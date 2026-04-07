@@ -1,7 +1,8 @@
 """LLM provider abstraction layer.
 
-Supports Anthropic Claude, OpenAI, and Ollama (local) backends.
-Every provider normalises its output into a common ``LLMResponse``.
+Supports Anthropic Claude, OpenAI, Google Gemini, xAI Grok, Deepseek,
+Mistral, Groq, and Ollama (local) backends. Every provider normalises
+its output into a common ``LLMResponse``.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from typing import Any
 
 import httpx
 
+
 # ---------------------------------------------------------------------------
 # Common response types
 # ---------------------------------------------------------------------------
@@ -21,7 +23,6 @@ import httpx
 @dataclass(frozen=True, slots=True)
 class ToolCall:
     """A single tool invocation requested by the LLM."""
-
     id: str
     name: str
     arguments: dict[str, Any]
@@ -30,7 +31,6 @@ class ToolCall:
 @dataclass(frozen=True, slots=True)
 class LLMResponse:
     """Normalised response from any LLM provider."""
-
     content: str
     tool_calls: list[ToolCall] = field(default_factory=list)
     model: str = ""
@@ -50,16 +50,14 @@ class LLMProvider(abc.ABC):
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
-    ) -> LLMResponse:
-        """Send *messages* (with optional *tools*) and return a normalised response."""
+    ) -> LLMResponse: ...
 
     @abc.abstractmethod
     async def stream(
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
-    ):
-        """Yield incremental content chunks.  Sub-classes yield ``str`` pieces."""
+    ): ...
 
 
 # ---------------------------------------------------------------------------
@@ -72,31 +70,24 @@ class AnthropicProvider(LLMProvider):
 
     def __init__(self, api_key: str, model: str = "claude-sonnet-4-20250514"):
         import anthropic
-
         self._client = anthropic.AsyncAnthropic(api_key=api_key)
         self._model = model
 
-    # -- helpers -----------------------------------------------------------
-
     @staticmethod
     def _convert_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
-        """Convert generic tool dicts into Anthropic's tool schema."""
         if not tools:
             return None
-        converted: list[dict[str, Any]] = []
-        for t in tools:
-            converted.append(
-                {
-                    "name": t["name"],
-                    "description": t.get("description", ""),
-                    "input_schema": t.get("parameters", {"type": "object", "properties": {}}),
-                }
-            )
-        return converted
+        return [
+            {
+                "name": t["name"],
+                "description": t.get("description", ""),
+                "input_schema": t.get("parameters", {"type": "object", "properties": {}}),
+            }
+            for t in tools
+        ]
 
     @staticmethod
     def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str | None, list[dict[str, Any]]]:
-        """Split a system message out (Anthropic uses a top-level param) and return the rest."""
         system: str | None = None
         rest: list[dict[str, Any]] = []
         for m in messages:
@@ -111,24 +102,12 @@ class AnthropicProvider(LLMProvider):
         calls: list[ToolCall] = []
         for block in content_blocks:
             if getattr(block, "type", None) == "tool_use":
-                calls.append(
-                    ToolCall(id=block.id, name=block.name, arguments=block.input or {})
-                )
+                calls.append(ToolCall(id=block.id, name=block.name, arguments=block.input or {}))
         return calls
 
-    # -- public API --------------------------------------------------------
-
-    async def complete(
-        self,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
-    ) -> LLMResponse:
+    async def complete(self, messages, tools=None) -> LLMResponse:
         system, msgs = self._convert_messages(messages)
-        kwargs: dict[str, Any] = {
-            "model": self._model,
-            "max_tokens": 4096,
-            "messages": msgs,
-        }
+        kwargs: dict[str, Any] = {"model": self._model, "max_tokens": 4096, "messages": msgs}
         if system:
             kwargs["system"] = system
         anthropic_tools = self._convert_tools(tools)
@@ -136,75 +115,69 @@ class AnthropicProvider(LLMProvider):
             kwargs["tools"] = anthropic_tools
 
         resp = await self._client.messages.create(**kwargs)
-
-        text_parts: list[str] = []
-        for block in resp.content:
-            if getattr(block, "type", None) == "text":
-                text_parts.append(block.text)
-
+        text_parts = [b.text for b in resp.content if getattr(b, "type", None) == "text"]
         return LLMResponse(
             content="".join(text_parts),
             tool_calls=self._parse_tool_calls(resp.content),
             model=resp.model,
-            usage={
-                "input_tokens": resp.usage.input_tokens,
-                "output_tokens": resp.usage.output_tokens,
-            },
+            usage={"input_tokens": resp.usage.input_tokens, "output_tokens": resp.usage.output_tokens},
         )
 
-    async def stream(
-        self,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
-    ):
+    async def stream(self, messages, tools=None):
         system, msgs = self._convert_messages(messages)
-        kwargs: dict[str, Any] = {
-            "model": self._model,
-            "max_tokens": 4096,
-            "messages": msgs,
-        }
+        kwargs: dict[str, Any] = {"model": self._model, "max_tokens": 4096, "messages": msgs}
         if system:
             kwargs["system"] = system
         anthropic_tools = self._convert_tools(tools)
         if anthropic_tools:
             kwargs["tools"] = anthropic_tools
-
         async with self._client.messages.stream(**kwargs) as stream:
             async for text in stream.text_stream:
                 yield text
 
 
 # ---------------------------------------------------------------------------
-# OpenAI
+# OpenAI-Compatible Provider (base for OpenAI, Grok, Deepseek, Groq, Mistral)
 # ---------------------------------------------------------------------------
 
 
-class OpenAIProvider(LLMProvider):
-    """OpenAI GPT models via the official ``openai`` async SDK."""
+class OpenAICompatibleProvider(LLMProvider):
+    """Base class for any provider using the OpenAI-compatible chat API.
 
-    def __init__(self, api_key: str, model: str = "gpt-4o"):
+    Works with: OpenAI, xAI Grok, Deepseek, Groq, Mistral, and any
+    other provider that exposes an OpenAI-compatible endpoint.
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        base_url: str | None = None,
+        provider_name: str = "openai",
+    ):
         import openai
-
-        self._client = openai.AsyncOpenAI(api_key=api_key)
+        kwargs: dict[str, Any] = {"api_key": api_key}
+        if base_url:
+            kwargs["base_url"] = base_url
+        self._client = openai.AsyncOpenAI(**kwargs)
         self._model = model
+        self._provider_name = provider_name
 
     @staticmethod
     def _convert_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
         if not tools:
             return None
-        converted: list[dict[str, Any]] = []
-        for t in tools:
-            converted.append(
-                {
-                    "type": "function",
-                    "function": {
-                        "name": t["name"],
-                        "description": t.get("description", ""),
-                        "parameters": t.get("parameters", {"type": "object", "properties": {}}),
-                    },
-                }
-            )
-        return converted
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": t["name"],
+                    "description": t.get("description", ""),
+                    "parameters": t.get("parameters", {"type": "object", "properties": {}}),
+                },
+            }
+            for t in tools
+        ]
 
     @staticmethod
     def _parse_tool_calls(choices: Any) -> list[ToolCall]:
@@ -219,15 +192,8 @@ class OpenAIProvider(LLMProvider):
                 calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=args))
         return calls
 
-    async def complete(
-        self,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
-    ) -> LLMResponse:
-        kwargs: dict[str, Any] = {
-            "model": self._model,
-            "messages": messages,
-        }
+    async def complete(self, messages, tools=None) -> LLMResponse:
+        kwargs: dict[str, Any] = {"model": self._model, "messages": messages}
         oai_tools = self._convert_tools(tools)
         if oai_tools:
             kwargs["tools"] = oai_tools
@@ -244,25 +210,176 @@ class OpenAIProvider(LLMProvider):
             },
         )
 
-    async def stream(
-        self,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
-    ):
-        kwargs: dict[str, Any] = {
-            "model": self._model,
-            "messages": messages,
-            "stream": True,
-        }
+    async def stream(self, messages, tools=None):
+        kwargs: dict[str, Any] = {"model": self._model, "messages": messages, "stream": True}
         oai_tools = self._convert_tools(tools)
         if oai_tools:
             kwargs["tools"] = oai_tools
-
         stream = await self._client.chat.completions.create(**kwargs)
         async for chunk in stream:
             delta = chunk.choices[0].delta if chunk.choices else None
             if delta and delta.content:
                 yield delta.content
+
+
+class OpenAIProvider(OpenAICompatibleProvider):
+    """OpenAI GPT models."""
+    def __init__(self, api_key: str, model: str = "gpt-4o"):
+        super().__init__(api_key=api_key, model=model, provider_name="openai")
+
+
+class GrokProvider(OpenAICompatibleProvider):
+    """xAI Grok models via OpenAI-compatible API."""
+    def __init__(self, api_key: str, model: str = "grok-3"):
+        super().__init__(
+            api_key=api_key,
+            model=model,
+            base_url="https://api.x.ai/v1",
+            provider_name="grok",
+        )
+
+
+class DeepseekProvider(OpenAICompatibleProvider):
+    """Deepseek models via OpenAI-compatible API."""
+    def __init__(self, api_key: str, model: str = "deepseek-chat"):
+        super().__init__(
+            api_key=api_key,
+            model=model,
+            base_url="https://api.deepseek.com",
+            provider_name="deepseek",
+        )
+
+
+class GroqProvider(OpenAICompatibleProvider):
+    """Groq ultra-fast inference via OpenAI-compatible API."""
+    def __init__(self, api_key: str, model: str = "llama-3.3-70b-versatile"):
+        super().__init__(
+            api_key=api_key,
+            model=model,
+            base_url="https://api.groq.com/openai/v1",
+            provider_name="groq",
+        )
+
+
+class MistralProvider(OpenAICompatibleProvider):
+    """Mistral AI models via OpenAI-compatible API."""
+    def __init__(self, api_key: str, model: str = "mistral-large-latest"):
+        super().__init__(
+            api_key=api_key,
+            model=model,
+            base_url="https://api.mistral.ai/v1",
+            provider_name="mistral",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Google Gemini
+# ---------------------------------------------------------------------------
+
+
+class GeminiProvider(LLMProvider):
+    """Google Gemini via the REST API."""
+
+    def __init__(self, api_key: str, model: str = "gemini-2.5-flash"):
+        self._api_key = api_key
+        self._model = model
+        self._base_url = "https://generativelanguage.googleapis.com/v1beta"
+        self._client = httpx.AsyncClient(timeout=120.0)
+
+    def _build_url(self, action: str = "generateContent") -> str:
+        return f"{self._base_url}/models/{self._model}:{action}?key={self._api_key}"
+
+    @staticmethod
+    def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str | None, list[dict[str, Any]]]:
+        system_instruction = None
+        contents: list[dict[str, Any]] = []
+        for m in messages:
+            role = m.get("role", "user")
+            if role == "system":
+                system_instruction = m["content"]
+                continue
+            gemini_role = "model" if role == "assistant" else "user"
+            contents.append({"role": gemini_role, "parts": [{"text": m["content"]}]})
+        return system_instruction, contents
+
+    @staticmethod
+    def _convert_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
+        if not tools:
+            return None
+        function_declarations = []
+        for t in tools:
+            function_declarations.append({
+                "name": t["name"],
+                "description": t.get("description", ""),
+                "parameters": t.get("parameters", {"type": "object", "properties": {}}),
+            })
+        return [{"functionDeclarations": function_declarations}]
+
+    async def complete(self, messages, tools=None) -> LLMResponse:
+        system_instruction, contents = self._convert_messages(messages)
+        payload: dict[str, Any] = {"contents": contents}
+        if system_instruction:
+            payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
+        gemini_tools = self._convert_tools(tools)
+        if gemini_tools:
+            payload["tools"] = gemini_tools
+
+        resp = await self._client.post(self._build_url(), json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+
+        # Parse response
+        candidates = data.get("candidates", [])
+        if not candidates:
+            return LLMResponse(content="", model=self._model)
+
+        parts = candidates[0].get("content", {}).get("parts", [])
+        text_parts: list[str] = []
+        tool_calls: list[ToolCall] = []
+
+        for i, part in enumerate(parts):
+            if "text" in part:
+                text_parts.append(part["text"])
+            elif "functionCall" in part:
+                fc = part["functionCall"]
+                tool_calls.append(ToolCall(
+                    id=f"gemini_{i}",
+                    name=fc.get("name", ""),
+                    arguments=fc.get("args", {}),
+                ))
+
+        usage_meta = data.get("usageMetadata", {})
+        return LLMResponse(
+            content="".join(text_parts),
+            tool_calls=tool_calls,
+            model=self._model,
+            usage={
+                "input_tokens": usage_meta.get("promptTokenCount", 0),
+                "output_tokens": usage_meta.get("candidatesTokenCount", 0),
+            },
+        )
+
+    async def stream(self, messages, tools=None):
+        system_instruction, contents = self._convert_messages(messages)
+        payload: dict[str, Any] = {"contents": contents}
+        if system_instruction:
+            payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
+
+        async with self._client.stream(
+            "POST", self._build_url("streamGenerateContent"), json=payload
+        ) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line:
+                    continue
+                try:
+                    chunk = json.loads(line.lstrip("[,"))
+                except json.JSONDecodeError:
+                    continue
+                parts = chunk.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+                for part in parts:
+                    if "text" in part:
+                        yield part["text"]
 
 
 # ---------------------------------------------------------------------------
@@ -273,7 +390,7 @@ class OpenAIProvider(LLMProvider):
 class OllamaProvider(LLMProvider):
     """Ollama local models via the REST API."""
 
-    def __init__(self, base_url: str = "http://localhost:11434", model: str = "llama3"):
+    def __init__(self, base_url: str = "http://localhost:11434", model: str = "llama3.2"):
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._client = httpx.AsyncClient(base_url=self._base_url, timeout=120.0)
@@ -282,30 +399,20 @@ class OllamaProvider(LLMProvider):
     def _convert_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
         if not tools:
             return None
-        converted: list[dict[str, Any]] = []
-        for t in tools:
-            converted.append(
-                {
-                    "type": "function",
-                    "function": {
-                        "name": t["name"],
-                        "description": t.get("description", ""),
-                        "parameters": t.get("parameters", {"type": "object", "properties": {}}),
-                    },
-                }
-            )
-        return converted
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": t["name"],
+                    "description": t.get("description", ""),
+                    "parameters": t.get("parameters", {"type": "object", "properties": {}}),
+                },
+            }
+            for t in tools
+        ]
 
-    async def complete(
-        self,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
-    ) -> LLMResponse:
-        payload: dict[str, Any] = {
-            "model": self._model,
-            "messages": messages,
-            "stream": False,
-        }
+    async def complete(self, messages, tools=None) -> LLMResponse:
+        payload: dict[str, Any] = {"model": self._model, "messages": messages, "stream": False}
         ollama_tools = self._convert_tools(tools)
         if ollama_tools:
             payload["tools"] = ollama_tools
@@ -318,13 +425,7 @@ class OllamaProvider(LLMProvider):
         msg = data.get("message", {})
         for idx, tc in enumerate(msg.get("tool_calls", [])):
             fn = tc.get("function", {})
-            tool_calls.append(
-                ToolCall(
-                    id=f"ollama_{idx}",
-                    name=fn.get("name", ""),
-                    arguments=fn.get("arguments", {}),
-                )
-            )
+            tool_calls.append(ToolCall(id=f"ollama_{idx}", name=fn.get("name", ""), arguments=fn.get("arguments", {})))
 
         return LLMResponse(
             content=msg.get("content", ""),
@@ -336,16 +437,8 @@ class OllamaProvider(LLMProvider):
             },
         )
 
-    async def stream(
-        self,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
-    ):
-        payload: dict[str, Any] = {
-            "model": self._model,
-            "messages": messages,
-            "stream": True,
-        }
+    async def stream(self, messages, tools=None):
+        payload: dict[str, Any] = {"model": self._model, "messages": messages, "stream": True}
         ollama_tools = self._convert_tools(tools)
         if ollama_tools:
             payload["tools"] = ollama_tools
@@ -368,6 +461,17 @@ class OllamaProvider(LLMProvider):
 # Factory
 # ---------------------------------------------------------------------------
 
+PROVIDER_REGISTRY: dict[str, type[LLMProvider]] = {
+    "anthropic": AnthropicProvider,
+    "openai": OpenAIProvider,
+    "gemini": GeminiProvider,
+    "grok": GrokProvider,
+    "deepseek": DeepseekProvider,
+    "groq": GroqProvider,
+    "mistral": MistralProvider,
+    "ollama": OllamaProvider,
+}
+
 
 def create_provider(
     provider_name: str,
@@ -377,16 +481,20 @@ def create_provider(
     base_url: str = "http://localhost:11434",
 ) -> LLMProvider:
     """Instantiate the correct provider based on *provider_name*."""
-    match provider_name:
-        case "anthropic":
-            if not api_key:
-                raise ValueError("ANTHROPIC_API_KEY is required for the Anthropic provider")
-            return AnthropicProvider(api_key=api_key, model=model)
-        case "openai":
-            if not api_key:
-                raise ValueError("OPENAI_API_KEY is required for the OpenAI provider")
-            return OpenAIProvider(api_key=api_key, model=model)
-        case "ollama":
-            return OllamaProvider(base_url=base_url, model=model)
-        case _:
-            raise ValueError(f"Unknown LLM provider: {provider_name!r}")
+    if provider_name not in PROVIDER_REGISTRY:
+        supported = ", ".join(sorted(PROVIDER_REGISTRY.keys()))
+        raise ValueError(f"Unknown LLM provider: {provider_name!r}. Supported: {supported}")
+
+    if provider_name == "ollama":
+        return OllamaProvider(base_url=base_url, model=model)
+
+    if not api_key:
+        raise ValueError(f"{provider_name.upper()}_API_KEY is required for the {provider_name} provider")
+
+    provider_cls = PROVIDER_REGISTRY[provider_name]
+
+    if provider_name == "gemini":
+        return GeminiProvider(api_key=api_key, model=model)
+
+    # All OpenAI-compatible providers
+    return provider_cls(api_key=api_key, model=model)  # type: ignore[call-arg]

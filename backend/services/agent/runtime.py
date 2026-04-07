@@ -13,7 +13,19 @@ from typing import Any
 import structlog
 
 from core.config import Settings
+from services.agent.context_manager import ContextManager
 from services.agent.providers import LLMResponse, ToolCall, create_provider, LLMProvider
+
+# Map provider names to their API key config attribute
+_PROVIDER_KEY_MAP = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "grok": "GROK_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "mistral": "MISTRAL_API_KEY",
+}
 
 logger = structlog.get_logger(__name__)
 
@@ -139,16 +151,16 @@ class AgentRuntime:
         tool_executor: ToolExecutor | None = None,
     ):
         self._config = config
+        # Resolve the correct API key for the selected provider
+        key_attr = _PROVIDER_KEY_MAP.get(config.LLM_PROVIDER)
+        api_key = getattr(config, key_attr, None) if key_attr else None
         self._provider: LLMProvider = create_provider(
             provider_name=config.LLM_PROVIDER,
             model=config.LLM_MODEL,
-            api_key=(
-                config.ANTHROPIC_API_KEY
-                if config.LLM_PROVIDER == "anthropic"
-                else config.OPENAI_API_KEY
-            ),
+            api_key=api_key,
             base_url=config.OLLAMA_BASE_URL,
         )
+        self._context_manager = ContextManager(model=config.LLM_MODEL)
         self._permissions = permission_engine or PermissionEngine()
         self._guard = prompt_guard or PromptGuard()
         self._audit = audit_service or AuditService()

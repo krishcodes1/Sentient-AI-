@@ -12,7 +12,12 @@ export default function Settings() {
 
   const models: Record<string, string[]> = {
     anthropic: ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-haiku-4-5-20251001"],
-    openai: ["gpt-4o", "gpt-4o-mini", "o1-preview"],
+    openai: ["gpt-4o", "gpt-4o-mini", "o1-preview", "o1"],
+    gemini: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
+    grok: ["grok-3", "grok-3-mini"],
+    deepseek: ["deepseek-chat", "deepseek-reasoner"],
+    groq: ["llama-3.3-70b-versatile", "mixtral-8x7b-32768"],
+    mistral: ["mistral-large-latest", "mistral-small-latest"],
     ollama: ["llama3.2", "mistral", "codellama", "mixtral"],
   };
 
@@ -155,8 +160,8 @@ export default function Settings() {
             <label className="block text-sm font-medium mb-1.5" style={{ color: "var(--text-secondary)" }}>
               Provider
             </label>
-            <div className="grid grid-cols-3 gap-3">
-              {(["anthropic", "openai", "ollama"] as const).map((p) => (
+            <div className="grid grid-cols-4 gap-3">
+              {(["anthropic", "openai", "gemini", "grok", "deepseek", "groq", "mistral", "ollama"] as const).map((p) => (
                 <button
                   key={p}
                   onClick={() => {

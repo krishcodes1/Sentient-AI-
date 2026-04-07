@@ -35,13 +35,18 @@ class Settings(BaseSettings):
     # ── LLM provider ─────────────────────────────────────────────────────
     LLM_PROVIDER: str = Field(
         default="anthropic",
-        pattern="^(anthropic|openai|ollama)$",
-        description="LLM backend: anthropic, openai, or ollama",
+        pattern="^(anthropic|openai|gemini|grok|deepseek|groq|mistral|ollama)$",
+        description="LLM backend: anthropic, openai, gemini, grok, deepseek, groq, mistral, or ollama",
     )
     LLM_MODEL: str = "claude-sonnet-4-20250514"
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     ANTHROPIC_API_KEY: str | None = None
     OPENAI_API_KEY: str | None = None
+    GEMINI_API_KEY: str | None = None
+    GROK_API_KEY: str | None = None
+    DEEPSEEK_API_KEY: str | None = None
+    GROQ_API_KEY: str | None = None
+    MISTRAL_API_KEY: str | None = None
 
     # ── Rate limiting ─────────────────────────────────────────────────────
     RATE_LIMIT_PER_MINUTE: int = 60
