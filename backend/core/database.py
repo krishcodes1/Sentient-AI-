@@ -43,6 +43,23 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def init_db() -> None:
-    """Create all tables that don't yet exist (development convenience)."""
+    """Create tables and migrate missing columns for development convenience."""
+    from sqlalchemy import text
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+        # Add columns that may be missing on an existing users table.
+        # Each is wrapped in a try/except so it's safe to re-run.
+        migrations = [
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS name VARCHAR(256)",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS llm_provider VARCHAR(32) NOT NULL DEFAULT 'openai'",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS llm_model VARCHAR(128) NOT NULL DEFAULT 'gpt-4o'",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS llm_api_key_enc BYTEA",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_completed BOOLEAN NOT NULL DEFAULT false",
+        ]
+        for stmt in migrations:
+            try:
+                await conn.execute(text(stmt))
+            except Exception:
+                pass
