@@ -31,8 +31,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         llm_provider=settings.LLM_PROVIDER,
         llm_model=settings.LLM_MODEL,
     )
-    await init_db()
-    logger.info("database_initialized")
+    try:
+        await init_db()
+        logger.info("database_initialized")
+    except Exception as exc:
+        logger.error("database_init_failed", error=str(exc))
+        logger.warning("app_starting_without_database")
     yield
     logger.info("shutting_down_sentientai")
 

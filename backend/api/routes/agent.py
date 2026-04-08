@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Any, Dict, List, Optional, Union
 
 import uuid
 from datetime import datetime
@@ -29,7 +30,7 @@ class MessageResponse(BaseModel):
     conversation_id: uuid.UUID
     role: MessageRole
     content: str
-    tool_calls: dict | list | None = None
+    tool_calls: Optional[Union[Dict, List]] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}

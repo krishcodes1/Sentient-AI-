@@ -12,7 +12,7 @@ import hashlib
 import hmac
 import time
 import uuid
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import urlencode
 
 import httpx
@@ -61,9 +61,9 @@ class RobinhoodConnector(BaseConnector):
 
     def __init__(
         self,
-        api_key: str | None = None,
-        api_secret: str | None = None,
-        timeout_s: float | None = None,
+        api_key: Optional[str] = None,
+        api_secret: Optional[str] = None,
+        timeout_s: Optional[float] = None,
     ) -> None:
         # Very conservative rate limit for financial API
         super().__init__(timeout_s=timeout_s or 30.0, rate_limit=30)

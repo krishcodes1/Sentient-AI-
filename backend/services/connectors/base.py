@@ -12,7 +12,7 @@ import time
 from abc import ABC, abstractmethod
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 import structlog
@@ -130,7 +130,7 @@ class UserConfirmationRequired(ConnectorError):
 class HardBlockError(ConnectorError):
     """Raised for permanently blocked actions that can never be executed."""
 
-    def __init__(self, action: str, reason: str | None = None) -> None:
+    def __init__(self, action: str, reason: Optional[str] = None) -> None:
         self.action = action
         self.reason = reason or "This action is permanently blocked by security policy."
         super().__init__(f"HARD_BLOCK: '{action}' - {self.reason}")
@@ -168,8 +168,8 @@ class BaseConnector(ABC):
 
     def __init__(
         self,
-        timeout_s: float | None = None,
-        rate_limit: int | None = None,
+        timeout_s: Optional[float] = None,
+        rate_limit: Optional[int] = None,
     ) -> None:
         self._timeout = timeout_s or self.DEFAULT_TIMEOUT_S
         self._rate_limiter = RateLimiter(rate_limit or self.DEFAULT_RATE_LIMIT)

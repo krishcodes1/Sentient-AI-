@@ -3,6 +3,7 @@ from __future__ import annotations
 import enum
 import uuid
 from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Union
 
 from sqlalchemy import DateTime, Enum, Float, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import JSON, UUID
@@ -57,23 +58,23 @@ class AuditLog(Base):
         Enum(AuditStatus, name="audit_status"),
         nullable=False,
     )
-    reasoning_chain: Mapped[dict | list | None] = mapped_column(
+    reasoning_chain: Mapped[Optional[Union[Dict, List]]] = mapped_column(
         JSON,
         nullable=True,
     )
-    detection_method: Mapped[str | None] = mapped_column(
+    detection_method: Mapped[Optional[str]] = mapped_column(
         String(255),
         nullable=True,
     )
-    confidence_score: Mapped[float | None] = mapped_column(
+    confidence_score: Mapped[Optional[float]] = mapped_column(
         Float,
         nullable=True,
     )
-    request_data: Mapped[dict | None] = mapped_column(
+    request_data: Mapped[Optional[Dict]] = mapped_column(
         JSON,
         nullable=True,
     )
-    response_summary: Mapped[str | None] = mapped_column(
+    response_summary: Mapped[Optional[str]] = mapped_column(
         Text,
         nullable=True,
     )

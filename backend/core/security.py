@@ -6,7 +6,7 @@ import json
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Optional
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from jose import JWTError, jwt
@@ -36,7 +36,7 @@ JWT_ALGORITHM = "HS256"
 
 def create_access_token(
     data: dict[str, Any],
-    expires_delta: timedelta | None = None,
+    expires_delta: Optional[timedelta] = None,
 ) -> str:
     """Create a signed JWT containing *data* with an expiry claim."""
     to_encode = data.copy()

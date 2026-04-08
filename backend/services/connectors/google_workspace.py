@@ -12,7 +12,7 @@ import base64
 import hashlib
 import secrets
 from email.mime.text import MIMEText
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import urlencode
 
 import httpx
@@ -56,16 +56,16 @@ class GoogleWorkspaceConnector(BaseConnector):
         client_id: str,
         client_secret: str,
         redirect_uri: str = "http://localhost:8000/oauth/callback/google",
-        timeout_s: float | None = None,
+        timeout_s: Optional[float] = None,
     ) -> None:
         super().__init__(timeout_s=timeout_s, rate_limit=60)
         self._client_id = client_id
         self._client_secret = client_secret
         self._redirect_uri = redirect_uri
-        self._access_token: str | None = None
-        self._refresh_token: str | None = None
+        self._access_token: Optional[str] = None
+        self._refresh_token: Optional[str] = None
         self._granted_scopes: set[str] = set()
-        self._pkce_verifier: str | None = None
+        self._pkce_verifier: Optional[str] = None
 
     # -- Properties ----------------------------------------------------------
 

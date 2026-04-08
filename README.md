@@ -224,8 +224,8 @@ Copy `backend/.env.example` to `backend/.env` and configure:
 
 | Variable | Required? | Description |
 |----------|-----------|-------------|
-| `SECRET_KEY` | Yes | Random string for signing JWT auth tokens. Pre-generated in `.env.example`. Change for production. |
-| `ENCRYPTION_KEY` | Yes | Base64-encoded 32-byte key for AES-256-GCM encryption of stored credentials. Pre-generated in `.env.example`. |
+| `SECRET_KEY` | Yes | Signs your login tokens. Generate with the command below. |
+| `ENCRYPTION_KEY` | Yes | Encrypts stored API keys in the database. Generate with the command below. |
 | `DATABASE_URL` | Yes | PostgreSQL connection string. Default works with Docker. |
 | `REDIS_URL` | Yes | Redis connection string. Default works with Docker. |
 | `LLM_PROVIDER` | Yes | Which AI to use: `anthropic`, `openai`, `gemini`, `grok`, `deepseek`, `groq`, `mistral`, or `ollama` |
@@ -241,10 +241,23 @@ Copy `backend/.env.example` to `backend/.env` and configure:
 
 **You only need ONE API key** — whichever provider you choose.
 
-To generate new secure keys:
+### Generating Your Security Keys
+
+Run this single command in your terminal — it prints both keys at once:
+
 ```bash
 python3 -c "import secrets, base64, os; print('SECRET_KEY=' + secrets.token_urlsafe(48)); print('ENCRYPTION_KEY=' + base64.urlsafe_b64encode(os.urandom(32)).decode())"
 ```
+
+You'll see output like:
+```
+SECRET_KEY=aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789abcdef...
+ENCRYPTION_KEY=xYz789AbCdEf012GhIjKlMnOpQrStUvWxYz456789A=
+```
+
+Copy those two lines into your `backend/.env` file, replacing the `REPLACE_ME` placeholders.
+
+> **Windows users**: Use `python` instead of `python3` in the command above.
 
 ---
 

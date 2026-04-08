@@ -10,7 +10,7 @@ from __future__ import annotations
 import abc
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 
@@ -20,7 +20,7 @@ import httpx
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class ToolCall:
     """A single tool invocation requested by the LLM."""
     id: str
@@ -28,7 +28,7 @@ class ToolCall:
     arguments: dict[str, Any]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class LLMResponse:
     """Normalised response from any LLM provider."""
     content: str
@@ -88,7 +88,7 @@ class AnthropicProvider(LLMProvider):
 
     @staticmethod
     def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str | None, list[dict[str, Any]]]:
-        system: str | None = None
+        system: Optional[str] = None
         rest: list[dict[str, Any]] = []
         for m in messages:
             if m.get("role") == "system":
@@ -152,7 +152,7 @@ class OpenAICompatibleProvider(LLMProvider):
         self,
         api_key: str,
         model: str,
-        base_url: str | None = None,
+        base_url: Optional[str] = None,
         provider_name: str = "openai",
     ):
         import openai
@@ -477,7 +477,7 @@ def create_provider(
     provider_name: str,
     model: str,
     *,
-    api_key: str | None = None,
+    api_key: Optional[str] = None,
     base_url: str = "http://localhost:11434",
 ) -> LLMProvider:
     """Instantiate the correct provider based on *provider_name*."""

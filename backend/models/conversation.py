@@ -3,6 +3,7 @@ from __future__ import annotations
 import enum
 import uuid
 from datetime import datetime, timezone
+from typing import Dict, List, Optional, Union
 
 from sqlalchemy import DateTime, Enum, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import JSON, UUID
@@ -84,7 +85,7 @@ class Message(Base):
         Text,
         nullable=False,
     )
-    tool_calls: Mapped[dict | list | None] = mapped_column(
+    tool_calls: Mapped[Optional[Union[Dict, List]]] = mapped_column(
         JSON,
         nullable=True,
     )

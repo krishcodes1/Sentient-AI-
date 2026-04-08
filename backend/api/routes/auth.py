@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.database import get_db
 from core.security import create_access_token, hash_password, verify_password
 from models.user import User
+from services.auth import get_current_user
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -89,3 +90,9 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)) -> dict:
 
     token = create_access_token(data={"sub": str(user.id), "email": user.email})
     return {"access_token": token, "token_type": "bearer"}
+
+
+@router.get("/me", response_model=UserResponse)
+async def get_me(current_user: User = Depends(get_current_user)) -> User:
+    """Return the currently authenticated user."""
+    return current_user

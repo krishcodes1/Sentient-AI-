@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Any, Dict, List, Optional, Union
 
 import json
 import uuid
@@ -49,12 +50,12 @@ class ConnectorResponse(BaseModel):
 
 
 class ConnectorUpdateRequest(BaseModel):
-    display_name: str | None = Field(default=None, min_length=1, max_length=255)
-    is_active: bool | None = None
-    credentials: dict | None = None
-    granted_scopes: list[str] | None = None
-    permission_tier: PermissionTier | None = None
-    rate_limit_per_minute: int | None = Field(default=None, ge=1, le=600)
+    display_name: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    is_active: Optional[bool] = None
+    credentials: Optional[dict] = None
+    granted_scopes: Optional[List[str]] = None
+    permission_tier: Optional[PermissionTier] = None
+    rate_limit_per_minute: Optional[int] = Field(default=None, ge=1, le=600)
 
 
 @router.post(

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Any, Dict, List, Optional, Union
 
 import uuid
 from datetime import datetime
@@ -22,11 +23,11 @@ class AuditLogCreate(BaseModel):
     endpoint: str
     scope_used: str
     status: AuditStatus
-    reasoning_chain: dict | list | None = None
-    detection_method: str | None = None
-    confidence_score: float | None = None
-    request_data: dict | None = None
-    response_summary: str | None = None
+    reasoning_chain: Optional[Union[Dict, List]] = None
+    detection_method: Optional[str] = None
+    confidence_score: Optional[float] = None
+    request_data: Optional[dict] = None
+    response_summary: Optional[str] = None
     request_id: str
 
 
@@ -39,11 +40,11 @@ class AuditLogResponse(BaseModel):
     endpoint: str
     scope_used: str
     status: AuditStatus
-    reasoning_chain: dict | list | None = None
-    detection_method: str | None = None
-    confidence_score: float | None = None
-    request_data: dict | None = None
-    response_summary: str | None = None
+    reasoning_chain: Optional[Union[Dict, List]] = None
+    detection_method: Optional[str] = None
+    confidence_score: Optional[float] = None
+    request_data: Optional[dict] = None
+    response_summary: Optional[str] = None
     integrity_hash: str
     request_id: str
 
@@ -102,8 +103,8 @@ async def create_audit_log(
 @router.get("/", response_model=list[AuditLogResponse])
 async def list_audit_logs(
     user_id: uuid.UUID,
-    connector_name: str | None = None,
-    status_filter: AuditStatus | None = Query(default=None, alias="status"),
+    connector_name: Optional[str] = None,
+    status_filter: Optional[AuditStatus] = Query(default=None, alias="status"),
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     db: AsyncSession = Depends(get_db),

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import urlencode
 
 import httpx
@@ -60,16 +60,16 @@ class CanvasConnector(BaseConnector):
         client_id: str,
         client_secret: str,
         redirect_uri: str = "http://localhost:8000/oauth/callback/canvas",
-        timeout_s: float | None = None,
+        timeout_s: Optional[float] = None,
     ) -> None:
         super().__init__(timeout_s=timeout_s, rate_limit=self.CANVAS_RATE_LIMIT)
         self._base_url = base_url.rstrip("/")
         self._client_id = client_id
         self._client_secret = client_secret
         self._redirect_uri = redirect_uri
-        self._access_token: str | None = None
-        self._refresh_token: str | None = None
-        self._pkce_verifier: str | None = None
+        self._access_token: Optional[str] = None
+        self._refresh_token: Optional[str] = None
+        self._pkce_verifier: Optional[str] = None
 
     # -- Properties ----------------------------------------------------------
 

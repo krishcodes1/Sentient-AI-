@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Optional
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -40,13 +42,13 @@ class Settings(BaseSettings):
     )
     LLM_MODEL: str = "claude-sonnet-4-20250514"
     OLLAMA_BASE_URL: str = "http://localhost:11434"
-    ANTHROPIC_API_KEY: str | None = None
-    OPENAI_API_KEY: str | None = None
-    GEMINI_API_KEY: str | None = None
-    GROK_API_KEY: str | None = None
-    DEEPSEEK_API_KEY: str | None = None
-    GROQ_API_KEY: str | None = None
-    MISTRAL_API_KEY: str | None = None
+    ANTHROPIC_API_KEY: Optional[str] = None
+    OPENAI_API_KEY: Optional[str] = None
+    GEMINI_API_KEY: Optional[str] = None
+    GROK_API_KEY: Optional[str] = None
+    DEEPSEEK_API_KEY: Optional[str] = None
+    GROQ_API_KEY: Optional[str] = None
+    MISTRAL_API_KEY: Optional[str] = None
 
     # ── Rate limiting ─────────────────────────────────────────────────────
     RATE_LIMIT_PER_MINUTE: int = 60

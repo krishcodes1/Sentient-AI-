@@ -8,7 +8,7 @@ import uuid
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 
 import structlog
 
@@ -35,7 +35,7 @@ logger = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 
-@dataclass(slots=True)
+@dataclass()
 class Tool:
     """Descriptor for a tool that the agent can invoke."""
 
@@ -46,7 +46,7 @@ class Tool:
     permission_tier: str = "auto"  # auto | approval | blocked
 
 
-@dataclass(slots=True)
+@dataclass()
 class PendingApproval:
     """An action that requires explicit user approval before execution."""
 
@@ -57,7 +57,7 @@ class PendingApproval:
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
-@dataclass(slots=True)
+@dataclass()
 class BlockedAction:
     """An action that was blocked by security policy."""
 
@@ -66,7 +66,7 @@ class BlockedAction:
     policy: str
 
 
-@dataclass(slots=True)
+@dataclass()
 class AgentResponse:
     """Unified response returned by the agent runtime."""
 
