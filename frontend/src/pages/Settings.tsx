@@ -1,242 +1,212 @@
-import { useState } from "react";
-import { Save, AlertTriangle, Trash2 } from "lucide-react";
+import { useState, useEffect } from "react";
+import { Save, AlertTriangle, Trash2, Check, Loader2 } from "lucide-react";
+import { getMe, updateSettings, logout } from "@/services/api";
+import type { User } from "@/types";
+
+const models: Record<string, string[]> = {
+  anthropic: ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-haiku-4-5-20251001"],
+  openai: ["gpt-4o", "gpt-4o-mini", "o1-preview", "o1"],
+  gemini: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
+  grok: ["grok-3", "grok-3-mini"],
+  deepseek: ["deepseek-chat", "deepseek-reasoner"],
+  groq: ["llama-3.3-70b-versatile", "mixtral-8x7b-32768"],
+  mistral: ["mistral-large-latest", "mistral-small-latest"],
+  ollama: ["llama3.2", "mistral", "codellama", "mixtral"],
+};
+
+const PROVIDERS = ["anthropic", "openai", "gemini", "grok", "deepseek", "groq", "mistral", "ollama"] as const;
 
 export default function Settings() {
-  const [email, setEmail] = useState("krishshroff91@gmail.com");
-  const [currentPassword, setCurrentPassword] = useState("");
-  const [newPassword, setNewPassword] = useState("");
-  const [permissionTier, setPermissionTier] = useState("supervised");
-  const [rateLimit, setRateLimit] = useState(60);
-  const [llmProvider, setLlmProvider] = useState("anthropic");
-  const [llmModel, setLlmModel] = useState("claude-sonnet-4-20250514");
+  const [user, setUser] = useState<User | null>(null);
+  const [name, setName] = useState("");
+  const [llmProvider, setLlmProvider] = useState("openai");
+  const [llmModel, setLlmModel] = useState("gpt-4o");
+  const [apiKey, setApiKey] = useState("");
+  const [saving, setSaving] = useState("");
+  const [success, setSuccess] = useState("");
 
-  const models: Record<string, string[]> = {
-    anthropic: ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-haiku-4-5-20251001"],
-    openai: ["gpt-4o", "gpt-4o-mini", "o1-preview", "o1"],
-    gemini: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
-    grok: ["grok-3", "grok-3-mini"],
-    deepseek: ["deepseek-chat", "deepseek-reasoner"],
-    groq: ["llama-3.3-70b-versatile", "mixtral-8x7b-32768"],
-    mistral: ["mistral-large-latest", "mistral-small-latest"],
-    ollama: ["llama3.2", "mistral", "codellama", "mixtral"],
+  useEffect(() => {
+    getMe().then((u) => {
+      setUser(u);
+      setName(u.name || "");
+      setLlmProvider(u.llm_provider);
+      setLlmModel(u.llm_model);
+    }).catch(() => {});
+  }, []);
+
+  const handleSaveProfile = async () => {
+    setSaving("profile");
+    setSuccess("");
+    try {
+      const updated = await updateSettings({ name: name.trim() });
+      setUser(updated);
+      setSuccess("Profile saved");
+    } catch {}
+    setSaving("");
   };
 
-  const inputStyle = {
-    backgroundColor: "var(--bg-input)",
-    borderColor: "var(--border-primary)",
-    color: "var(--text-primary)",
+  const handleSaveLLM = async () => {
+    setSaving("llm");
+    setSuccess("");
+    try {
+      const data: Record<string, string> = { llm_provider: llmProvider, llm_model: llmModel };
+      if (apiKey.trim()) data.llm_api_key = apiKey.trim();
+      const updated = await updateSettings(data);
+      setUser(updated);
+      setApiKey("");
+      setSuccess("LLM settings saved");
+    } catch {}
+    setSaving("");
   };
+
+  const inputClass = "w-full px-4 py-3 rounded-[12px] border border-[var(--border-primary)] bg-[var(--bg-input)] text-[15px] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-muted)] focus:border-[var(--accent-primary)] transition-colors";
 
   return (
-    <div className="space-y-6 max-w-3xl">
-      <div>
-        <h1 className="text-2xl font-bold" style={{ color: "var(--text-primary)" }}>
+    <div className="space-y-8 max-w-3xl min-w-0">
+      <header>
+        <h1 className="text-[28px] font-semibold tracking-tight text-[var(--text-primary)] md:text-[32px]">
           Settings
         </h1>
-        <p className="text-sm mt-1" style={{ color: "var(--text-secondary)" }}>
-          Configure your account, security policies, and LLM provider
+        <p className="text-[15px] text-[var(--text-secondary)] mt-1 leading-relaxed">
+          Configure your account and LLM provider.
         </p>
-      </div>
+      </header>
+
+      {success && (
+        <div className="flex items-center gap-2 px-4 py-3 rounded-[12px] bg-[rgba(48,209,88,0.12)] border border-[rgba(48,209,88,0.25)] text-[14px] text-[var(--accent-success)]">
+          <Check className="w-4 h-4" strokeWidth={2.5} /> {success}
+        </div>
+      )}
 
       {/* Profile */}
       <section
-        className="rounded-xl border p-6"
-        style={{ backgroundColor: "var(--bg-secondary)", borderColor: "var(--border-primary)" }}
+        className="rounded-[var(--radius-xl)] border border-[var(--border-subtle)] p-6 md:p-7"
+        style={{ backgroundColor: "var(--bg-secondary)", boxShadow: "var(--shadow-card)" }}
       >
-        <h2 className="text-lg font-semibold mb-4" style={{ color: "var(--text-primary)" }}>
+        <h2 className="text-[20px] font-semibold tracking-tight text-[var(--text-primary)] mb-5">
           Profile
         </h2>
         <div className="space-y-4">
           <div>
-            <label className="block text-sm font-medium mb-1.5" style={{ color: "var(--text-secondary)" }}>
-              Email
-            </label>
-            <input
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className="w-full px-4 py-2.5 rounded-lg border text-sm outline-none"
-              style={inputStyle}
-            />
-          </div>
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium mb-1.5" style={{ color: "var(--text-secondary)" }}>
-                Current Password
-              </label>
-              <input
-                type="password"
-                value={currentPassword}
-                onChange={(e) => setCurrentPassword(e.target.value)}
-                className="w-full px-4 py-2.5 rounded-lg border text-sm outline-none"
-                style={inputStyle}
-                placeholder="Enter current password"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-1.5" style={{ color: "var(--text-secondary)" }}>
-                New Password
-              </label>
-              <input
-                type="password"
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-                className="w-full px-4 py-2.5 rounded-lg border text-sm outline-none"
-                style={inputStyle}
-                placeholder="Min. 8 characters"
-              />
-            </div>
-          </div>
-          <button
-            className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white"
-            style={{ backgroundColor: "var(--accent-primary)" }}
-          >
-            <Save className="w-4 h-4" /> Save Profile
-          </button>
-        </div>
-      </section>
-
-      {/* Security */}
-      <section
-        className="rounded-xl border p-6"
-        style={{ backgroundColor: "var(--bg-secondary)", borderColor: "var(--border-primary)" }}
-      >
-        <h2 className="text-lg font-semibold mb-4" style={{ color: "var(--text-primary)" }}>
-          Security Settings
-        </h2>
-        <div className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium mb-1.5" style={{ color: "var(--text-secondary)" }}>
-              Default Permission Tier
-            </label>
-            <select
-              value={permissionTier}
-              onChange={(e) => setPermissionTier(e.target.value)}
-              className="w-full px-4 py-2.5 rounded-lg border text-sm outline-none"
-              style={inputStyle}
-            >
-              <option value="open">Open - Auto-approve most actions</option>
-              <option value="supervised">Supervised - Confirm write actions</option>
-              <option value="restricted">Restricted - Confirm all actions</option>
-              <option value="locked">Locked - Admin approval required</option>
-            </select>
-            <p className="text-xs mt-1.5" style={{ color: "var(--text-muted)" }}>
-              Financial transactions are always blocked regardless of this setting.
-            </p>
+            <label className="block text-[13px] font-medium mb-2 text-[var(--text-secondary)]">Name</label>
+            <input type="text" value={name} onChange={(e) => setName(e.target.value)} className={inputClass} placeholder="Your name" />
           </div>
           <div>
-            <label className="block text-sm font-medium mb-1.5" style={{ color: "var(--text-secondary)" }}>
-              Rate Limit (requests/minute)
-            </label>
-            <input
-              type="number"
-              value={rateLimit}
-              onChange={(e) => setRateLimit(Number(e.target.value))}
-              min={10}
-              max={200}
-              className="w-full px-4 py-2.5 rounded-lg border text-sm outline-none"
-              style={inputStyle}
-            />
+            <label className="block text-[13px] font-medium mb-2 text-[var(--text-secondary)]">Email</label>
+            <input type="email" value={user?.email || ""} disabled className={inputClass + " opacity-60 cursor-not-allowed"} />
           </div>
           <button
-            className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white"
-            style={{ backgroundColor: "var(--accent-primary)" }}
+            type="button"
+            onClick={handleSaveProfile}
+            disabled={saving === "profile"}
+            className="flex items-center gap-2 px-5 py-2.5 rounded-[12px] text-[14px] font-semibold text-white bg-[var(--accent-primary)] disabled:opacity-50 hover:brightness-110 transition-all"
           >
-            <Save className="w-4 h-4" /> Save Security Settings
+            {saving === "profile" ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+            Save Profile
           </button>
         </div>
       </section>
 
       {/* LLM Provider */}
       <section
-        className="rounded-xl border p-6"
-        style={{ backgroundColor: "var(--bg-secondary)", borderColor: "var(--border-primary)" }}
+        className="rounded-[var(--radius-xl)] border border-[var(--border-subtle)] p-6 md:p-7"
+        style={{ backgroundColor: "var(--bg-secondary)", boxShadow: "var(--shadow-card)" }}
       >
-        <h2 className="text-lg font-semibold mb-4" style={{ color: "var(--text-primary)" }}>
+        <h2 className="text-[20px] font-semibold tracking-tight text-[var(--text-primary)] mb-5">
           LLM Provider
         </h2>
-        <div className="space-y-4">
+        <div className="space-y-5">
           <div>
-            <label className="block text-sm font-medium mb-1.5" style={{ color: "var(--text-secondary)" }}>
-              Provider
-            </label>
-            <div className="grid grid-cols-4 gap-3">
-              {(["anthropic", "openai", "gemini", "grok", "deepseek", "groq", "mistral", "ollama"] as const).map((p) => (
+            <label className="block text-[13px] font-medium mb-3 text-[var(--text-secondary)]">Provider</label>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+              {PROVIDERS.map((p) => (
                 <button
                   key={p}
+                  type="button"
                   onClick={() => {
                     setLlmProvider(p);
                     setLlmModel(models[p][0]);
                   }}
-                  className="px-4 py-3 rounded-lg border text-sm font-medium capitalize transition-colors"
+                  className="px-4 py-3 rounded-[12px] border text-[14px] font-medium capitalize transition-all"
                   style={{
-                    backgroundColor: llmProvider === p ? "rgba(99,102,241,0.15)" : "var(--bg-input)",
-                    borderColor: llmProvider === p ? "var(--accent-primary)" : "var(--border-primary)",
-                    color: llmProvider === p ? "var(--accent-primary)" : "var(--text-secondary)",
+                    backgroundColor: llmProvider === p ? "rgba(10,132,255,0.14)" : "var(--bg-tertiary)",
+                    borderColor: llmProvider === p ? "var(--accent-primary)" : "var(--border-subtle)",
+                    color: llmProvider === p ? "var(--text-primary)" : "var(--text-secondary)",
                   }}
                 >
                   {p}
                   {p === "ollama" && (
-                    <span className="block text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>
-                      Local / Self-hosted
-                    </span>
+                    <span className="block text-[11px] mt-0.5 text-[var(--text-muted)]">Local</span>
                   )}
                 </button>
               ))}
             </div>
           </div>
+
           <div>
-            <label className="block text-sm font-medium mb-1.5" style={{ color: "var(--text-secondary)" }}>
-              Model
-            </label>
+            <label className="block text-[13px] font-medium mb-2 text-[var(--text-secondary)]">Model</label>
             <select
               value={llmModel}
               onChange={(e) => setLlmModel(e.target.value)}
-              className="w-full px-4 py-2.5 rounded-lg border text-sm outline-none"
-              style={inputStyle}
+              className={inputClass}
             >
-              {models[llmProvider].map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
+              {(models[llmProvider] || []).map((m) => (
+                <option key={m} value={m}>{m}</option>
               ))}
             </select>
           </div>
+
+          {llmProvider !== "ollama" && (
+            <div>
+              <label className="block text-[13px] font-medium mb-2 text-[var(--text-secondary)]">
+                API Key <span className="text-[var(--text-muted)]">(leave empty to keep current)</span>
+              </label>
+              <input
+                type="password"
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                className={inputClass + " font-mono"}
+                placeholder="sk-..."
+              />
+            </div>
+          )}
+
           <button
-            className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white"
-            style={{ backgroundColor: "var(--accent-primary)" }}
+            type="button"
+            onClick={handleSaveLLM}
+            disabled={saving === "llm"}
+            className="flex items-center gap-2 px-5 py-2.5 rounded-[12px] text-[14px] font-semibold text-white bg-[var(--accent-primary)] disabled:opacity-50 hover:brightness-110 transition-all"
           >
-            <Save className="w-4 h-4" /> Save LLM Settings
+            {saving === "llm" ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+            Save LLM Settings
           </button>
         </div>
       </section>
 
       {/* Danger Zone */}
       <section
-        className="rounded-xl border p-6"
-        style={{
-          backgroundColor: "var(--bg-secondary)",
-          borderColor: "rgba(239,68,68,0.3)",
-        }}
+        className="rounded-[var(--radius-xl)] border border-[rgba(255,69,58,0.35)] p-6 md:p-7"
+        style={{ backgroundColor: "var(--bg-secondary)", boxShadow: "var(--shadow-card)" }}
       >
-        <h2 className="text-lg font-semibold mb-1 flex items-center gap-2" style={{ color: "var(--accent-danger)" }}>
-          <AlertTriangle className="w-5 h-5" /> Danger Zone
+        <h2 className="text-[20px] font-semibold tracking-tight text-[var(--accent-danger)] mb-1 flex items-center gap-2">
+          <AlertTriangle className="w-5 h-5" strokeWidth={2} /> Danger Zone
         </h2>
-        <p className="text-sm mb-4" style={{ color: "var(--text-muted)" }}>
+        <p className="text-[14px] text-[var(--text-muted)] mb-5">
           These actions are irreversible. Proceed with caution.
         </p>
-        <div className="flex gap-3">
+        <div className="flex flex-wrap gap-3">
           <button
-            className="flex items-center gap-2 px-4 py-2 rounded-lg border text-sm font-medium"
-            style={{ borderColor: "var(--accent-danger)", color: "var(--accent-danger)" }}
+            type="button"
+            className="flex items-center gap-2 px-4 py-2.5 rounded-[12px] border border-[var(--accent-danger)] text-[14px] font-medium text-[var(--accent-danger)] hover:bg-[rgba(255,69,58,0.08)] transition-colors"
           >
             <Trash2 className="w-4 h-4" /> Reset All Connectors
           </button>
           <button
-            className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white"
-            style={{ backgroundColor: "var(--accent-danger)" }}
+            type="button"
+            onClick={logout}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-[12px] text-[14px] font-medium text-white bg-[var(--accent-danger)] hover:brightness-110 transition-all"
           >
-            <Trash2 className="w-4 h-4" /> Delete Account
+            <Trash2 className="w-4 h-4" /> Sign Out
           </button>
         </div>
       </section>

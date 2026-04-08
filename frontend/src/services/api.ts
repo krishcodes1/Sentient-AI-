@@ -5,12 +5,13 @@ import type {
   User,
   Conversation,
   Message,
-  AgentResponse,
+  ChatResponse,
   Connector,
   AuditLog,
   AuditStats,
   DashboardStats,
   ScanResult,
+  UpdateSettingsData,
 } from "@/types";
 
 const API_BASE = "/api";
@@ -59,13 +60,15 @@ async function request<T>(
   return response.json();
 }
 
-// Auth
+// ── Auth ─────────────────────────────────────────────────────────────────
+
 export async function login(credentials: LoginCredentials): Promise<AuthResponse> {
   const data = await request<AuthResponse>("/auth/login", {
     method: "POST",
     body: JSON.stringify(credentials),
   });
   localStorage.setItem("auth_token", data.access_token);
+  localStorage.setItem("user", JSON.stringify(data.user));
   return data;
 }
 
@@ -75,6 +78,7 @@ export async function register(data: RegisterData): Promise<AuthResponse> {
     body: JSON.stringify(data),
   });
   localStorage.setItem("auth_token", result.access_token);
+  localStorage.setItem("user", JSON.stringify(result.user));
   return result;
 }
 
@@ -84,31 +88,54 @@ export async function getMe(): Promise<User> {
 
 export function logout(): void {
   localStorage.removeItem("auth_token");
+  localStorage.removeItem("user");
   window.location.href = "/login";
 }
 
-// Conversations
+export function getStoredUser(): User | null {
+  try {
+    const raw = localStorage.getItem("user");
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+// ── Settings ─────────────────────────────────────────────────────────────
+
+export async function updateSettings(data: UpdateSettingsData): Promise<User> {
+  const updated = await request<User>("/auth/settings", {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  });
+  localStorage.setItem("user", JSON.stringify(updated));
+  return updated;
+}
+
+// ── Conversations ────────────────────────────────────────────────────────
+
 export async function getConversations(): Promise<Conversation[]> {
-  return request<Conversation[]>("/conversations");
+  return request<Conversation[]>("/agent/conversations");
 }
 
 export async function createConversation(title: string): Promise<Conversation> {
-  return request<Conversation>("/conversations", {
+  return request<Conversation>("/agent/conversations", {
     method: "POST",
     body: JSON.stringify({ title }),
   });
 }
 
 export async function getMessages(conversationId: string): Promise<Message[]> {
-  return request<Message[]>(`/conversations/${conversationId}/messages`);
+  const conv = await request<{ messages: Message[] }>(`/agent/conversations/${conversationId}`);
+  return conv.messages;
 }
 
 export async function sendMessage(
   conversationId: string,
   content: string
-): Promise<AgentResponse> {
-  return request<AgentResponse>(
-    `/conversations/${conversationId}/messages`,
+): Promise<ChatResponse> {
+  return request<ChatResponse>(
+    `/agent/conversations/${conversationId}/messages`,
     {
       method: "POST",
       body: JSON.stringify({ content }),
@@ -126,7 +153,8 @@ export async function approveAction(
   });
 }
 
-// Connectors
+// ── Connectors ───────────────────────────────────────────────────────────
+
 export async function getConnectors(): Promise<Connector[]> {
   return request<Connector[]>("/connectors");
 }
@@ -140,16 +168,6 @@ export async function addConnector(
   });
 }
 
-export async function updateConnector(
-  id: string,
-  data: Partial<Connector>
-): Promise<Connector> {
-  return request<Connector>(`/connectors/${id}`, {
-    method: "PATCH",
-    body: JSON.stringify(data),
-  });
-}
-
 export async function deleteConnector(id: string): Promise<void> {
   return request<void>(`/connectors/${id}`, { method: "DELETE" });
 }
@@ -158,7 +176,8 @@ export async function testConnector(id: string): Promise<ScanResult> {
   return request<ScanResult>(`/connectors/${id}/test`, { method: "POST" });
 }
 
-// Audit Logs
+// ── Audit Logs ───────────────────────────────────────────────────────────
+
 export async function getAuditLogs(params?: {
   connector_id?: string;
   status?: string;
@@ -184,48 +203,8 @@ export async function getAuditStats(): Promise<AuditStats> {
   return request<AuditStats>("/audit/stats");
 }
 
-// Dashboard
+// ── Dashboard ────────────────────────────────────────────────────────────
+
 export async function getDashboardStats(): Promise<DashboardStats> {
   return request<DashboardStats>("/dashboard/stats");
-}
-
-// Settings
-export async function updateProfile(data: {
-  name?: string;
-  email?: string;
-}): Promise<User> {
-  return request<User>("/auth/profile", {
-    method: "PATCH",
-    body: JSON.stringify(data),
-  });
-}
-
-export async function changePassword(data: {
-  current_password: string;
-  new_password: string;
-}): Promise<void> {
-  return request<void>("/auth/password", {
-    method: "POST",
-    body: JSON.stringify(data),
-  });
-}
-
-export async function updateSettings(data: {
-  default_permission_tier?: string;
-  rate_limit?: number;
-  llm_provider?: string;
-  llm_model?: string;
-}): Promise<void> {
-  return request<void>("/settings", {
-    method: "PATCH",
-    body: JSON.stringify(data),
-  });
-}
-
-export async function deleteAccount(): Promise<void> {
-  return request<void>("/auth/account", { method: "DELETE" });
-}
-
-export async function resetConnectors(): Promise<void> {
-  return request<void>("/connectors/reset", { method: "POST" });
 }

@@ -1,311 +1,278 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import {
   Send,
   Plus,
   Bot,
   User,
-  CheckCircle2,
-  XCircle,
-  Clock,
-  Shield,
-  ChevronRight,
+  Loader2,
+  MessageSquare,
 } from "lucide-react";
-import clsx from "clsx";
-import type { Message, ToolCall, PendingApproval } from "@/types";
-
-interface ConversationPreview {
-  id: string;
-  title: string;
-  lastMessage: string;
-  timestamp: string;
-}
-
-const mockConversations: ConversationPreview[] = [
-  { id: "1", title: "Assignment deadlines", lastMessage: "Here are your upcoming due dates...", timestamp: "2m ago" },
-  { id: "2", title: "Grade analysis", lastMessage: "Your GPA trend shows...", timestamp: "1h ago" },
-  { id: "3", title: "Portfolio check", lastMessage: "Your crypto holdings are...", timestamp: "3h ago" },
-];
-
-const mockMessages: Message[] = [
-  {
-    id: "1",
-    conversation_id: "1",
-    role: "user",
-    content: "What assignments do I have due this week?",
-    timestamp: "2024-04-06T10:00:00Z",
-  },
-  {
-    id: "2",
-    conversation_id: "1",
-    role: "assistant",
-    content: "I'll check your Canvas LMS for upcoming assignments. Let me fetch your course data.",
-    tool_calls: [
-      { id: "tc1", connector: "Canvas LMS", action: "get_assignments", endpoint: "/api/v1/courses/assignments", status: "success", result: "Found 3 assignments" },
-    ],
-    timestamp: "2024-04-06T10:00:05Z",
-  },
-  {
-    id: "3",
-    conversation_id: "1",
-    role: "assistant",
-    content: "Here are your upcoming assignments this week:\n\n1. **CSCI335 - Algorithm Analysis HW5** - Due Wednesday, Apr 9\n2. **CSCI300 - Database Project Milestone 2** - Due Thursday, Apr 10\n3. **CSCI270 - Probability Problem Set 4** - Due Friday, Apr 11\n\nWould you like me to create calendar events for these deadlines?",
-    pending_approvals: [
-      { id: "pa1", connector: "Google Calendar", action: "create_events", scope: "calendar.events", risk_level: "write", reasoning: "Creating calendar events requires write access to Google Calendar" },
-    ],
-    timestamp: "2024-04-06T10:00:10Z",
-  },
-];
-
-function ToolCallBadge({ tc }: { tc: ToolCall }) {
-  const colors = {
-    success: { bg: "rgba(34,197,94,0.1)", text: "var(--accent-success)" },
-    blocked: { bg: "rgba(239,68,68,0.1)", text: "var(--accent-danger)" },
-    pending: { bg: "rgba(245,158,11,0.1)", text: "var(--accent-warning)" },
-    error: { bg: "rgba(239,68,68,0.1)", text: "var(--accent-danger)" },
-  };
-  const c = colors[tc.status];
-  const Icon = tc.status === "success" ? CheckCircle2 : tc.status === "blocked" ? XCircle : Clock;
-
-  return (
-    <div
-      className="flex items-center gap-2 px-3 py-2 rounded-lg text-xs"
-      style={{ backgroundColor: c.bg, border: `1px solid ${c.text}20` }}
-    >
-      <Icon className="w-3.5 h-3.5" style={{ color: c.text }} />
-      <span style={{ color: c.text }} className="font-medium">
-        {tc.connector}
-      </span>
-      <ChevronRight className="w-3 h-3" style={{ color: "var(--text-muted)" }} />
-      <span style={{ color: "var(--text-secondary)" }}>{tc.action}</span>
-    </div>
-  );
-}
-
-function ApprovalCard({ approval }: { approval: PendingApproval }) {
-  return (
-    <div
-      className="rounded-lg border p-3 mt-2"
-      style={{
-        backgroundColor: "rgba(245,158,11,0.05)",
-        borderColor: "rgba(245,158,11,0.2)",
-      }}
-    >
-      <div className="flex items-center gap-2 mb-2">
-        <Shield className="w-4 h-4" style={{ color: "var(--accent-warning)" }} />
-        <span className="text-xs font-semibold" style={{ color: "var(--accent-warning)" }}>
-          Approval Required
-        </span>
-        <span
-          className="text-xs px-1.5 py-0.5 rounded"
-          style={{
-            backgroundColor: "rgba(245,158,11,0.15)",
-            color: "var(--accent-warning)",
-          }}
-        >
-          {approval.risk_level}
-        </span>
-      </div>
-      <p className="text-xs mb-2" style={{ color: "var(--text-secondary)" }}>
-        <strong>{approval.connector}</strong> wants to <strong>{approval.action}</strong> (scope: {approval.scope})
-      </p>
-      <p className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
-        {approval.reasoning}
-      </p>
-      <div className="flex gap-2">
-        <button
-          className="px-3 py-1.5 rounded-md text-xs font-medium text-white"
-          style={{ backgroundColor: "var(--accent-success)" }}
-        >
-          Approve
-        </button>
-        <button
-          className="px-3 py-1.5 rounded-md text-xs font-medium border"
-          style={{
-            borderColor: "var(--accent-danger)",
-            color: "var(--accent-danger)",
-          }}
-        >
-          Deny
-        </button>
-      </div>
-    </div>
-  );
-}
+import type { Conversation, Message } from "@/types";
+import {
+  getConversations,
+  createConversation,
+  getMessages,
+  sendMessage,
+} from "@/services/api";
 
 export default function Chat() {
-  const [activeConv, setActiveConv] = useState("1");
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [activeConvId, setActiveConvId] = useState<string | null>(null);
+  const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
+  const [sending, setSending] = useState(false);
+  const [loadingConvos, setLoadingConvos] = useState(true);
+  const [loadingMessages, setLoadingMessages] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
+  const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [mockMessages]);
+  }, []);
 
-  const handleSend = (e: React.FormEvent) => {
+  useEffect(() => { scrollToBottom(); }, [messages, scrollToBottom]);
+
+  useEffect(() => {
+    getConversations()
+      .then(setConversations)
+      .catch(() => {})
+      .finally(() => setLoadingConvos(false));
+  }, []);
+
+  const loadMessages = async (convId: string) => {
+    setActiveConvId(convId);
+    setLoadingMessages(true);
+    try {
+      const msgs = await getMessages(convId);
+      setMessages(msgs);
+    } catch {
+      setMessages([]);
+    } finally {
+      setLoadingMessages(false);
+    }
+  };
+
+  const handleNewChat = async () => {
+    try {
+      const conv = await createConversation("New Conversation");
+      setConversations((prev) => [conv, ...prev]);
+      setActiveConvId(conv.id);
+      setMessages([]);
+    } catch {}
+  };
+
+  const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!input.trim()) return;
-    // In production, this would call sendMessage API
+    if (!input.trim() || sending) return;
+
+    let convId = activeConvId;
+
+    if (!convId) {
+      try {
+        const conv = await createConversation("New Conversation");
+        setConversations((prev) => [conv, ...prev]);
+        convId = conv.id;
+        setActiveConvId(convId);
+      } catch {
+        return;
+      }
+    }
+
+    const userContent = input.trim();
     setInput("");
+    setSending(true);
+
+    const tempUserMsg: Message = {
+      id: `temp-${Date.now()}`,
+      conversation_id: convId,
+      role: "user",
+      content: userContent,
+    };
+    setMessages((prev) => [...prev, tempUserMsg]);
+
+    try {
+      const resp = await sendMessage(convId, userContent);
+      setMessages((prev) => {
+        const withoutTemp = prev.filter((m) => m.id !== tempUserMsg.id);
+        return [...withoutTemp, resp.user_message, resp.assistant_message];
+      });
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.id === convId ? { ...c, title: resp.user_message.content.slice(0, 80), updated_at: new Date().toISOString() } : c
+        )
+      );
+    } catch (err: any) {
+      const errMsg: Message = {
+        id: `err-${Date.now()}`,
+        conversation_id: convId,
+        role: "assistant",
+        content: `Something went wrong: ${err.message || "Unknown error"}. Check your API key in Settings.`,
+      };
+      setMessages((prev) => [...prev, errMsg]);
+    } finally {
+      setSending(false);
+    }
   };
 
   return (
     <div
-      className="flex h-[calc(100vh-3rem)] rounded-xl border overflow-hidden"
-      style={{
-        backgroundColor: "var(--bg-secondary)",
-        borderColor: "var(--border-primary)",
-      }}
+      className="flex h-[calc(100vh-5rem)] rounded-[var(--radius-xl)] border border-[var(--border-subtle)] overflow-hidden min-w-0"
+      style={{ backgroundColor: "var(--bg-secondary)", boxShadow: "var(--shadow-card)" }}
     >
-      {/* Conversation List */}
-      <div
-        className="w-72 border-r flex flex-col shrink-0"
-        style={{ borderColor: "var(--border-primary)" }}
-      >
-        <div className="p-4 border-b" style={{ borderColor: "var(--border-primary)" }}>
+      {/* Conversation sidebar */}
+      <div className="w-[280px] shrink-0 border-r border-[var(--border-subtle)] flex flex-col bg-[var(--bg-secondary)]">
+        <div className="p-3 border-b border-[var(--border-subtle)]">
           <button
-            className="w-full flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-medium text-white"
-            style={{ backgroundColor: "var(--accent-primary)" }}
+            type="button"
+            onClick={handleNewChat}
+            className="w-full flex items-center justify-center gap-2 py-2.5 rounded-[12px] text-[14px] font-semibold text-white bg-[var(--accent-primary)] hover:brightness-110 transition-all"
           >
-            <Plus className="w-4 h-4" /> New Chat
+            <Plus className="w-4 h-4" strokeWidth={2.5} /> New Chat
           </button>
         </div>
-        <div className="flex-1 overflow-y-auto">
-          {mockConversations.map((conv) => (
+        <div className="flex-1 overflow-y-auto min-h-0">
+          {loadingConvos && (
+            <div className="flex items-center justify-center py-10">
+              <Loader2 className="w-5 h-5 animate-spin text-[var(--text-muted)]" />
+            </div>
+          )}
+          {!loadingConvos && conversations.length === 0 && (
+            <div className="text-center py-10 px-4">
+              <MessageSquare className="w-8 h-8 text-[var(--text-muted)] mx-auto mb-2" strokeWidth={1.5} />
+              <p className="text-[13px] text-[var(--text-muted)]">No conversations yet</p>
+            </div>
+          )}
+          {conversations.map((conv) => (
             <button
               key={conv.id}
-              onClick={() => setActiveConv(conv.id)}
-              className={clsx("w-full text-left px-4 py-3 border-b transition-colors")}
+              type="button"
+              onClick={() => loadMessages(conv.id)}
+              className="w-full text-left px-4 py-3 border-b border-[var(--border-subtle)] transition-colors"
               style={{
-                borderColor: "var(--border-primary)",
-                backgroundColor: activeConv === conv.id ? "var(--bg-hover)" : "transparent",
+                backgroundColor: activeConvId === conv.id ? "rgba(10,132,255,0.12)" : "transparent",
               }}
             >
-              <div className="flex items-center justify-between">
-                <span
-                  className="text-sm font-medium truncate"
-                  style={{ color: "var(--text-primary)" }}
-                >
-                  {conv.title}
-                </span>
-                <span className="text-xs shrink-0" style={{ color: "var(--text-muted)" }}>
-                  {conv.timestamp}
-                </span>
-              </div>
-              <p
-                className="text-xs mt-1 truncate"
-                style={{ color: "var(--text-muted)" }}
+              <span
+                className="text-[14px] font-medium truncate block"
+                style={{
+                  color: activeConvId === conv.id ? "var(--text-primary)" : "var(--text-secondary)",
+                }}
               >
-                {conv.lastMessage}
-              </p>
+                {conv.title}
+              </span>
             </button>
           ))}
         </div>
       </div>
 
-      {/* Chat Area */}
-      <div className="flex-1 flex flex-col">
+      {/* Chat area */}
+      <div className="flex-1 flex flex-col min-w-0 bg-[var(--bg-primary)]">
         {/* Messages */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-4">
-          {mockMessages.map((msg) => (
-            <div
-              key={msg.id}
-              className={clsx("flex gap-3", msg.role === "user" ? "justify-end" : "")}
-            >
-              {msg.role === "assistant" && (
-                <div
-                  className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0"
-                  style={{ backgroundColor: "rgba(99,102,241,0.15)" }}
-                >
-                  <Bot className="w-4 h-4" style={{ color: "var(--accent-primary)" }} />
-                </div>
-              )}
-              <div
-                className={clsx("max-w-[70%] rounded-xl px-4 py-3")}
-                style={{
-                  backgroundColor:
-                    msg.role === "user"
-                      ? "var(--accent-primary)"
-                      : "var(--bg-primary)",
-                  border: msg.role === "assistant" ? "1px solid var(--border-primary)" : "none",
-                }}
-              >
-                <p
-                  className="text-sm whitespace-pre-wrap"
-                  style={{
-                    color: msg.role === "user" ? "#fff" : "var(--text-primary)",
-                  }}
-                >
-                  {msg.content}
-                </p>
-                {/* Tool calls */}
-                {msg.tool_calls && msg.tool_calls.length > 0 && (
-                  <div className="mt-2 space-y-1">
-                    {msg.tool_calls.map((tc) => (
-                      <ToolCallBadge key={tc.id} tc={tc} />
-                    ))}
-                  </div>
-                )}
-                {/* Pending approvals */}
-                {msg.pending_approvals && msg.pending_approvals.length > 0 && (
-                  <div className="mt-2">
-                    {msg.pending_approvals.map((pa) => (
-                      <ApprovalCard key={pa.id} approval={pa} />
-                    ))}
-                  </div>
-                )}
+        <div className="flex-1 overflow-y-auto p-5 md:p-8 min-h-0">
+          {!activeConvId && !sending && (
+            <div className="flex flex-col items-center justify-center h-full text-center gap-4">
+              <div className="w-16 h-16 rounded-[16px] bg-[rgba(10,132,255,0.15)] flex items-center justify-center">
+                <Bot className="w-8 h-8 text-[var(--accent-primary)]" strokeWidth={1.5} />
               </div>
-              {msg.role === "user" && (
-                <div
-                  className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0"
-                  style={{ backgroundColor: "rgba(99,102,241,0.3)" }}
-                >
-                  <User className="w-4 h-4" style={{ color: "var(--accent-primary)" }} />
+              <div>
+                <h2 className="text-[20px] font-semibold text-[var(--text-primary)]">
+                  Start a conversation
+                </h2>
+                <p className="text-[14px] text-[var(--text-muted)] mt-1 max-w-sm">
+                  Ask SentientAI anything. Your messages are processed securely.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {activeConvId && loadingMessages && (
+            <div className="flex items-center justify-center h-full">
+              <Loader2 className="w-6 h-6 animate-spin text-[var(--text-muted)]" />
+            </div>
+          )}
+
+          {activeConvId && !loadingMessages && (
+            <div className="max-w-3xl mx-auto space-y-5">
+              {messages.map((msg) => (
+                <div key={msg.id} className={`flex gap-3 ${msg.role === "user" ? "justify-end" : ""}`}>
+                  {msg.role === "assistant" && (
+                    <div className="w-9 h-9 rounded-[12px] bg-[rgba(10,132,255,0.15)] flex items-center justify-center shrink-0 mt-0.5">
+                      <Bot className="w-[18px] h-[18px] text-[var(--accent-primary)]" strokeWidth={1.75} />
+                    </div>
+                  )}
+                  <div
+                    className="max-w-[80%] rounded-[16px] px-4 py-3 min-w-0"
+                    style={{
+                      backgroundColor: msg.role === "user" ? "var(--accent-primary)" : "var(--bg-secondary)",
+                      border: msg.role === "assistant" ? "1px solid var(--border-subtle)" : "none",
+                    }}
+                  >
+                    <p
+                      className="text-[15px] leading-relaxed whitespace-pre-wrap break-words"
+                      style={{ color: msg.role === "user" ? "#fff" : "var(--text-primary)" }}
+                    >
+                      {msg.content}
+                    </p>
+                  </div>
+                  {msg.role === "user" && (
+                    <div className="w-9 h-9 rounded-[12px] bg-[rgba(10,132,255,0.25)] flex items-center justify-center shrink-0 mt-0.5">
+                      <User className="w-[18px] h-[18px] text-[var(--accent-primary)]" strokeWidth={1.75} />
+                    </div>
+                  )}
+                </div>
+              ))}
+
+              {sending && (
+                <div className="flex gap-3">
+                  <div className="w-9 h-9 rounded-[12px] bg-[rgba(10,132,255,0.15)] flex items-center justify-center shrink-0">
+                    <Bot className="w-[18px] h-[18px] text-[var(--accent-primary)]" strokeWidth={1.75} />
+                  </div>
+                  <div className="rounded-[16px] px-4 py-3 border border-[var(--border-subtle)] bg-[var(--bg-secondary)]">
+                    <div className="flex items-center gap-2 text-[14px] text-[var(--text-muted)]">
+                      <Loader2 className="w-4 h-4 animate-spin" /> Thinking...
+                    </div>
+                  </div>
                 </div>
               )}
+
+              <div ref={messagesEndRef} />
             </div>
-          ))}
-          <div ref={messagesEndRef} />
+          )}
         </div>
 
-        {/* Input */}
-        <form
-          onSubmit={handleSend}
-          className="p-4 border-t"
-          style={{ borderColor: "var(--border-primary)" }}
-        >
-          <div
-            className="flex items-center gap-3 rounded-xl border px-4 py-2"
-            style={{
-              backgroundColor: "var(--bg-input)",
-              borderColor: "var(--border-primary)",
-            }}
-          >
-            <input
-              type="text"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder="Ask SentientAI anything..."
-              className="flex-1 bg-transparent outline-none text-sm"
-              style={{ color: "var(--text-primary)" }}
-            />
-            <button
-              type="submit"
-              className="w-8 h-8 rounded-lg flex items-center justify-center transition-colors"
-              style={{
-                backgroundColor: input.trim()
-                  ? "var(--accent-primary)"
-                  : "transparent",
-              }}
+        {/* Input bar */}
+        <div className="px-5 pb-5 md:px-8 md:pb-6 pt-2">
+          <form onSubmit={handleSend} className="max-w-3xl mx-auto">
+            <div
+              className="flex items-center gap-3 rounded-[16px] border border-[var(--border-primary)] bg-[var(--bg-secondary)] px-4 py-2.5 shadow-sm focus-within:border-[var(--accent-primary)] transition-colors"
             >
-              <Send
-                className="w-4 h-4"
-                style={{
-                  color: input.trim() ? "#fff" : "var(--text-muted)",
-                }}
+              <input
+                type="text"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                placeholder="Ask SentientAI anything..."
+                disabled={sending}
+                className="flex-1 bg-transparent outline-none text-[15px] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] disabled:opacity-50"
               />
-            </button>
-          </div>
-        </form>
+              <button
+                type="submit"
+                disabled={!input.trim() || sending}
+                className="w-9 h-9 rounded-[10px] flex items-center justify-center transition-all shrink-0 disabled:opacity-30"
+                style={{
+                  backgroundColor: input.trim() ? "var(--accent-primary)" : "transparent",
+                }}
+              >
+                <Send
+                  className="w-[18px] h-[18px]"
+                  style={{ color: input.trim() ? "#fff" : "var(--text-muted)" }}
+                  strokeWidth={2}
+                />
+              </button>
+            </div>
+            <p className="text-center text-[11px] text-[var(--text-muted)] mt-2">
+              SentientAI may make mistakes. Verify important information.
+            </p>
+          </form>
+        </div>
       </div>
     </div>
   );

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Brain, Eye, EyeOff } from "lucide-react";
-import { login, register } from "@/services/api";
+import { login, register, getStoredUser } from "@/services/api";
 
 export default function Login() {
   const navigate = useNavigate();
@@ -24,7 +24,12 @@ export default function Login() {
       } else {
         await login({ email, password });
       }
-      navigate("/");
+      const user = getStoredUser();
+      if (user && !user.onboarding_completed) {
+        navigate("/onboarding");
+      } else {
+        navigate("/");
+      }
     } catch (err: any) {
       setError(err.message || "Authentication failed");
     } finally {
@@ -33,69 +38,42 @@ export default function Login() {
   };
 
   return (
-    <div
-      className="min-h-screen flex items-center justify-center p-4"
-      style={{ backgroundColor: "var(--bg-primary)" }}
-    >
+    <div className="min-h-screen flex items-center justify-center p-5 bg-[var(--bg-primary)]">
       <div
-        className="w-full max-w-md rounded-2xl p-8 border"
-        style={{
-          backgroundColor: "var(--bg-secondary)",
-          borderColor: "var(--border-primary)",
-        }}
+        className="w-full max-w-[420px] rounded-[var(--radius-xl)] border border-[var(--border-subtle)] p-8 md:p-10"
+        style={{ backgroundColor: "var(--bg-secondary)", boxShadow: "var(--shadow-card)" }}
       >
         {/* Logo */}
         <div className="flex flex-col items-center mb-8">
-          <div
-            className="w-14 h-14 rounded-xl flex items-center justify-center mb-4"
-            style={{ backgroundColor: "var(--accent-primary)" }}
-          >
-            <Brain className="w-8 h-8 text-white" />
+          <div className="w-16 h-16 rounded-[16px] bg-[var(--accent-primary)] flex items-center justify-center mb-5 shadow-sm">
+            <Brain className="w-9 h-9 text-white" strokeWidth={1.75} />
           </div>
-          <h1
-            className="text-2xl font-bold"
-            style={{ color: "var(--text-primary)" }}
-          >
+          <h1 className="text-[24px] font-semibold tracking-tight text-[var(--text-primary)]">
             SentientAI
           </h1>
-          <p className="text-sm mt-1" style={{ color: "var(--text-secondary)" }}>
-            Secure-by-Design Agentic AI Platform
+          <p className="text-[14px] mt-1 text-[var(--text-secondary)]">
+            Secure-by-Design Agentic AI
           </p>
         </div>
 
         {/* Error */}
         {error && (
-          <div
-            className="mb-4 p-3 rounded-lg text-sm"
-            style={{
-              backgroundColor: "rgba(239, 68, 68, 0.1)",
-              color: "var(--accent-danger)",
-              border: "1px solid rgba(239, 68, 68, 0.2)",
-            }}
-          >
+          <div className="mb-5 p-3 rounded-[10px] text-[13px] bg-[rgba(255,69,58,0.12)] text-[var(--accent-danger)] border border-[rgba(255,69,58,0.25)]">
             {error}
           </div>
         )}
 
-        <form onSubmit={handleSubmit} className="space-y-4">
+        <form onSubmit={handleSubmit} className="space-y-5">
           {isRegister && (
             <div>
-              <label
-                className="block text-sm font-medium mb-1.5"
-                style={{ color: "var(--text-secondary)" }}
-              >
+              <label className="block text-[13px] font-medium mb-2 text-[var(--text-secondary)]">
                 Full Name
               </label>
               <input
                 type="text"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                className="w-full px-4 py-2.5 rounded-lg border text-sm outline-none transition-colors"
-                style={{
-                  backgroundColor: "var(--bg-input)",
-                  borderColor: "var(--border-primary)",
-                  color: "var(--text-primary)",
-                }}
+                className="w-full px-4 py-3 rounded-[12px] border border-[var(--border-primary)] bg-[var(--bg-input)] text-[15px] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-muted)] focus:border-[var(--accent-primary)] transition-colors"
                 placeholder="Krish Shroff"
                 required
               />
@@ -103,32 +81,21 @@ export default function Login() {
           )}
 
           <div>
-            <label
-              className="block text-sm font-medium mb-1.5"
-              style={{ color: "var(--text-secondary)" }}
-            >
+            <label className="block text-[13px] font-medium mb-2 text-[var(--text-secondary)]">
               Email
             </label>
             <input
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              className="w-full px-4 py-2.5 rounded-lg border text-sm outline-none transition-colors"
-              style={{
-                backgroundColor: "var(--bg-input)",
-                borderColor: "var(--border-primary)",
-                color: "var(--text-primary)",
-              }}
+              className="w-full px-4 py-3 rounded-[12px] border border-[var(--border-primary)] bg-[var(--bg-input)] text-[15px] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-muted)] focus:border-[var(--accent-primary)] transition-colors"
               placeholder="you@example.com"
               required
             />
           </div>
 
           <div>
-            <label
-              className="block text-sm font-medium mb-1.5"
-              style={{ color: "var(--text-secondary)" }}
-            >
+            <label className="block text-[13px] font-medium mb-2 text-[var(--text-secondary)]">
               Password
             </label>
             <div className="relative">
@@ -136,12 +103,7 @@ export default function Login() {
                 type={showPassword ? "text" : "password"}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="w-full px-4 py-2.5 rounded-lg border text-sm outline-none transition-colors pr-10"
-                style={{
-                  backgroundColor: "var(--bg-input)",
-                  borderColor: "var(--border-primary)",
-                  color: "var(--text-primary)",
-                }}
+                className="w-full px-4 py-3 rounded-[12px] border border-[var(--border-primary)] bg-[var(--bg-input)] text-[15px] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-muted)] focus:border-[var(--accent-primary)] transition-colors pr-12"
                 placeholder="Min. 8 characters"
                 minLength={8}
                 required
@@ -149,14 +111,9 @@ export default function Login() {
               <button
                 type="button"
                 onClick={() => setShowPassword(!showPassword)}
-                className="absolute right-3 top-1/2 -translate-y-1/2"
-                style={{ color: "var(--text-muted)" }}
+                className="absolute right-3 top-1/2 -translate-y-1/2 p-1.5 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-secondary)] transition-colors"
               >
-                {showPassword ? (
-                  <EyeOff className="w-4 h-4" />
-                ) : (
-                  <Eye className="w-4 h-4" />
-                )}
+                {showPassword ? <EyeOff className="w-[18px] h-[18px]" /> : <Eye className="w-[18px] h-[18px]" />}
               </button>
             </div>
           </div>
@@ -164,29 +121,20 @@ export default function Login() {
           <button
             type="submit"
             disabled={loading}
-            className="w-full py-2.5 rounded-lg text-sm font-semibold text-white transition-all disabled:opacity-50"
-            style={{ backgroundColor: "var(--accent-primary)" }}
+            className="w-full py-3 rounded-[12px] text-[15px] font-semibold text-white bg-[var(--accent-primary)] transition-all disabled:opacity-50 hover:brightness-110"
           >
-            {loading
-              ? "Please wait..."
-              : isRegister
-              ? "Create Account"
-              : "Sign In"}
+            {loading ? "Please wait..." : isRegister ? "Create Account" : "Sign In"}
           </button>
         </form>
 
-        <p
-          className="text-center text-sm mt-6"
-          style={{ color: "var(--text-secondary)" }}
-        >
+        <p className="text-center text-[14px] mt-6 text-[var(--text-secondary)]">
           {isRegister ? "Already have an account?" : "Don't have an account?"}{" "}
           <button
             onClick={() => {
               setIsRegister(!isRegister);
               setError("");
             }}
-            className="font-medium hover:underline"
-            style={{ color: "var(--accent-primary)" }}
+            className="font-medium text-[var(--accent-primary)] hover:underline"
           >
             {isRegister ? "Sign in" : "Create one"}
           </button>

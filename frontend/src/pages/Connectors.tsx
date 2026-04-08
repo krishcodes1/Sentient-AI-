@@ -7,17 +7,16 @@ import {
   Check,
   X,
   ChevronDown,
-  ExternalLink,
   RefreshCw,
 } from "lucide-react";
 import clsx from "clsx";
 import type { Connector, ConnectorScope } from "@/types";
 
 const scopeColors = {
-  read: { bg: "rgba(34,197,94,0.1)", text: "var(--accent-success)", label: "Read" },
-  write: { bg: "rgba(245,158,11,0.1)", text: "var(--accent-warning)", label: "Write" },
-  admin: { bg: "rgba(239,68,68,0.1)", text: "var(--accent-danger)", label: "Admin" },
-  financial: { bg: "rgba(239,68,68,0.15)", text: "var(--accent-danger)", label: "Financial" },
+  read: { bg: "rgba(48,209,88,0.14)", text: "var(--accent-success)", label: "Read" },
+  write: { bg: "rgba(255,159,10,0.14)", text: "var(--accent-warning)", label: "Write" },
+  admin: { bg: "rgba(255,69,58,0.14)", text: "var(--accent-danger)", label: "Admin" },
+  financial: { bg: "rgba(255,69,58,0.18)", text: "var(--accent-danger)", label: "Financial" },
 };
 
 const connectorIcons: Record<string, any> = {
@@ -88,25 +87,19 @@ function ScopeTag({ scope }: { scope: ConnectorScope }) {
   const c = scopeColors[scope.risk_level];
   return (
     <div
-      className="inline-flex items-center gap-1.5 px-2 py-1 rounded text-xs"
+      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-[8px] text-[12px]"
       style={{ backgroundColor: c.bg }}
     >
       {scope.granted ? (
-        <Check className="w-3 h-3" style={{ color: c.text }} />
+        <Check className="w-3 h-3" style={{ color: c.text }} strokeWidth={2.5} />
       ) : (
-        <X className="w-3 h-3" style={{ color: "var(--text-muted)" }} />
+        <X className="w-3 h-3 text-[var(--text-muted)]" strokeWidth={2.5} />
       )}
       <span style={{ color: scope.granted ? c.text : "var(--text-muted)" }}>
         {scope.name}
       </span>
-      {scope.risk_level === "financial" && (
-        <span
-          className="text-[10px] px-1 rounded font-bold"
-          style={{
-            backgroundColor: "rgba(239,68,68,0.2)",
-            color: "var(--accent-danger)",
-          }}
-        >
+      {scope.risk_level === "financial" && !scope.granted && (
+        <span className="text-[10px] px-1.5 py-0.5 rounded-[4px] font-bold bg-[rgba(255,69,58,0.2)] text-[var(--accent-danger)]">
           BLOCKED
         </span>
       )}
@@ -120,91 +113,61 @@ function ConnectorCard({ connector }: { connector: Connector }) {
 
   return (
     <div
-      className="rounded-xl border overflow-hidden"
-      style={{
-        backgroundColor: "var(--bg-secondary)",
-        borderColor: "var(--border-primary)",
-      }}
+      className="rounded-[var(--radius-xl)] border border-[var(--border-subtle)] overflow-hidden"
+      style={{ backgroundColor: "var(--bg-secondary)", boxShadow: "var(--shadow-card)" }}
     >
-      {/* Header */}
       <div className="p-5">
-        <div className="flex items-start justify-between mb-3">
-          <div className="flex items-center gap-3">
-            <div
-              className="w-10 h-10 rounded-lg flex items-center justify-center"
-              style={{ backgroundColor: "rgba(99,102,241,0.15)" }}
-            >
-              <Icon className="w-5 h-5" style={{ color: "var(--accent-primary)" }} />
+        <div className="flex items-start justify-between mb-4">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-11 h-11 rounded-[12px] bg-[rgba(10,132,255,0.15)] flex items-center justify-center shrink-0">
+              <Icon className="w-5 h-5 text-[var(--accent-primary)]" strokeWidth={1.75} />
             </div>
-            <div>
-              <h3
-                className="text-sm font-semibold"
-                style={{ color: "var(--text-primary)" }}
-              >
+            <div className="min-w-0">
+              <h3 className="text-[15px] font-semibold text-[var(--text-primary)] truncate">
                 {connector.name}
               </h3>
-              <p className="text-xs" style={{ color: "var(--text-muted)" }}>
-                {connector.auth_method.toUpperCase()} | {connector.base_url}
+              <p className="text-[12px] text-[var(--text-muted)] truncate">
+                {connector.auth_method.toUpperCase()} &middot; {connector.base_url}
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 shrink-0">
             <span
-              className="text-xs px-2 py-0.5 rounded-full font-medium"
+              className="text-[11px] font-semibold uppercase tracking-wide px-2 py-1 rounded-full"
               style={{
-                backgroundColor:
-                  connector.status === "connected"
-                    ? "rgba(34,197,94,0.1)"
-                    : "rgba(239,68,68,0.1)",
-                color:
-                  connector.status === "connected"
-                    ? "var(--accent-success)"
-                    : "var(--accent-danger)",
+                backgroundColor: connector.status === "connected" ? "rgba(48,209,88,0.18)" : "rgba(255,69,58,0.18)",
+                color: connector.status === "connected" ? "var(--accent-success)" : "var(--accent-danger)",
               }}
             >
               {connector.status}
             </span>
             {connector.health && connector.health !== "healthy" && (
-              <span
-                className="text-xs px-2 py-0.5 rounded-full font-medium"
-                style={{
-                  backgroundColor: "rgba(245,158,11,0.1)",
-                  color: "var(--accent-warning)",
-                }}
-              >
+              <span className="text-[11px] font-semibold uppercase tracking-wide px-2 py-1 rounded-full bg-[rgba(255,159,10,0.18)] text-[var(--accent-warning)]">
                 {connector.health}
               </span>
             )}
           </div>
         </div>
 
-        {/* Permission Tier */}
-        <div className="flex items-center gap-4 mb-3">
+        <div className="flex items-center gap-6 mb-4">
           <div>
-            <span className="text-xs" style={{ color: "var(--text-muted)" }}>
-              Permission Tier
+            <span className="text-[11px] text-[var(--text-muted)] uppercase tracking-wide font-medium">
+              Permission
             </span>
-            <p
-              className="text-sm font-medium capitalize"
-              style={{ color: "var(--text-primary)" }}
-            >
+            <p className="text-[14px] font-medium capitalize text-[var(--text-primary)]">
               {connector.permission_tier}
             </p>
           </div>
           <div>
-            <span className="text-xs" style={{ color: "var(--text-muted)" }}>
+            <span className="text-[11px] text-[var(--text-muted)] uppercase tracking-wide font-medium">
               Last Used
             </span>
-            <p
-              className="text-sm font-medium"
-              style={{ color: "var(--text-primary)" }}
-            >
+            <p className="text-[14px] font-medium text-[var(--text-primary)]">
               {connector.last_used || "Never"}
             </p>
           </div>
         </div>
 
-        {/* Scopes */}
         <div className="flex flex-wrap gap-1.5">
           {connector.scopes.map((s) => (
             <ScopeTag key={s.name} scope={s} />
@@ -212,29 +175,22 @@ function ConnectorCard({ connector }: { connector: Connector }) {
         </div>
       </div>
 
-      {/* Actions */}
       <div
-        className="flex items-center justify-between px-5 py-3 border-t"
-        style={{
-          borderColor: "var(--border-primary)",
-          backgroundColor: "var(--bg-primary)",
-        }}
+        className="flex items-center justify-between px-5 py-3 border-t border-[var(--border-subtle)] bg-[var(--bg-tertiary)]"
       >
         <button
-          className="flex items-center gap-1.5 text-xs font-medium"
-          style={{ color: "var(--accent-primary)" }}
+          type="button"
+          className="flex items-center gap-1.5 text-[13px] font-medium text-[var(--accent-primary)] hover:underline"
         >
-          <RefreshCw className="w-3.5 h-3.5" /> Test Connection
+          <RefreshCw className="w-3.5 h-3.5" strokeWidth={2} /> Test Connection
         </button>
         <button
+          type="button"
           onClick={() => setExpanded(!expanded)}
-          className="flex items-center gap-1 text-xs font-medium"
-          style={{ color: "var(--text-secondary)" }}
+          className="flex items-center gap-1 text-[13px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
         >
-          Configure{" "}
-          <ChevronDown
-            className={clsx("w-3.5 h-3.5 transition-transform", expanded && "rotate-180")}
-          />
+          Configure
+          <ChevronDown className={clsx("w-3.5 h-3.5 transition-transform", expanded && "rotate-180")} />
         </button>
       </div>
     </div>
@@ -243,46 +199,40 @@ function ConnectorCard({ connector }: { connector: Connector }) {
 
 export default function Connectors() {
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1
-            className="text-2xl font-bold"
-            style={{ color: "var(--text-primary)" }}
-          >
+    <div className="space-y-8 min-w-0">
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <header>
+          <h1 className="text-[28px] font-semibold tracking-tight text-[var(--text-primary)] md:text-[32px]">
             Connectors
           </h1>
-          <p
-            className="text-sm mt-1"
-            style={{ color: "var(--text-secondary)" }}
-          >
-            Manage third-party integrations and their security policies
+          <p className="text-[15px] text-[var(--text-secondary)] mt-1 max-w-lg leading-relaxed">
+            Manage third-party integrations and their security policies.
           </p>
-        </div>
+        </header>
         <button
-          className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white"
-          style={{ backgroundColor: "var(--accent-primary)" }}
+          type="button"
+          className="flex items-center gap-2 px-5 py-2.5 rounded-[12px] text-[14px] font-semibold text-white bg-[var(--accent-primary)] hover:brightness-110 transition-all shrink-0"
         >
-          <Plus className="w-4 h-4" /> Add Connector
+          <Plus className="w-4 h-4" strokeWidth={2.5} /> Add Connector
         </button>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
         {mockConnectors.map((c) => (
           <ConnectorCard key={c.id} connector={c} />
         ))}
 
-        {/* Add New Card */}
         <button
-          className="rounded-xl border-2 border-dashed p-8 flex flex-col items-center justify-center gap-2 transition-colors hover:opacity-80"
-          style={{
-            borderColor: "var(--border-primary)",
-            color: "var(--text-muted)",
-          }}
+          type="button"
+          className="rounded-[var(--radius-xl)] border-2 border-dashed border-[var(--border-primary)] p-10 flex flex-col items-center justify-center gap-2 transition-colors hover:border-[var(--accent-primary)] hover:bg-[rgba(10,132,255,0.04)] group"
         >
-          <Plus className="w-8 h-8" />
-          <span className="text-sm font-medium">Add New Connector</span>
-          <span className="text-xs">GitHub, Slack, Notion, Spotify...</span>
+          <Plus className="w-9 h-9 text-[var(--text-muted)] group-hover:text-[var(--accent-primary)] transition-colors" strokeWidth={1.5} />
+          <span className="text-[14px] font-medium text-[var(--text-muted)] group-hover:text-[var(--text-primary)] transition-colors">
+            Add New Connector
+          </span>
+          <span className="text-[12px] text-[var(--text-muted)]">
+            GitHub, Slack, Notion, Spotify...
+          </span>
         </button>
       </div>
     </div>

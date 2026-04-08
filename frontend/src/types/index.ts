@@ -1,10 +1,12 @@
 export interface User {
   id: string;
   email: string;
-  name: string;
+  name: string | null;
+  is_active: boolean;
+  llm_provider: string;
+  llm_model: string;
+  onboarding_completed: boolean;
   created_at: string;
-  default_permission_tier: PermissionTier;
-  rate_limit: number;
 }
 
 export type PermissionTier = "open" | "supervised" | "restricted" | "locked";
@@ -55,7 +57,6 @@ export interface Conversation {
   title: string;
   created_at: string;
   updated_at: string;
-  message_count: number;
 }
 
 export interface Message {
@@ -65,7 +66,8 @@ export interface Message {
   content: string;
   tool_calls?: ToolCall[];
   pending_approvals?: PendingApproval[];
-  timestamp: string;
+  created_at?: string;
+  timestamp?: string;
 }
 
 export interface ToolCall {
@@ -90,6 +92,11 @@ export interface AgentResponse {
   message: Message;
   tool_calls: ToolCall[];
   pending_approvals: PendingApproval[];
+}
+
+export interface ChatResponse {
+  user_message: Message;
+  assistant_message: Message;
 }
 
 export interface ScanResult {
@@ -162,4 +169,12 @@ export interface AuthResponse {
   access_token: string;
   token_type: string;
   user: User;
+}
+
+export interface UpdateSettingsData {
+  name?: string;
+  llm_provider?: string;
+  llm_model?: string;
+  llm_api_key?: string;
+  onboarding_completed?: boolean;
 }
