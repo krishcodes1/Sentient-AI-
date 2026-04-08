@@ -51,12 +51,25 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         "Pragma": "no-cache",
     }
 
+    # Swagger / ReDoc paths that need relaxed CSP
+    _DOCS_PATHS = {"/docs", "/docs/", "/redoc", "/redoc/", "/openapi.json"}
+
     async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
         response = await call_next(request)
         for header, value in self.SECURITY_HEADERS.items():
             response.headers[header] = value
+        # Swagger UI and ReDoc require inline scripts/styles + CDN resources
+        if request.url.path in self._DOCS_PATHS:
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; "
+                "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+                "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+                "img-src 'self' data: https://fastapi.tiangolo.com; "
+                "font-src 'self' https://cdn.jsdelivr.net; "
+                "frame-ancestors 'none'"
+            )
         return response
 
 

@@ -67,6 +67,16 @@ app.include_router(connectors.router, prefix="/api")
 app.include_router(audit.router, prefix="/api")
 
 
+@app.get("/")
+async def root() -> dict[str, str]:
+    return {
+        "name": "SentientAI",
+        "version": "0.1.0",
+        "docs": "/docs",
+        "health": "/api/health",
+    }
+
+
 @app.get("/api/health")
 async def health_check() -> dict[str, str]:
     return {"status": "healthy", "version": "0.1.0"}

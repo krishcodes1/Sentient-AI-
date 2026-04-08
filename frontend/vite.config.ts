@@ -16,6 +16,11 @@ export default defineConfig({
       "/api": {
         target: process.env.VITE_API_TARGET || "http://localhost:8000",
         changeOrigin: true,
+        configure: (proxy) => {
+          proxy.on("error", (err) => {
+            console.log("proxy error", err.message);
+          });
+        },
       },
     },
   },
