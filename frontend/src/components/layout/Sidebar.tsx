@@ -1,28 +1,42 @@
+import { useState, useEffect } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard,
   MessageSquare,
-  Plug,
+  Radio,
   Shield,
   Settings,
   LogOut,
   Brain,
 } from "lucide-react";
 import clsx from "clsx";
+import { getStoredUser } from "@/services/api";
 
 const navItems = [
   { to: "/", icon: LayoutDashboard, label: "Dashboard" },
   { to: "/chat", icon: MessageSquare, label: "Chat" },
-  { to: "/connectors", icon: Plug, label: "Connectors" },
+  { to: "/channels", icon: Radio, label: "Channels" },
   { to: "/audit", icon: Shield, label: "Audit Logs" },
   { to: "/settings", icon: Settings, label: "Settings" },
 ];
 
 export default function Sidebar() {
   const navigate = useNavigate();
+  const [user, setUser] = useState(getStoredUser());
+
+  useEffect(() => {
+    const onStorage = () => setUser(getStoredUser());
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
+  const initials = user?.name
+    ? user.name.split(" ").map((w) => w[0]).join("").slice(0, 2).toUpperCase()
+    : user?.email?.[0]?.toUpperCase() || "U";
 
   const handleLogout = () => {
     localStorage.removeItem("auth_token");
+    localStorage.removeItem("user");
     navigate("/login");
   };
 
@@ -82,18 +96,26 @@ export default function Sidebar() {
         ))}
       </nav>
 
+      {/* OpenClaw badge */}
+      <div className="px-4 py-2">
+        <div className="flex items-center gap-2 text-[11px] text-[var(--text-muted)]">
+          <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent-success)] shrink-0" />
+          Powered by OpenClaw
+        </div>
+      </div>
+
       {/* User section */}
       <div className="px-3 py-4 border-t border-[var(--border-subtle)]">
         <div className="flex items-center gap-3 rounded-[12px] px-2 py-2 bg-[rgba(255,255,255,0.04)] border border-[var(--border-subtle)]">
           <div className="w-9 h-9 rounded-full flex items-center justify-center text-[13px] font-semibold bg-[rgba(10,132,255,0.22)] text-[var(--accent-primary)] shrink-0">
-            U
+            {initials}
           </div>
           <div className="flex-1 min-w-0">
             <p className="text-[15px] font-medium truncate text-[var(--text-primary)]">
-              User
+              {user?.name || "User"}
             </p>
             <p className="text-[12px] truncate text-[var(--text-muted)]">
-              user@example.com
+              {user?.email || "user@example.com"}
             </p>
           </div>
           <button

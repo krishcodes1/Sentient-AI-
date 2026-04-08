@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     GROQ_API_KEY: Optional[str] = None
     MISTRAL_API_KEY: Optional[str] = None
 
+    # ── OpenClaw Gateway ──────────────────────────────────────────────────
+    OPENCLAW_GATEWAY_URL: str = "http://localhost:18789"
+    OPENCLAW_CONFIG_DIR: str = "/openclaw-config"
+
     # ── Rate limiting ─────────────────────────────────────────────────────
     RATE_LIMIT_PER_MINUTE: int = 60
 

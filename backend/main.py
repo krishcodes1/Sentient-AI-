@@ -18,7 +18,7 @@ from api.middleware.security import (
     RequestIdMiddleware,
     SecurityHeadersMiddleware,
 )
-from api.routes import agent, audit, auth, connectors
+from api.routes import agent, audit, auth, channels, connectors
 
 logger = structlog.get_logger(__name__)
 
@@ -63,6 +63,7 @@ app.add_middleware(
 # ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(auth.router, prefix="/api")
 app.include_router(agent.router, prefix="/api")
+app.include_router(channels.router, prefix="/api")
 app.include_router(connectors.router, prefix="/api")
 app.include_router(audit.router, prefix="/api")
 

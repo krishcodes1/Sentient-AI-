@@ -178,3 +178,52 @@ export interface UpdateSettingsData {
   llm_api_key?: string;
   onboarding_completed?: boolean;
 }
+
+// ── OpenClaw Channels ────────────────────────────────────────────────────
+
+export type ChannelType =
+  | "telegram"
+  | "discord"
+  | "slack"
+  | "whatsapp"
+  | "signal"
+  | "webchat";
+
+export interface ChannelConfigInput {
+  bot_token?: string;
+  app_token?: string;
+  dm_policy?: string;
+  group_policy?: string;
+  allow_from?: string[];
+  webhook_url?: string;
+}
+
+export interface ChannelResponse {
+  id: string;
+  channel_type: ChannelType;
+  display_name: string;
+  is_enabled: boolean;
+  config_meta: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateChannelData {
+  channel_type: ChannelType;
+  display_name: string;
+  config: ChannelConfigInput;
+  is_enabled?: boolean;
+}
+
+export interface UpdateChannelData {
+  display_name?: string;
+  config?: ChannelConfigInput;
+  is_enabled?: boolean;
+}
+
+export interface OpenClawStatus {
+  gateway_online: boolean;
+  gateway_url: string;
+  channels_configured: number;
+  details: Record<string, unknown>;
+}

@@ -136,6 +136,8 @@ async def update_settings(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    llm_changed = False
+
     if body.name is not None:
         current_user.name = body.name
 
@@ -143,12 +145,15 @@ async def update_settings(
         if body.llm_provider not in VALID_PROVIDERS:
             raise HTTPException(status_code=422, detail=f"Invalid provider. Must be one of: {', '.join(sorted(VALID_PROVIDERS))}")
         current_user.llm_provider = body.llm_provider
+        llm_changed = True
 
     if body.llm_model is not None:
         current_user.llm_model = body.llm_model
+        llm_changed = True
 
     if body.llm_api_key is not None:
         current_user.llm_api_key_enc = encrypt_credentials(body.llm_api_key)
+        llm_changed = True
 
     if body.onboarding_completed is not None:
         current_user.onboarding_completed = body.onboarding_completed
@@ -156,4 +161,12 @@ async def update_settings(
     current_user.updated_at = datetime.now(timezone.utc)
     await db.flush()
     await db.refresh(current_user)
+
+    if llm_changed:
+        try:
+            from services.openclaw.config_manager import sync_openclaw_config_for_user
+            await sync_openclaw_config_for_user(current_user)
+        except Exception:
+            pass
+
     return current_user

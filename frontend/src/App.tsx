@@ -2,7 +2,7 @@ import { Routes, Route, Navigate } from "react-router-dom";
 import Layout from "./components/layout/Layout";
 import Dashboard from "./pages/Dashboard";
 import Chat from "./pages/Chat";
-import Connectors from "./pages/Connectors";
+import Channels from "./pages/Channels";
 import AuditLogs from "./pages/AuditLogs";
 import Settings from "./pages/Settings";
 import Login from "./pages/Login";
@@ -54,7 +54,7 @@ export default function App() {
       >
         <Route path="/" element={<Dashboard />} />
         <Route path="/chat" element={<Chat />} />
-        <Route path="/connectors" element={<Connectors />} />
+        <Route path="/channels" element={<Channels />} />
         <Route path="/audit" element={<AuditLogs />} />
         <Route path="/settings" element={<Settings />} />
       </Route>

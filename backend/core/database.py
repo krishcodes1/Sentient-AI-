@@ -49,8 +49,6 @@ async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-        # Add columns that may be missing on an existing users table.
-        # Each is wrapped in a try/except so it's safe to re-run.
         migrations = [
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS name VARCHAR(256)",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS llm_provider VARCHAR(32) NOT NULL DEFAULT 'openai'",
@@ -58,6 +56,17 @@ async def init_db() -> None:
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS llm_api_key_enc BYTEA",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_completed BOOLEAN NOT NULL DEFAULT false",
         ]
+
+        # Create the channel_type enum if it doesn't exist
+        try:
+            await conn.execute(text(
+                "DO $$ BEGIN "
+                "CREATE TYPE channel_type AS ENUM ('telegram','discord','slack','whatsapp','signal','webchat'); "
+                "EXCEPTION WHEN duplicate_object THEN null; END $$;"
+            ))
+        except Exception:
+            pass
+
         for stmt in migrations:
             try:
                 await conn.execute(text(stmt))

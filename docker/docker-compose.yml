@@ -29,6 +29,44 @@ services:
       timeout: 5s
       retries: 5
 
+  # ── OpenClaw Gateway (core agent engine) ────────────────────────
+  openclaw:
+    image: node:24-bookworm-slim
+    restart: unless-stopped
+    working_dir: /home/node
+    environment:
+      HOME: /home/node
+      TERM: xterm-256color
+      NODE_ENV: production
+      npm_config_prefix: /home/node/.npm-global
+      PATH: /home/node/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    volumes:
+      - openclaw_config:/home/node/.openclaw
+      - openclaw_npm:/home/node/.npm-global
+    ports:
+      - "18789:18789"
+      - "18790:18790"
+    init: true
+    command:
+      - sh
+      - -c
+      - |
+        mkdir -p /home/node/.npm-global /home/node/.openclaw/workspace
+        npm install -g openclaw@latest 2>&1 || true
+        exec /home/node/.npm-global/bin/openclaw gateway --bind lan --port 18789 --allow-unconfigured
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:18789/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
+
   # ── Backend (FastAPI) ───────────────────────────────────────────
   backend:
     build:
@@ -42,6 +80,8 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://sentientai:sentientai@db:5432/sentientai
       REDIS_URL: redis://redis:6379/0
+      OPENCLAW_GATEWAY_URL: http://openclaw:18789
+      OPENCLAW_CONFIG_DIR: /openclaw-config
     depends_on:
       db:
         condition: service_healthy
@@ -49,6 +89,7 @@ services:
         condition: service_healthy
     volumes:
       - ../backend:/app
+      - openclaw_config:/openclaw-config
 
   # ── Frontend (Vite dev / Nginx prod) ────────────────────────────
   frontend:
@@ -68,3 +109,5 @@ services:
 
 volumes:
   pgdata:
+  openclaw_config:
+  openclaw_npm:

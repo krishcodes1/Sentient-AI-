@@ -1,10 +1,15 @@
+import { useState, useEffect } from "react";
 import {
-  Plug,
+  Radio,
   Activity,
   ShieldAlert,
   Clock,
   CheckCircle2,
   XCircle,
+  Wifi,
+  WifiOff,
+  MessageSquare,
+  Loader2,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import {
@@ -18,15 +23,10 @@ import {
 import type {
   ActivityEntry,
   SecurityTimelineEntry,
-  ConnectorHealthEntry,
+  ChannelResponse,
+  OpenClawStatus,
 } from "@/types";
-
-const stats = {
-  active_connectors: 3,
-  total_actions_24h: 142,
-  blocked_threats: 7,
-  pending_approvals: 2,
-};
+import { getChannels, getOpenClawStatus } from "@/services/api";
 
 const mockTimeline: SecurityTimelineEntry[] = [
   { date: "Mar 31", approved: 45, blocked: 2 },
@@ -39,18 +39,12 @@ const mockTimeline: SecurityTimelineEntry[] = [
 ];
 
 const mockActivity: ActivityEntry[] = [
-  { id: "1", connector: "Canvas LMS", action: "get_assignments", status: "approved", timestamp: "2 min ago" },
-  { id: "2", connector: "Gmail", action: "search_emails", status: "approved", timestamp: "5 min ago" },
-  { id: "3", connector: "Robinhood", action: "execute_trade", status: "blocked", timestamp: "12 min ago" },
-  { id: "4", connector: "Google Calendar", action: "create_event", status: "pending", timestamp: "18 min ago" },
-  { id: "5", connector: "Canvas LMS", action: "get_grades", status: "approved", timestamp: "25 min ago" },
-  { id: "6", connector: "Gmail", action: "send_email", status: "pending", timestamp: "31 min ago" },
-];
-
-const mockHealth: ConnectorHealthEntry[] = [
-  { id: "1", name: "Canvas LMS", type: "canvas", status: "healthy", uptime: 99.9, last_check: "1 min ago" },
-  { id: "2", name: "Google Workspace", type: "google", status: "healthy", uptime: 99.7, last_check: "2 min ago" },
-  { id: "3", name: "Robinhood Crypto", type: "robinhood", status: "degraded", uptime: 95.2, last_check: "3 min ago" },
+  { id: "1", connector: "Telegram", action: "message_received", status: "approved", timestamp: "2 min ago" },
+  { id: "2", connector: "Discord", action: "dm_response", status: "approved", timestamp: "5 min ago" },
+  { id: "3", connector: "WebChat", action: "chat_session", status: "approved", timestamp: "12 min ago" },
+  { id: "4", connector: "Slack", action: "channel_reply", status: "pending", timestamp: "18 min ago" },
+  { id: "5", connector: "WhatsApp", action: "voice_message", status: "approved", timestamp: "25 min ago" },
+  { id: "6", connector: "Telegram", action: "group_message", status: "blocked", timestamp: "31 min ago" },
 ];
 
 const statusColors = {
@@ -111,7 +105,7 @@ function StatCard({
   accent,
 }: {
   label: string;
-  value: number;
+  value: number | string;
   icon: LucideIcon;
   accent: string;
 }) {
@@ -143,7 +137,33 @@ function StatCard({
   );
 }
 
+const channelColors: Record<string, string> = {
+  telegram: "#0088cc",
+  discord: "#5865F2",
+  slack: "#4A154B",
+  whatsapp: "#25D366",
+  signal: "#3A76F0",
+  webchat: "#0a84ff",
+};
+
 export default function Dashboard() {
+  const [clawStatus, setClawStatus] = useState<OpenClawStatus | null>(null);
+  const [channels, setChannels] = useState<ChannelResponse[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    Promise.all([
+      getOpenClawStatus().catch(() => null),
+      getChannels().catch(() => []),
+    ]).then(([status, chs]) => {
+      setClawStatus(status);
+      setChannels(chs);
+      setLoading(false);
+    });
+  }, []);
+
+  const activeChannels = channels.filter((c) => c.is_enabled);
+
   return (
     <div className="space-y-10 min-w-0">
       <header className="space-y-1">
@@ -151,35 +171,35 @@ export default function Dashboard() {
           Dashboard
         </h1>
         <p className="text-[15px] text-[var(--text-secondary)] max-w-xl leading-relaxed">
-          Real-time monitoring of agent activity and security events.
+          Real-time monitoring of your AI agent, channels, and security events.
         </p>
       </header>
 
       <section aria-label="Summary">
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 md:gap-5">
           <StatCard
-            label="Active Connectors"
-            value={stats.active_connectors}
-            icon={Plug}
-            accent="var(--accent-success)"
+            label="Gateway Status"
+            value={loading ? "..." : clawStatus?.gateway_online ? "Online" : "Offline"}
+            icon={clawStatus?.gateway_online ? Wifi : WifiOff}
+            accent={clawStatus?.gateway_online ? "var(--accent-success)" : "var(--accent-danger)"}
           />
           <StatCard
-            label="Actions (24h)"
-            value={stats.total_actions_24h}
-            icon={Activity}
+            label="Active Channels"
+            value={loading ? "..." : activeChannels.length}
+            icon={Radio}
             accent="var(--accent-primary)"
           />
           <StatCard
-            label="Blocked Threats"
-            value={stats.blocked_threats}
-            icon={ShieldAlert}
-            accent="var(--accent-danger)"
+            label="Messages Today"
+            value={142}
+            icon={Activity}
+            accent="var(--accent-success)"
           />
           <StatCard
-            label="Pending Approvals"
-            value={stats.pending_approvals}
-            icon={Clock}
-            accent="var(--accent-warning)"
+            label="Blocked Threats"
+            value={7}
+            icon={ShieldAlert}
+            accent="var(--accent-danger)"
           />
         </div>
       </section>
@@ -201,7 +221,7 @@ export default function Dashboard() {
                 Security events
               </h2>
               <p className="text-[13px] text-[var(--text-muted)] mt-0.5">
-                Last 7 days — approved vs blocked
+                Last 7 days &mdash; approved vs blocked
               </p>
             </div>
             <div className="flex items-center gap-4 text-[12px] text-[var(--text-muted)] shrink-0">
@@ -215,7 +235,6 @@ export default function Dashboard() {
               </span>
             </div>
           </div>
-          {/* Fixed height + min-h-0 prevents Recharts from overflowing and overlapping siblings */}
           <div className="h-[280px] w-full min-h-0 min-w-0 flex-1">
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={mockTimeline} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
@@ -283,7 +302,7 @@ export default function Dashboard() {
               Recent activity
             </h2>
             <p className="text-[13px] text-[var(--text-muted)] mt-0.5">
-              Latest connector actions
+              Latest channel events
             </p>
           </div>
           <ul className="flex flex-col gap-2 flex-1 min-h-0 overflow-y-auto pr-1 -mr-1">
@@ -322,7 +341,7 @@ export default function Dashboard() {
       </section>
 
       <section
-        aria-label="Connector health"
+        aria-label="Channel status"
         className="rounded-[var(--radius-xl)] border border-[var(--border-subtle)] p-6 md:p-7"
         style={{
           backgroundColor: "var(--bg-secondary)",
@@ -331,49 +350,73 @@ export default function Dashboard() {
       >
         <div className="mb-5">
           <h2 className="text-[20px] font-semibold tracking-tight text-[var(--text-primary)]">
-            Connector health
+            Channel status
           </h2>
           <p className="text-[13px] text-[var(--text-muted)] mt-0.5">
-            Uptime and last successful check
+            Connected messaging platforms via OpenClaw
           </p>
         </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
-          {mockHealth.map((c) => (
-            <div
-              key={c.id}
-              className="rounded-[14px] border border-[var(--border-subtle)] p-4 min-w-0 bg-[var(--bg-tertiary)]"
-            >
-              <div className="flex items-start justify-between gap-3 mb-3">
-                <span className="text-[15px] font-medium text-[var(--text-primary)] leading-snug break-words">
-                  {c.name}
-                </span>
-                <span
-                  className="text-[11px] font-semibold uppercase tracking-wide px-2 py-1 rounded-full shrink-0"
-                  style={{
-                    backgroundColor:
-                      c.status === "healthy"
+
+        {loading ? (
+          <div className="flex items-center justify-center py-8">
+            <Loader2 className="w-5 h-5 animate-spin text-[var(--text-muted)]" />
+          </div>
+        ) : channels.length === 0 ? (
+          <div className="text-center py-8">
+            <MessageSquare className="w-8 h-8 text-[var(--text-muted)] mx-auto mb-2" strokeWidth={1.5} />
+            <p className="text-[14px] text-[var(--text-muted)]">
+              No channels connected yet. Go to <span className="text-[var(--accent-primary)]">Channels</span> to get started.
+            </p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+            {channels.map((ch) => (
+              <div
+                key={ch.id}
+                className="rounded-[14px] border border-[var(--border-subtle)] p-4 min-w-0 bg-[var(--bg-tertiary)]"
+              >
+                <div className="flex items-start justify-between gap-3 mb-3">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div
+                      className="w-8 h-8 rounded-[8px] flex items-center justify-center shrink-0"
+                      style={{
+                        backgroundColor: `${channelColors[ch.channel_type] || "#0a84ff"}22`,
+                      }}
+                    >
+                      <Radio
+                        className="w-4 h-4"
+                        style={{ color: channelColors[ch.channel_type] || "#0a84ff" }}
+                        strokeWidth={1.75}
+                      />
+                    </div>
+                    <span className="text-[15px] font-medium text-[var(--text-primary)] leading-snug break-words">
+                      {ch.display_name}
+                    </span>
+                  </div>
+                  <span
+                    className="text-[11px] font-semibold uppercase tracking-wide px-2 py-1 rounded-full shrink-0"
+                    style={{
+                      backgroundColor: ch.is_enabled
                         ? "rgba(48,209,88,0.18)"
-                        : c.status === "degraded"
-                          ? "rgba(255,159,10,0.18)"
-                          : "rgba(255,69,58,0.18)",
-                    color:
-                      c.status === "healthy"
+                        : "rgba(255,69,58,0.18)",
+                      color: ch.is_enabled
                         ? "var(--accent-success)"
-                        : c.status === "degraded"
-                          ? "var(--accent-warning)"
-                          : "var(--accent-danger)",
-                  }}
-                >
-                  {c.status}
-                </span>
+                        : "var(--accent-danger)",
+                    }}
+                  >
+                    {ch.is_enabled ? "Active" : "Disabled"}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-[13px] text-[var(--text-muted)]">
+                  <span className="capitalize">{ch.channel_type}</span>
+                  <span className="tabular-nums">
+                    {new Date(ch.updated_at).toLocaleDateString()}
+                  </span>
+                </div>
               </div>
-              <div className="flex flex-wrap items-center justify-between gap-2 text-[13px] text-[var(--text-muted)]">
-                <span>Uptime {c.uptime}%</span>
-                <span className="tabular-nums">{c.last_check}</span>
-              </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
       </section>
     </div>
   );

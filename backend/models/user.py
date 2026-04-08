@@ -87,6 +87,10 @@ class User(Base):
         back_populates="user",
         lazy="selectin",
     )
+    channels: Mapped[list["Channel"]] = relationship(  # noqa: F821
+        back_populates="user",
+        lazy="selectin",
+    )
 
     def __repr__(self) -> str:
         return f"<User {self.email}>"

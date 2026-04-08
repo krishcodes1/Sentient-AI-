@@ -12,6 +12,10 @@ import type {
   DashboardStats,
   ScanResult,
   UpdateSettingsData,
+  ChannelResponse,
+  CreateChannelData,
+  UpdateChannelData,
+  OpenClawStatus,
 } from "@/types";
 
 const API_BASE = "/api";
@@ -201,6 +205,40 @@ export async function getAuditLogs(params?: {
 
 export async function getAuditStats(): Promise<AuditStats> {
   return request<AuditStats>("/audit/stats");
+}
+
+// ── Channels (OpenClaw) ──────────────────────────────────────────────────
+
+export async function getChannels(): Promise<ChannelResponse[]> {
+  return request<ChannelResponse[]>("/channels");
+}
+
+export async function createChannel(data: CreateChannelData): Promise<ChannelResponse> {
+  return request<ChannelResponse>("/channels", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateChannel(id: string, data: UpdateChannelData): Promise<ChannelResponse> {
+  return request<ChannelResponse>(`/channels/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteChannel(id: string): Promise<void> {
+  return request<void>(`/channels/${id}`, { method: "DELETE" });
+}
+
+export async function getOpenClawStatus(): Promise<OpenClawStatus> {
+  return request<OpenClawStatus>("/channels/openclaw/status");
+}
+
+export async function restartOpenClawSync(): Promise<{ status: string }> {
+  return request<{ status: string }>("/channels/openclaw/restart", {
+    method: "POST",
+  });
 }
 
 // ── Dashboard ────────────────────────────────────────────────────────────
