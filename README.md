@@ -1,17 +1,45 @@
 # SentientAI
 
-**Secure-by-Design Agentic AI Platform**
+**Secure AI Agent Platform — Powered by OpenClaw**
 
-A self-hosted AI assistant platform with security, user control, and auditability built into every layer. SentientAI integrates with Canvas LMS, Google Workspace, Robinhood Crypto, and more — with fine-grained permission scoping, multi-layer prompt injection defense, and tamper-evident audit logging.
+A self-hosted AI assistant platform that wraps [OpenClaw](https://github.com/openclaw/openclaw) as its core agent engine, adding a security dashboard, multi-provider LLM support, and a management UI. Connect your AI to Telegram, Discord, Slack, WhatsApp, Signal, and more — with any AI provider you choose.
 
-**Author:** Krish Shroff — CSCI-456 Senior Project, New York Institute of Technology
+**Author:** Krish Shroff
+
+---
+
+## How It Works
+
+```
+Telegram / Discord / Slack / WhatsApp / Signal / WebChat
+                    │
+                    ▼
+       ┌────────────────────────┐
+       │   OpenClaw Gateway     │  ← Core agent engine (port 18789)
+       │   (wrapped by us)      │
+       └────────────┬───────────┘
+                    │
+       ┌────────────┴───────────┐
+       │   SentientAI Backend   │  ← Management API (port 8000)
+       │   (FastAPI + Postgres) │     Manages config, users, channels
+       └────────────┬───────────┘
+                    │
+       ┌────────────┴───────────┐
+       │   SentientAI Frontend  │  ← Dashboard UI (port 3000)
+       │   (React + Tailwind)   │     Onboarding, chat, settings
+       └────────────────────────┘
+```
+
+SentientAI writes your LLM and channel settings to `openclaw.json`, which the OpenClaw gateway reads to connect to messaging platforms and route conversations through your chosen AI.
 
 ---
 
 ## Supported AI Providers
 
-| Provider | Models | API Key Required |
-|----------|--------|-----------------|
+Users choose their provider during onboarding. **Not locked to any single vendor.**
+
+| Provider | Models | API Key |
+|----------|--------|---------|
 | **Anthropic** | Claude Opus 4, Sonnet 4, Haiku 4.5 | `ANTHROPIC_API_KEY` |
 | **OpenAI** | GPT-4o, GPT-4o-mini, o1 | `OPENAI_API_KEY` |
 | **Google Gemini** | Gemini 2.5 Pro, 2.5 Flash, 2.0 Flash | `GEMINI_API_KEY` |
@@ -19,202 +47,176 @@ A self-hosted AI assistant platform with security, user control, and auditabilit
 | **Deepseek** | Deepseek Chat, Deepseek Reasoner | `DEEPSEEK_API_KEY` |
 | **Groq** | LLaMA 3.3 70B, Mixtral 8x7B | `GROQ_API_KEY` |
 | **Mistral** | Mistral Large, Mistral Small | `MISTRAL_API_KEY` |
-| **Ollama** | LLaMA 3.2, Mistral, CodeLLaMA (local) | None (free, runs locally) |
+| **Ollama** | LLaMA 3.2, Mistral, CodeLLaMA (local, free) | None |
+
+## Supported Channels (via OpenClaw)
+
+| Channel | Setup |
+|---------|-------|
+| **Telegram** | Bot token from @BotFather |
+| **Discord** | Bot token from Developer Portal |
+| **Slack** | Bot token + App token |
+| **WhatsApp** | QR code scan (via Baileys) |
+| **Signal** | Linked device |
+| **WebChat** | Built-in at gateway URL |
 
 ---
 
-## Quick Start
+## Quick Start — Docker (Recommended)
 
 ### Prerequisites
 
-- **Python 3.11+** — [python.org/downloads](https://www.python.org/downloads/)
-- **Node.js 20+** — [nodejs.org](https://nodejs.org/)
-- **PostgreSQL 15+** — [postgresql.org](https://www.postgresql.org/download/)
-- **Redis 7+** — [redis.io](https://redis.io/download)
-- **Docker** (optional, for easiest setup) — [docker.com](https://www.docker.com/get-started/)
+- **Docker Desktop** — [docker.com/get-started](https://www.docker.com/get-started/)
+- **One AI API key** (or use Ollama for free local AI)
+
+### Step-by-step
+
+```bash
+# 1. Clone the repo
+git clone https://github.com/krishcodes1/Sentient-AI-.git
+cd Sentient-AI-
+
+# 2. Set up your environment file
+cp backend/.env.example backend/.env
+```
+
+Edit `backend/.env` and set your AI provider API key (see [Environment Variables](#environment-variables)).
+
+```bash
+# 3. Start all services
+cd docker
+docker compose up --build
+```
+
+This starts 5 services:
+- **PostgreSQL** (port 5432) — database
+- **Redis** (port 6379) — caching
+- **OpenClaw Gateway** (port 18789) — agent engine + channel connections
+- **SentientAI Backend** (port 8000) — API server
+- **SentientAI Frontend** (port 3000) — dashboard UI
+
+```bash
+# 4. Open the dashboard
+open http://localhost:3000
+```
+
+### First-time setup
+
+1. **Create an account** at http://localhost:3000 (Register with email + password)
+2. **Onboarding wizard** walks you through:
+   - Enter your display name
+   - Choose your AI provider (OpenAI, Anthropic, Gemini, etc.)
+   - Enter your API key
+   - Pick a model
+3. **Go to Channels** to connect Telegram, Discord, Slack, etc.
+4. **Start chatting** via the Chat page or through your connected channels
+
+### Useful URLs
+
+| Service | URL |
+|---------|-----|
+| Dashboard | http://localhost:3000 |
+| API Docs (Swagger) | http://localhost:8000/docs |
+| OpenClaw Gateway UI | http://localhost:18789/openclaw |
+| OpenClaw Health | http://localhost:18789/healthz |
+
+### Stopping
+
+```bash
+# Stop all services
+docker compose down
+
+# Stop and remove all data (fresh start)
+docker compose down -v
+```
 
 ---
 
-## Setup Instructions
+## Manual Setup (Without Docker)
 
-### Option 1: Docker (Easiest — Works on Windows, Mac, Linux)
+### Prerequisites
 
-1. **Install Docker Desktop**
-   - **Mac:** Download from [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/)
-   - **Windows:** Download from [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/). Enable WSL 2 when prompted.
-   - **Linux:** `sudo apt install docker.io docker-compose-v2` (Ubuntu/Debian) or `sudo dnf install docker docker-compose` (Fedora)
+- Python 3.11+
+- Node.js 20+
+- PostgreSQL 15+
+- Redis 7+
 
-2. **Clone the repo**
-   ```bash
-   git clone https://github.com/krishcodes1/Sentient-AI-.git
-   cd Sentient-AI-
-   ```
+### Mac
 
-3. **Configure environment**
-   ```bash
-   cp backend/.env.example backend/.env
-   ```
-   Edit `backend/.env` and add your API key (see [Environment Variables](#environment-variables) below).
+```bash
+# Install deps
+brew install postgresql@16 redis node python@3.12
+brew services start postgresql@16
+brew services start redis
 
-4. **Start everything**
-   ```bash
-   cd docker
-   docker compose up
-   ```
+# Create database
+createdb sentientai
+psql sentientai -c "CREATE USER sentientai WITH PASSWORD 'sentientai'; GRANT ALL PRIVILEGES ON DATABASE sentientai TO sentientai;"
 
-5. **Open the app**
-   - Frontend: http://localhost:3000
-   - Backend API: http://localhost:8000
-   - API Docs: http://localhost:8000/docs
+# Backend
+cd backend
+cp .env.example .env   # Edit and add your API key
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+python main.py
 
----
+# Frontend (new terminal)
+cd frontend
+npm install
+npm run dev
+```
 
-### Option 2: Manual Setup (Mac)
+### Windows
 
-1. **Install dependencies**
-   ```bash
-   # Install Homebrew if you don't have it
-   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```cmd
+:: Install Python 3.12+, Node.js 20+, PostgreSQL 16, Redis (via Memurai or WSL)
+:: Create database via pgAdmin or psql
 
-   # Install PostgreSQL and Redis
-   brew install postgresql@16 redis node python@3.12
+cd backend
+copy .env.example .env
+:: Edit .env with notepad
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
+python main.py
 
-   # Start services
-   brew services start postgresql@16
-   brew services start redis
-   ```
+:: New terminal
+cd frontend
+npm install
+npm run dev
+```
 
-2. **Create the database**
-   ```bash
-   createdb sentientai
-   psql sentientai -c "CREATE USER sentientai WITH PASSWORD 'sentientai'; GRANT ALL PRIVILEGES ON DATABASE sentientai TO sentientai;"
-   ```
+### Linux (Ubuntu/Debian)
 
-3. **Set up the backend**
-   ```bash
-   cd backend
-   cp .env.example .env
-   # Edit .env and add your API key
+```bash
+sudo apt update
+sudo apt install python3.12 python3.12-venv python3-pip nodejs npm postgresql redis-server
+sudo systemctl start postgresql redis-server
+sudo -u postgres psql -c "CREATE DATABASE sentientai;"
+sudo -u postgres psql -c "CREATE USER sentientai WITH PASSWORD 'sentientai';"
+sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE sentientai TO sentientai;"
 
-   python3 -m venv venv
-   source venv/bin/activate
-   pip install -r requirements.txt
-   python main.py
-   ```
+cd backend
+cp .env.example .env   # Edit and add your API key
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+python main.py
 
-4. **Set up the frontend** (in a new terminal)
-   ```bash
-   cd frontend
-   npm install
-   npm run dev
-   ```
+# New terminal
+cd frontend && npm install && npm run dev
+```
 
-5. **Open the app:** http://localhost:3000
+### Free Local AI (No API Key)
 
----
+```bash
+# Install Ollama: https://ollama.com/download
+ollama pull llama3.2
 
-### Option 3: Manual Setup (Windows)
-
-1. **Install dependencies**
-   - Download and install **Python 3.12+** from [python.org](https://www.python.org/downloads/) — check "Add Python to PATH"
-   - Download and install **Node.js 20+** from [nodejs.org](https://nodejs.org/)
-   - Download and install **PostgreSQL 16** from [postgresql.org/download/windows](https://www.postgresql.org/download/windows/) — remember the password you set
-   - Download and install **Redis** via [Memurai](https://www.memurai.com/get-memurai) (Redis-compatible for Windows) or use WSL
-
-2. **Create the database** (open pgAdmin or Command Prompt)
-   ```cmd
-   psql -U postgres
-   CREATE DATABASE sentientai;
-   CREATE USER sentientai WITH PASSWORD 'sentientai';
-   GRANT ALL PRIVILEGES ON DATABASE sentientai TO sentientai;
-   \q
-   ```
-
-3. **Set up the backend** (Command Prompt or PowerShell)
-   ```cmd
-   cd backend
-   copy .env.example .env
-   :: Edit .env with notepad and add your API key
-   notepad .env
-
-   python -m venv venv
-   venv\Scripts\activate
-   pip install -r requirements.txt
-   python main.py
-   ```
-
-4. **Set up the frontend** (new terminal)
-   ```cmd
-   cd frontend
-   npm install
-   npm run dev
-   ```
-
-5. **Open the app:** http://localhost:3000
-
----
-
-### Option 4: Manual Setup (Linux / Ubuntu)
-
-1. **Install dependencies**
-   ```bash
-   sudo apt update
-   sudo apt install python3.12 python3.12-venv python3-pip nodejs npm postgresql redis-server
-
-   # Start services
-   sudo systemctl start postgresql redis-server
-   sudo systemctl enable postgresql redis-server
-   ```
-
-2. **Create the database**
-   ```bash
-   sudo -u postgres psql -c "CREATE DATABASE sentientai;"
-   sudo -u postgres psql -c "CREATE USER sentientai WITH PASSWORD 'sentientai';"
-   sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE sentientai TO sentientai;"
-   ```
-
-3. **Set up the backend**
-   ```bash
-   cd backend
-   cp .env.example .env
-   nano .env  # Add your API key
-
-   python3 -m venv venv
-   source venv/bin/activate
-   pip install -r requirements.txt
-   python main.py
-   ```
-
-4. **Set up the frontend** (new terminal)
-   ```bash
-   cd frontend
-   npm install
-   npm run dev
-   ```
-
-5. **Open the app:** http://localhost:3000
-
----
-
-### Option 5: Free Local AI (No API Key Needed)
-
-If you don't want to pay for API keys, use **Ollama** for free local AI:
-
-1. **Install Ollama:** [ollama.com/download](https://ollama.com/download) (Mac, Windows, Linux)
-
-2. **Pull a model**
-   ```bash
-   ollama pull llama3.2
-   ```
-
-3. **Set in your `.env`**
-   ```env
-   LLM_PROVIDER=ollama
-   LLM_MODEL=llama3.2
-   OLLAMA_BASE_URL=http://localhost:11434
-   ```
-
-4. Run the backend and frontend as described above. No API key needed.
+# Set in backend/.env:
+# LLM_PROVIDER=ollama
+# LLM_MODEL=llama3.2
+```
 
 ---
 
@@ -222,42 +224,22 @@ If you don't want to pay for API keys, use **Ollama** for free local AI:
 
 Copy `backend/.env.example` to `backend/.env` and configure:
 
-| Variable | Required? | Description |
-|----------|-----------|-------------|
-| `SECRET_KEY` | Yes | Signs your login tokens. Generate with the command below. |
-| `ENCRYPTION_KEY` | Yes | Encrypts stored API keys in the database. Generate with the command below. |
-| `DATABASE_URL` | Yes | PostgreSQL connection string. Default works with Docker. |
-| `REDIS_URL` | Yes | Redis connection string. Default works with Docker. |
-| `LLM_PROVIDER` | Yes | Which AI to use: `anthropic`, `openai`, `gemini`, `grok`, `deepseek`, `groq`, `mistral`, or `ollama` |
-| `LLM_MODEL` | Yes | Model name (e.g., `claude-sonnet-4-20250514`, `gpt-4o`, `gemini-2.5-flash`) |
-| `ANTHROPIC_API_KEY` | If using Anthropic | Get from [console.anthropic.com](https://console.anthropic.com) |
-| `OPENAI_API_KEY` | If using OpenAI | Get from [platform.openai.com](https://platform.openai.com/api-keys) |
-| `GEMINI_API_KEY` | If using Gemini | Get from [aistudio.google.com](https://aistudio.google.com/apikey) |
-| `GROK_API_KEY` | If using Grok | Get from [console.x.ai](https://console.x.ai) |
-| `DEEPSEEK_API_KEY` | If using Deepseek | Get from [platform.deepseek.com](https://platform.deepseek.com) |
-| `GROQ_API_KEY` | If using Groq | Get from [console.groq.com](https://console.groq.com) |
-| `MISTRAL_API_KEY` | If using Mistral | Get from [console.mistral.ai](https://console.mistral.ai) |
-| `OLLAMA_BASE_URL` | If using Ollama | Default: `http://localhost:11434` |
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `SECRET_KEY` | Yes | JWT signing key |
+| `ENCRYPTION_KEY` | Yes | AES-256-GCM key for encrypting stored API keys |
+| `DATABASE_URL` | Yes | PostgreSQL connection string (default works with Docker) |
+| `REDIS_URL` | Yes | Redis connection string (default works with Docker) |
+| `LLM_PROVIDER` | Yes | Default provider: `anthropic`, `openai`, `gemini`, `grok`, `deepseek`, `groq`, `mistral`, or `ollama` |
+| `LLM_MODEL` | Yes | Default model name |
+| `OPENCLAW_GATEWAY_URL` | Yes | OpenClaw gateway URL (Docker: `http://openclaw:18789`) |
+| `*_API_KEY` | One | API key for your chosen provider |
 
-**You only need ONE API key** — whichever provider you choose.
-
-### Generating Your Security Keys
-
-Run this single command in your terminal — it prints both keys at once:
+### Generating Security Keys
 
 ```bash
 python3 -c "import secrets, base64, os; print('SECRET_KEY=' + secrets.token_urlsafe(48)); print('ENCRYPTION_KEY=' + base64.urlsafe_b64encode(os.urandom(32)).decode())"
 ```
-
-You'll see output like:
-```
-SECRET_KEY=aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789abcdef...
-ENCRYPTION_KEY=xYz789AbCdEf012GhIjKlMnOpQrStUvWxYz456789A=
-```
-
-Copy those two lines into your `backend/.env` file, replacing the `REPLACE_ME` placeholders.
-
-> **Windows users**: Use `python` instead of `python3` in the command above.
 
 ---
 
@@ -265,45 +247,65 @@ Copy those two lines into your `backend/.env` file, replacing the `REPLACE_ME` p
 
 ```
 sentientai/
-├── backend/                    # Python / FastAPI
-│   ├── core/                   # Config, database, security, network policy
-│   ├── models/                 # SQLAlchemy ORM models
+├── backend/                       # Python / FastAPI
+│   ├── core/                      # Config, database, security
+│   ├── models/                    # User, Channel, Conversation, Message, Audit
 │   ├── services/
-│   │   ├── agent/              # LLM runtime, providers, prompt guard, permissions, context manager
-│   │   ├── connectors/         # Canvas LMS, Google Workspace, Robinhood
-│   │   ├── audit.py            # Tamper-evident audit logging
-│   │   └── auth.py             # JWT authentication
-│   └── api/                    # FastAPI routes + middleware
-├── frontend/                   # React / TypeScript / Vite / Tailwind
+│   │   ├── agent/                 # LLM runtime, 8 providers, context manager
+│   │   └── openclaw/              # Config manager — writes openclaw.json
+│   └── api/routes/                # Auth, Agent, Channels, Connectors, Audit
+├── frontend/                      # React / TypeScript / Vite / Tailwind
 │   └── src/
-│       ├── pages/              # Dashboard, Chat, Connectors, Audit Logs, Settings
-│       ├── components/         # Layout, Sidebar
-│       └── services/           # API client
-└── docker/                     # Docker Compose, Dockerfiles
+│       ├── pages/                 # Dashboard, Chat, Channels, Audit, Settings
+│       ├── components/            # Layout, Sidebar
+│       └── services/              # API client
+└── docker/                        # Docker Compose + Dockerfiles
+    └── docker-compose.yml         # PostgreSQL, Redis, OpenClaw, Backend, Frontend
 ```
+
+### How the OpenClaw Wrapper Works
+
+1. User signs up and completes onboarding (picks AI provider + API key)
+2. Backend writes `openclaw.json` to a shared Docker volume with the user's model config
+3. User connects channels (Telegram bot token, Discord token, etc.) via the Channels page
+4. Backend encrypts tokens in the database, regenerates `openclaw.json` with channel configs
+5. OpenClaw gateway reads the config and connects to all configured messaging platforms
+6. Messages from any channel are routed through the user's chosen AI provider
 
 ### Security Features
 
-- **Multi-layer prompt injection defense** — regex pattern matching, heuristic analysis, output validation
-- **Tiered permission engine** — auto-approve, user-confirm, admin-only, hard-blocked
-- **Financial transaction hard block** — trades/transfers permanently blocked regardless of config
-- **AES-256-GCM credential encryption** — API keys encrypted at rest
-- **SHA-256 chain-linked audit logs** — tamper-evident, immutable action history
-- **SSRF protection** — DNS resolution + IP validation against all private ranges (NemoClaw-inspired)
-- **Deny-by-default network policies** — connectors can only reach allowlisted hosts/paths
-- **OAuth 2.0 + PKCE** — secure auth for Canvas and Google integrations
-- **Security headers** — X-Frame-Options, CSP, HSTS, etc.
-- **Rate limiting** — per-IP request throttling
+- AES-256-GCM credential encryption for stored API keys and channel tokens
+- JWT authentication with bcrypt password hashing
+- Tiered permission engine (auto-approve, user-confirm, admin-only, hard-blocked)
+- Prompt injection defense (input scanning, output validation)
+- SHA-256 tamper-evident audit logs
+- Security headers (X-Frame-Options, CSP, HSTS)
+- Rate limiting per IP
+- SSRF protection with DNS validation
 
-### Smart Context Management
+---
 
-SentientAI solves the token explosion problem seen in platforms like OpenClaw:
+## API Endpoints
 
-- **Sliding window** — keeps last 12 messages in full, summarizes older ones
-- **Tool result compression** — truncates large API responses to 2000 chars
-- **Dynamic tool selection** — sends only relevant tool schemas instead of all 50+
-- **Semantic caching** — caches identical queries to avoid duplicate API calls
-- **Accurate token estimation** — uses ~3.5 chars/token (not the broken 4.0 estimate that causes 47% undercounting)
+### Auth
+- `POST /api/auth/register` — Create account
+- `POST /api/auth/login` — Login
+- `GET /api/auth/me` — Current user
+- `PATCH /api/auth/settings` — Update profile/LLM config
+
+### Chat
+- `GET /api/agent/conversations` — List conversations
+- `POST /api/agent/conversations` — Create conversation
+- `GET /api/agent/conversations/:id` — Get conversation with messages
+- `POST /api/agent/conversations/:id/messages` — Send message (calls LLM)
+
+### Channels (OpenClaw)
+- `GET /api/channels` — List configured channels
+- `POST /api/channels` — Connect a new channel
+- `PATCH /api/channels/:id` — Update channel config
+- `DELETE /api/channels/:id` — Remove channel
+- `GET /api/channels/openclaw/status` — Gateway health check
+- `POST /api/channels/openclaw/restart` — Force config re-sync
 
 ---
 

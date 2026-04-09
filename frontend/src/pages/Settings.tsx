@@ -199,7 +199,7 @@ export default function Settings() {
             type="button"
             className="flex items-center gap-2 px-4 py-2.5 rounded-[12px] border border-[var(--accent-danger)] text-[14px] font-medium text-[var(--accent-danger)] hover:bg-[rgba(255,69,58,0.08)] transition-colors"
           >
-            <Trash2 className="w-4 h-4" /> Reset All Connectors
+            <Trash2 className="w-4 h-4" /> Reset All Channels
           </button>
           <button
             type="button"

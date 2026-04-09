@@ -6,11 +6,6 @@ import type {
   Conversation,
   Message,
   ChatResponse,
-  Connector,
-  AuditLog,
-  AuditStats,
-  DashboardStats,
-  ScanResult,
   UpdateSettingsData,
   ChannelResponse,
   CreateChannelData,
@@ -147,66 +142,6 @@ export async function sendMessage(
   );
 }
 
-export async function approveAction(
-  approvalId: string,
-  approved: boolean
-): Promise<void> {
-  return request<void>(`/approvals/${approvalId}`, {
-    method: "POST",
-    body: JSON.stringify({ approved }),
-  });
-}
-
-// ── Connectors ───────────────────────────────────────────────────────────
-
-export async function getConnectors(): Promise<Connector[]> {
-  return request<Connector[]>("/connectors");
-}
-
-export async function addConnector(
-  connector: Partial<Connector>
-): Promise<Connector> {
-  return request<Connector>("/connectors", {
-    method: "POST",
-    body: JSON.stringify(connector),
-  });
-}
-
-export async function deleteConnector(id: string): Promise<void> {
-  return request<void>(`/connectors/${id}`, { method: "DELETE" });
-}
-
-export async function testConnector(id: string): Promise<ScanResult> {
-  return request<ScanResult>(`/connectors/${id}/test`, { method: "POST" });
-}
-
-// ── Audit Logs ───────────────────────────────────────────────────────────
-
-export async function getAuditLogs(params?: {
-  connector_id?: string;
-  status?: string;
-  start_date?: string;
-  end_date?: string;
-  search?: string;
-  limit?: number;
-  offset?: number;
-}): Promise<AuditLog[]> {
-  const searchParams = new URLSearchParams();
-  if (params) {
-    Object.entries(params).forEach(([key, value]) => {
-      if (value !== undefined && value !== "") {
-        searchParams.set(key, String(value));
-      }
-    });
-  }
-  const query = searchParams.toString();
-  return request<AuditLog[]>(`/audit${query ? `?${query}` : ""}`);
-}
-
-export async function getAuditStats(): Promise<AuditStats> {
-  return request<AuditStats>("/audit/stats");
-}
-
 // ── Channels (OpenClaw) ──────────────────────────────────────────────────
 
 export async function getChannels(): Promise<ChannelResponse[]> {
@@ -241,8 +176,3 @@ export async function restartOpenClawSync(): Promise<{ status: string }> {
   });
 }
 
-// ── Dashboard ────────────────────────────────────────────────────────────
-
-export async function getDashboardStats(): Promise<DashboardStats> {
-  return request<DashboardStats>("/dashboard/stats");
-}
