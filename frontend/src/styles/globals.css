@@ -2,27 +2,37 @@
 
 /* Apple Human Interface–inspired dark palette (macOS / iOS) */
 :root {
-  --bg-primary: #000000;
-  --bg-secondary: #1c1c1e;
-  --bg-tertiary: #2c2c2e;
+  --bg-primary: #0a0a0b;
+  --bg-secondary: #141416;
+  --bg-tertiary: #1c1c1f;
   --bg-sidebar: #161618;
   --bg-hover: #3a3a3c;
-  --bg-input: #1c1c1e;
+  --bg-input: #161618;
   --border-primary: rgba(84, 84, 88, 0.48);
-  --border-subtle: rgba(84, 84, 88, 0.32);
-  --border-focus: #0a84ff;
-  --accent-primary: #0a84ff;
-  --accent-primary-hover: #409cff;
-  --accent-success: #30d158;
-  --accent-warning: #ff9f0a;
-  --accent-danger: #ff453a;
-  --text-primary: #ffffff;
-  --text-secondary: rgba(235, 235, 245, 0.68);
-  --text-muted: rgba(235, 235, 245, 0.45);
-  --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.06) inset,
-    0 8px 24px rgba(0, 0, 0, 0.35);
-  --radius-lg: 14px;
-  --radius-xl: 18px;
+  --border-subtle: rgba(84, 84, 88, 0.28);
+  --border-focus: #22d3ee;
+  --accent-primary: #22d3ee;
+  --accent-primary-hover: #67e8f9;
+  --accent-success: #34d399;
+  --accent-warning: #fbbf24;
+  --accent-danger: #f87171;
+  --text-primary: #f4f4f5;
+  --text-secondary: rgba(244, 244, 245, 0.72);
+  --text-muted: rgba(161, 161, 170, 0.9);
+  --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.05) inset,
+    0 1px 2px rgba(0, 0, 0, 0.45);
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+
+  /* OpenClaw Control UI–adjacent shell */
+  --claw-sidebar: #0f0f10;
+  --claw-panel: #131316;
+  --claw-surface: #18181c;
+  --claw-surface-active: #1f1f24;
+  --claw-border: rgba(63, 63, 70, 0.65);
+  --claw-accent: #22d3ee;
+  --claw-accent-bright: #5eead4;
+  --claw-glow: rgba(34, 211, 238, 0.12);
 }
 
 * {

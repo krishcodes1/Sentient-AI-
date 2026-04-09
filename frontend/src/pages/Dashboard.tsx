@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { Link } from "react-router-dom";
 import {
   Radio,
   Activity,
@@ -10,6 +11,8 @@ import {
   WifiOff,
   MessageSquare,
   Loader2,
+  ExternalLink,
+  Server,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import {
@@ -26,7 +29,10 @@ import type {
   ChannelResponse,
   OpenClawStatus,
 } from "@/types";
-import { getChannels, getOpenClawStatus } from "@/services/api";
+import { getChannels, getOpenClawStatus, getStoredUser } from "@/services/api";
+
+const GATEWAY_BASE = "http://127.0.0.1:18789";
+const GATEWAY_OPEN = `${GATEWAY_BASE}/`;
 
 const mockTimeline: SecurityTimelineEntry[] = [
   { date: "Mar 31", approved: 45, blocked: 2 },
@@ -47,7 +53,10 @@ const mockActivity: ActivityEntry[] = [
   { id: "6", connector: "Telegram", action: "group_message", status: "blocked", timestamp: "31 min ago" },
 ];
 
-const statusColors = {
+const CHART_OK = "#22d3ee";
+const CHART_BLOCK = "#f87171";
+
+const statusColors: Record<string, string> = {
   approved: "var(--accent-success)",
   blocked: "var(--accent-danger)",
   pending: "var(--accent-warning)",
@@ -59,8 +68,22 @@ const statusIcons = {
   pending: Clock,
 };
 
-const CHART_APPROVED = "#0a84ff";
-const CHART_BLOCKED = "#ff453a";
+function Panel({
+  children,
+  className = "",
+}: {
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <div
+      className={`rounded-[var(--radius-xl)] border border-[var(--claw-border)] bg-[var(--claw-panel)] ${className}`}
+      style={{ boxShadow: "inset 0 1px 0 rgba(255,255,255,0.04)" }}
+    >
+      {children}
+    </div>
+  );
+}
 
 function ChartTooltip({
   active,
@@ -74,23 +97,15 @@ function ChartTooltip({
   if (!active || !payload?.length) return null;
   return (
     <div
-      className="rounded-[10px] border px-3 py-2.5 text-[13px] shadow-lg"
-      style={{
-        backgroundColor: "var(--bg-tertiary)",
-        borderColor: "var(--border-primary)",
-        color: "var(--text-primary)",
-        boxShadow: "var(--shadow-card)",
-      }}
+      className="rounded-md border border-[var(--claw-border)] px-3 py-2 text-[12px] font-mono"
+      style={{ backgroundColor: "var(--claw-surface)", color: "var(--text-primary)" }}
     >
-      <p className="text-[12px] text-[var(--text-muted)] mb-1.5">{label}</p>
-      <div className="space-y-1">
+      <p className="text-[var(--text-muted)] mb-1">{label}</p>
+      <div className="space-y-0.5">
         {payload.map((p) => (
-          <div
-            key={String(p.dataKey ?? p.name)}
-            className="flex items-center justify-between gap-6"
-          >
-            <span style={{ color: "var(--text-secondary)" }}>{p.name}</span>
-            <span className="font-medium tabular-nums">{p.value}</span>
+          <div key={String(p.dataKey ?? p.name)} className="flex justify-between gap-6 tabular-nums">
+            <span className="text-[var(--text-secondary)]">{p.name}</span>
+            <span>{p.value}</span>
           </div>
         ))}
       </div>
@@ -98,7 +113,7 @@ function ChartTooltip({
   );
 }
 
-function StatCard({
+function MetricTile({
   label,
   value,
   icon: Icon,
@@ -110,40 +125,27 @@ function StatCard({
   accent: string;
 }) {
   return (
-    <div
-      className="rounded-[var(--radius-xl)] border border-[var(--border-subtle)] p-5 min-w-0 flex flex-col gap-3"
-      style={{
-        backgroundColor: "var(--bg-secondary)",
-        boxShadow: "var(--shadow-card)",
-      }}
-    >
-      <div className="flex items-start justify-between gap-3">
-        <span className="text-[13px] font-medium leading-snug text-[var(--text-secondary)]">
+    <Panel className="p-4 flex flex-col gap-2 min-w-0">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[11px] font-mono uppercase tracking-wider text-[var(--text-muted)] truncate">
           {label}
         </span>
-        <div
-          className="w-10 h-10 rounded-[12px] flex items-center justify-center shrink-0"
-          style={{
-            backgroundColor: `color-mix(in srgb, ${accent} 20%, transparent)`,
-          }}
-        >
-          <Icon className="w-5 h-5" style={{ color: accent }} strokeWidth={2} />
-        </div>
+        <Icon className="w-4 h-4 shrink-0" style={{ color: accent }} strokeWidth={2} />
       </div>
-      <p className="text-[34px] font-semibold tracking-tight leading-none text-[var(--text-primary)] tabular-nums">
+      <p className="text-[26px] font-semibold tabular-nums tracking-tight text-[var(--text-primary)] leading-none font-mono">
         {value}
       </p>
-    </div>
+    </Panel>
   );
 }
 
 const channelColors: Record<string, string> = {
-  telegram: "#0088cc",
-  discord: "#5865F2",
-  slack: "#4A154B",
-  whatsapp: "#25D366",
-  signal: "#3A76F0",
-  webchat: "#0a84ff",
+  telegram: "#22d3ee",
+  discord: "#a78bfa",
+  slack: "#fbbf24",
+  whatsapp: "#34d399",
+  signal: "#38bdf8",
+  webchat: "#5eead4",
 };
 
 export default function Dashboard() {
@@ -163,261 +165,303 @@ export default function Dashboard() {
   }, []);
 
   const activeChannels = channels.filter((c) => c.is_enabled);
+  const user = getStoredUser();
+  const gatewayOnline = !loading && clawStatus?.gateway_online;
+  const modelLabel = user ? `${user.llm_provider} · ${user.llm_model}` : "—";
 
   return (
-    <div className="space-y-10 min-w-0">
-      <header className="space-y-1">
-        <h1 className="text-[28px] font-semibold tracking-tight text-[var(--text-primary)] md:text-[32px]">
-          Dashboard
-        </h1>
-        <p className="text-[15px] text-[var(--text-secondary)] max-w-xl leading-relaxed">
-          Real-time monitoring of your AI agent, channels, and security events.
-        </p>
+    <div className="space-y-6 min-w-0">
+      {/* Header — Control UI density */}
+      <header className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between min-w-0">
+        <div className="min-w-0 pr-2">
+          <div className="flex items-center gap-2 flex-wrap mb-1">
+            <span className="text-[10px] font-mono uppercase tracking-[0.12em] text-[var(--claw-accent)] px-2 py-0.5 rounded border border-[rgba(34,211,238,0.35)] bg-[var(--claw-glow)]">
+              Control center
+            </span>
+            <span className="text-[10px] font-mono text-[var(--text-muted)]">SentientAI shell</span>
+          </div>
+          <h1 className="text-[22px] sm:text-[26px] font-semibold tracking-tight text-[var(--text-primary)]">
+            Gateway & workspace
+          </h1>
+          <p className="text-[13px] text-[var(--text-muted)] mt-1 max-w-2xl leading-relaxed font-mono">
+            Mirror of the native OpenClaw dashboard: manage channels here, then open the Control UI for
+            sessions, config, and WebChat — same port as upstream OpenClaw.
+          </p>
+        </div>
+        <div className="flex flex-col sm:items-end gap-2 shrink-0">
+          <a
+            href={GATEWAY_OPEN}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-[13px] font-mono font-medium text-[var(--bg-primary)] bg-[var(--claw-accent)] hover:brightness-110 transition-all"
+          >
+            <ExternalLink className="w-4 h-4" strokeWidth={2} />
+            Open OpenClaw UI
+          </a>
+          <span className="text-[10px] font-mono text-[var(--text-muted)] text-right max-w-[240px]">
+            {GATEWAY_OPEN}
+          </span>
+        </div>
       </header>
 
-      <section aria-label="Summary">
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 md:gap-5">
-          <StatCard
-            label="Gateway Status"
-            value={loading ? "..." : clawStatus?.gateway_online ? "Online" : "Offline"}
-            icon={clawStatus?.gateway_online ? Wifi : WifiOff}
-            accent={clawStatus?.gateway_online ? "var(--accent-success)" : "var(--accent-danger)"}
-          />
-          <StatCard
-            label="Active Channels"
-            value={loading ? "..." : activeChannels.length}
-            icon={Radio}
-            accent="var(--accent-primary)"
-          />
-          <StatCard
-            label="Messages Today"
-            value={142}
-            icon={Activity}
-            accent="var(--accent-success)"
-          />
-          <StatCard
-            label="Blocked Threats"
-            value={7}
-            icon={ShieldAlert}
-            accent="var(--accent-danger)"
-          />
+      {/* Gateway runtime strip */}
+      <Panel className="p-4 sm:p-5">
+        <div className="flex flex-col lg:flex-row lg:items-center gap-4 min-w-0">
+          <div className="flex items-center gap-3 min-w-0">
+            <div
+              className="w-10 h-10 rounded-lg flex items-center justify-center shrink-0 border border-[var(--claw-border)]"
+              style={{ background: "var(--claw-surface)" }}
+            >
+              <Server className="w-5 h-5 text-[var(--claw-accent)]" strokeWidth={1.75} />
+            </div>
+            <div className="min-w-0">
+              <p className="text-[11px] font-mono uppercase tracking-wider text-[var(--text-muted)]">
+                Gateway
+              </p>
+              <p className="text-[14px] font-mono text-[var(--text-primary)] truncate tabular-nums">
+                {loading ? "…" : clawStatus?.gateway_url || GATEWAY_BASE}
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 lg:ml-auto">
+            <span
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-mono border"
+              style={{
+                borderColor: gatewayOnline ? "rgba(52,211,153,0.35)" : "rgba(248,113,113,0.35)",
+                background: gatewayOnline ? "rgba(52,211,153,0.1)" : "rgba(248,113,113,0.1)",
+                color: gatewayOnline ? "var(--accent-success)" : "var(--accent-danger)",
+              }}
+            >
+              {gatewayOnline ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
+              {loading ? "checking" : gatewayOnline ? "reachable" : "unreachable"}
+            </span>
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-mono border border-[var(--claw-border)] bg-[var(--claw-surface)] text-[var(--text-secondary)] max-w-full">
+              <Radio className="w-3 h-3 text-[var(--claw-accent)] shrink-0" />
+              <span className="truncate">{activeChannels.length} channels</span>
+            </span>
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-mono border border-[var(--claw-border)] bg-[var(--claw-surface)] text-[var(--text-secondary)] max-w-full truncate">
+              {modelLabel}
+            </span>
+          </div>
         </div>
+      </Panel>
+
+      {/* Metrics */}
+      <section aria-label="Summary" className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+        <MetricTile
+          label="Gateway"
+          value={loading ? "…" : gatewayOnline ? "OK" : "Down"}
+          icon={gatewayOnline ? Wifi : WifiOff}
+          accent={gatewayOnline ? "var(--accent-success)" : "var(--accent-danger)"}
+        />
+        <MetricTile
+          label="Channels"
+          value={loading ? "…" : activeChannels.length}
+          icon={Radio}
+          accent="var(--claw-accent)"
+        />
+        <MetricTile
+          label="Msgs (sample)"
+          value={142}
+          icon={Activity}
+          accent="var(--accent-success)"
+        />
+        <MetricTile
+          label="Blocked"
+          value={7}
+          icon={ShieldAlert}
+          accent="var(--accent-danger)"
+        />
       </section>
 
       <section
         aria-label="Charts and activity"
-        className="grid grid-cols-1 lg:grid-cols-12 gap-6 lg:gap-8 items-stretch min-w-0"
+        className="grid grid-cols-1 xl:grid-cols-12 gap-4 items-stretch min-w-0"
       >
-        <div
-          className="lg:col-span-8 rounded-[var(--radius-xl)] border border-[var(--border-subtle)] p-6 md:p-7 min-w-0 flex flex-col"
-          style={{
-            backgroundColor: "var(--bg-secondary)",
-            boxShadow: "var(--shadow-card)",
-          }}
-        >
-          <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-2 mb-5 shrink-0">
+        <Panel className="xl:col-span-8 p-5 min-w-0 flex flex-col">
+          <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2 mb-4 shrink-0">
             <div>
-              <h2 className="text-[20px] font-semibold tracking-tight text-[var(--text-primary)]">
-                Security events
+              <h2 className="text-[13px] font-mono uppercase tracking-wider text-[var(--text-muted)]">
+                Policy timeline
               </h2>
-              <p className="text-[13px] text-[var(--text-muted)] mt-0.5">
-                Last 7 days &mdash; approved vs blocked
+              <p className="text-[15px] font-medium text-[var(--text-primary)] mt-1">
+                Approved vs blocked (sample)
               </p>
             </div>
-            <div className="flex items-center gap-4 text-[12px] text-[var(--text-muted)] shrink-0">
+            <div className="flex items-center gap-3 text-[11px] font-mono text-[var(--text-muted)] shrink-0">
               <span className="flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full" style={{ background: CHART_APPROVED }} />
-                Approved
+                <span className="w-2 h-2 rounded-full" style={{ background: CHART_OK }} />
+                ok
               </span>
               <span className="flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full" style={{ background: CHART_BLOCKED }} />
-                Blocked
+                <span className="w-2 h-2 rounded-full" style={{ background: CHART_BLOCK }} />
+                block
               </span>
             </div>
           </div>
-          <div className="h-[280px] w-full min-h-0 min-w-0 flex-1">
+          <div className="h-[260px] w-full min-h-0 min-w-0 flex-1 rounded-lg border border-[var(--claw-border)] bg-[var(--claw-surface)] px-2 py-2">
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={mockTimeline} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
                 <defs>
-                  <linearGradient id="approvedGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor={CHART_APPROVED} stopOpacity={0.35} />
-                    <stop offset="95%" stopColor={CHART_APPROVED} stopOpacity={0} />
+                  <linearGradient id="okGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor={CHART_OK} stopOpacity={0.25} />
+                    <stop offset="95%" stopColor={CHART_OK} stopOpacity={0} />
                   </linearGradient>
-                  <linearGradient id="blockedGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor={CHART_BLOCKED} stopOpacity={0.3} />
-                    <stop offset="95%" stopColor={CHART_BLOCKED} stopOpacity={0} />
+                  <linearGradient id="blockGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor={CHART_BLOCK} stopOpacity={0.2} />
+                    <stop offset="95%" stopColor={CHART_BLOCK} stopOpacity={0} />
                   </linearGradient>
                 </defs>
                 <XAxis
                   dataKey="date"
-                  tick={{ fill: "rgba(235,235,245,0.45)", fontSize: 12 }}
+                  tick={{ fill: "rgba(161,161,170,0.9)", fontSize: 11, fontFamily: "ui-monospace" }}
                   tickLine={false}
                   axisLine={false}
                   dy={8}
                 />
                 <YAxis
-                  tick={{ fill: "rgba(235,235,245,0.45)", fontSize: 12 }}
+                  tick={{ fill: "rgba(161,161,170,0.9)", fontSize: 11, fontFamily: "ui-monospace" }}
                   tickLine={false}
                   axisLine={false}
-                  width={36}
+                  width={32}
                 />
                 <Tooltip
                   content={<ChartTooltip />}
-                  cursor={{ stroke: "rgba(255,255,255,0.12)", strokeWidth: 1 }}
+                  cursor={{ stroke: "rgba(255,255,255,0.08)", strokeWidth: 1 }}
                 />
                 <Area
                   type="monotone"
                   dataKey="approved"
                   name="Approved"
-                  stroke={CHART_APPROVED}
-                  fill="url(#approvedGrad)"
-                  strokeWidth={2}
+                  stroke={CHART_OK}
+                  fill="url(#okGrad)"
+                  strokeWidth={1.5}
                   dot={false}
-                  activeDot={{ r: 4, strokeWidth: 0 }}
                 />
                 <Area
                   type="monotone"
                   dataKey="blocked"
                   name="Blocked"
-                  stroke={CHART_BLOCKED}
-                  fill="url(#blockedGrad)"
-                  strokeWidth={2}
+                  stroke={CHART_BLOCK}
+                  fill="url(#blockGrad)"
+                  strokeWidth={1.5}
                   dot={false}
-                  activeDot={{ r: 4, strokeWidth: 0 }}
                 />
               </AreaChart>
             </ResponsiveContainer>
           </div>
-        </div>
+        </Panel>
 
-        <div
-          className="lg:col-span-4 rounded-[var(--radius-xl)] border border-[var(--border-subtle)] p-6 md:p-7 min-w-0 flex flex-col min-h-[320px] lg:min-h-0"
-          style={{
-            backgroundColor: "var(--bg-secondary)",
-            boxShadow: "var(--shadow-card)",
-          }}
-        >
-          <div className="mb-4 shrink-0">
-            <h2 className="text-[20px] font-semibold tracking-tight text-[var(--text-primary)]">
-              Recent activity
-            </h2>
-            <p className="text-[13px] text-[var(--text-muted)] mt-0.5">
-              Latest channel events
-            </p>
-          </div>
-          <ul className="flex flex-col gap-2 flex-1 min-h-0 overflow-y-auto pr-1 -mr-1">
+        <Panel className="xl:col-span-4 p-5 min-w-0 flex flex-col min-h-[300px] xl:min-h-0">
+          <h2 className="text-[13px] font-mono uppercase tracking-wider text-[var(--text-muted)] mb-1">
+            Live feed
+          </h2>
+          <p className="text-[15px] font-medium text-[var(--text-primary)] mb-3">
+            Channel events
+          </p>
+          <ul className="flex flex-col gap-1 flex-1 min-h-0 overflow-y-auto font-mono text-[12px]">
             {mockActivity.map((entry) => {
               const StatusIcon = statusIcons[entry.status];
               return (
                 <li
                   key={entry.id}
-                  className="rounded-[12px] border border-[var(--border-subtle)] bg-[rgba(255,255,255,0.03)] px-3 py-3 min-w-0"
+                  className="rounded-md border border-[var(--claw-border)] bg-[var(--claw-surface)] px-2.5 py-2 min-w-0 flex gap-2 items-start"
                 >
-                  <div className="flex gap-3 min-w-0">
-                    <StatusIcon
-                      className="w-[18px] h-[18px] shrink-0 mt-0.5"
-                      style={{ color: statusColors[entry.status] }}
-                      strokeWidth={2}
-                    />
-                    <div className="flex-1 min-w-0 flex flex-col gap-1.5 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
-                      <div className="min-w-0">
-                        <p className="text-[15px] font-medium text-[var(--text-primary)] break-words">
-                          {entry.action}
-                        </p>
-                        <p className="text-[13px] text-[var(--text-muted)] mt-0.5 break-words">
-                          {entry.connector}
-                        </p>
-                      </div>
-                      <span className="text-[12px] text-[var(--text-muted)] tabular-nums whitespace-nowrap shrink-0 sm:pt-0.5 sm:text-right">
-                        {entry.timestamp}
-                      </span>
-                    </div>
+                  <StatusIcon
+                    className="w-3.5 h-3.5 shrink-0 mt-0.5"
+                    style={{ color: statusColors[entry.status] }}
+                    strokeWidth={2}
+                  />
+                  <div className="flex-1 min-w-0">
+                    <span className="text-[var(--text-primary)]">{entry.action}</span>
+                    <span className="text-[var(--text-muted)]"> · {entry.connector}</span>
                   </div>
+                  <span className="text-[var(--text-muted)] shrink-0 tabular-nums">{entry.timestamp}</span>
                 </li>
               );
             })}
           </ul>
-        </div>
+        </Panel>
       </section>
 
-      <section
-        aria-label="Channel status"
-        className="rounded-[var(--radius-xl)] border border-[var(--border-subtle)] p-6 md:p-7"
-        style={{
-          backgroundColor: "var(--bg-secondary)",
-          boxShadow: "var(--shadow-card)",
-        }}
-      >
-        <div className="mb-5">
-          <h2 className="text-[20px] font-semibold tracking-tight text-[var(--text-primary)]">
-            Channel status
-          </h2>
-          <p className="text-[13px] text-[var(--text-muted)] mt-0.5">
-            Connected messaging platforms via OpenClaw
-          </p>
+      <Panel className="p-5 sm:p-6">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-4">
+          <div>
+            <h2 className="text-[13px] font-mono uppercase tracking-wider text-[var(--text-muted)]">
+              Integrations
+            </h2>
+            <p className="text-[15px] font-medium text-[var(--text-primary)] mt-1">
+              OpenClaw channel bindings
+            </p>
+          </div>
+          <Link
+            to="/channels"
+            className="inline-flex items-center justify-center px-4 py-2 rounded-lg text-[13px] font-mono font-medium border border-[var(--claw-border)] text-[var(--claw-accent-bright)] bg-[var(--claw-glow)] hover:bg-[rgba(34,211,238,0.18)] transition-colors shrink-0"
+          >
+            Configure channels →
+          </Link>
         </div>
 
         {loading ? (
-          <div className="flex items-center justify-center py-8">
-            <Loader2 className="w-5 h-5 animate-spin text-[var(--text-muted)]" />
+          <div className="flex items-center justify-center py-12">
+            <Loader2 className="w-5 h-5 animate-spin text-[var(--claw-accent)]" />
           </div>
         ) : channels.length === 0 ? (
-          <div className="text-center py-8">
-            <MessageSquare className="w-8 h-8 text-[var(--text-muted)] mx-auto mb-2" strokeWidth={1.5} />
-            <p className="text-[14px] text-[var(--text-muted)]">
-              No channels connected yet. Go to <span className="text-[var(--accent-primary)]">Channels</span> to get started.
+          <div className="rounded-lg border border-dashed border-[var(--claw-border)] bg-[var(--claw-surface)] px-6 py-10 text-center">
+            <MessageSquare className="w-8 h-8 text-[var(--text-muted)] mx-auto mb-3" strokeWidth={1.5} />
+            <p className="text-[14px] text-[var(--text-secondary)] font-mono max-w-md mx-auto">
+              No channels yet. Wire Telegram, Discord, Slack, and more — tokens sync into{" "}
+              <code className="text-[var(--claw-accent)]">openclaw.json</code> for the gateway.
             </p>
+            <Link
+              to="/channels"
+              className="inline-flex mt-4 px-4 py-2 rounded-lg text-[13px] font-mono font-medium bg-[var(--claw-accent)] text-[var(--bg-primary)] hover:brightness-110"
+            >
+              Add your first channel
+            </Link>
           </div>
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             {channels.map((ch) => (
               <div
                 key={ch.id}
-                className="rounded-[14px] border border-[var(--border-subtle)] p-4 min-w-0 bg-[var(--bg-tertiary)]"
+                className="rounded-lg border border-[var(--claw-border)] bg-[var(--claw-surface)] p-3 min-w-0"
               >
-                <div className="flex items-start justify-between gap-3 mb-3">
-                  <div className="flex items-center gap-2.5 min-w-0">
+                <div className="flex items-start justify-between gap-2 mb-2">
+                  <div className="flex items-center gap-2 min-w-0">
                     <div
-                      className="w-8 h-8 rounded-[8px] flex items-center justify-center shrink-0"
-                      style={{
-                        backgroundColor: `${channelColors[ch.channel_type] || "#0a84ff"}22`,
-                      }}
+                      className="w-7 h-7 rounded-md flex items-center justify-center shrink-0 border border-[var(--claw-border)]"
+                      style={{ background: `${channelColors[ch.channel_type] || "#22d3ee"}18` }}
                     >
                       <Radio
-                        className="w-4 h-4"
-                        style={{ color: channelColors[ch.channel_type] || "#0a84ff" }}
-                        strokeWidth={1.75}
+                        className="w-3.5 h-3.5"
+                        style={{ color: channelColors[ch.channel_type] || "#22d3ee" }}
+                        strokeWidth={2}
                       />
                     </div>
-                    <span className="text-[15px] font-medium text-[var(--text-primary)] leading-snug break-words">
+                    <span className="text-[13px] font-medium text-[var(--text-primary)] truncate">
                       {ch.display_name}
                     </span>
                   </div>
                   <span
-                    className="text-[11px] font-semibold uppercase tracking-wide px-2 py-1 rounded-full shrink-0"
+                    className="text-[10px] font-mono uppercase px-2 py-0.5 rounded border shrink-0"
                     style={{
-                      backgroundColor: ch.is_enabled
-                        ? "rgba(48,209,88,0.18)"
-                        : "rgba(255,69,58,0.18)",
-                      color: ch.is_enabled
-                        ? "var(--accent-success)"
-                        : "var(--accent-danger)",
+                      borderColor: ch.is_enabled ? "rgba(52,211,153,0.35)" : "rgba(248,113,113,0.35)",
+                      color: ch.is_enabled ? "var(--accent-success)" : "var(--accent-danger)",
                     }}
                   >
-                    {ch.is_enabled ? "Active" : "Disabled"}
+                    {ch.is_enabled ? "on" : "off"}
                   </span>
                 </div>
-                <div className="flex items-center justify-between text-[13px] text-[var(--text-muted)]">
+                <div className="flex items-center justify-between text-[11px] font-mono text-[var(--text-muted)]">
                   <span className="capitalize">{ch.channel_type}</span>
-                  <span className="tabular-nums">
-                    {new Date(ch.updated_at).toLocaleDateString()}
-                  </span>
+                  <span>{new Date(ch.updated_at).toLocaleDateString()}</span>
                 </div>
               </div>
             ))}
           </div>
         )}
-      </section>
+      </Panel>
     </div>
   );
 }
