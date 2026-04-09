@@ -64,7 +64,7 @@ export default function Onboarding() {
         llm_api_key: provider === "ollama" ? "ollama" : apiKey.trim(),
         onboarding_completed: true,
       });
-      navigate("/");
+      navigate("/gateway");
     } catch (err: any) {
       setError(err.message || "Failed to save settings");
     } finally {

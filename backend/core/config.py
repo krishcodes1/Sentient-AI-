@@ -51,7 +51,10 @@ class Settings(BaseSettings):
     MISTRAL_API_KEY: Optional[str] = None
 
     # ── OpenClaw Gateway ──────────────────────────────────────────────────
+    # URL the backend uses (Docker: http://openclaw:18789)
     OPENCLAW_GATEWAY_URL: str = "http://localhost:18789"
+    # URL the user's browser should load for Control UI / iframe (host-published port)
+    OPENCLAW_GATEWAY_BROWSER_URL: str = "http://127.0.0.1:18789"
     OPENCLAW_CONFIG_DIR: str = "/openclaw-config"
 
     # ── Rate limiting ─────────────────────────────────────────────────────

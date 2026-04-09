@@ -81,6 +81,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://sentientai:sentientai@db:5432/sentientai
       REDIS_URL: redis://redis:6379/0
       OPENCLAW_GATEWAY_URL: http://openclaw:18789
+      OPENCLAW_GATEWAY_BROWSER_URL: http://127.0.0.1:18789
       OPENCLAW_CONFIG_DIR: /openclaw-config
     depends_on:
       db:

@@ -176,3 +176,8 @@ export async function restartOpenClawSync(): Promise<{ status: string }> {
   });
 }
 
+/** Browser-facing Control UI base URL (for iframe / new tab), from backend env. */
+export async function getOpenClawEmbedUrl(): Promise<{ url: string }> {
+  return request<{ url: string }>("/openclaw/embed-url");
+}
+

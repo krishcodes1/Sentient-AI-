@@ -28,7 +28,7 @@ export default function Login() {
       if (user && !user.onboarding_completed) {
         navigate("/onboarding");
       } else {
-        navigate("/");
+        navigate("/gateway");
       }
     } catch (err: any) {
       setError(err.message || "Authentication failed");

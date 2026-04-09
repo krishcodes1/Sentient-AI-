@@ -1,6 +1,8 @@
 import { Routes, Route, Navigate } from "react-router-dom";
 import Layout from "./components/layout/Layout";
+import LayoutFull from "./components/layout/LayoutFull";
 import Dashboard from "./pages/Dashboard";
+import Gateway from "./pages/Gateway";
 import Chat from "./pages/Chat";
 import Channels from "./pages/Channels";
 import AuditLogs from "./pages/AuditLogs";
@@ -27,7 +29,7 @@ function OnboardingGuard({ children }: { children: React.ReactNode }) {
 
   const user = getStoredUser();
   if (user && user.onboarding_completed) {
-    return <Navigate to="/" replace />;
+    return <Navigate to="/gateway" replace />;
   }
 
   return <>{children}</>;
@@ -46,13 +48,30 @@ export default function App() {
         }
       />
       <Route
+        path="/"
+        element={
+          <ProtectedRoute>
+            <Navigate to="/gateway" replace />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        element={
+          <ProtectedRoute>
+            <LayoutFull />
+          </ProtectedRoute>
+        }
+      >
+        <Route path="/gateway" element={<Gateway />} />
+      </Route>
+      <Route
         element={
           <ProtectedRoute>
             <Layout />
           </ProtectedRoute>
         }
       >
-        <Route path="/" element={<Dashboard />} />
+        <Route path="/overview" element={<Dashboard />} />
         <Route path="/chat" element={<Chat />} />
         <Route path="/channels" element={<Channels />} />
         <Route path="/audit" element={<AuditLogs />} />

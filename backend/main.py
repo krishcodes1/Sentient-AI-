@@ -18,7 +18,7 @@ from api.middleware.security import (
     RequestIdMiddleware,
     SecurityHeadersMiddleware,
 )
-from api.routes import agent, audit, auth, channels, connectors
+from api.routes import agent, audit, auth, channels, connectors, openclaw_embed
 
 logger = structlog.get_logger(__name__)
 
@@ -66,6 +66,7 @@ app.include_router(agent.router, prefix="/api")
 app.include_router(channels.router, prefix="/api")
 app.include_router(connectors.router, prefix="/api")
 app.include_router(audit.router, prefix="/api")
+app.include_router(openclaw_embed.router, prefix="/api")
 
 
 @app.get("/")

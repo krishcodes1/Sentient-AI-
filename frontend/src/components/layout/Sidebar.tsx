@@ -9,14 +9,24 @@ import {
   LogOut,
   ExternalLink,
   Terminal,
+  AppWindow,
 } from "lucide-react";
 import clsx from "clsx";
-import { getStoredUser } from "@/services/api";
+import { getOpenClawEmbedUrl, getStoredUser } from "@/services/api";
 
-const GATEWAY_UI = "http://localhost:18789/";
+const GATEWAY_FALLBACK =
+  (typeof import.meta.env.VITE_OPENCLAW_GATEWAY_URL === "string"
+    && import.meta.env.VITE_OPENCLAW_GATEWAY_URL) ||
+  "http://127.0.0.1:18789/";
+
+function normalizeGatewayHref(u: string): string {
+  const t = u.trim();
+  return t.endsWith("/") ? t : `${t}/`;
+}
 
 const navItems = [
-  { to: "/", icon: LayoutDashboard, label: "Overview" },
+  { to: "/gateway", icon: AppWindow, label: "OpenClaw UI" },
+  { to: "/overview", icon: LayoutDashboard, label: "Overview" },
   { to: "/chat", icon: MessageSquare, label: "Chat" },
   { to: "/channels", icon: Radio, label: "Channels" },
   { to: "/audit", icon: Shield, label: "Audit" },
@@ -34,6 +44,13 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
 export default function Sidebar() {
   const navigate = useNavigate();
   const [user, setUser] = useState(getStoredUser());
+  const [gatewayHref, setGatewayHref] = useState(normalizeGatewayHref(GATEWAY_FALLBACK));
+
+  useEffect(() => {
+    getOpenClawEmbedUrl()
+      .then((r) => setGatewayHref(normalizeGatewayHref(r.url)))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     const onStorage = () => setUser(getStoredUser());
@@ -85,7 +102,7 @@ export default function Sidebar() {
             <NavLink
               key={item.to}
               to={item.to}
-              end={item.to === "/"}
+              end={item.to === "/gateway" || item.to === "/overview"}
               className={({ isActive }) =>
                 clsx(
                   "group flex items-center gap-2.5 px-2.5 py-2 rounded-md text-[13px] font-medium transition-colors duration-150 border border-transparent",
@@ -124,7 +141,7 @@ export default function Sidebar() {
             <span className="truncate">Control UI</span>
           </div>
           <a
-            href={GATEWAY_UI}
+            href={gatewayHref}
             target="_blank"
             rel="noopener noreferrer"
             className="flex items-center justify-center gap-1.5 w-full py-2 rounded-md text-[12px] font-medium font-mono text-[var(--claw-accent-bright)] bg-[rgba(34,211,238,0.08)] border border-[rgba(34,211,238,0.22)] hover:bg-[rgba(34,211,238,0.14)] transition-colors"
