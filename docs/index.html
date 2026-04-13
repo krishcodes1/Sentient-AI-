@@ -1,0 +1,1363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SentientAI — Senior Project Presentation</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500&display=swap');
+
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --bg: #0a0a0f;
+  --surface: #12121a;
+  --border: rgba(255,255,255,0.06);
+  --text: #e8e8ed;
+  --text-dim: #8888a0;
+  --accent: #6c5ce7;
+  --accent2: #00cec9;
+  --accent3: #fd79a8;
+  --gradient1: linear-gradient(135deg, #6c5ce7, #a29bfe);
+  --gradient2: linear-gradient(135deg, #00cec9, #81ecec);
+  --gradient3: linear-gradient(135deg, #fd79a8, #fab1a0);
+  --gradient4: linear-gradient(135deg, #6c5ce7, #00cec9);
+}
+
+html, body {
+  width: 100%; height: 100%;
+  font-family: 'Inter', -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  overflow: hidden;
+}
+
+/* ─── SLIDE CONTAINER ─── */
+.deck {
+  width: 100%; height: 100vh;
+  position: relative;
+  overflow: hidden;
+}
+
+.slide {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column;
+  justify-content: center; align-items: center;
+  padding: 60px 80px;
+  opacity: 0;
+  transform: translateY(40px) scale(0.97);
+  transition: opacity 0.7s cubic-bezier(.4,0,.2,1), transform 0.7s cubic-bezier(.4,0,.2,1);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.slide.active {
+  opacity: 1; transform: translateY(0) scale(1);
+  pointer-events: auto; z-index: 2;
+}
+
+.slide.exit-up {
+  opacity: 0; transform: translateY(-60px) scale(0.95);
+  z-index: 1;
+}
+
+/* ─── ANIMATED BACKGROUND ─── */
+.bg-mesh {
+  position: fixed; inset: 0; z-index: 0; pointer-events: none;
+  overflow: hidden;
+}
+
+.bg-mesh .orb {
+  position: absolute; border-radius: 50%; filter: blur(120px); opacity: 0.12;
+  animation: orbFloat 20s ease-in-out infinite alternate;
+}
+.bg-mesh .orb:nth-child(1) { width: 600px; height: 600px; background: #6c5ce7; top: -10%; left: -5%; animation-delay: 0s; }
+.bg-mesh .orb:nth-child(2) { width: 500px; height: 500px; background: #00cec9; bottom: -15%; right: -10%; animation-delay: -7s; }
+.bg-mesh .orb:nth-child(3) { width: 400px; height: 400px; background: #fd79a8; top: 50%; left: 50%; animation-delay: -14s; }
+
+@keyframes orbFloat {
+  0% { transform: translate(0, 0) scale(1); }
+  33% { transform: translate(60px, -40px) scale(1.1); }
+  66% { transform: translate(-30px, 50px) scale(0.95); }
+  100% { transform: translate(20px, -20px) scale(1.05); }
+}
+
+/* ─── GRID PATTERN ─── */
+.grid-pattern {
+  position: fixed; inset: 0; z-index: 0; pointer-events: none;
+  background-image:
+    linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px);
+  background-size: 60px 60px;
+  mask-image: radial-gradient(ellipse at center, black 30%, transparent 70%);
+}
+
+/* ─── PARTICLES ─── */
+.particles {
+  position: fixed; inset: 0; z-index: 0; pointer-events: none;
+}
+.particle {
+  position: absolute; width: 2px; height: 2px;
+  background: rgba(108, 92, 231, 0.5); border-radius: 50%;
+  animation: particleDrift 15s linear infinite;
+}
+@keyframes particleDrift {
+  0% { transform: translateY(100vh) translateX(0); opacity: 0; }
+  10% { opacity: 1; }
+  90% { opacity: 1; }
+  100% { transform: translateY(-10vh) translateX(50px); opacity: 0; }
+}
+
+/* ─── STAGGER ANIMATIONS ─── */
+.slide.active .anim { animation: fadeSlideUp 0.6s cubic-bezier(.4,0,.2,1) forwards; opacity: 0; }
+.slide.active .anim.d1 { animation-delay: 0.1s; }
+.slide.active .anim.d2 { animation-delay: 0.25s; }
+.slide.active .anim.d3 { animation-delay: 0.4s; }
+.slide.active .anim.d4 { animation-delay: 0.55s; }
+.slide.active .anim.d5 { animation-delay: 0.7s; }
+.slide.active .anim.d6 { animation-delay: 0.85s; }
+.slide.active .anim.d7 { animation-delay: 1.0s; }
+.slide.active .anim.d8 { animation-delay: 1.15s; }
+
+@keyframes fadeSlideUp {
+  from { opacity: 0; transform: translateY(30px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fadeSlideLeft {
+  from { opacity: 0; transform: translateX(40px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(0.8); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes drawLine {
+  from { width: 0; }
+  to { width: 100%; }
+}
+
+@keyframes pulseGlow {
+  0%, 100% { box-shadow: 0 0 20px rgba(108,92,231,0.3); }
+  50% { box-shadow: 0 0 40px rgba(108,92,231,0.6); }
+}
+
+@keyframes countUp {
+  from { opacity: 0; transform: scale(0.5); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes typewriter {
+  from { width: 0; }
+  to { width: 100%; }
+}
+
+@keyframes blink {
+  50% { border-color: transparent; }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ─── TYPOGRAPHY ─── */
+.mega-title {
+  font-size: clamp(3rem, 6vw, 5.5rem);
+  font-weight: 900;
+  line-height: 1.05;
+  letter-spacing: -0.03em;
+}
+
+.gradient-text {
+  background: var(--gradient4);
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.section-title {
+  font-size: clamp(2rem, 4vw, 3.5rem);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+}
+
+.subtitle {
+  font-size: clamp(1rem, 1.8vw, 1.4rem);
+  color: var(--text-dim);
+  font-weight: 400;
+  line-height: 1.6;
+  max-width: 700px;
+}
+
+.label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.mono {
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* ─── CARDS ─── */
+.card {
+  background: rgba(18,18,26,0.8);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 28px;
+  backdrop-filter: blur(20px);
+  transition: transform 0.3s, box-shadow 0.3s, border-color 0.3s;
+}
+.card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 20px 40px rgba(0,0,0,0.3);
+  border-color: rgba(108,92,231,0.3);
+}
+
+.card-grid {
+  display: grid;
+  gap: 20px;
+  width: 100%;
+  max-width: 1200px;
+}
+.card-grid.cols-2 { grid-template-columns: repeat(2, 1fr); }
+.card-grid.cols-3 { grid-template-columns: repeat(3, 1fr); }
+.card-grid.cols-4 { grid-template-columns: repeat(4, 1fr); }
+
+/* ─── ICON CIRCLES ─── */
+.icon-circle {
+  width: 48px; height: 48px;
+  border-radius: 14px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1.3rem;
+  margin-bottom: 16px;
+  position: relative;
+  overflow: hidden;
+}
+.icon-circle::after {
+  content: '';
+  position: absolute; inset: 0;
+  background: inherit; opacity: 0.15;
+  border-radius: inherit;
+}
+
+/* ─── BADGES ─── */
+.badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 14px;
+  border-radius: 100px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  border: 1px solid;
+}
+.badge.purple { color: #a29bfe; border-color: rgba(162,155,254,0.3); background: rgba(162,155,254,0.08); }
+.badge.teal { color: #81ecec; border-color: rgba(129,236,236,0.3); background: rgba(129,236,236,0.08); }
+.badge.pink { color: #fab1a0; border-color: rgba(250,177,160,0.3); background: rgba(250,177,160,0.08); }
+.badge.green { color: #55efc4; border-color: rgba(85,239,196,0.3); background: rgba(85,239,196,0.08); }
+
+/* ─── PROGRESS BAR ─── */
+.progress-wrap {
+  position: fixed; bottom: 0; left: 0; right: 0;
+  height: 3px; background: rgba(255,255,255,0.05);
+  z-index: 100;
+}
+.progress-bar {
+  height: 100%;
+  background: var(--gradient4);
+  transition: width 0.5s cubic-bezier(.4,0,.2,1);
+  box-shadow: 0 0 12px rgba(108,92,231,0.5);
+}
+
+/* ─── SLIDE COUNTER ─── */
+.slide-counter {
+  position: fixed; bottom: 20px; right: 30px;
+  font-size: 0.8rem; color: var(--text-dim);
+  font-family: 'JetBrains Mono', monospace;
+  z-index: 100;
+}
+
+/* ─── NAV DOTS ─── */
+.nav-dots {
+  position: fixed; right: 20px; top: 50%;
+  transform: translateY(-50%);
+  display: flex; flex-direction: column; gap: 8px;
+  z-index: 100;
+}
+.nav-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.15);
+  cursor: pointer;
+  transition: all 0.3s;
+  border: none; outline: none;
+}
+.nav-dot.active {
+  background: var(--accent);
+  box-shadow: 0 0 10px rgba(108,92,231,0.5);
+  transform: scale(1.3);
+}
+
+/* ─── FLOW DIAGRAM ─── */
+.flow-container {
+  display: flex; align-items: center; gap: 0;
+  width: 100%; max-width: 1100px;
+  justify-content: center;
+}
+.flow-node {
+  background: rgba(18,18,26,0.9);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 18px 24px;
+  text-align: center;
+  min-width: 160px;
+  position: relative;
+}
+.flow-arrow {
+  width: 50px; height: 2px;
+  background: linear-gradient(90deg, var(--accent), var(--accent2));
+  position: relative;
+  flex-shrink: 0;
+}
+.flow-arrow::after {
+  content: '';
+  position: absolute; right: -6px; top: -5px;
+  width: 0; height: 0;
+  border-left: 8px solid var(--accent2);
+  border-top: 6px solid transparent;
+  border-bottom: 6px solid transparent;
+}
+
+/* ─── STAT NUMBER ─── */
+.stat-number {
+  font-size: clamp(2.5rem, 4vw, 4rem);
+  font-weight: 900;
+  line-height: 1;
+}
+
+/* ─── COMPARISON TABLE ─── */
+.comp-table {
+  width: 100%; max-width: 1100px;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 0.85rem;
+}
+.comp-table th, .comp-table td {
+  padding: 12px 16px;
+  text-align: center;
+  border-bottom: 1px solid var(--border);
+}
+.comp-table th {
+  font-weight: 700;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-dim);
+}
+.comp-table th:last-child {
+  color: var(--accent);
+}
+.comp-table td:first-child {
+  text-align: left;
+  font-weight: 600;
+  color: var(--text);
+}
+.comp-table td:last-child {
+  background: rgba(108,92,231,0.06);
+}
+.comp-table tr:last-child td { border-bottom: none; }
+
+.check { color: #55efc4; }
+.cross { color: #ff7675; }
+.partial { color: #fdcb6e; }
+
+/* ─── SHIELD ICON ─── */
+.shield-layers {
+  display: flex; gap: 20px;
+  width: 100%; max-width: 1100px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.shield-layer {
+  flex: 1; min-width: 220px;
+  background: rgba(18,18,26,0.9);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 24px;
+  position: relative;
+  overflow: hidden;
+}
+.shield-layer::before {
+  content: '';
+  position: absolute; top: 0; left: 0; right: 0;
+  height: 3px;
+}
+.shield-layer:nth-child(1)::before { background: var(--gradient1); }
+.shield-layer:nth-child(2)::before { background: var(--gradient2); }
+.shield-layer:nth-child(3)::before { background: var(--gradient3); }
+.shield-layer:nth-child(4)::before { background: linear-gradient(135deg, #fdcb6e, #f39c12); }
+
+.layer-num {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  margin-bottom: 10px;
+}
+
+/* ─── TEAM CARDS ─── */
+.team-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 24px;
+  width: 100%;
+  max-width: 1000px;
+}
+.team-card {
+  text-align: center;
+  padding: 36px 20px;
+  background: rgba(18,18,26,0.8);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  transition: all 0.4s;
+}
+.team-card:hover {
+  transform: translateY(-6px);
+  border-color: rgba(108,92,231,0.4);
+  box-shadow: 0 20px 50px rgba(0,0,0,0.3);
+}
+.team-avatar {
+  width: 72px; height: 72px;
+  border-radius: 50%;
+  margin: 0 auto 16px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1.6rem; font-weight: 800;
+  position: relative;
+}
+.team-avatar::after {
+  content: '';
+  position: absolute; inset: -3px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  background: var(--gradient4) border-box;
+  mask: linear-gradient(#fff 0 0) padding-box, linear-gradient(#fff 0 0);
+  mask-composite: exclude; -webkit-mask-composite: xor;
+}
+
+/* ─── PROVIDER TAGS ─── */
+.provider-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+  width: 100%;
+  max-width: 900px;
+}
+.provider-tag {
+  display: flex; align-items: center; gap: 12px;
+  padding: 16px 20px;
+  background: rgba(18,18,26,0.8);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  font-weight: 600;
+  font-size: 0.9rem;
+  transition: all 0.3s;
+}
+.provider-tag:hover {
+  border-color: rgba(108,92,231,0.4);
+  transform: translateY(-2px);
+}
+.provider-dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* ─── CHANNEL PILLS ─── */
+.channel-row {
+  display: flex; gap: 14px; flex-wrap: wrap;
+  justify-content: center;
+  max-width: 900px;
+}
+.channel-pill {
+  display: flex; align-items: center; gap: 10px;
+  padding: 14px 24px;
+  background: rgba(18,18,26,0.9);
+  border: 1px solid var(--border);
+  border-radius: 100px;
+  font-weight: 600;
+  font-size: 0.95rem;
+  transition: all 0.3s;
+}
+.channel-pill:hover {
+  border-color: rgba(0,206,201,0.4);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.2);
+}
+
+/* ─── TIMELINE ─── */
+.timeline {
+  position: relative;
+  width: 100%;
+  max-width: 800px;
+  padding-left: 40px;
+}
+.timeline::before {
+  content: '';
+  position: absolute;
+  left: 14px; top: 0; bottom: 0;
+  width: 2px;
+  background: linear-gradient(180deg, var(--accent), var(--accent2), var(--accent3));
+}
+.timeline-item {
+  position: relative;
+  padding: 0 0 32px 30px;
+}
+.timeline-item::before {
+  content: '';
+  position: absolute;
+  left: -33px; top: 6px;
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 12px rgba(108,92,231,0.5);
+}
+.timeline-item:nth-child(2)::before { background: var(--accent2); box-shadow: 0 0 12px rgba(0,206,201,0.5); }
+.timeline-item:nth-child(3)::before { background: var(--accent3); box-shadow: 0 0 12px rgba(253,121,168,0.5); }
+.timeline-item:nth-child(4)::before { background: #fdcb6e; box-shadow: 0 0 12px rgba(253,203,110,0.5); }
+
+/* ─── OWASP RISKS ─── */
+.risk-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 12px;
+  width: 100%;
+  max-width: 1100px;
+}
+.risk-item {
+  background: rgba(18,18,26,0.8);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  text-align: center;
+  transition: all 0.3s;
+  position: relative;
+  overflow: hidden;
+}
+.risk-item::after {
+  content: '';
+  position: absolute; inset: 0;
+  background: linear-gradient(135deg, rgba(108,92,231,0.05), transparent);
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+.risk-item:hover::after { opacity: 1; }
+.risk-item:hover { border-color: rgba(108,92,231,0.3); transform: translateY(-2px); }
+.risk-id {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: var(--accent);
+  margin-bottom: 6px;
+}
+.risk-name {
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.3;
+}
+.risk-check {
+  margin-top: 8px;
+  font-size: 0.7rem;
+  color: #55efc4;
+}
+
+/* ─── KEYBOARD HINT ─── */
+.kb-hint {
+  position: fixed; bottom: 20px; left: 30px;
+  display: flex; gap: 8px; align-items: center;
+  font-size: 0.75rem; color: var(--text-dim);
+  z-index: 100;
+}
+.kb-key {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 6px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+}
+
+/* ─── DIVIDER LINE ─── */
+.divider {
+  height: 2px;
+  background: var(--gradient4);
+  border-radius: 2px;
+  margin: 16px 0;
+  opacity: 0.5;
+}
+
+/* ─── ARCHITECTURE DIAGRAM ─── */
+.arch-diagram {
+  display: flex; flex-direction: column; align-items: center; gap: 16px;
+  width: 100%; max-width: 700px;
+}
+.arch-layer {
+  width: 100%;
+  padding: 20px 28px;
+  border-radius: 14px;
+  text-align: center;
+  font-weight: 600;
+  position: relative;
+  border: 1px solid;
+}
+.arch-connector {
+  width: 2px; height: 20px;
+  background: rgba(255,255,255,0.15);
+  position: relative;
+}
+.arch-connector::after {
+  content: '';
+  position: absolute; bottom: -4px; left: -4px;
+  width: 0; height: 0;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-top: 6px solid rgba(255,255,255,0.15);
+}
+
+/* ─── RESPONSIVE ─── */
+@media (max-width: 900px) {
+  .slide { padding: 40px 30px; }
+  .card-grid.cols-3, .card-grid.cols-4 { grid-template-columns: repeat(2, 1fr); }
+  .team-grid { grid-template-columns: repeat(2, 1fr); }
+  .provider-grid { grid-template-columns: repeat(2, 1fr); }
+  .risk-grid { grid-template-columns: repeat(3, 1fr); }
+  .flow-container { flex-wrap: wrap; }
+}
+
+.text-center { text-align: center; }
+.mb-2 { margin-bottom: 8px; }
+.mb-3 { margin-bottom: 12px; }
+.mb-4 { margin-bottom: 16px; }
+.mb-6 { margin-bottom: 24px; }
+.mb-8 { margin-bottom: 32px; }
+.mb-10 { margin-bottom: 40px; }
+.gap-2 { gap: 8px; }
+.flex { display: flex; }
+.flex-col { flex-direction: column; }
+.items-center { align-items: center; }
+.justify-center { justify-content: center; }
+.w-full { width: 100%; }
+
+/* ─── LOGO ANIMATION ─── */
+.logo-ring {
+  width: 120px; height: 120px;
+  border-radius: 50%;
+  border: 2px solid rgba(108,92,231,0.3);
+  display: flex; align-items: center; justify-content: center;
+  position: relative;
+  margin-bottom: 32px;
+}
+.logo-ring::before {
+  content: '';
+  position: absolute; inset: -4px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  border-top-color: var(--accent);
+  animation: spin 3s linear infinite;
+}
+.logo-ring::after {
+  content: '';
+  position: absolute; inset: -10px;
+  border-radius: 50%;
+  border: 1px solid transparent;
+  border-bottom-color: var(--accent2);
+  animation: spin 5s linear infinite reverse;
+}
+.logo-inner {
+  font-size: 2.8rem; font-weight: 900;
+  background: var(--gradient4);
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* Typewriter */
+.typewriter-wrap {
+  display: inline-block;
+  overflow: hidden;
+  white-space: nowrap;
+  border-right: 2px solid var(--accent);
+  animation: typewriter 2s steps(40, end) forwards, blink 0.7s step-end infinite;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.95rem;
+  color: var(--accent2);
+}
+
+/* Glowing border card */
+.glow-card {
+  position: relative;
+  border-radius: 20px;
+  padding: 2px;
+  background: linear-gradient(135deg, var(--accent), var(--accent2), var(--accent3));
+  background-size: 200% 200%;
+  animation: shimmer 3s ease infinite;
+}
+.glow-card-inner {
+  background: var(--surface);
+  border-radius: 18px;
+  padding: 32px;
+}
+</style>
+</head>
+<body>
+
+<!-- Animated Background -->
+<div class="bg-mesh">
+  <div class="orb"></div>
+  <div class="orb"></div>
+  <div class="orb"></div>
+</div>
+<div class="grid-pattern"></div>
+<div class="particles" id="particles"></div>
+
+<!-- Progress -->
+<div class="progress-wrap"><div class="progress-bar" id="progressBar"></div></div>
+<div class="slide-counter" id="slideCounter"></div>
+<div class="nav-dots" id="navDots"></div>
+<div class="kb-hint">
+  <span class="kb-key">&larr;</span>
+  <span class="kb-key">&rarr;</span>
+  <span style="margin-left:4px">Navigate</span>
+</div>
+
+<div class="deck" id="deck">
+
+  <!-- ═══════ SLIDE 1: TITLE ═══════ -->
+  <div class="slide text-center" data-slide="0">
+    <div class="logo-ring anim d1">
+      <span class="logo-inner">S</span>
+    </div>
+    <div class="mega-title anim d2" style="margin-bottom:16px">
+      <span class="gradient-text">SentientAI</span>
+    </div>
+    <div class="anim d3" style="margin-bottom: 24px;">
+      <span class="typewriter-wrap">Secure-by-Design Agentic AI Platform</span>
+    </div>
+    <div class="subtitle anim d4" style="margin-bottom:32px;">
+      A self-hosted AI assistant platform that wraps OpenClaw as its core agent engine,<br>
+      adding enterprise-grade security, multi-provider LLM support, and a management UI.
+    </div>
+    <div class="flex gap-2 anim d5" style="gap:12px; flex-wrap:wrap; justify-content:center;">
+      <span class="badge purple">CSCI-456 Senior Project</span>
+      <span class="badge teal">New York Institute of Technology</span>
+      <span class="badge pink">Spring 2026</span>
+    </div>
+  </div>
+
+  <!-- ═══════ SLIDE 2: THE PROBLEM ═══════ -->
+  <div class="slide" data-slide="1">
+    <div class="text-center" style="max-width:1000px;">
+      <div class="label anim d1 mb-4">The Problem</div>
+      <div class="section-title anim d2 mb-6">Agentic AI is powerful.<br><span class="gradient-text">But dangerously unsecured.</span></div>
+      <div class="subtitle anim d3 mb-10" style="margin:0 auto 48px;">
+        As AI agents gain the ability to execute real-world tasks, the gap between capability and security grows wider every day.
+      </div>
+      <div class="card-grid cols-3 anim d4">
+        <div class="card text-center">
+          <div class="stat-number gradient-text" style="margin-bottom:8px;">40%</div>
+          <div style="font-size:0.85rem;color:var(--text-dim);">of enterprise apps will integrate AI agents by end of 2026</div>
+          <div style="font-size:0.7rem;color:var(--text-dim);margin-top:6px;font-style:italic;">— Gartner</div>
+        </div>
+        <div class="card text-center">
+          <div class="stat-number" style="background:var(--gradient3);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:8px;">71%</div>
+          <div style="font-size:0.85rem;color:var(--text-dim);">of organizations deploying agentic AI are NOT prepared to secure it</div>
+          <div style="font-size:0.7rem;color:var(--text-dim);margin-top:6px;font-style:italic;">— Cisco State of AI Security 2026</div>
+        </div>
+        <div class="card text-center">
+          <div class="stat-number" style="background:var(--gradient2);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:8px;">1 in 8</div>
+          <div style="font-size:0.85rem;color:var(--text-dim);">companies reporting AI breaches attribute them to agentic systems</div>
+          <div style="font-size:0.7rem;color:var(--text-dim);margin-top:6px;font-style:italic;">— HiddenLayer 2026</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════ SLIDE 3: THE TEAM ═══════ -->
+  <div class="slide" data-slide="2">
+    <div class="text-center" style="max-width:1100px;">
+      <div class="label anim d1 mb-4">The Team</div>
+      <div class="section-title anim d2 mb-8">Built by a team of <span class="gradient-text">four engineers.</span></div>
+      <div class="team-grid anim d3">
+        <div class="team-card">
+          <div class="team-avatar" style="background:rgba(108,92,231,0.15);color:#a29bfe;">KS</div>
+          <div style="font-weight:700;font-size:1.05rem;margin-bottom:4px;">Krish Shroff</div>
+          <div style="font-size:0.8rem;color:var(--accent);font-weight:600;margin-bottom:8px;">Team Leader</div>
+          <div style="font-size:0.78rem;color:var(--text-dim);">Architecture, Integration Design, LLM Runtime</div>
+        </div>
+        <div class="team-card">
+          <div class="team-avatar" style="background:rgba(0,206,201,0.15);color:#81ecec;">RH</div>
+          <div style="font-weight:700;font-size:1.05rem;margin-bottom:4px;">Rafi Hossain</div>
+          <div style="font-size:0.8rem;color:var(--accent2);font-weight:600;margin-bottom:8px;">Backend Developer</div>
+          <div style="font-size:0.78rem;color:var(--text-dim);">FastAPI, PostgreSQL, API Endpoints</div>
+        </div>
+        <div class="team-card">
+          <div class="team-avatar" style="background:rgba(253,121,168,0.15);color:#fab1a0;">MH</div>
+          <div style="font-weight:700;font-size:1.05rem;margin-bottom:4px;">Miadul Haque</div>
+          <div style="font-size:0.8rem;color:var(--accent3);font-weight:600;margin-bottom:8px;">Security Engineer</div>
+          <div style="font-size:0.78rem;color:var(--text-dim);">Encryption, Threat Defense, Audit Logging</div>
+        </div>
+        <div class="team-card">
+          <div class="team-avatar" style="background:rgba(253,203,110,0.15);color:#fdcb6e;">ES</div>
+          <div style="font-weight:700;font-size:1.05rem;margin-bottom:4px;">Edrich Silva</div>
+          <div style="font-size:0.8rem;color:#fdcb6e;font-weight:600;margin-bottom:8px;">Frontend Developer</div>
+          <div style="font-size:0.78rem;color:var(--text-dim);">React, TypeScript, Dashboard UI</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════ SLIDE 4: COMPETITIVE LANDSCAPE ═══════ -->
+  <div class="slide" data-slide="3">
+    <div class="text-center" style="max-width:1100px;">
+      <div class="label anim d1 mb-4">Competitive Analysis</div>
+      <div class="section-title anim d2 mb-8">Existing platforms leave <span class="gradient-text">security as an afterthought.</span></div>
+      <div class="anim d3" style="width:100%;overflow-x:auto;">
+        <table class="comp-table">
+          <thead>
+            <tr>
+              <th style="text-align:left;">Feature</th>
+              <th>AutoGPT</th>
+              <th>LangChain</th>
+              <th>Open Interp.</th>
+              <th>CrewAI</th>
+              <th>MS Copilot</th>
+              <th style="color:var(--accent);">SentientAI</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>Permission Scoping</td><td class="cross">&#10007;</td><td class="cross">&#10007;</td><td class="cross">&#10007;</td><td class="partial">Basic</td><td class="partial">Entra ID</td><td class="check">&#10003; Fine-grained</td></tr>
+            <tr><td>Prompt Injection Defense</td><td class="cross">&#10007;</td><td class="cross">&#10007;</td><td class="cross">&#10007;</td><td class="cross">&#10007;</td><td class="partial">Proprietary</td><td class="check">&#10003; Multi-layer</td></tr>
+            <tr><td>Audit Logging</td><td class="cross">&#10007;</td><td class="partial">LangSmith $</td><td class="cross">&#10007;</td><td class="partial">Basic</td><td class="partial">Built-in</td><td class="check">&#10003; Immutable</td></tr>
+            <tr><td>Self-Hosted</td><td class="check">&#10003;</td><td class="check">&#10003;</td><td class="check">&#10003;</td><td class="check">&#10003;</td><td class="cross">&#10007;</td><td class="check">&#10003;</td></tr>
+            <tr><td>Open Source</td><td class="check">&#10003;</td><td class="check">&#10003;</td><td class="check">&#10003;</td><td class="check">&#10003;</td><td class="cross">&#10007;</td><td class="check">&#10003;</td></tr>
+            <tr><td>Connector Security</td><td class="cross">&#10007;</td><td class="cross">Dev's job</td><td class="cross">&#10007;</td><td class="cross">&#10007;</td><td class="partial">Graph API</td><td class="check">&#10003; Per-connector</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════ SLIDE 5: SOLUTION OVERVIEW ═══════ -->
+  <div class="slide" data-slide="4">
+    <div class="text-center" style="max-width:1100px;">
+      <div class="label anim d1 mb-4">Our Solution</div>
+      <div class="section-title anim d2 mb-6">Security meets capability.<br><span class="gradient-text">No compromises.</span></div>
+      <div class="subtitle anim d3 mb-10" style="margin:0 auto 48px;">
+        SentientAI wraps OpenClaw as its core engine, adding security layers at every boundary — from user input to API connector output.
+      </div>
+      <div class="card-grid cols-3 anim d4">
+        <div class="card">
+          <div class="icon-circle" style="background:rgba(108,92,231,0.15);color:#a29bfe;">&#128737;</div>
+          <div style="font-weight:700;margin-bottom:6px;">Secure by Design</div>
+          <div style="font-size:0.82rem;color:var(--text-dim);line-height:1.5;">AES-256-GCM encryption, JWT auth, bcrypt hashing, SHA-256 tamper-evident audit logs.</div>
+        </div>
+        <div class="card">
+          <div class="icon-circle" style="background:rgba(0,206,201,0.15);color:#81ecec;">&#9881;</div>
+          <div style="font-weight:700;margin-bottom:6px;">Multi-Provider LLM</div>
+          <div style="font-size:0.82rem;color:var(--text-dim);line-height:1.5;">8 AI providers supported. Not locked to any vendor. Use cloud or local models freely.</div>
+        </div>
+        <div class="card">
+          <div class="icon-circle" style="background:rgba(253,121,168,0.15);color:#fab1a0;">&#128172;</div>
+          <div style="font-weight:700;margin-bottom:6px;">Omni-Channel</div>
+          <div style="font-size:0.82rem;color:var(--text-dim);line-height:1.5;">Telegram, Discord, Slack, WhatsApp, Signal, WebChat — all through one unified gateway.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════ SLIDE 6: ARCHITECTURE ═══════ -->
+  <div class="slide" data-slide="5">
+    <div class="text-center" style="max-width:900px;">
+      <div class="label anim d1 mb-4">Architecture</div>
+      <div class="section-title anim d2 mb-8">Three-layer <span class="gradient-text">modular architecture.</span></div>
+      <div class="arch-diagram anim d3">
+        <div class="arch-layer" style="border-color:rgba(0,206,201,0.3); background:rgba(0,206,201,0.05);">
+          <div style="font-size:0.7rem;color:var(--accent2);font-weight:600;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:4px;">Messaging Layer</div>
+          <div style="font-size:1.05rem;">Telegram &middot; Discord &middot; Slack &middot; WhatsApp &middot; Signal &middot; WebChat</div>
+        </div>
+        <div class="arch-connector"></div>
+        <div class="arch-layer" style="border-color:rgba(108,92,231,0.3); background:rgba(108,92,231,0.05);">
+          <div style="font-size:0.7rem;color:var(--accent);font-weight:600;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:4px;">OpenClaw Gateway &middot; Port 18789</div>
+          <div style="font-size:1.05rem;">Core Agent Engine — Routes conversations through your chosen AI</div>
+        </div>
+        <div class="arch-connector"></div>
+        <div class="arch-layer" style="border-color:rgba(253,121,168,0.3); background:rgba(253,121,168,0.05);">
+          <div style="font-size:0.7rem;color:var(--accent3);font-weight:600;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:4px;">SentientAI Backend &middot; FastAPI + PostgreSQL &middot; Port 8000</div>
+          <div style="font-size:1.05rem;">Management API — Config, Users, Channels, Security, Audit</div>
+        </div>
+        <div class="arch-connector"></div>
+        <div class="arch-layer" style="border-color:rgba(253,203,110,0.3); background:rgba(253,203,110,0.05);">
+          <div style="font-size:0.7rem;color:#fdcb6e;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:4px;">SentientAI Frontend &middot; React + Tailwind &middot; Port 3000</div>
+          <div style="font-size:1.05rem;">Dashboard UI — Onboarding, Chat, Settings, Monitoring</div>
+        </div>
+      </div>
+      <div class="anim d4" style="margin-top:24px; display:flex; gap:12px; justify-content:center; flex-wrap:wrap;">
+        <span class="badge purple">PostgreSQL</span>
+        <span class="badge teal">Redis</span>
+        <span class="badge pink">Docker Compose</span>
+        <span class="badge green">5 Microservices</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════ SLIDE 7: AI PROVIDERS ═══════ -->
+  <div class="slide" data-slide="6">
+    <div class="text-center" style="max-width:1000px;">
+      <div class="label anim d1 mb-4">LLM Support</div>
+      <div class="section-title anim d2 mb-6"><span class="gradient-text">8 AI Providers.</span> Zero vendor lock-in.</div>
+      <div class="subtitle anim d3 mb-10" style="margin:0 auto 40px;">
+        Users choose their provider during onboarding. Switch freely between cloud and local models.
+      </div>
+      <div class="provider-grid anim d4">
+        <div class="provider-tag"><div class="provider-dot" style="background:#a29bfe;"></div> Anthropic Claude</div>
+        <div class="provider-tag"><div class="provider-dot" style="background:#55efc4;"></div> OpenAI GPT-4o</div>
+        <div class="provider-tag"><div class="provider-dot" style="background:#74b9ff;"></div> Google Gemini</div>
+        <div class="provider-tag"><div class="provider-dot" style="background:#ff7675;"></div> xAI Grok</div>
+        <div class="provider-tag"><div class="provider-dot" style="background:#81ecec;"></div> Deepseek</div>
+        <div class="provider-tag"><div class="provider-dot" style="background:#fdcb6e;"></div> Groq</div>
+        <div class="provider-tag"><div class="provider-dot" style="background:#fab1a0;"></div> Mistral</div>
+        <div class="provider-tag"><div class="provider-dot" style="background:#dfe6e9;"></div> Ollama (Local)</div>
+      </div>
+      <div class="anim d5" style="margin-top:32px;">
+        <div class="glow-card" style="display:inline-block;">
+          <div class="glow-card-inner" style="padding:16px 32px;">
+            <span style="font-size:0.85rem;color:var(--text-dim);">Free local AI via Ollama &mdash; no API key required. </span>
+            <span class="mono" style="font-size:0.82rem;color:var(--accent2);">ollama pull llama3.2</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════ SLIDE 8: CHANNELS ═══════ -->
+  <div class="slide" data-slide="7">
+    <div class="text-center" style="max-width:1000px;">
+      <div class="label anim d1 mb-4">Messaging Channels</div>
+      <div class="section-title anim d2 mb-6">One gateway. <span class="gradient-text">Every platform.</span></div>
+      <div class="subtitle anim d3 mb-10" style="margin:0 auto 48px;">
+        Connect your AI to any messaging platform through the OpenClaw gateway. Each channel is configured, encrypted, and monitored independently.
+      </div>
+      <div class="channel-row anim d4">
+        <div class="channel-pill">&#9992;&#65039; Telegram</div>
+        <div class="channel-pill">&#127918; Discord</div>
+        <div class="channel-pill">&#128172; Slack</div>
+        <div class="channel-pill">&#128242; WhatsApp</div>
+        <div class="channel-pill">&#128274; Signal</div>
+        <div class="channel-pill">&#127760; WebChat</div>
+      </div>
+      <div class="card-grid cols-3 anim d5" style="margin-top:40px; max-width:900px; margin-left:auto; margin-right:auto;">
+        <div class="card text-center">
+          <div style="font-weight:700;margin-bottom:6px;">Encrypted Tokens</div>
+          <div style="font-size:0.8rem;color:var(--text-dim);">AES-256-GCM encryption for all stored channel credentials</div>
+        </div>
+        <div class="card text-center">
+          <div style="font-weight:700;margin-bottom:6px;">Hot Config Reload</div>
+          <div style="font-size:0.8rem;color:var(--text-dim);">Backend writes openclaw.json &mdash; gateway picks up changes live</div>
+        </div>
+        <div class="card text-center">
+          <div style="font-weight:700;margin-bottom:6px;">Per-Channel Audit</div>
+          <div style="font-size:0.8rem;color:var(--text-dim);">Every message routed through any channel is logged and traceable</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════ SLIDE 9: SECURITY DEEP DIVE ═══════ -->
+  <div class="slide" data-slide="8">
+    <div class="text-center" style="max-width:1100px;">
+      <div class="label anim d1 mb-4">Security Architecture</div>
+      <div class="section-title anim d2 mb-8">Four layers of <span class="gradient-text">prompt injection defense.</span></div>
+      <div class="shield-layers anim d3">
+        <div class="shield-layer">
+          <div class="layer-num" style="color:var(--accent);">Layer 1</div>
+          <div style="font-weight:700;margin-bottom:6px;">Input Sanitization</div>
+          <div style="font-size:0.8rem;color:var(--text-dim);line-height:1.5;">Strips hidden HTML, zero-width chars, homoglyph attacks, and instruction-like phrases from all external content.</div>
+        </div>
+        <div class="shield-layer">
+          <div class="layer-num" style="color:var(--accent2);">Layer 2</div>
+          <div style="font-weight:700;margin-bottom:6px;">LLM Classifier</div>
+          <div style="font-size:0.8rem;color:var(--text-dim);line-height:1.5;">A secondary, locally-hosted LLM evaluates content for semantic injection attempts with confidence scoring.</div>
+        </div>
+        <div class="shield-layer">
+          <div class="layer-num" style="color:var(--accent3);">Layer 3</div>
+          <div style="font-weight:700;margin-bottom:6px;">Output Validation</div>
+          <div style="font-size:0.8rem;color:var(--text-dim);line-height:1.5;">Every agent action is validated against permission policy before execution. Exceeding scope = hard block.</div>
+        </div>
+        <div class="shield-layer">
+          <div class="layer-num" style="color:#fdcb6e;">Layer 4</div>
+          <div style="font-weight:700;margin-bottom:6px;">Behavioral Anomaly</div>
+          <div style="font-size:0.8rem;color:var(--text-dim);line-height:1.5;">Real-time monitoring tracks agent patterns and flags deviations from expected tool usage behavior.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════ SLIDE 10: OWASP MAPPING ═══════ -->
+  <div class="slide" data-slide="9">
+    <div class="text-center" style="max-width:1100px;">
+      <div class="label anim d1 mb-4">OWASP Compliance</div>
+      <div class="section-title anim d2 mb-6">Mapped against the <span class="gradient-text">OWASP Top 10</span> for Agentic AI.</div>
+      <div class="subtitle anim d3 mb-8" style="margin:0 auto 32px;">Every risk category in the 2026 OWASP Agentic standard has a dedicated mitigation in our architecture.</div>
+      <div class="risk-grid anim d4">
+        <div class="risk-item"><div class="risk-id">ASI-01</div><div class="risk-name">Agent Goal Hijack</div><div class="risk-check">&#10003; Mitigated</div></div>
+        <div class="risk-item"><div class="risk-id">ASI-02</div><div class="risk-name">Tool Misuse</div><div class="risk-check">&#10003; Mitigated</div></div>
+        <div class="risk-item"><div class="risk-id">ASI-03</div><div class="risk-name">Identity Abuse</div><div class="risk-check">&#10003; Mitigated</div></div>
+        <div class="risk-item"><div class="risk-id">ASI-04</div><div class="risk-name">Excessive Agency</div><div class="risk-check">&#10003; Mitigated</div></div>
+        <div class="risk-item"><div class="risk-id">ASI-05</div><div class="risk-name">Inadequate Guardrails</div><div class="risk-check">&#10003; Mitigated</div></div>
+        <div class="risk-item"><div class="risk-id">ASI-06</div><div class="risk-name">Insecure Outputs</div><div class="risk-check">&#10003; Mitigated</div></div>
+        <div class="risk-item"><div class="risk-id">ASI-07</div><div class="risk-name">Supply Chain Vulns</div><div class="risk-check">&#10003; Mitigated</div></div>
+        <div class="risk-item"><div class="risk-id">ASI-08</div><div class="risk-name">Insufficient Monitoring</div><div class="risk-check">&#10003; Mitigated</div></div>
+        <div class="risk-item"><div class="risk-id">ASI-09</div><div class="risk-name">Inadequate Sandboxing</div><div class="risk-check">&#10003; Mitigated</div></div>
+        <div class="risk-item"><div class="risk-id">ASI-10</div><div class="risk-name">Memory Poisoning</div><div class="risk-check">&#10003; Mitigated</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════ SLIDE 11: INTEGRATIONS ═══════ -->
+  <div class="slide" data-slide="10">
+    <div class="text-center" style="max-width:1100px;">
+      <div class="label anim d1 mb-4">Integrations</div>
+      <div class="section-title anim d2 mb-6">Secure connectors for <span class="gradient-text">real-world services.</span></div>
+      <div class="card-grid cols-2 anim d3" style="max-width:1000px; margin:0 auto;">
+        <div class="card">
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
+            <div class="icon-circle" style="background:rgba(108,92,231,0.15);color:#a29bfe;margin-bottom:0;width:40px;height:40px;font-size:1.1rem;">&#127891;</div>
+            <div style="font-weight:700;font-size:1.1rem;">Canvas LMS</div>
+          </div>
+          <div style="font-size:0.82rem;color:var(--text-dim);line-height:1.6;margin-bottom:12px;">
+            OAuth 2.0 + PKCE authentication. Read-only grade, assignment, and schedule data. FERPA-compliant &mdash; student data never leaves your infrastructure.
+          </div>
+          <div class="flex gap-2" style="gap:6px;flex-wrap:wrap;">
+            <span class="badge green" style="font-size:0.65rem;">courses.read</span>
+            <span class="badge green" style="font-size:0.65rem;">grades.read</span>
+            <span class="badge green" style="font-size:0.65rem;">assignments.read</span>
+          </div>
+        </div>
+        <div class="card">
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
+            <div class="icon-circle" style="background:rgba(85,239,196,0.15);color:#55efc4;margin-bottom:0;width:40px;height:40px;font-size:1.1rem;">&#128200;</div>
+            <div style="font-weight:700;font-size:1.1rem;">Robinhood</div>
+          </div>
+          <div style="font-size:0.82rem;color:var(--text-dim);line-height:1.6;margin-bottom:12px;">
+            Official Crypto API only &mdash; no unofficial endpoints. Read-only by default. Hard-blocked trade execution at platform level. Most restrictive permission tier.
+          </div>
+          <div class="flex gap-2" style="gap:6px;flex-wrap:wrap;">
+            <span class="badge pink" style="font-size:0.65rem;">read-only</span>
+            <span class="badge pink" style="font-size:0.65rem;">hard-blocked trades</span>
+          </div>
+        </div>
+        <div class="card">
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
+            <div class="icon-circle" style="background:rgba(116,185,255,0.15);color:#74b9ff;margin-bottom:0;width:40px;height:40px;font-size:1.1rem;">&#9993;</div>
+            <div style="font-weight:700;font-size:1.1rem;">Gmail + Calendar</div>
+          </div>
+          <div style="font-size:0.82rem;color:var(--text-dim);line-height:1.6;margin-bottom:12px;">
+            OAuth 2.0 + PKCE with incremental authorization. Mandatory draft-and-confirm for sending email. Content passes through injection defense layer.
+          </div>
+          <div class="flex gap-2" style="gap:6px;flex-wrap:wrap;">
+            <span class="badge teal" style="font-size:0.65rem;">gmail.readonly</span>
+            <span class="badge teal" style="font-size:0.65rem;">calendar.events</span>
+          </div>
+        </div>
+        <div class="card">
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
+            <div class="icon-circle" style="background:rgba(253,203,110,0.15);color:#fdcb6e;margin-bottom:0;width:40px;height:40px;font-size:1.1rem;">&#128268;</div>
+            <div style="font-weight:700;font-size:1.1rem;">MCP Framework</div>
+          </div>
+          <div style="font-size:0.82rem;color:var(--text-dim);line-height:1.6;margin-bottom:12px;">
+            Model Context Protocol for extensible tool integration. Tool definition pinning, content sanitization, TLS/mTLS, sandboxed execution in Docker containers.
+          </div>
+          <div class="flex gap-2" style="gap:6px;flex-wrap:wrap;">
+            <span class="badge purple" style="font-size:0.65rem;">sandboxed</span>
+            <span class="badge purple" style="font-size:0.65rem;">pinned definitions</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════ SLIDE 12: PERMISSION ENGINE ═══════ -->
+  <div class="slide" data-slide="11">
+    <div class="text-center" style="max-width:1000px;">
+      <div class="label anim d1 mb-4">Permission Engine</div>
+      <div class="section-title anim d2 mb-8">Tiered trust. <span class="gradient-text">Zero implicit access.</span></div>
+      <div class="anim d3" style="display:flex;flex-direction:column;gap:16px;width:100%;max-width:800px;margin:0 auto;">
+        <div class="card" style="display:flex;align-items:center;gap:20px;border-left:3px solid #55efc4;">
+          <div style="flex-shrink:0;width:120px;font-weight:700;color:#55efc4;">Auto-Approve</div>
+          <div style="font-size:0.85rem;color:var(--text-dim);">Read-only operations on approved connectors. Fetching grades, reading calendar events, viewing portfolio data.</div>
+        </div>
+        <div class="card" style="display:flex;align-items:center;gap:20px;border-left:3px solid #fdcb6e;">
+          <div style="flex-shrink:0;width:120px;font-weight:700;color:#fdcb6e;">User-Confirm</div>
+          <div style="font-size:0.85rem;color:var(--text-dim);">Write operations that modify external state. Sending emails, creating calendar events, submitting assignments.</div>
+        </div>
+        <div class="card" style="display:flex;align-items:center;gap:20px;border-left:3px solid #a29bfe;">
+          <div style="flex-shrink:0;width:120px;font-weight:700;color:#a29bfe;">Admin-Only</div>
+          <div style="font-size:0.85rem;color:var(--text-dim);">Sensitive configuration changes. Adding new connectors, modifying permission policies, managing API keys.</div>
+        </div>
+        <div class="card" style="display:flex;align-items:center;gap:20px;border-left:3px solid #ff7675;">
+          <div style="flex-shrink:0;width:120px;font-weight:700;color:#ff7675;">Hard-Blocked</div>
+          <div style="font-size:0.85rem;color:var(--text-dim);">Permanently forbidden. Financial transactions, credential exfiltration, privilege escalation. Cannot be overridden.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════ SLIDE 13: SECURITY FEATURES ═══════ -->
+  <div class="slide" data-slide="12">
+    <div class="text-center" style="max-width:1100px;">
+      <div class="label anim d1 mb-4">Security Stack</div>
+      <div class="section-title anim d2 mb-8">Enterprise-grade security. <span class="gradient-text">Built in, not bolted on.</span></div>
+      <div class="card-grid cols-4 anim d3">
+        <div class="card text-center">
+          <div style="font-size:1.5rem;margin-bottom:10px;">&#128272;</div>
+          <div style="font-weight:700;font-size:0.9rem;margin-bottom:4px;">AES-256-GCM</div>
+          <div style="font-size:0.75rem;color:var(--text-dim);">Credential encryption with per-user key derivation</div>
+        </div>
+        <div class="card text-center">
+          <div style="font-size:1.5rem;margin-bottom:10px;">&#128273;</div>
+          <div style="font-weight:700;font-size:0.9rem;margin-bottom:4px;">JWT + bcrypt</div>
+          <div style="font-size:0.75rem;color:var(--text-dim);">Token-based auth with secure password hashing</div>
+        </div>
+        <div class="card text-center">
+          <div style="font-size:1.5rem;margin-bottom:10px;">&#128220;</div>
+          <div style="font-weight:700;font-size:0.9rem;margin-bottom:4px;">SHA-256 Audit</div>
+          <div style="font-size:0.75rem;color:var(--text-dim);">Tamper-evident immutable audit logging</div>
+        </div>
+        <div class="card text-center">
+          <div style="font-size:1.5rem;margin-bottom:10px;">&#128737;</div>
+          <div style="font-weight:700;font-size:0.9rem;margin-bottom:4px;">Security Headers</div>
+          <div style="font-size:0.75rem;color:var(--text-dim);">X-Frame, CSP, HSTS, rate limiting, SSRF protection</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════ SLIDE 14: HOW IT WORKS FLOW ═══════ -->
+  <div class="slide" data-slide="13">
+    <div class="text-center" style="max-width:1100px;">
+      <div class="label anim d1 mb-4">How It Works</div>
+      <div class="section-title anim d2 mb-8">From signup to <span class="gradient-text">secure AI chat.</span></div>
+      <div class="timeline anim d3">
+        <div class="timeline-item">
+          <div style="font-weight:700;font-size:1.05rem;margin-bottom:4px;">1. Create Account & Onboard</div>
+          <div style="font-size:0.85rem;color:var(--text-dim);line-height:1.6;">
+            Register with email + password. The onboarding wizard walks you through picking an AI provider, entering your API key, and choosing a model.
+          </div>
+        </div>
+        <div class="timeline-item">
+          <div style="font-weight:700;font-size:1.05rem;margin-bottom:4px;">2. Backend Writes Config</div>
+          <div style="font-size:0.85rem;color:var(--text-dim);line-height:1.6;">
+            Your settings are encrypted and written to <span class="mono" style="color:var(--accent2);">openclaw.json</span> on a shared Docker volume. The OpenClaw gateway picks it up automatically.
+          </div>
+        </div>
+        <div class="timeline-item">
+          <div style="font-weight:700;font-size:1.05rem;margin-bottom:4px;">3. Connect Channels</div>
+          <div style="font-size:0.85rem;color:var(--text-dim);line-height:1.6;">
+            Add Telegram bots, Discord bots, Slack apps, or WhatsApp via QR scan. Tokens are AES-256-GCM encrypted in PostgreSQL.
+          </div>
+        </div>
+        <div class="timeline-item">
+          <div style="font-weight:700;font-size:1.05rem;margin-bottom:4px;">4. Chat Securely</div>
+          <div style="font-size:0.85rem;color:var(--text-dim);line-height:1.6;">
+            Messages flow through the gateway, pass injection defense layers, hit your AI provider, and return validated responses. Every action is audit-logged.
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════ SLIDE 15: LIMITATIONS ═══════ -->
+  <div class="slide" data-slide="14">
+    <div class="text-center" style="max-width:1000px;">
+      <div class="label anim d1 mb-4">Honest Assessment</div>
+      <div class="section-title anim d2 mb-8">Challenges & <span class="gradient-text">limitations.</span></div>
+      <div class="card-grid cols-2 anim d3" style="max-width:900px; margin:0 auto;">
+        <div class="card" style="border-left:3px solid #fdcb6e;">
+          <div style="font-weight:700;margin-bottom:6px;">LLM Inference Overhead</div>
+          <div style="font-size:0.82rem;color:var(--text-dim);line-height:1.5;">Multi-layer security adds latency. Local models via Ollama require GPU hardware for acceptable speeds.</div>
+        </div>
+        <div class="card" style="border-left:3px solid #ff7675;">
+          <div style="font-weight:700;margin-bottom:6px;">Robinhood API Gaps</div>
+          <div style="font-size:0.82rem;color:var(--text-dim);line-height:1.5;">No public stock API exists. Only official Crypto API is integrated. Expansion depends on Robinhood's decisions.</div>
+        </div>
+        <div class="card" style="border-left:3px solid #74b9ff;">
+          <div style="font-weight:700;margin-bottom:6px;">Canvas Institutional Deps</div>
+          <div style="font-size:0.82rem;color:var(--text-dim);line-height:1.5;">Requires admin-issued developer keys. Not a plug-and-play solution without university IT coordination.</div>
+        </div>
+        <div class="card" style="border-left:3px solid #a29bfe;">
+          <div style="font-weight:700;margin-bottom:6px;">Academic Scope</div>
+          <div style="font-size:0.82rem;color:var(--text-dim);line-height:1.5;">Single-semester project. Core architecture is demonstrated but full adversarial testing is beyond timeline.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════ SLIDE 16: FUTURE WORK ═══════ -->
+  <div class="slide" data-slide="15">
+    <div class="text-center" style="max-width:1000px;">
+      <div class="label anim d1 mb-4">Future Work</div>
+      <div class="section-title anim d2 mb-8">Where <span class="gradient-text">SentientAI</span> goes next.</div>
+      <div class="card-grid cols-3 anim d3" style="max-width:1000px; margin:0 auto;">
+        <div class="card text-center">
+          <div style="font-size:1.5rem;margin-bottom:10px;">&#129302;</div>
+          <div style="font-weight:700;margin-bottom:6px;">Multi-Agent Security</div>
+          <div style="font-size:0.8rem;color:var(--text-dim);">Extending security to support collaborating agents with inter-agent trust boundaries.</div>
+        </div>
+        <div class="card text-center">
+          <div style="font-size:1.5rem;margin-bottom:10px;">&#128268;</div>
+          <div style="font-weight:700;margin-bottom:6px;">More Connectors</div>
+          <div style="font-size:0.8rem;color:var(--text-dim);">GitHub, Notion, Spotify, and developer tool integrations via the connector framework.</div>
+        </div>
+        <div class="card text-center">
+          <div style="font-size:1.5rem;margin-bottom:10px;">&#127970;</div>
+          <div style="font-weight:700;margin-bottom:6px;">Enterprise SSO</div>
+          <div style="font-size:0.8rem;color:var(--text-dim);">SAML and LDAP federation for institutional single sign-on deployments.</div>
+        </div>
+        <div class="card text-center">
+          <div style="font-size:1.5rem;margin-bottom:10px;">&#128302;</div>
+          <div style="font-weight:700;margin-bottom:6px;">Red-Team Testing</div>
+          <div style="font-size:0.8rem;color:var(--text-dim);">Systematic adversarial evaluation of the prompt injection detection layers.</div>
+        </div>
+        <div class="card text-center">
+          <div style="font-size:1.5rem;margin-bottom:10px;">&#128203;</div>
+          <div style="font-weight:700;margin-bottom:6px;">SOC 2 / ISO 27001</div>
+          <div style="font-size:0.8rem;color:var(--text-dim);">Working toward compliance certifications for enterprise adoption.</div>
+        </div>
+        <div class="card text-center">
+          <div style="font-size:1.5rem;margin-bottom:10px;">&#127757;</div>
+          <div style="font-weight:700;margin-bottom:6px;">Open Source Release</div>
+          <div style="font-size:0.8rem;color:var(--text-dim);">Community-driven development with contributor guidelines and security disclosure process.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════ SLIDE 17: CLOSING ═══════ -->
+  <div class="slide text-center" data-slide="16">
+    <div class="logo-ring anim d1">
+      <span class="logo-inner">S</span>
+    </div>
+    <div class="section-title anim d2 mb-4" style="font-size:clamp(2.5rem,5vw,4rem);">
+      <span class="gradient-text">Thank You</span>
+    </div>
+    <div class="subtitle anim d3 mb-8" style="margin:0 auto 32px;">
+      SentientAI demonstrates that agentic AI can be both highly capable and rigorously controlled. Security is not the cost of capability &mdash; it is the foundation.
+    </div>
+    <div class="anim d4 mb-8" style="margin-bottom:32px;">
+      <div class="glow-card" style="display:inline-block;">
+        <div class="glow-card-inner" style="padding:20px 40px;">
+          <div class="mono" style="font-size:0.9rem;color:var(--accent2);">github.com/krishcodes1/Sentient-AI-</div>
+        </div>
+      </div>
+    </div>
+    <div class="flex gap-2 anim d5" style="gap:12px;flex-wrap:wrap;justify-content:center;">
+      <span class="badge purple">Krish Shroff</span>
+      <span class="badge teal">Rafi Hossain</span>
+      <span class="badge pink">Miadul Haque</span>
+      <span class="badge" style="color:#fdcb6e;border-color:rgba(253,203,110,0.3);background:rgba(253,203,110,0.08);">Edrich Silva</span>
+    </div>
+    <div class="anim d6" style="margin-top:24px;font-size:0.8rem;color:var(--text-dim);">
+      CSCI-456 Senior Project &middot; New York Institute of Technology &middot; Manhattan Campus &middot; Spring 2026
+    </div>
+  </div>
+
+</div>
+
+<script>
+// ─── PARTICLES ───
+const pContainer = document.getElementById('particles');
+for (let i = 0; i < 30; i++) {
+  const p = document.createElement('div');
+  p.className = 'particle';
+  p.style.left = Math.random() * 100 + '%';
+  p.style.animationDelay = Math.random() * 15 + 's';
+  p.style.animationDuration = (10 + Math.random() * 10) + 's';
+  p.style.opacity = Math.random() * 0.5;
+  pContainer.appendChild(p);
+}
+
+// ─── SLIDE ENGINE ───
+const slides = document.querySelectorAll('.slide');
+const total = slides.length;
+let current = 0;
+
+const progressBar = document.getElementById('progressBar');
+const counter = document.getElementById('slideCounter');
+const dotsContainer = document.getElementById('navDots');
+
+// Create nav dots
+for (let i = 0; i < total; i++) {
+  const dot = document.createElement('button');
+  dot.className = 'nav-dot';
+  dot.addEventListener('click', () => goTo(i));
+  dotsContainer.appendChild(dot);
+}
+const dots = dotsContainer.querySelectorAll('.nav-dot');
+
+function updateUI() {
+  slides.forEach((s, i) => {
+    s.classList.remove('active', 'exit-up');
+    if (i === current) s.classList.add('active');
+    else if (i < current) s.classList.add('exit-up');
+  });
+  dots.forEach((d, i) => d.classList.toggle('active', i === current));
+  progressBar.style.width = ((current / (total - 1)) * 100) + '%';
+  counter.textContent = `${current + 1} / ${total}`;
+}
+
+function goTo(n) {
+  if (n < 0 || n >= total || n === current) return;
+  current = n;
+  updateUI();
+}
+
+function next() { goTo(current + 1); }
+function prev() { goTo(current - 1); }
+
+// Keyboard
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') { e.preventDefault(); next(); }
+  if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); prev(); }
+  if (e.key === 'Home') { e.preventDefault(); goTo(0); }
+  if (e.key === 'End') { e.preventDefault(); goTo(total - 1); }
+});
+
+// Touch/swipe
+let touchStartX = 0;
+document.addEventListener('touchstart', (e) => { touchStartX = e.touches[0].clientX; });
+document.addEventListener('touchend', (e) => {
+  const diff = touchStartX - e.changedTouches[0].clientX;
+  if (Math.abs(diff) > 50) diff > 0 ? next() : prev();
+});
+
+// Mouse wheel
+let wheelTimeout;
+document.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  clearTimeout(wheelTimeout);
+  wheelTimeout = setTimeout(() => {
+    e.deltaY > 0 ? next() : prev();
+  }, 80);
+}, { passive: false });
+
+// Init
+updateUI();
+</script>
+</body>
+</html>
