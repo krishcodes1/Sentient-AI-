@@ -1,3 +1,4 @@
+import { lazy, Suspense } from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 import Layout from "./components/layout/Layout";
 import LayoutFull from "./components/layout/LayoutFull";
@@ -9,10 +10,16 @@ import AuditLogs from "./pages/AuditLogs";
 import Settings from "./pages/Settings";
 import Login from "./pages/Login";
 import Onboarding from "./pages/Onboarding";
-import { getStoredUser } from "./services/api";
+import NotFound from "./pages/NotFound";
+import ErrorBoundary from "./components/ui/ErrorBoundary";
+import PageLoader from "./components/ui/PageLoader";
+import { getStoredUser, getAccessToken } from "./services/api";
+
+// Lazily-loaded routes — owned by other agents.
+const Connectors = lazy(() => import("./pages/Connectors"));
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
-  const token = localStorage.getItem("auth_token");
+  const token = getAccessToken();
   if (!token) return <Navigate to="/login" replace />;
 
   const user = getStoredUser();
@@ -24,7 +31,7 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 }
 
 function OnboardingGuard({ children }: { children: React.ReactNode }) {
-  const token = localStorage.getItem("auth_token");
+  const token = getAccessToken();
   if (!token) return <Navigate to="/login" replace />;
 
   const user = getStoredUser();
@@ -37,46 +44,52 @@ function OnboardingGuard({ children }: { children: React.ReactNode }) {
 
 export default function App() {
   return (
-    <Routes>
-      <Route path="/login" element={<Login />} />
-      <Route
-        path="/onboarding"
-        element={
-          <OnboardingGuard>
-            <Onboarding />
-          </OnboardingGuard>
-        }
-      />
-      <Route
-        path="/"
-        element={
-          <ProtectedRoute>
-            <Navigate to="/gateway" replace />
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        element={
-          <ProtectedRoute>
-            <LayoutFull />
-          </ProtectedRoute>
-        }
-      >
-        <Route path="/gateway" element={<Gateway />} />
-      </Route>
-      <Route
-        element={
-          <ProtectedRoute>
-            <Layout />
-          </ProtectedRoute>
-        }
-      >
-        <Route path="/overview" element={<Dashboard />} />
-        <Route path="/chat" element={<Chat />} />
-        <Route path="/channels" element={<Channels />} />
-        <Route path="/audit" element={<AuditLogs />} />
-        <Route path="/settings" element={<Settings />} />
-      </Route>
-    </Routes>
+    <ErrorBoundary>
+      <Suspense fallback={<PageLoader />}>
+        <Routes>
+          <Route path="/login" element={<Login />} />
+          <Route
+            path="/onboarding"
+            element={
+              <OnboardingGuard>
+                <Onboarding />
+              </OnboardingGuard>
+            }
+          />
+          <Route
+            path="/"
+            element={
+              <ProtectedRoute>
+                <Navigate to="/gateway" replace />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            element={
+              <ProtectedRoute>
+                <LayoutFull />
+              </ProtectedRoute>
+            }
+          >
+            <Route path="/gateway" element={<Gateway />} />
+          </Route>
+          <Route
+            element={
+              <ProtectedRoute>
+                <Layout />
+              </ProtectedRoute>
+            }
+          >
+            <Route path="/overview" element={<Dashboard />} />
+            <Route path="/chat" element={<Chat />} />
+            <Route path="/channels" element={<Channels />} />
+            <Route path="/connectors" element={<Connectors />} />
+            <Route path="/audit" element={<AuditLogs />} />
+            <Route path="/settings" element={<Settings />} />
+          </Route>
+          <Route path="*" element={<NotFound />} />
+        </Routes>
+      </Suspense>
+    </ErrorBoundary>
   );
 }

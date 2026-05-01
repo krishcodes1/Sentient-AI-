@@ -101,3 +101,10 @@ input:-webkit-autofill:focus {
   -webkit-text-fill-color: var(--text-primary);
   caret-color: var(--text-primary);
 }
+
+@layer utilities {
+  .focus-ring {
+    @apply outline-none ring-2 ring-cyan-500 ring-offset-2 ring-offset-black;
+  }
+}
+

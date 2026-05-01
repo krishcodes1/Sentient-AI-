@@ -6,7 +6,10 @@ export default function LayoutFull() {
   return (
     <div className="flex min-h-screen min-h-[100dvh] min-w-0 bg-[var(--bg-primary)]">
       <Sidebar />
-      <main className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
+      <main
+        id="main"
+        className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden pt-12 md:pt-0"
+      >
         <Outlet />
       </main>
     </div>

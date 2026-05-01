@@ -10,9 +10,33 @@ import {
   Server,
   MessageSquare,
 } from "lucide-react";
-import { updateSettings } from "@/services/api";
+import type { LucideIcon } from "lucide-react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+  ApiError,
+  getAuditLogs,
+  updateSettings,
+} from "@/services/api";
+import { ErrorBanner } from "@/components/ui/ErrorBanner";
 
-const PROVIDERS = [
+type ProviderId =
+  | "openai"
+  | "anthropic"
+  | "gemini"
+  | "grok"
+  | "deepseek"
+  | "groq"
+  | "mistral"
+  | "ollama";
+
+interface ProviderDef {
+  id: ProviderId;
+  name: string;
+  models: string[];
+  desc: string;
+}
+
+const PROVIDERS: ProviderDef[] = [
   { id: "openai", name: "OpenAI", models: ["gpt-4o", "gpt-4o-mini", "o1-preview", "o1"], desc: "GPT-4o and beyond" },
   { id: "anthropic", name: "Anthropic", models: ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-haiku-4-5-20251001"], desc: "Claude models" },
   { id: "gemini", name: "Google Gemini", models: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"], desc: "Gemini multimodal" },
@@ -21,11 +45,14 @@ const PROVIDERS = [
   { id: "groq", name: "Groq", models: ["llama-3.3-70b-versatile", "mixtral-8x7b-32768"], desc: "Ultra-fast inference" },
   { id: "mistral", name: "Mistral", models: ["mistral-large-latest", "mistral-small-latest"], desc: "European AI" },
   { id: "ollama", name: "Ollama", models: ["llama3.2", "mistral", "codellama", "mixtral"], desc: "Local / self-hosted" },
-] as const;
+];
 
-type ProviderId = (typeof PROVIDERS)[number]["id"];
+interface Step {
+  icon: LucideIcon;
+  label: string;
+}
 
-const STEPS = [
+const STEPS: Step[] = [
   { icon: Sparkles, label: "Welcome" },
   { icon: Brain, label: "Provider" },
   { icon: Key, label: "API Key" },
@@ -33,43 +60,54 @@ const STEPS = [
   { icon: MessageSquare, label: "Ready" },
 ];
 
+function getErrorMessage(err: unknown, fallback: string): string {
+  if (err instanceof ApiError) return err.message;
+  if (err instanceof Error) return err.message;
+  if (typeof err === "string") return err;
+  return fallback;
+}
+
 export default function Onboarding() {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [step, setStep] = useState(0);
   const [name, setName] = useState("");
   const [provider, setProvider] = useState<ProviderId>("openai");
   const [apiKey, setApiKey] = useState("");
-  const [model, setModel] = useState("gpt-4o");
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
+  const [model, setModel] = useState<string>("gpt-4o");
 
-  const selectedProvider = PROVIDERS.find((p) => p.id === provider)!;
+  const selectedProvider =
+    PROVIDERS.find((p) => p.id === provider) ?? PROVIDERS[0];
 
-  const canNext = () => {
-    if (step === 0) return name.trim().length >= 1;
-    if (step === 1) return true;
-    if (step === 2) return provider === "ollama" || apiKey.trim().length > 0;
-    if (step === 3) return model.length > 0;
-    return true;
-  };
-
-  const handleFinish = async () => {
-    setSaving(true);
-    setError("");
-    try {
-      await updateSettings({
+  const finishMutation = useMutation({
+    mutationFn: () =>
+      updateSettings({
         name: name.trim(),
         llm_provider: provider,
         llm_model: model,
         llm_api_key: provider === "ollama" ? "ollama" : apiKey.trim(),
         onboarding_completed: true,
+      }),
+    onSuccess: () => {
+      // Warm the dashboard cache so /gateway → /overview feels instant.
+      void queryClient.prefetchQuery({
+        queryKey: ["audit-recent"],
+        queryFn: () => getAuditLogs({ limit: 10 }),
       });
       navigate("/gateway");
-    } catch (err: any) {
-      setError(err.message || "Failed to save settings");
-    } finally {
-      setSaving(false);
-    }
+    },
+  });
+
+  const error = finishMutation.error
+    ? getErrorMessage(finishMutation.error, "Failed to save settings")
+    : null;
+
+  const canNext = (): boolean => {
+    if (step === 0) return name.trim().length >= 1;
+    if (step === 1) return true;
+    if (step === 2) return provider === "ollama" || apiKey.trim().length > 0;
+    if (step === 3) return model.length > 0;
+    return true;
   };
 
   return (
@@ -132,14 +170,18 @@ export default function Onboarding() {
                   Welcome to SentientAI
                 </h1>
                 <p className="text-[15px] text-[var(--text-secondary)] leading-relaxed max-w-sm mx-auto">
-                  Let's get you set up. First, what should we call you?
+                  Let&apos;s get you set up. First, what should we call you?
                 </p>
               </div>
               <div>
-                <label className="block text-[13px] font-medium text-[var(--text-secondary)] mb-2">
+                <label
+                  htmlFor="onboarding-name"
+                  className="block text-[13px] font-medium text-[var(--text-secondary)] mb-2"
+                >
                   Your name
                 </label>
                 <input
+                  id="onboarding-name"
                   type="text"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
@@ -162,34 +204,38 @@ export default function Onboarding() {
                   Pick which LLM powers your assistant. You can change this later.
                 </p>
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                {PROVIDERS.map((p) => (
-                  <button
-                    key={p.id}
-                    type="button"
-                    onClick={() => {
-                      setProvider(p.id);
-                      setModel(p.models[0]);
-                    }}
-                    className="text-left px-4 py-3.5 rounded-[14px] border transition-all duration-200"
-                    style={{
-                      backgroundColor: provider === p.id ? "rgba(10,132,255,0.14)" : "var(--bg-tertiary)",
-                      borderColor: provider === p.id ? "var(--accent-primary)" : "var(--border-subtle)",
-                    }}
-                  >
-                    <span
-                      className="text-[15px] font-medium block"
+              <div role="radiogroup" aria-label="Provider" className="grid grid-cols-2 gap-3">
+                {PROVIDERS.map((p) => {
+                  const isSelected = provider === p.id;
+                  return (
+                    <button
+                      key={p.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={isSelected}
+                      aria-pressed={isSelected}
+                      onClick={() => {
+                        setProvider(p.id);
+                        setModel(p.models[0]);
+                      }}
+                      className="text-left px-4 py-3.5 rounded-[14px] border transition-all duration-200"
                       style={{
-                        color: provider === p.id ? "var(--text-primary)" : "var(--text-secondary)",
+                        backgroundColor: isSelected ? "rgba(10,132,255,0.14)" : "var(--bg-tertiary)",
+                        borderColor: isSelected ? "var(--accent-primary)" : "var(--border-subtle)",
                       }}
                     >
-                      {p.name}
-                    </span>
-                    <span className="text-[12px] block mt-0.5 text-[var(--text-muted)]">
-                      {p.desc}
-                    </span>
-                  </button>
-                ))}
+                      <span
+                        className="text-[15px] font-medium block"
+                        style={{ color: isSelected ? "var(--text-primary)" : "var(--text-secondary)" }}
+                      >
+                        {p.name}
+                      </span>
+                      <span className="text-[12px] block mt-0.5 text-[var(--text-muted)]">
+                        {p.desc}
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -199,7 +245,9 @@ export default function Onboarding() {
             <div className="space-y-6">
               <div className="text-center space-y-2">
                 <h2 className="text-[24px] font-semibold tracking-tight text-[var(--text-primary)]">
-                  {provider === "ollama" ? "Ollama connection" : `Enter your ${selectedProvider.name} API key`}
+                  {provider === "ollama"
+                    ? "Ollama connection"
+                    : `Enter your ${selectedProvider.name} API key`}
                 </h2>
                 <p className="text-[15px] text-[var(--text-secondary)] leading-relaxed max-w-sm mx-auto">
                   {provider === "ollama"
@@ -209,14 +257,18 @@ export default function Onboarding() {
               </div>
               {provider !== "ollama" && (
                 <div>
-                  <label className="block text-[13px] font-medium text-[var(--text-secondary)] mb-2">
+                  <label
+                    htmlFor="onboarding-api-key"
+                    className="block text-[13px] font-medium text-[var(--text-secondary)] mb-2"
+                  >
                     API Key
                   </label>
                   <input
+                    id="onboarding-api-key"
                     type="password"
                     value={apiKey}
                     onChange={(e) => setApiKey(e.target.value)}
-                    placeholder={`sk-...`}
+                    placeholder="sk-..."
                     autoFocus
                     className="w-full px-4 py-3 rounded-[12px] border border-[var(--border-primary)] bg-[var(--bg-input)] text-[15px] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-muted)] focus:border-[var(--accent-primary)] transition-colors font-mono"
                   />
@@ -224,7 +276,10 @@ export default function Onboarding() {
               )}
               {provider === "ollama" && (
                 <div className="rounded-[14px] border border-[var(--border-subtle)] bg-[var(--bg-tertiary)] p-5 text-center">
-                  <Server className="w-10 h-10 text-[var(--accent-primary)] mx-auto mb-3" strokeWidth={1.5} />
+                  <Server
+                    className="w-10 h-10 text-[var(--accent-primary)] mx-auto mb-3"
+                    strokeWidth={1.5}
+                  />
                   <p className="text-[15px] text-[var(--text-primary)] font-medium">Local server</p>
                   <p className="text-[13px] text-[var(--text-muted)] mt-1">
                     No API key needed. Make sure{" "}
@@ -246,29 +301,35 @@ export default function Onboarding() {
                   Choose the default model for {selectedProvider.name}.
                 </p>
               </div>
-              <div className="flex flex-col gap-2">
-                {selectedProvider.models.map((m) => (
-                  <button
-                    key={m}
-                    type="button"
-                    onClick={() => setModel(m)}
-                    className="text-left px-4 py-3.5 rounded-[14px] border transition-all duration-200 flex items-center justify-between"
-                    style={{
-                      backgroundColor: model === m ? "rgba(10,132,255,0.14)" : "var(--bg-tertiary)",
-                      borderColor: model === m ? "var(--accent-primary)" : "var(--border-subtle)",
-                    }}
-                  >
-                    <span
-                      className="text-[15px] font-mono"
+              <div role="radiogroup" aria-label="Model" className="flex flex-col gap-2">
+                {selectedProvider.models.map((m) => {
+                  const isSelected = model === m;
+                  return (
+                    <button
+                      key={m}
+                      type="button"
+                      role="radio"
+                      aria-checked={isSelected}
+                      aria-pressed={isSelected}
+                      onClick={() => setModel(m)}
+                      className="text-left px-4 py-3.5 rounded-[14px] border transition-all duration-200 flex items-center justify-between"
                       style={{
-                        color: model === m ? "var(--text-primary)" : "var(--text-secondary)",
+                        backgroundColor: isSelected ? "rgba(10,132,255,0.14)" : "var(--bg-tertiary)",
+                        borderColor: isSelected ? "var(--accent-primary)" : "var(--border-subtle)",
                       }}
                     >
-                      {m}
-                    </span>
-                    {model === m && <Check className="w-5 h-5 text-[var(--accent-primary)]" strokeWidth={2.5} />}
-                  </button>
-                ))}
+                      <span
+                        className="text-[15px] font-mono"
+                        style={{ color: isSelected ? "var(--text-primary)" : "var(--text-secondary)" }}
+                      >
+                        {m}
+                      </span>
+                      {isSelected && (
+                        <Check className="w-5 h-5 text-[var(--accent-primary)]" strokeWidth={2.5} />
+                      )}
+                    </button>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -284,8 +345,9 @@ export default function Onboarding() {
                   You're all set, {name}!
                 </h2>
                 <p className="text-[15px] text-[var(--text-secondary)] leading-relaxed max-w-sm mx-auto">
-                  SentientAI is configured with <strong className="text-[var(--text-primary)]">{selectedProvider.name}</strong> using{" "}
-                  <code className="text-[var(--accent-primary)]">{model}</code>.
+                  SentientAI is configured with{" "}
+                  <strong className="text-[var(--text-primary)]">{selectedProvider.name}</strong>{" "}
+                  using <code className="text-[var(--accent-primary)]">{model}</code>.
                 </p>
               </div>
               <div className="rounded-[14px] border border-[var(--border-subtle)] bg-[var(--bg-tertiary)] p-4 text-left space-y-2 text-[13px]">
@@ -305,12 +367,7 @@ export default function Onboarding() {
             </div>
           )}
 
-          {/* Error */}
-          {error && (
-            <div className="mt-4 p-3 rounded-[10px] text-[13px] bg-[rgba(255,69,58,0.12)] text-[var(--accent-danger)] border border-[rgba(255,69,58,0.25)]">
-              {error}
-            </div>
-          )}
+          {error && <div className="mt-4"><ErrorBanner message={error} /></div>}
 
           {/* Navigation */}
           <div className="flex items-center justify-between mt-8">
@@ -338,11 +395,12 @@ export default function Onboarding() {
             ) : (
               <button
                 type="button"
-                onClick={handleFinish}
-                disabled={saving}
+                onClick={() => finishMutation.mutate()}
+                disabled={finishMutation.isPending}
                 className="flex items-center gap-2 px-6 py-2.5 rounded-[12px] text-[15px] font-semibold text-white bg-[var(--accent-primary)] disabled:opacity-40 transition-all hover:brightness-110"
               >
-                {saving ? "Saving..." : "Start chatting"} <MessageSquare className="w-4 h-4" />
+                {finishMutation.isPending ? "Saving..." : "Start chatting"}{" "}
+                <MessageSquare className="w-4 h-4" />
               </button>
             )}
           </div>
