@@ -1,0 +1,65 @@
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = [
+    "alembic",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "build",
+    "dist",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "W",   # pycodestyle warnings
+    "I",   # isort
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "A",   # flake8-builtins
+    "C4",  # flake8-comprehensions
+    "SIM", # flake8-simplify
+]
+ignore = [
+    "E501",  # line too long (formatter handles it)
+    "B008",  # function calls in argument defaults (FastAPI Depends)
+    "N805",  # first arg of method should be self (pydantic validators)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["N802", "N803", "N806", "B011", "SIM117"]
+
+[tool.mypy]
+python_version = "3.11"
+strict_optional = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unreachable = true
+no_implicit_optional = true
+check_untyped_defs = true
+disallow_untyped_defs = false
+ignore_missing_imports = false
+plugins = []
+
+[[tool.mypy.overrides]]
+module = [
+    "anthropic.*",
+    "openai.*",
+    "google.generativeai.*",
+    "google.*",
+    "ollama.*",
+    "groq.*",
+    "mistralai.*",
+    "passlib.*",
+    "jose.*",
+    "celery.*",
+    "redis.*",
+    "factory.*",
+    "factory_boy.*",
+    "freezegun.*",
+    "structlog.*",
+]
+ignore_missing_imports = true

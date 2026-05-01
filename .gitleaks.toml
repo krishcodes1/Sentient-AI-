@@ -1,0 +1,70 @@
+# SentientAI gitleaks configuration.
+#
+# Extends the upstream gitleaks default ruleset and adds project-specific
+# rules for the AI / messaging providers we integrate with.
+#
+# Docs: https://github.com/gitleaks/gitleaks#configuration
+
+title = "SentientAI gitleaks config"
+
+[extend]
+useDefault = true
+
+# ─── Custom rules ───────────────────────────────────────────────────────────
+
+[[rules]]
+id = "anthropic-api-key"
+description = "Anthropic API key"
+regex = '''sk-ant-[A-Za-z0-9_\-]{20,}'''
+keywords = ["sk-ant-"]
+tags = ["key", "anthropic"]
+
+[[rules]]
+id = "openai-api-key"
+description = "OpenAI API key (sk- / sess-)"
+regex = '''(?:sk|sess)-[A-Za-z0-9]{20,}'''
+keywords = ["sk-", "sess-"]
+tags = ["key", "openai"]
+
+[[rules]]
+id = "google-ai-api-key"
+description = "Google AI / Generative Language API key"
+regex = '''AIza[0-9A-Za-z_\-]{35}'''
+keywords = ["AIza"]
+tags = ["key", "google"]
+
+[[rules]]
+id = "slack-token"
+description = "Slack bot/app/user/refresh/legacy token"
+regex = '''xox[baprs]-[A-Za-z0-9-]{10,}'''
+keywords = ["xoxb-", "xoxa-", "xoxp-", "xoxr-", "xoxs-"]
+tags = ["token", "slack"]
+
+[[rules]]
+id = "telegram-bot-token"
+description = "Telegram bot token"
+regex = '''\b\d{6,15}:[A-Za-z0-9_\-]{35}\b'''
+keywords = [":"]
+tags = ["token", "telegram"]
+
+# ─── Allowlist (paths + patterns we know are safe) ──────────────────────────
+
+[allowlist]
+description = "Global allowlist for SentientAI"
+paths = [
+  '''(?i)frontend/node_modules/''',
+  '''.*\.lock$''',
+  '''.*package-lock\.json$''',
+  '''.*pnpm-lock\.yaml$''',
+  '''.*yarn\.lock$''',
+  '''.*\.min\.(js|css)$''',
+  '''(?i)docs/duck\.mp4$''',
+]
+
+# Common test/example placeholder strings used in fixtures and CI.
+regexes = [
+  '''test-not-real''',
+  '''test-secret-key-32-bytes-long-pad''',
+  '''sk-ant-EXAMPLE.*''',
+  '''AIzaSyEXAMPLE.*''',
+]

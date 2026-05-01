@@ -1,19 +1,27 @@
-FROM python:3.12-slim
-
-WORKDIR /app
-
-# Install system dependencies
+# syntax=docker/dockerfile:1.7
+FROM python:3.12-slim AS builder
+WORKDIR /build
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
+    build-essential libpq-dev && rm -rf /var/lib/apt/lists/*
+COPY backend/requirements.txt ./
+RUN pip install --no-cache-dir --user -r requirements.txt
 
-# Install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy application code
-COPY . .
-
+FROM python:3.12-slim AS runtime
+ARG APP_USER=app
+ARG APP_UID=10001
+RUN groupadd -g $APP_UID $APP_USER && useradd -m -u $APP_UID -g $APP_USER $APP_USER && \
+    apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 curl tini && rm -rf /var/lib/apt/lists/*
+ENV PATH="/home/$APP_USER/.local/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1
+WORKDIR /app
+COPY --from=builder --chown=$APP_USER:$APP_USER /root/.local /home/$APP_USER/.local
+COPY --chown=$APP_USER:$APP_USER backend/ ./
+USER $APP_USER
 EXPOSE 8000
-
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:8000/api/health || exit 1
+ENTRYPOINT ["tini", "--"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4", "--proxy-headers", "--forwarded-allow-ips", "*"]

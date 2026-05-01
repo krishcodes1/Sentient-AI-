@@ -1,14 +1,40 @@
-FROM node:20-alpine
+# syntax=docker/dockerfile:1.7
+# ── Stage 1: build the SPA bundle ─────────────────────────────────
+FROM node:20-alpine AS builder
+WORKDIR /build
 
-WORKDIR /app
+# Install deps from a clean lockfile (reproducible).
+COPY frontend/package*.json ./
+RUN npm ci --no-audit --no-fund
 
-# Install dependencies
-COPY package.json package-lock.json* ./
-RUN npm install
+# Copy the rest of the source and build (typecheck + lint + vite build,
+# per frontend/package.json's "build" script).
+COPY frontend/ ./
+RUN npm run build
 
-# Copy application code
-COPY . .
+# ── Stage 2: serve the static bundle with a hardened nginx ────────
+FROM nginx:1.27-alpine AS runtime
 
-EXPOSE 3000
+# nginx:1.27-alpine already ships with an unprivileged `nginx` user/group,
+# but we give it an explicit home so the temp-paths rewrite below works.
+RUN apk add --no-cache curl wget tini && \
+    # Make sure runtime-writable dirs exist and are owned by nginx so we
+    # can run as a non-root user.
+    mkdir -p /var/cache/nginx /var/run /tmp/nginx && \
+    chown -R nginx:nginx /var/cache/nginx /var/run /tmp/nginx /usr/share/nginx/html
 
-CMD ["npx", "vite", "--host", "0.0.0.0"]
+# Drop the default site and install our hardened config.
+RUN rm -f /etc/nginx/conf.d/default.conf
+COPY docker/nginx.conf /etc/nginx/nginx.conf
+
+# Static assets from the builder stage.
+COPY --from=builder --chown=nginx:nginx /build/dist /usr/share/nginx/html
+
+USER nginx
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -q -T 3 -O - http://127.0.0.1:8080/healthz || exit 1
+
+ENTRYPOINT ["tini", "--"]
+CMD ["nginx", "-g", "daemon off;"]

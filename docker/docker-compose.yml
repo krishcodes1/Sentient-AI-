@@ -1,114 +1,215 @@
+# SentientAI — production-grade compose stack.
+#
+# This is the PRODUCTION default. For local development with hot reload,
+# layer the dev overlay on top:
+#
+#     docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# All services join a single internal bridge network (sentientai-net).
+# Postgres, Redis, and OpenClaw are NOT published on the host — they are
+# only reachable from inside the network. The only host-published ports
+# are the backend (127.0.0.1:8000) and frontend (127.0.0.1:3000), and
+# both bind to localhost by default. Override BACKEND_BIND/FRONTEND_BIND
+# in `.env` (e.g. to `0.0.0.0`) only if you intend to expose them.
+#
+# ─── OpenClaw config volume — IMPORTANT ───────────────────────────
+# The backend writes the gateway config to $OPENCLAW_CONFIG_DIR (set to
+# `/openclaw-config` on the backend). The OpenClaw gateway reads its
+# config from $OPENCLAW_CONFIG_DIR (set to `/home/openclaw/.openclaw`
+# inside the openclaw container — see Dockerfile.openclaw). To make both
+# sides see the SAME `openclaw.json`, the named volume `openclaw_config`
+# is mounted to BOTH paths. This fixes the dev-grade mismatch where the
+# backend wrote into one volume and the gateway read from another.
+# ──────────────────────────────────────────────────────────────────
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
-  # ── PostgreSQL ──────────────────────────────────────────────────
-  db:
+  # ── PostgreSQL ─────────────────────────────────────────────────
+  postgres:
     image: postgres:16-alpine
-    restart: unless-stopped
+    # No `restart:` — operators manage stateful services explicitly.
     environment:
-      POSTGRES_USER: sentientai
-      POSTGRES_PASSWORD: sentientai
-      POSTGRES_DB: sentientai
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+    # Intentionally NOT publishing 5432 to the host. Override in
+    # docker-compose.dev.yml if you need a local psql connection.
     volumes:
       - pgdata:/var/lib/postgresql/data
+    networks:
+      - sentientai-net
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U sentientai"]
-      interval: 5s
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
+    logging: *default-logging
 
-  # ── Redis ───────────────────────────────────────────────────────
+  # ── Redis ──────────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
-    restart: unless-stopped
-    ports:
-      - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  # ── OpenClaw Gateway (core agent engine) ────────────────────────
-  openclaw:
-    image: node:24-bookworm-slim
-    restart: unless-stopped
-    working_dir: /home/node
-    environment:
-      HOME: /home/node
-      TERM: xterm-256color
-      NODE_ENV: production
-      npm_config_prefix: /home/node/.npm-global
-      PATH: /home/node/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-    volumes:
-      - openclaw_config:/home/node/.openclaw
-      - openclaw_npm:/home/node/.npm-global
-    ports:
-      - "18789:18789"
-      - "18790:18790"
-    init: true
+    # No `restart:` — see postgres.
     command:
-      - sh
-      - -c
-      - |
-        mkdir -p /home/node/.npm-global /home/node/.openclaw/workspace
-        npm install -g openclaw@latest 2>&1 || true
-        exec /home/node/.npm-global/bin/openclaw gateway --bind lan --port 18789 --allow-unconfigured
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+      - --appendonly
+      - "yes"
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+    # Intentionally NOT publishing 6379 to the host.
+    volumes:
+      - redisdata:/data
+    networks:
+      - sentientai-net
     healthcheck:
-      test:
-        [
-          "CMD",
-          "node",
-          "-e",
-          "fetch('http://127.0.0.1:18789/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
-        ]
-      interval: 30s
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 90s
+      start_period: 5s
+    logging: *default-logging
 
-  # ── Backend (FastAPI) ───────────────────────────────────────────
-  backend:
+  # ── OpenClaw gateway ───────────────────────────────────────────
+  openclaw:
     build:
-      context: ../backend
-      dockerfile: ../docker/Dockerfile.backend
+      context: ..
+      dockerfile: docker/Dockerfile.openclaw
+    image: sentientai/openclaw:latest
     restart: unless-stopped
-    ports:
-      - "8000:8000"
-    env_file:
-      - ../backend/.env
+    # Internal-only — proxied by the frontend nginx at /openclaw/ and
+    # talked to directly by the backend at http://openclaw:18789.
+    expose:
+      - "18789"
     environment:
-      DATABASE_URL: postgresql+asyncpg://sentientai:sentientai@db:5432/sentientai
-      REDIS_URL: redis://redis:6379/0
-      OPENCLAW_GATEWAY_URL: http://openclaw:18789
-      OPENCLAW_GATEWAY_BROWSER_URL: http://127.0.0.1:18789
-      OPENCLAW_CONFIG_DIR: /openclaw-config
+      NODE_ENV: production
+      OPENCLAW_CONFIG_DIR: /home/openclaw/.openclaw
+      OPENCLAW_PORT: "18789"
+    volumes:
+      # SHARED with backend — see "OpenClaw config volume" note above.
+      - openclaw_config:/home/openclaw/.openclaw
+    networks:
+      - sentientai-net
     depends_on:
-      db:
+      postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-    volumes:
-      - ../backend:/app
-      - openclaw_config:/openclaw-config
+      backend:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:18789/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging: *default-logging
 
-  # ── Frontend (Vite dev / Nginx prod) ────────────────────────────
+  # ── Backend (FastAPI) ──────────────────────────────────────────
+  backend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+    image: sentientai/backend:latest
+    restart: unless-stopped
+    # Default: localhost-only. Set BACKEND_BIND=0.0.0.0 in .env to expose.
+    ports:
+      - "${BACKEND_BIND:-127.0.0.1}:8000:8000"
+    environment:
+      ENVIRONMENT: production
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY is required}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      OPENCLAW_GATEWAY_URL: http://openclaw:18789
+      OPENCLAW_CONFIG_DIR: /openclaw-config
+      LLM_PROVIDER: ${LLM_PROVIDER:-anthropic}
+      LLM_MODEL: ${LLM_MODEL:-claude-haiku-4-5}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GROK_API_KEY: ${GROK_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+    volumes:
+      # SHARED with openclaw — see "OpenClaw config volume" note above.
+      - openclaw_config:/openclaw-config
+    networks:
+      - sentientai-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # Wraps the HEALTHCHECK already defined in the Dockerfile so compose
+    # has the same view; tightening interval here is fine.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging: *default-logging
+
+  # ── Frontend (nginx serving the SPA + reverse-proxy) ───────────
   frontend:
     build:
-      context: ../frontend
-      dockerfile: ../docker/Dockerfile.frontend
+      context: ..
+      dockerfile: docker/Dockerfile.frontend
+    image: sentientai/frontend:latest
     restart: unless-stopped
+    # Default: localhost-only. Set FRONTEND_BIND=0.0.0.0 in .env to expose.
     ports:
-      - "3000:3000"
-    environment:
-      VITE_API_TARGET: http://backend:8000
+      - "${FRONTEND_BIND:-127.0.0.1}:3000:8080"
+    networks:
+      - sentientai-net
     depends_on:
-      - backend
-    volumes:
-      - ../frontend:/app
-      - /app/node_modules
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "3", "-O", "-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging: *default-logging
+
+  # ── Public-facing reverse proxy (optional) ─────────────────────
+  # Uncomment when ready to put a real domain + TLS in front of the
+  # frontend. Caddy will handle ACME automatically; Traefik works too.
+  #
+  # proxy:
+  #   image: caddy:2-alpine
+  #   restart: unless-stopped
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     - ./Caddyfile:/etc/caddy/Caddyfile:ro
+  #     - caddy_data:/data
+  #     - caddy_config:/config
+  #   networks:
+  #     - sentientai-net
+  #   depends_on:
+  #     frontend:
+  #       condition: service_healthy
+  #   logging: *default-logging
+
+networks:
+  sentientai-net:
+    driver: bridge
 
 volumes:
   pgdata:
+  redisdata:
   openclaw_config:
-  openclaw_npm:
+  # caddy_data:
+  # caddy_config:

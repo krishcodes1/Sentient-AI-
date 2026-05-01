@@ -1,0 +1,33 @@
+# syntax=docker/dockerfile:1.7
+# ── Stage 1: vendor the OpenClaw npm package ──────────────────────
+# We pin to `openclaw@latest` here because the upstream package does
+# not yet publish a stable semver tag we can rely on. TODO: once the
+# OpenClaw team cuts a tagged release, replace `@latest` with that
+# exact version (e.g. `openclaw@1.2.3`) and rebuild — otherwise this
+# image's contents drift every time the layer cache is invalidated.
+FROM node:20-alpine AS builder
+WORKDIR /app
+RUN apk add --no-cache python3 make g++ git curl
+RUN npm install -g openclaw@latest && \
+    cp -r /usr/local/lib/node_modules/openclaw /app/openclaw
+
+# ── Stage 2: minimal runtime ──────────────────────────────────────
+FROM node:20-alpine AS runtime
+RUN apk add --no-cache curl tini && \
+    addgroup -g 10002 openclaw && adduser -D -u 10002 -G openclaw openclaw
+WORKDIR /home/openclaw/.openclaw
+COPY --from=builder --chown=openclaw:openclaw /app/openclaw /opt/openclaw
+ENV NODE_ENV=production \
+    PATH=/opt/openclaw/bin:/opt/openclaw/node_modules/.bin:$PATH \
+    OPENCLAW_CONFIG_DIR=/home/openclaw/.openclaw \
+    OPENCLAW_PORT=18789
+USER openclaw
+EXPOSE 18789
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:18789/healthz || exit 1
+ENTRYPOINT ["tini", "--"]
+# TODO: Verify the entry script path. The npm `bin` field in the
+# upstream package.json maps `openclaw -> bin/openclaw.js` for the
+# versions we tested; if a future version moves the entrypoint, this
+# CMD will need to be updated.
+CMD ["node", "/opt/openclaw/bin/openclaw.js", "--allow-unconfigured"]

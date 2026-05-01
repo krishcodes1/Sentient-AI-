@@ -1,5 +1,7 @@
 # SentientAI
 
+> **Production polish in progress** — see [docs/CHANGELOG.md](docs/CHANGELOG.md) for the latest changes, and [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) before deploying to a public host.
+
 **Secure AI Agent Platform — Powered by OpenClaw**
 
 A self-hosted AI assistant platform that wraps [OpenClaw](https://github.com/openclaw/openclaw) as its core agent engine, adding a security dashboard, multi-provider LLM support, and a management UI. Connect your AI to Telegram, Discord, Slack, WhatsApp, Signal, and more — with any AI provider you choose.
@@ -306,6 +308,21 @@ sentientai/
 - `DELETE /api/channels/:id` — Remove channel
 - `GET /api/channels/openclaw/status` — Gateway health check
 - `POST /api/channels/openclaw/restart` — Force config re-sync
+
+---
+
+## Production Deployment
+
+The Docker Compose stack above is suitable for local development and a senior-project demo. For a public-facing deployment, read these in order:
+
+- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — single-VM deploy, reverse proxy, backups, sizing, rollbacks
+- [docs/SECRETS.md](docs/SECRETS.md) — generating, rotating, and recovering from leaked secrets
+- [docs/SECURITY.md](docs/SECURITY.md) — threat model, defense layers, disclosure policy
+- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — common failure modes
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — request flows, trust boundaries, data model
+- [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) — workflow, conventions, how to add a provider/channel/connector
+- [docs/ROADMAP.md](docs/ROADMAP.md) — what's done, what's next, what's aspirational
+- [docs/CHANGELOG.md](docs/CHANGELOG.md) — release notes
 
 ---
 

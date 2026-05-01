@@ -1,0 +1,58 @@
+# SentientAI — development overlay.
+#
+# Layer this on top of the production compose:
+#
+#     docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# Adds bind mounts for hot reload, swaps the backend command for
+# uvicorn --reload, replaces the nginx-served frontend with the Vite
+# dev server, and publishes Postgres/Redis on localhost so you can
+# point a local psql / redis-cli at them.
+
+services:
+  postgres:
+    # Expose for local debugging only.
+    ports:
+      - "127.0.0.1:5432:5432"
+
+  redis:
+    ports:
+      - "127.0.0.1:6379:6379"
+
+  backend:
+    # In dev we don't need 4 workers and we DO need autoreload.
+    command:
+      - uvicorn
+      - main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+    environment:
+      ENVIRONMENT: development
+    volumes:
+      # Bind-mount the backend source for live reload. The shared
+      # openclaw_config volume from the base compose is preserved.
+      - ../backend:/app
+
+  frontend:
+    # Replace the nginx-served prod build with Vite dev server.
+    image: node:20-alpine
+    user: "0:0"  # vite needs to write into node_modules during dev
+    working_dir: /app
+    command: ["sh", "-c", "npm install && npx vite --host 0.0.0.0 --port 5173"]
+    environment:
+      VITE_API_TARGET: http://backend:8000
+    ports:
+      - "127.0.0.1:5173:5173"
+    volumes:
+      - ../frontend:/app
+      - /app/node_modules
+    healthcheck:
+      # Vite dev server doesn't expose /healthz; fall back to a TCP probe.
+      test: ["CMD", "wget", "-q", "-T", "3", "-O", "-", "http://127.0.0.1:5173/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

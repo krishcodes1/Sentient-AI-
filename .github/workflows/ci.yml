@@ -1,0 +1,222 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend-lint:
+    name: Backend Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install ruff
+        run: pip install ruff==0.6.9
+
+      - name: ruff check
+        run: ruff check backend
+
+      - name: ruff format --check
+        run: ruff format --check backend
+
+  backend-typecheck:
+    name: Backend Typecheck (mypy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+
+      - name: Install backend deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          if [ -f backend/requirements-dev.txt ]; then
+            pip install -r backend/requirements-dev.txt
+          else
+            pip install mypy
+          fi
+
+      - name: mypy
+        run: mypy backend
+
+  backend-test:
+    name: Backend Test (pytest)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: sentientai
+          POSTGRES_PASSWORD: sentientai
+          POSTGRES_DB: sentientai_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sentientai"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+
+      - name: Install backend deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          if [ -f backend/requirements-dev.txt ]; then
+            pip install -r backend/requirements-dev.txt
+          else
+            pip install pytest pytest-asyncio pytest-cov
+          fi
+
+      - name: Run pytest with coverage
+        env:
+          DATABASE_URL: postgresql+asyncpg://sentientai:sentientai@localhost:5432/sentientai_test
+          REDIS_URL: redis://localhost:6379/0
+          SECRET_KEY: test-secret-key-32-bytes-long-pad
+          LLM_PROVIDER: anthropic
+          LLM_MODEL: claude-haiku-4-5
+          ANTHROPIC_API_KEY: test-not-real
+          ENVIRONMENT: test
+        run: |
+          export ENCRYPTION_KEY="$(python -c 'import base64,os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())')"
+          pytest backend/tests --cov=backend --cov-report=xml --cov-report=term-missing
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  frontend-lint:
+    name: Frontend Lint (eslint)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+      - run: npm run lint
+
+  frontend-typecheck:
+    name: Frontend Typecheck (tsc)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+      - run: npm run typecheck
+
+  frontend-test:
+    name: Frontend Test (vitest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+      - run: npm run test
+
+  frontend-build:
+    name: Frontend Build (vite)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+      - run: npm run build
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist-${{ github.sha }}
+          path: frontend/dist
+          if-no-files-found: error
+          retention-days: 7

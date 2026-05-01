@@ -1,0 +1,8 @@
+# SentientAI CODEOWNERS
+# Last matching pattern wins. Anyone listed here is auto-requested for review.
+
+* @krishcodes1
+/backend/services/agent/ @krishcodes1
+/backend/core/security.py @krishcodes1
+/backend/core/network_security.py @krishcodes1
+/docker/ @krishcodes1

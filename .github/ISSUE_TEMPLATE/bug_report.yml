@@ -1,0 +1,107 @@
+name: Bug report
+description: Report a defect or unexpected behavior in SentientAI.
+title: "[Bug]: "
+labels:
+  - bug
+  - triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report. The more detail you
+        give us, the faster we can reproduce and fix the issue. **Please do
+        not include secrets, API keys, or personal data in this report.**
+
+  - type: input
+    id: summary
+    attributes:
+      label: Short summary
+      description: One sentence describing the bug.
+      placeholder: "Agent task fails with 500 when uploading files >10MB"
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Numbered steps that consistently reproduce the bug.
+      placeholder: |
+        1. Sign in as user X
+        2. Open the agent panel
+        3. Upload a 12MB PDF
+        4. Observe error
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What actually happened? Include exact error messages, stack traces, screenshots, or short log excerpts (redact secrets).
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected component
+      multiple: true
+      options:
+        - Backend (FastAPI)
+        - Frontend (React/Vite)
+        - Agent / OpenClaw
+        - Database / migrations
+        - Docker / deploy
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit SHA
+      description: Output of `git rev-parse --short HEAD`, or release tag.
+      placeholder: "c64070f or v1.2.3"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Environment
+      options:
+        - Local dev (docker-compose)
+        - Local dev (bare metal)
+        - Staging
+        - Production
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: OS, browser, Python/Node version, anything else that helps.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Pre-flight checks
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
+        - label: I have not included secrets, tokens, or personal data in this report.
+          required: true

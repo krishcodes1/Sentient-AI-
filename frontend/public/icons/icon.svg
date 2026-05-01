@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" width="192" height="192" role="img" aria-label="SentientAI">
+  <defs>
+    <linearGradient id="brand" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#22d3ee" />
+      <stop offset="100%" stop-color="#e879f9" />
+    </linearGradient>
+    <linearGradient id="brandSoft" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#22d3ee" stop-opacity="0.95" />
+      <stop offset="100%" stop-color="#e879f9" stop-opacity="0.95" />
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="192" height="192" rx="36" ry="36" fill="#0a0a0a" />
+  <rect x="6" y="6" width="180" height="180" rx="32" ry="32" fill="none" stroke="url(#brand)" stroke-opacity="0.18" stroke-width="1.5" />
+  <g transform="translate(96 96)">
+    <circle r="62" fill="none" stroke="url(#brand)" stroke-opacity="0.25" stroke-width="1.25" />
+    <path
+      d="M 28 -28
+         C 18 -42, -10 -44, -22 -32
+         C -34 -20, -32 -2, -16 6
+         L 14 18
+         C 28 24, 30 38, 18 46
+         C 6 54, -16 52, -28 40"
+      fill="none"
+      stroke="url(#brandSoft)"
+      stroke-width="14"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
+    <circle cx="-32" cy="-30" r="4" fill="#22d3ee" />
+    <circle cx="32" cy="30" r="4" fill="#e879f9" />
+  </g>
+  <text x="96" y="170" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" font-weight="600" letter-spacing="3" fill="#fafafa" fill-opacity="0.85">SAI</text>
+</svg>

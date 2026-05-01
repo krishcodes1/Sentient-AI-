@@ -5,8 +5,15 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "build": "npm run typecheck && npm run lint && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:ui": "vitest --ui",
+    "test:coverage": "vitest run --coverage",
+    "lint": "eslint src",
+    "typecheck": "tsc -b --noEmit",
+    "format": "prettier --write src"
   },
   "dependencies": {
     "react": "^19.0.0",
@@ -27,6 +34,19 @@
     "tailwindcss": "^4.0.0",
     "postcss": "^8.4.0",
     "autoprefixer": "^10.4.0",
-    "@tailwindcss/vite": "^4.0.0"
+    "@tailwindcss/vite": "^4.0.0",
+    "vitest": "^2.1.0",
+    "@vitest/ui": "^2.1.0",
+    "@testing-library/react": "^16.1.0",
+    "@testing-library/jest-dom": "^6.6.0",
+    "@testing-library/user-event": "^14.5.0",
+    "jsdom": "^25.0.0",
+    "msw": "^2.6.0",
+    "eslint": "^9.16.0",
+    "@eslint/js": "^9.16.0",
+    "typescript-eslint": "^8.18.0",
+    "eslint-plugin-react-hooks": "^5.1.0",
+    "eslint-plugin-react-refresh": "^0.4.16",
+    "eslint-plugin-jsx-a11y": "^6.10.0"
   }
 }
