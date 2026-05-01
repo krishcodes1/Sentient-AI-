@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -14,7 +15,10 @@ from core.database import get_db
 from core.security import decrypt_credentials
 from models.conversation import Conversation, Message, MessageRole
 from models.user import User
+from services.agent.runtime import LLMProviderError, PromptInjectionBlocked
 from services.auth import get_current_user
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
@@ -198,8 +202,15 @@ async def send_message(
             user_id=str(current_user.id),
         )
         assistant_content = agent_response.content
-    except Exception as exc:
-        assistant_content = f"I'm sorry, I encountered an error connecting to the AI provider. Please check your API key in Settings.\n\nError: {exc}"
+    except PromptInjectionBlocked as exc:
+        logger.warning("prompt_injection_blocked", reason=exc.reason, level=exc.level)
+        assistant_content = "Your message was blocked by safety checks. Please rephrase."
+    except LLMProviderError:
+        logger.exception("llm_provider_failed")
+        assistant_content = "I couldn't reach the AI provider. Check your API key in Settings."
+    except Exception:
+        logger.exception("send_message_failed")
+        assistant_content = "I encountered an internal error. Please try again."
 
     # 4. Persist the assistant message
     assistant_msg = Message(

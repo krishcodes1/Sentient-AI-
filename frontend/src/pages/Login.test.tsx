@@ -27,13 +27,13 @@ describe("Login page", () => {
     );
 
     await user.type(screen.getByPlaceholderText(/you@example\.com/i), "test@sentient.ai");
-    await user.type(screen.getByPlaceholderText(/min\. 8 characters/i), "supersecret");
+    await user.type(screen.getByPlaceholderText(/min\. 12 characters/i), "supersecret1");
     await user.click(screen.getByRole("button", { name: /sign in/i }));
 
     await waitFor(() => {
       expect(screen.getByTestId("gateway-route")).toBeInTheDocument();
     });
-    expect(localStorage.getItem("auth_token")).toBeTruthy();
+    expect(localStorage.getItem("sai.access_token")).toBeTruthy();
   });
 
   it("shows an error when login fails", async () => {
@@ -51,7 +51,7 @@ describe("Login page", () => {
 
     renderWithProviders(<Login />, { initialEntries: ["/login"] });
     await user.type(screen.getByPlaceholderText(/you@example\.com/i), "test@sentient.ai");
-    await user.type(screen.getByPlaceholderText(/min\. 8 characters/i), "wrongpass");
+    await user.type(screen.getByPlaceholderText(/min\. 12 characters/i), "wrongpassword1");
     await user.click(screen.getByRole("button", { name: /sign in/i }));
 
     await waitFor(() => {

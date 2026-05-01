@@ -200,5 +200,7 @@ export const handlers = [
     return HttpResponse.json([sampleAuditLog]);
   }),
   http.get("/api/audit/stats", () => HttpResponse.json(auditStats)),
-  http.get("/api/audit/verify-chain", () => HttpResponse.json({ valid: true })),
+  http.get("/api/audit/verify", () =>
+    HttpResponse.json({ valid: true, total: 1 }),
+  ),
 ];

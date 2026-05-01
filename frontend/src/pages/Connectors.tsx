@@ -25,14 +25,33 @@ import {
 } from "lucide-react";
 import clsx from "clsx";
 import { toast } from "@/hooks/useToast";
+import {
+  ApiError,
+  createConnector as apiCreateConnector,
+  deleteConnector as apiDeleteConnector,
+  getConnector as apiGetConnector,
+  getConnectors as apiGetConnectors,
+  updateConnector as apiUpdateConnector,
+  type CreateConnectorPayload,
+  type UpdateConnectorPayload,
+} from "@/services/api";
+import type { Connector } from "@/types";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Types — mirrored locally so this page does not depend on api.ts shape changes
-// the foundation agent is making in parallel.
+// UI ↔ foundation mapping
+//
+// The foundation services/api.ts is the source of truth. Its `Connector` type
+// uses these field names: { id, name, type, scopes, permission_tier,
+// status, ... }. Permission tiers are: "open" | "supervised" | "restricted" |
+// "locked". We keep a local `ConnectorRecord` shape that the UI renders from,
+// and normalize whatever the API returns (which may include legacy field
+// names like display_name/connector_type/granted_scopes from older deploys
+// or test mocks) into it.
 // ─────────────────────────────────────────────────────────────────────────────
 
 type ConnectorType = "canvas" | "google" | "robinhood";
-type PermissionTier = "auto_approve" | "confirm_on_write" | "always_confirm" | "disabled";
+// Foundation permission tiers — match services/api.ts:453.
+type PermissionTier = "open" | "supervised" | "restricted" | "locked";
 type ConnectorStatus = "connected" | "error" | "unauthorized" | "pending_oauth";
 
 interface ConnectorRecord {
@@ -48,10 +67,92 @@ interface ConnectorRecord {
   created_at: string;
 }
 
-interface CreateConnectorPayload {
-  connector_type: ConnectorType;
-  permission_tier: PermissionTier;
-  granted_scopes: string[];
+/**
+ * Normalize a connector returned from any of:
+ *  - the typed foundation API (`@/types` Connector)
+ *  - the live backend ConnectorOut response
+ *  - older / test-mock shapes that still use `display_name`, `connector_type`,
+ *    `granted_scopes`.
+ *
+ * The returned record always uses the local UI field names.
+ */
+function normalizeConnector(raw: unknown): ConnectorRecord | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+
+  const id = typeof r.id === "string" ? r.id : null;
+  if (!id) return null;
+
+  const rawType = (r.connector_type ?? r.type) as string | undefined;
+  const connector_type = (rawType as ConnectorType) ?? "canvas";
+
+  const display_name =
+    (typeof r.display_name === "string" && r.display_name) ||
+    (typeof r.name === "string" && r.name) ||
+    String(rawType ?? "Connector");
+
+  const scopesRaw = (r.granted_scopes ?? r.scopes) as unknown;
+  let granted_scopes: string[] = [];
+  if (Array.isArray(scopesRaw)) {
+    granted_scopes = scopesRaw
+      .map((s) => {
+        if (typeof s === "string") return s;
+        if (s && typeof s === "object" && "name" in s) {
+          const obj = s as { name?: unknown };
+          return typeof obj.name === "string" ? obj.name : "";
+        }
+        return "";
+      })
+      .filter((s): s is string => s.length > 0);
+  }
+
+  const tierRaw = r.permission_tier;
+  const permission_tier: PermissionTier =
+    tierRaw === "open" ||
+    tierRaw === "supervised" ||
+    tierRaw === "restricted" ||
+    tierRaw === "locked"
+      ? tierRaw
+      : "supervised";
+
+  const statusRaw = (r.status as string | undefined) ?? "connected";
+  const allowedStatus: ConnectorStatus[] = [
+    "connected",
+    "error",
+    "unauthorized",
+    "pending_oauth",
+  ];
+  const status: ConnectorStatus = (allowedStatus as string[]).includes(statusRaw)
+    ? (statusRaw as ConnectorStatus)
+    : statusRaw === "disconnected"
+      ? "unauthorized"
+      : "connected";
+
+  const is_enabled =
+    typeof r.is_enabled === "boolean"
+      ? r.is_enabled
+      : status === "connected";
+
+  return {
+    id,
+    connector_type,
+    display_name,
+    granted_scopes,
+    permission_tier,
+    status,
+    is_enabled,
+    last_used_at:
+      typeof r.last_used_at === "string"
+        ? r.last_used_at
+        : typeof r.last_used === "string"
+          ? r.last_used
+          : null,
+    last_error: typeof r.last_error === "string" ? r.last_error : null,
+    created_at:
+      typeof r.created_at === "string"
+        ? r.created_at
+        : new Date().toISOString(),
+  };
 }
 
 interface CreateConnectorResponse {
@@ -61,58 +162,92 @@ interface CreateConnectorResponse {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// API shims. These call /api/connectors directly.
-// TODO: switch to imports from "@/services/api" once the foundation agent ships
-//       getConnectors / createConnector / updateConnector / deleteConnector /
-//       getConnectorAuthUrl / getConnector.
+// API wrappers — thin adapters around the foundation services/api.ts. These
+// keep the page's call sites unchanged while routing every network call
+// through the foundation (which handles auth, refresh, X-Request-ID, abort).
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const token = localStorage.getItem("auth_token");
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    ...((init.headers as Record<string, string>) || {}),
-  };
-  if (token) headers["Authorization"] = `Bearer ${token}`;
-  const res = await fetch(`/api${path}`, { ...init, headers });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.detail || `Request failed: ${res.statusText}`);
-  }
-  if (res.status === 204) return undefined as T;
-  return res.json();
-}
-
 async function getConnectors(): Promise<ConnectorRecord[]> {
-  return apiFetch<ConnectorRecord[]>("/connectors");
+  const list = (await apiGetConnectors()) as unknown as unknown[];
+  if (!Array.isArray(list)) return [];
+  return list
+    .map((row) => normalizeConnector(row))
+    .filter((c): c is ConnectorRecord => c !== null);
 }
 
 async function getConnector(id: string): Promise<ConnectorRecord> {
-  return apiFetch<ConnectorRecord>(`/connectors/${id}`);
+  const row = (await apiGetConnector(id)) as unknown;
+  const norm = normalizeConnector(row);
+  if (!norm) {
+    throw new ApiError({
+      status: 500,
+      code: "shape_error",
+      message: "Connector response missing required fields.",
+    });
+  }
+  return norm;
 }
 
-async function createConnector(
-  payload: CreateConnectorPayload,
-): Promise<CreateConnectorResponse> {
-  return apiFetch<CreateConnectorResponse>("/connectors", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
+async function createConnector(payload: {
+  connector_type: ConnectorType;
+  permission_tier: PermissionTier;
+  granted_scopes: string[];
+}): Promise<CreateConnectorResponse> {
+  const apiPayload: CreateConnectorPayload = {
+    type: payload.connector_type,
+    name: payload.connector_type,
+    auth_method: "oauth2",
+    permission_tier: payload.permission_tier,
+    config: { scopes: payload.granted_scopes },
+    credentials: {},
+  };
+  // The foundation typed call returns Connector; we wrap it in the
+  // page's CreateConnectorResponse shape so the UI flow stays the same.
+  const created = (await apiCreateConnector(apiPayload)) as unknown as Record<
+    string,
+    unknown
+  >;
+  // If the backend returns an OAuth URL on the response (older shape), surface
+  // it. The new typed surface returns the connector directly, so treat that
+  // as immediate success.
+  const authUrl =
+    typeof created.auth_url === "string" ? (created.auth_url as string) : undefined;
+  const norm = normalizeConnector(created);
+  if (authUrl) {
+    return { auth_url: authUrl, connector: norm ?? undefined };
+  }
+  return { success: true, connector: norm ?? undefined };
 }
 
 async function updateConnector(
   id: string,
-  patch: Partial<Pick<ConnectorRecord, "permission_tier" | "granted_scopes" | "is_enabled">>,
+  patch: {
+    permission_tier?: PermissionTier;
+    granted_scopes?: string[];
+    is_enabled?: boolean;
+  },
 ): Promise<ConnectorRecord> {
-  return apiFetch<ConnectorRecord>(`/connectors/${id}`, {
-    method: "PATCH",
-    body: JSON.stringify(patch),
-  });
+  const apiPatch: UpdateConnectorPayload = {};
+  if (patch.permission_tier) apiPatch.permission_tier = patch.permission_tier;
+  if (patch.granted_scopes) apiPatch.scopes = patch.granted_scopes;
+  const row = (await apiUpdateConnector(id, apiPatch)) as unknown;
+  const norm = normalizeConnector(row);
+  if (!norm) {
+    throw new ApiError({
+      status: 500,
+      code: "shape_error",
+      message: "Connector update response missing required fields.",
+    });
+  }
+  return norm;
 }
 
 async function deleteConnector(id: string): Promise<void> {
-  return apiFetch<void>(`/connectors/${id}`, { method: "DELETE" });
+  await apiDeleteConnector(id);
 }
+
+// Keep TS aware Connector type is imported (used for inference docs).
+export type _ConnectorTypeExport = Connector;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Connector catalog — visual + plain-English scope explanations.
@@ -249,26 +384,28 @@ const CATALOG_BY_TYPE: Record<ConnectorType, ConnectorCatalog> = CONNECTOR_CATAL
 // Permission tier metadata
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Permission tier copy. Order matches services/api.ts:453, going from
+// most permissive (top) to most restrictive (bottom).
 const TIER_OPTIONS: { value: PermissionTier; label: string; helper: string }[] = [
   {
-    value: "auto_approve",
-    label: "Auto-approve (read-only operations)",
+    value: "open",
+    label: "Open (auto-approve read operations)",
     helper: "The agent runs read calls without confirming.",
   },
   {
-    value: "confirm_on_write",
-    label: "Confirm-on-write",
+    value: "supervised",
+    label: "Supervised (confirm-on-write)",
     helper:
       "Read auto-approved; create/update/delete require user confirmation in chat.",
   },
   {
-    value: "always_confirm",
-    label: "Always confirm (recommended for sensitive)",
+    value: "restricted",
+    label: "Restricted (always confirm)",
     helper: "Every operation pauses for confirmation in chat.",
   },
   {
-    value: "disabled",
-    label: "Disabled (manual only)",
+    value: "locked",
+    label: "Locked (manual only)",
     helper: "Connect but the agent can't use it.",
   },
 ];
@@ -284,10 +421,10 @@ const TIER_LABEL: Record<PermissionTier, string> = TIER_OPTIONS.reduce(
 // Order from most permissive to most restrictive — used to enforce
 // "downgrade only" on edit.
 const TIER_RANK: Record<PermissionTier, number> = {
-  auto_approve: 0,
-  confirm_on_write: 1,
-  always_confirm: 2,
-  disabled: 3,
+  open: 0,
+  supervised: 1,
+  restricted: 2,
+  locked: 3,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -471,7 +608,7 @@ function ConnectModal({
   onConnected: (record: ConnectorRecord) => void;
 }) {
   const [step, setStep] = useState<1 | 2 | 3>(1);
-  const [tier, setTier] = useState<PermissionTier>("confirm_on_write");
+  const [tier, setTier] = useState<PermissionTier>("supervised");
   const [submitting, setSubmitting] = useState(false);
   const [authUrl, setAuthUrl] = useState<string | null>(null);
   const [popupBlocked, setPopupBlocked] = useState(false);
@@ -483,7 +620,7 @@ function ConnectModal({
   useEffect(() => {
     if (open) {
       setStep(1);
-      setTier(catalog?.isReadOnly ? "auto_approve" : "confirm_on_write");
+      setTier(catalog?.isReadOnly ? "open" : "supervised");
       setSubmitting(false);
       setAuthUrl(null);
       setPopupBlocked(false);
@@ -807,7 +944,7 @@ function EditConnectorModal({
 }) {
   const catalog = connector ? CATALOG_BY_TYPE[connector.connector_type] : null;
   const [tier, setTier] = useState<PermissionTier>(
-    connector?.permission_tier ?? "confirm_on_write",
+    connector?.permission_tier ?? "supervised",
   );
   const [scopes, setScopes] = useState<Set<string>>(
     new Set(connector?.granted_scopes ?? []),

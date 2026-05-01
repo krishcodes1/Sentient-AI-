@@ -119,7 +119,8 @@ function SidebarBody({
               to={item.to}
               end={item.to === "/gateway" || item.to === "/overview"}
               onClick={onNavigate}
-              aria-current={undefined}
+              // NavLink applies aria-current="page" to the rendered <a>
+              // automatically when the route is active — let it do its job.
               className={({ isActive }) =>
                 clsx(
                   "group flex items-center gap-2.5 px-2.5 py-3 md:py-2 rounded-md text-[13px] font-medium transition-colors duration-150 border border-transparent min-h-[44px] md:min-h-0",
@@ -130,10 +131,7 @@ function SidebarBody({
               }
             >
               {({ isActive }) => (
-                <span
-                  className="flex flex-1 items-center gap-2.5"
-                  aria-current={isActive ? "page" : undefined}
-                >
+                <span className="flex flex-1 items-center gap-2.5">
                   <item.icon
                     className="w-[17px] h-[17px] shrink-0"
                     strokeWidth={isActive ? 2.25 : 1.65}

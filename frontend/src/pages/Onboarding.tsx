@@ -34,17 +34,95 @@ interface ProviderDef {
   name: string;
   models: string[];
   desc: string;
+  /** Plain-English hint shown next to the API-key input. */
+  keyHint?: string;
+  /** Returns null on success, or an error message on failed format check. */
+  validateKey?: (raw: string) => string | null;
+}
+
+function startsWithCheck(prefix: string, hint: string) {
+  return (raw: string): string | null => {
+    const v = raw.trim();
+    if (!v.startsWith(prefix)) {
+      return `Doesn't look like a valid key. ${hint}`;
+    }
+    return null;
+  };
 }
 
 const PROVIDERS: ProviderDef[] = [
-  { id: "openai", name: "OpenAI", models: ["gpt-4o", "gpt-4o-mini", "o1-preview", "o1"], desc: "GPT-4o and beyond" },
-  { id: "anthropic", name: "Anthropic", models: ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-haiku-4-5-20251001"], desc: "Claude models" },
-  { id: "gemini", name: "Google Gemini", models: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"], desc: "Gemini multimodal" },
-  { id: "grok", name: "xAI Grok", models: ["grok-3", "grok-3-mini"], desc: "Grok reasoning" },
-  { id: "deepseek", name: "Deepseek", models: ["deepseek-chat", "deepseek-reasoner"], desc: "Cost-effective AI" },
-  { id: "groq", name: "Groq", models: ["llama-3.3-70b-versatile", "mixtral-8x7b-32768"], desc: "Ultra-fast inference" },
-  { id: "mistral", name: "Mistral", models: ["mistral-large-latest", "mistral-small-latest"], desc: "European AI" },
-  { id: "ollama", name: "Ollama", models: ["llama3.2", "mistral", "codellama", "mixtral"], desc: "Local / self-hosted" },
+  {
+    id: "openai",
+    name: "OpenAI",
+    models: ["gpt-4o", "gpt-4o-mini", "o1-preview", "o1"],
+    desc: "GPT-4o and beyond",
+    keyHint: "OpenAI keys start with sk-.",
+    validateKey: startsWithCheck("sk-", "OpenAI keys start with sk-."),
+  },
+  {
+    id: "anthropic",
+    name: "Anthropic",
+    models: [
+      "claude-sonnet-4-20250514",
+      "claude-opus-4-20250514",
+      "claude-haiku-4-5-20251001",
+    ],
+    desc: "Claude models",
+    keyHint: "Anthropic keys start with sk-ant-.",
+    validateKey: startsWithCheck("sk-ant-", "Anthropic keys start with sk-ant-."),
+  },
+  {
+    id: "gemini",
+    name: "Google Gemini",
+    models: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
+    desc: "Gemini multimodal",
+    keyHint: "Gemini keys start with AIza and are around 39 characters long.",
+    validateKey: (raw: string): string | null => {
+      const v = raw.trim();
+      if (!v.startsWith("AIza")) {
+        return "Doesn't look like a valid key. Gemini keys start with AIza.";
+      }
+      if (v.length < 35) {
+        return "Doesn't look like a valid key. Gemini keys are around 39 characters long.";
+      }
+      return null;
+    },
+  },
+  {
+    id: "grok",
+    name: "xAI Grok",
+    models: ["grok-3", "grok-3-mini"],
+    desc: "Grok reasoning",
+    keyHint: "Paste the API key from your xAI console.",
+  },
+  {
+    id: "deepseek",
+    name: "Deepseek",
+    models: ["deepseek-chat", "deepseek-reasoner"],
+    desc: "Cost-effective AI",
+    keyHint: "Paste the API key from your Deepseek dashboard.",
+  },
+  {
+    id: "groq",
+    name: "Groq",
+    models: ["llama-3.3-70b-versatile", "mixtral-8x7b-32768"],
+    desc: "Ultra-fast inference",
+    keyHint: "Groq keys start with gsk_.",
+    validateKey: startsWithCheck("gsk_", "Groq keys start with gsk_."),
+  },
+  {
+    id: "mistral",
+    name: "Mistral",
+    models: ["mistral-large-latest", "mistral-small-latest"],
+    desc: "European AI",
+    keyHint: "Paste the API key from your Mistral console.",
+  },
+  {
+    id: "ollama",
+    name: "Ollama",
+    models: ["llama3.2", "mistral", "codellama", "mixtral"],
+    desc: "Local / self-hosted",
+  },
 ];
 
 interface Step {
@@ -75,6 +153,7 @@ export default function Onboarding() {
   const [provider, setProvider] = useState<ProviderId>("openai");
   const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState<string>("gpt-4o");
+  const [keyError, setKeyError] = useState<string | null>(null);
 
   const selectedProvider =
     PROVIDERS.find((p) => p.id === provider) ?? PROVIDERS[0];
@@ -98,16 +177,48 @@ export default function Onboarding() {
     },
   });
 
+  const skipMutation = useMutation({
+    mutationFn: () => updateSettings({ onboarding_completed: true }),
+    onSuccess: () => navigate("/gateway"),
+    onError: () => {
+      // If the backend rejects (e.g. older deploy without that field),
+      // still let the user out of the flow.
+      navigate("/gateway");
+    },
+  });
+
   const error = finishMutation.error
     ? getErrorMessage(finishMutation.error, "Failed to save settings")
     : null;
 
+  /** Validate the API key for the current provider; returns null when ok. */
+  const validateApiKey = (): string | null => {
+    if (provider === "ollama") return null;
+    const trimmed = apiKey.trim();
+    if (!trimmed) return "Please enter your API key.";
+    const validator = selectedProvider.validateKey;
+    if (validator) return validator(trimmed);
+    return null;
+  };
+
   const canNext = (): boolean => {
     if (step === 0) return name.trim().length >= 1;
     if (step === 1) return true;
-    if (step === 2) return provider === "ollama" || apiKey.trim().length > 0;
+    if (step === 2) return validateApiKey() === null;
     if (step === 3) return model.length > 0;
     return true;
+  };
+
+  const goNext = () => {
+    if (step === 2) {
+      const err = validateApiKey();
+      if (err) {
+        setKeyError(err);
+        return;
+      }
+      setKeyError(null);
+    }
+    setStep(step + 1);
   };
 
   return (
@@ -204,7 +315,7 @@ export default function Onboarding() {
                   Pick which LLM powers your assistant. You can change this later.
                 </p>
               </div>
-              <div role="radiogroup" aria-label="Provider" className="grid grid-cols-2 gap-3">
+              <div role="radiogroup" aria-label="Provider" className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {PROVIDERS.map((p) => {
                   const isSelected = provider === p.id;
                   return (
@@ -267,11 +378,34 @@ export default function Onboarding() {
                     id="onboarding-api-key"
                     type="password"
                     value={apiKey}
-                    onChange={(e) => setApiKey(e.target.value)}
+                    onChange={(e) => {
+                      setApiKey(e.target.value);
+                      if (keyError) setKeyError(null);
+                    }}
                     placeholder="sk-..."
                     autoFocus
+                    aria-invalid={Boolean(keyError) || undefined}
+                    aria-describedby={
+                      keyError ? "onboarding-api-key-error" : "onboarding-api-key-hint"
+                    }
                     className="w-full px-4 py-3 rounded-[12px] border border-[var(--border-primary)] bg-[var(--bg-input)] text-[15px] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-muted)] focus:border-[var(--accent-primary)] transition-colors font-mono"
                   />
+                  {keyError ? (
+                    <p
+                      id="onboarding-api-key-error"
+                      role="alert"
+                      className="mt-2 text-[12px] text-[var(--accent-danger)] leading-relaxed"
+                    >
+                      {keyError}
+                    </p>
+                  ) : selectedProvider.keyHint ? (
+                    <p
+                      id="onboarding-api-key-hint"
+                      className="mt-2 text-[12px] text-[var(--text-muted)] leading-relaxed"
+                    >
+                      {selectedProvider.keyHint}
+                    </p>
+                  ) : null}
                 </div>
               )}
               {provider === "ollama" && (
@@ -386,7 +520,7 @@ export default function Onboarding() {
             {step < 4 ? (
               <button
                 type="button"
-                onClick={() => setStep(step + 1)}
+                onClick={goNext}
                 disabled={!canNext()}
                 className="flex items-center gap-2 px-6 py-2.5 rounded-[12px] text-[15px] font-semibold text-white bg-[var(--accent-primary)] disabled:opacity-40 transition-all hover:brightness-110"
               >
@@ -404,6 +538,20 @@ export default function Onboarding() {
               </button>
             )}
           </div>
+
+          {/* Skip onboarding — quietly available for users who hit it by mistake. */}
+          {step < 4 && (
+            <div className="mt-6 text-center">
+              <button
+                type="button"
+                onClick={() => skipMutation.mutate()}
+                disabled={skipMutation.isPending}
+                className="text-[12px] text-[var(--text-muted)] hover:text-[var(--text-secondary)] underline underline-offset-2 transition-colors disabled:opacity-50"
+              >
+                {skipMutation.isPending ? "Skipping..." : "Skip onboarding"}
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </div>

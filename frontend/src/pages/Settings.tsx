@@ -10,7 +10,13 @@ import {
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ApiError, getMe, logout, updateSettings } from "@/services/api";
+import {
+  ApiError,
+  getMe,
+  logout,
+  resendVerification,
+  updateSettings,
+} from "@/services/api";
 import type { User } from "@/types";
 import { toast } from "@/hooks/useToast";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -104,6 +110,27 @@ export default function Settings() {
     onError: (err: unknown) => {
       toast.error({
         title: "Couldn't save LLM settings",
+        description: getErrorMessage(err, "Try again in a moment."),
+      });
+    },
+  });
+
+  const resendVerificationMutation = useMutation({
+    mutationFn: () => {
+      if (!user?.email) {
+        throw new Error("No email address on file.");
+      }
+      return resendVerification({ email: user.email });
+    },
+    onSuccess: () => {
+      toast.success({
+        title: "Verification email sent",
+        description: "Check your inbox for the link.",
+      });
+    },
+    onError: (err: unknown) => {
+      toast.error({
+        title: "Couldn't send verification email",
         description: getErrorMessage(err, "Try again in a moment."),
       });
     },
@@ -242,14 +269,13 @@ export default function Settings() {
           </p>
           <button
             type="button"
-            onClick={() =>
-              toast.info({
-                title: "Verification email sent",
-                description: "Check your inbox for the link.",
-              })
-            }
-            className="flex items-center gap-2 px-4 py-2.5 rounded-[12px] text-[14px] font-medium border border-[var(--border-primary)] text-[var(--text-primary)] hover:bg-[rgba(255,255,255,0.06)] transition-colors"
+            onClick={() => resendVerificationMutation.mutate()}
+            disabled={resendVerificationMutation.isPending}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-[12px] text-[14px] font-medium border border-[var(--border-primary)] text-[var(--text-primary)] hover:bg-[rgba(255,255,255,0.06)] transition-colors disabled:opacity-50"
           >
+            {resendVerificationMutation.isPending && (
+              <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
+            )}
             Resend verification email
           </button>
         </section>

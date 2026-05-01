@@ -37,6 +37,35 @@ const STORAGE_KEYS = {
 
 // ── Error classes ────────────────────────────────────────────────────────
 
+/**
+ * Coerce a FastAPI / Pydantic / generic JSON error body into a single
+ * human-readable string. FastAPI returns 422 as `{detail: [{loc, msg, type}, ...]}`
+ * — rendering that array directly produces "[object Object]" in the UI.
+ */
+function formatErrorMessage(body: unknown, fallback: string): string {
+  if (!body || typeof body !== "object") return fallback || "Request failed";
+  const b = body as { detail?: unknown; message?: unknown; error?: unknown };
+  const detail = b.detail;
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    const msgs = detail
+      .map((d) => {
+        if (typeof d === "string") return d;
+        if (d && typeof d === "object") {
+          const dd = d as { msg?: string; loc?: unknown[]; message?: string };
+          const field = Array.isArray(dd.loc) && dd.loc.length > 1 ? `${String(dd.loc[dd.loc.length - 1])}: ` : "";
+          return `${field}${dd.msg || dd.message || JSON.stringify(d)}`;
+        }
+        return String(d);
+      })
+      .filter(Boolean);
+    if (msgs.length) return msgs.join("; ");
+  }
+  if (typeof b.message === "string") return b.message;
+  if (typeof b.error === "string") return b.error;
+  return fallback || "Request failed";
+}
+
 export class ApiError extends Error {
   status: number;
   code?: string;
@@ -233,7 +262,7 @@ async function request<T>(path: string, init: RequestOptions = {}, _retried = fa
     throw new ApiError({
       status: 429,
       code: body?.code || "rate_limited",
-      message: body?.detail || body?.message || "Too many requests",
+      message: formatErrorMessage(body, "Too many requests"),
       requestId: res.headers.get("X-Request-ID") || undefined,
       body,
     });
@@ -242,7 +271,7 @@ async function request<T>(path: string, init: RequestOptions = {}, _retried = fa
   if (!res.ok) {
     const requestId = res.headers.get("X-Request-ID") || undefined;
     const body = await res.json().catch(() => ({}));
-    const message = body?.detail || body?.message || `Request failed: ${res.statusText}`;
+    const message = formatErrorMessage(body, res.statusText);
     if (res.status >= 500) {
       if (!init.silent) {
         toast.error({ title: "Server error", description: "Please try again." });
@@ -464,7 +493,9 @@ export interface UpdateConnectorPayload {
 }
 
 export async function getConnectors(): Promise<Connector[]> {
-  return request<Connector[]>("/connectors");
+  // Trailing slash matches backend route definition (`@router.get("/")`); without it
+  // FastAPI 307-redirects and the browser drops the Authorization header.
+  return request<Connector[]>("/connectors/");
 }
 
 export async function getConnector(id: string): Promise<Connector> {
@@ -472,7 +503,7 @@ export async function getConnector(id: string): Promise<Connector> {
 }
 
 export async function createConnector(payload: CreateConnectorPayload): Promise<Connector> {
-  return request<Connector>("/connectors", {
+  return request<Connector>("/connectors/", {
     method: "POST",
     body: JSON.stringify(payload),
   });
@@ -498,10 +529,11 @@ export async function getConnectorAuthUrl(connectorType: string): Promise<{ url:
 // ── Audit ────────────────────────────────────────────────────────────────
 
 export interface AuditLogFilters {
-  connector_id?: string;
+  /** Backend query parameter names — see backend/api/routes/audit.py:202-209 */
+  action?: string;
   status?: string;
-  start_date?: string;
-  end_date?: string;
+  from_ts?: string;
+  to_ts?: string;
   limit?: number;
   offset?: number;
 }
@@ -512,7 +544,10 @@ export async function getAuditLogs(filters: AuditLogFilters = {}): Promise<Audit
     if (v !== undefined && v !== null && v !== "") params.set(k, String(v));
   });
   const qs = params.toString();
-  return request<AuditLog[]>(`/audit${qs ? `?${qs}` : ""}`);
+  // Trailing slash is intentional — FastAPI 307-redirects /audit → /audit/, and
+  // browsers strip the Authorization header on the redirect (only secure for
+  // same-origin same-scheme; our /api is rewritten by the dev proxy).
+  return request<AuditLog[]>(`/audit/${qs ? `?${qs}` : ""}`);
 }
 
 export async function getAuditLog(id: string): Promise<AuditLog> {

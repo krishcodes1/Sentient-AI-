@@ -7,7 +7,7 @@ import { MOCK_TOKEN } from "@/test/handlers";
 
 describe("Chat page", () => {
   beforeEach(() => {
-    localStorage.setItem("auth_token", MOCK_TOKEN);
+    localStorage.setItem("sai.access_token", MOCK_TOKEN);
   });
 
   it("loads the conversation list", async () => {

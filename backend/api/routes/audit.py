@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.database import get_db
 from models.audit import AuditLog, AuditStatus
 from models.user import User
-from services.audit import AuditService, _GENESIS_HASH
+from services.audit import AuditService
 from services.auth import get_current_user
 
 router = APIRouter(prefix="/audit", tags=["audit"])
@@ -157,38 +157,19 @@ async def verify_audit_chain(
 ) -> AuditVerifyOut:
     """Walk the SHA-256 hash chain for the current user's audit logs.
 
-    Returns ``ok=False`` and the offending row's id at the first hash
-    mismatch encountered.
+    Delegates the chain walk to :meth:`AuditService.verify_integrity`,
+    which is the source of truth for the canonical hash format and
+    sequence-contiguity check. Returns ``ok=False`` and the offending
+    row's id at the first integrity mismatch encountered.
     """
-    user_id = current_user.id
-
-    stmt = (
-        select(AuditLog)
-        .where(AuditLog.user_id == user_id)
-        .order_by(AuditLog.timestamp.asc(), AuditLog.id.asc())
+    service = AuditService(db)
+    result = await service.verify_integrity(user_id=current_user.id)
+    return AuditVerifyOut(
+        ok=bool(result["ok"]),
+        total=int(result["total"]),
+        broken_at=result["broken_at"],
+        broken_field=result["broken_field"],
     )
-    result = await db.execute(stmt)
-    logs = list(result.scalars().all())
-
-    previous = _GENESIS_HASH
-    for log in logs:
-        expected = AuditService._compute_hash(
-            log.timestamp.isoformat(),
-            str(log.user_id),
-            log.action,
-            log.endpoint,
-            previous,
-        )
-        if expected != log.integrity_hash:
-            return AuditVerifyOut(
-                ok=False,
-                total=len(logs),
-                broken_at=log.id,
-                broken_field="integrity_hash",
-            )
-        previous = log.integrity_hash
-
-    return AuditVerifyOut(ok=True, total=len(logs))
 
 
 @router.get("/all", response_model=List[AuditLogOut])

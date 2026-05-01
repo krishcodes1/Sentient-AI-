@@ -45,6 +45,14 @@ def upgrade() -> None:
         unique=False,
     )
 
+    # Add ``escalated`` to the postgres ``audit_status`` enum (the baseline
+    # migration only created approved/blocked/pending). ALTER TYPE ... ADD
+    # VALUE cannot run inside a transaction on PG <12; it's idempotent on 12+.
+    bind = op.get_bind()
+    if bind.dialect.name == "postgresql":
+        with op.get_context().autocommit_block():
+            op.execute("ALTER TYPE audit_status ADD VALUE IF NOT EXISTS 'escalated'")
+
     # Backfill ``sequence`` per-user using a window function. Postgres-only
     # (SQLite tests skip backfill — window functions in UPDATE FROM are not
     # universally supported and the test database is created fresh anyway).

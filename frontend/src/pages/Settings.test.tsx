@@ -7,7 +7,7 @@ import { MOCK_TOKEN } from "@/test/handlers";
 
 describe("Settings page", () => {
   beforeEach(() => {
-    localStorage.setItem("auth_token", MOCK_TOKEN);
+    localStorage.setItem("sai.access_token", MOCK_TOKEN);
   });
 
   it("loads the user profile and prefills the form", async () => {

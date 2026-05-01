@@ -196,5 +196,18 @@ class Settings(BaseSettings):
                 "(incompatible with allow_credentials=True)."
             )
 
+        # ALLOWED_HOSTS must enumerate real hostnames so TrustedHostMiddleware
+        # actually filters Host headers — wildcard defeats the middleware.
+        if "*" in self.ALLOWED_HOSTS:
+            raise ConfigurationError(
+                "ALLOWED_HOSTS must not include '*' in production — list every "
+                "hostname your reverse proxy will forward (e.g. "
+                "[\"sentientai.example.com\"])."
+            )
+        if not self.ALLOWED_HOSTS:
+            raise ConfigurationError(
+                "ALLOWED_HOSTS must contain at least one hostname in production."
+            )
+
 
 settings = Settings()  # type: ignore[call-arg]

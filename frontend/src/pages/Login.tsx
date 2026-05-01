@@ -162,11 +162,11 @@ export default function Login() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 aria-invalid={Boolean(error) || undefined}
-                aria-describedby={error ? "login-error" : undefined}
+                aria-describedby={error ? "login-error" : "password-hint"}
                 autoComplete={isRegister ? "new-password" : "current-password"}
                 className="w-full px-4 py-3 rounded-[12px] border border-[var(--border-primary)] bg-[var(--bg-input)] text-[15px] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-muted)] focus:border-[var(--accent-primary)] transition-colors pr-12"
-                placeholder="Min. 8 characters"
-                minLength={8}
+                placeholder="Min. 12 characters"
+                minLength={12}
                 required
               />
               <button
@@ -179,6 +179,9 @@ export default function Login() {
                 {showPassword ? <EyeOff className="w-[18px] h-[18px]" aria-hidden /> : <Eye className="w-[18px] h-[18px]" aria-hidden />}
               </button>
             </div>
+            <p id="password-hint" className="mt-2 text-[12px] text-[var(--text-muted)] leading-relaxed">
+              At least 12 characters, including a letter and a digit.
+            </p>
           </div>
 
           <button

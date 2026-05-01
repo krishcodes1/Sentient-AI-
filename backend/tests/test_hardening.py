@@ -44,6 +44,7 @@ def _make_prod_settings(**overrides: Any) -> Settings:
         ENCRYPTION_KEY=_VALID_B64_32_BYTES,
         DATABASE_URL="postgresql+asyncpg://prod:strongpw@db.internal:5432/sentientai",
         CORS_ORIGINS=["https://app.example.com"],
+        ALLOWED_HOSTS=["app.example.com"],
         LLM_PROVIDER="ollama",  # ollama doesn't need an API key
     )
     base.update(overrides)
@@ -86,6 +87,18 @@ def test_config_validation_rejects_default_creds_in_db_url_in_prod() -> None:
 def test_config_validation_rejects_wildcard_cors_in_prod() -> None:
     s = _make_prod_settings(CORS_ORIGINS=["*"])
     with pytest.raises(ConfigurationError, match="CORS"):
+        s.validate_for_environment()
+
+
+def test_config_validation_rejects_wildcard_allowed_hosts_in_prod() -> None:
+    s = _make_prod_settings(ALLOWED_HOSTS=["*"])
+    with pytest.raises(ConfigurationError, match="ALLOWED_HOSTS"):
+        s.validate_for_environment()
+
+
+def test_config_validation_rejects_empty_allowed_hosts_in_prod() -> None:
+    s = _make_prod_settings(ALLOWED_HOSTS=[])
+    with pytest.raises(ConfigurationError, match="ALLOWED_HOSTS"):
         s.validate_for_environment()
 
 

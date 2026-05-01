@@ -56,7 +56,11 @@ class AuditLog(Base):
         nullable=False,
     )
     status: Mapped[AuditStatus] = mapped_column(
-        Enum(AuditStatus, name="audit_status"),
+        # values_callable forces SQLAlchemy to bind the lowercase ``.value``
+        # ("approved" / "blocked" / "pending" / "escalated") rather than the
+        # uppercase Python member name ("APPROVED" etc.) — required because
+        # the Postgres audit_status enum is lowercase.
+        Enum(AuditStatus, name="audit_status", values_callable=lambda e: [m.value for m in e]),
         nullable=False,
     )
     reasoning_chain: Mapped[Optional[Union[Dict, List]]] = mapped_column(

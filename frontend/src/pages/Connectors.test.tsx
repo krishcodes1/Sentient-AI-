@@ -72,7 +72,7 @@ function mockConnectorsList(initial: MockConnector[] = []) {
 
 describe("Connectors page", () => {
   beforeEach(() => {
-    localStorage.setItem("auth_token", "test-token-abc123");
+    localStorage.setItem("sai.access_token", "test-token-abc123");
   });
 
   it("renders the page with accessible tabs", async () => {
@@ -119,24 +119,31 @@ describe("Connectors page", () => {
   it("submits createConnector with the correct payload (Robinhood)", async () => {
     mockConnectorsList([]);
 
+    // The page now routes through @/services/api which uses the foundation
+    // CreateConnectorPayload shape: { type, name, auth_method, permission_tier,
+    // config: { scopes }, credentials }. We assert against that contract
+    // because the foundation api.ts is the source of truth.
     let received:
-      | { connector_type: string; permission_tier: string; granted_scopes: string[] }
+      | {
+          type: string;
+          name: string;
+          auth_method: string;
+          permission_tier: string;
+          config?: { scopes?: string[] };
+        }
       | null = null;
     server.use(
       http.post("/api/connectors", async ({ request }) => {
         received = (await request.json()) as typeof received;
         return HttpResponse.json({
-          success: true,
-          connector: {
-            id: "conn_robin",
-            connector_type: "robinhood",
-            display_name: "Robinhood",
-            granted_scopes: received!.granted_scopes,
-            permission_tier: received!.permission_tier,
-            status: "connected",
-            is_enabled: true,
-            created_at: new Date().toISOString(),
-          },
+          id: "conn_robin",
+          type: received!.type,
+          name: received!.name,
+          status: "connected",
+          is_enabled: true,
+          scopes: received!.config?.scopes ?? [],
+          permission_tier: received!.permission_tier,
+          created_at: new Date().toISOString(),
         });
       }),
     );
@@ -159,9 +166,9 @@ describe("Connectors page", () => {
     await waitFor(() => {
       expect(received).not.toBeNull();
     });
-    expect(received!.connector_type).toBe("robinhood");
-    expect(Array.isArray(received!.granted_scopes)).toBe(true);
-    expect(received!.granted_scopes.length).toBeGreaterThan(0);
+    expect(received!.type).toBe("robinhood");
+    expect(Array.isArray(received!.config?.scopes)).toBe(true);
+    expect((received!.config?.scopes ?? []).length).toBeGreaterThan(0);
   });
 
   it("disconnect confirmation flow calls deleteConnector", async () => {

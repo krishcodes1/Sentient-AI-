@@ -2,6 +2,7 @@ import type { ReactElement, ReactNode } from "react";
 import { render, type RenderOptions, type RenderResult } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
+import { ToastProvider } from "@/components/ui/Toaster";
 
 export function makeQueryClient(): QueryClient {
   return new QueryClient({
@@ -30,7 +31,9 @@ export function renderWithProviders(
   function Wrapper({ children }: { children: ReactNode }) {
     return (
       <QueryClientProvider client={queryClient}>
-        <MemoryRouter initialEntries={initialEntries}>{children}</MemoryRouter>
+        <MemoryRouter initialEntries={initialEntries}>
+          <ToastProvider>{children}</ToastProvider>
+        </MemoryRouter>
       </QueryClientProvider>
     );
   }

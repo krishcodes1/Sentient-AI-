@@ -6,7 +6,7 @@ import { MOCK_TOKEN } from "@/test/handlers";
 
 describe("AuditLogs page", () => {
   beforeEach(() => {
-    localStorage.setItem("auth_token", MOCK_TOKEN);
+    localStorage.setItem("sai.access_token", MOCK_TOKEN);
   });
 
   it("shows skeleton rows while loading", () => {
