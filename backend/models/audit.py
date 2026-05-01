@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
 
-from sqlalchemy import DateTime, Enum, Float, ForeignKey, String, Text
+from sqlalchemy import DateTime, Enum, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -13,9 +13,10 @@ from core.database import Base
 
 
 class AuditStatus(str, enum.Enum):
-    approved = "approved"
-    blocked = "blocked"
-    pending = "pending"
+    APPROVED = "approved"
+    BLOCKED = "blocked"
+    PENDING = "pending"
+    ESCALATED = "escalated"
 
 
 class AuditLog(Base):
@@ -81,6 +82,15 @@ class AuditLog(Base):
     integrity_hash: Mapped[str] = mapped_column(
         String(64),
         nullable=False,
+    )
+    previous_hash: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    sequence: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+        index=True,
     )
     request_id: Mapped[str] = mapped_column(
         String(36),

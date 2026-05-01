@@ -1,4 +1,5 @@
 from models.audit import AuditLog, AuditStatus
+from models.auth_session import AuthSession
 from models.channel import Channel, ChannelType
 from models.connector import (
     AuthMethod,
@@ -13,6 +14,7 @@ __all__ = [
     "AuditLog",
     "AuditStatus",
     "AuthMethod",
+    "AuthSession",
     "Channel",
     "ChannelType",
     "ConnectorConfig",

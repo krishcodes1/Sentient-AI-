@@ -4,7 +4,7 @@ import enum
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, LargeBinary, String
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, LargeBinary, String, Text
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -53,6 +53,23 @@ class Channel(Base):
     )
     config_meta: Mapped[dict | None] = mapped_column(
         JSON,
+        nullable=True,
+    )
+    # Per-channel runtime status, populated by the OpenClaw sync layer.
+    # See services.openclaw.config_manager.update_channel_status for the
+    # allowed enum values: connected | disconnected | error | connecting
+    # | unconfigured.
+    status: Mapped[str | None] = mapped_column(
+        String(20),
+        nullable=True,
+        server_default="unconfigured",
+    )
+    last_error: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+    last_status_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
         nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(

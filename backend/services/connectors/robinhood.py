@@ -101,12 +101,15 @@ class RobinhoodConnector(BaseConnector):
         self._api_key = api_key
         self._api_secret = api_secret
 
-        # Validate credentials by making a lightweight API call
+        # Validate credentials by making a lightweight API call.
+        # Use the same canonical-path-with-query flow as the real GET so the
+        # signature matches what httpx actually sends.
+        accounts_path = "/api/v1/crypto/trading/accounts/"
         try:
             client = self._get_client(base_url=self.BASE_URL)
             resp = await client.get(
-                "/api/v1/crypto/trading/accounts/",
-                headers=self._build_headers("GET", "/api/v1/crypto/trading/accounts/"),
+                accounts_path,
+                headers=self._build_headers("GET", accounts_path),
             )
             if resp.status_code == 401:
                 raise AuthenticationError("Invalid Robinhood API credentials.")
@@ -122,14 +125,29 @@ class RobinhoodConnector(BaseConnector):
         self._log.info("authenticated_with_api_key")
         return True
 
+    @staticmethod
+    def _canonical_query(params: dict[str, Any] | None) -> str:
+        """Encode *params* deterministically: sorted by key, urlencoded.
+
+        Returns ``""`` for empty/None. Centralized so the signing path and
+        the request path produce identical strings.
+        """
+        if not params:
+            return ""
+        return urlencode(sorted(params.items()))
+
     def _build_headers(
         self,
         method: str,
         path: str,
         body: str = "",
-        query: str = "",
     ) -> dict[str, str]:
         """Build signed request headers using HMAC-SHA256.
+
+        ``path`` MUST already include any query string (e.g.
+        ``/api/v1/x/?a=1&b=2``); the caller is responsible for building
+        the canonical path-with-query so the signature matches the URL
+        we hand to httpx.
 
         Robinhood Crypto API requires:
         - ``x-api-key``
@@ -160,7 +178,13 @@ class RobinhoodConnector(BaseConnector):
         *,
         user_confirmed: bool = False,
     ) -> Any:
-        """Every single API call requires USER_CONFIRM."""
+        """Every single API call requires USER_CONFIRM.
+
+        Build the canonical path (with sorted query) once, sign that
+        exact string, and hand it to httpx without a separate ``params=``
+        kwarg. If we passed ``params=`` httpx would re-append the query
+        and httpx's encoding may not match the form we signed -> 401.
+        """
         if not user_confirmed:
             raise UserConfirmationRequired(
                 action=f"GET {path}",
@@ -170,11 +194,55 @@ class RobinhoodConnector(BaseConnector):
                 ),
             )
 
-        query = urlencode(params) if params else ""
+        query = self._canonical_query(params)
         full_path = f"{path}?{query}" if query else path
         headers = self._build_headers("GET", full_path)
         client = self._get_client(base_url=self.BASE_URL)
-        resp = await client.get(path, headers=headers, params=params)
+        # NOTE: do NOT pass params= here -- the query is already baked into
+        # full_path and signed. Re-passing params= would let httpx append
+        # them again with potentially different encoding, breaking HMAC.
+        resp = await client.get(full_path, headers=headers)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def _api_post(
+        self,
+        path: str,
+        body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+        *,
+        user_confirmed: bool = False,
+    ) -> Any:
+        """Signed POST. Same canonical-path discipline as :meth:`_api_get`,
+        plus the JSON body bytes are part of the signature.
+
+        The connector currently has no callers that need POST -- all
+        action methods are read-only -- but this exists so future callers
+        don't reinvent (and re-break) the signing flow. Also makes the
+        signing logic testable without depending on a public mutation.
+        """
+        if not user_confirmed:
+            raise UserConfirmationRequired(
+                action=f"POST {path}",
+                details=(
+                    "Sending data to Robinhood. Please confirm this action."
+                ),
+            )
+
+        import json as _json
+
+        body_bytes = _json.dumps(body, separators=(",", ":")) if body else ""
+        query = self._canonical_query(params)
+        full_path = f"{path}?{query}" if query else path
+        headers = self._build_headers("POST", full_path, body=body_bytes)
+        client = self._get_client(base_url=self.BASE_URL)
+        # Send the *exact* body bytes we signed; if we passed json=body,
+        # httpx might re-serialize with different separators.
+        resp = await client.post(
+            full_path,
+            headers=headers,
+            content=body_bytes.encode("utf-8") if body_bytes else b"",
+        )
         resp.raise_for_status()
         return resp.json()
 

@@ -2,7 +2,9 @@
 Tamper-evident audit logging service for SentientAI.
 
 Uses the canonical AuditLog model from models.audit. Every agent action
-is recorded with a SHA-256 integrity hash chained to the previous entry.
+is recorded with a SHA-256 integrity hash chained to the previous entry
+via ``previous_hash`` plus a monotonic per-user ``sequence`` so that
+deletions and reorderings are detectable.
 """
 
 from __future__ import annotations
@@ -11,7 +13,7 @@ import hashlib
 import json
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from sqlalchemy import select, func
@@ -39,6 +41,11 @@ _SENSITIVE_VALUE_PATTERNS = re.compile(
     r"(?:AKIA[A-Z0-9]{16})|"                       # AWS access keys
     r"(?:\b[0-9]{13,19}\b)",                        # Credit card numbers
     re.ASCII,
+)
+
+# Keys whose values must be redacted before being fingerprinted in audit rows.
+_PARAM_HASH_REDACT_KEYS = frozenset(
+    {"api_key", "token", "password", "secret", "authorization"}
 )
 
 
@@ -70,11 +77,43 @@ def sanitize_request_data(data: Any) -> str:
         return json.dumps({"raw": str(sanitized)})
 
 
+def _redact_for_params_hash(data: Any) -> Any:
+    """Walk *data* and replace values for known-secret keys with ``<REDACTED>``.
+
+    Used by :func:`_compute_params_hash` so the audit row stores a fingerprint
+    of params without preserving raw secret values.
+    """
+    if isinstance(data, dict):
+        out: dict[str, Any] = {}
+        for key, value in data.items():
+            if str(key).lower() in _PARAM_HASH_REDACT_KEYS:
+                out[key] = "<REDACTED>"
+            else:
+                out[key] = _redact_for_params_hash(value)
+        return out
+    if isinstance(data, list):
+        return [_redact_for_params_hash(item) for item in data]
+    return data
+
+
+def _compute_params_hash(params: Optional[dict[str, Any]]) -> str:
+    """Return a stable SHA-256 fingerprint of *params* with secrets redacted.
+
+    Obvious secret keys (``api_key``, ``token``, ``password``, ``secret``,
+    ``authorization``) have their values replaced with ``<REDACTED>`` before
+    hashing so the audit row can include a deterministic fingerprint of the
+    request shape without storing raw secrets.
+    """
+    redacted = _redact_for_params_hash(params or {})
+    canonical = json.dumps(
+        redacted, sort_keys=True, separators=(",", ":"), default=str
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 # ------------------------------------------------------------------ #
 # Audit Service
 # ------------------------------------------------------------------ #
-
-_GENESIS_HASH = "0" * 64
 
 
 class AuditService:
@@ -83,30 +122,55 @@ class AuditService:
     def __init__(self, db: AsyncSession) -> None:
         self._db = db
 
-    async def _get_last_hash(self, user_id: str) -> str:
-        """Retrieve the most recent integrity hash for this user's log chain."""
+    # --------------------------------------------------------------
+    # Chain helpers
+    # --------------------------------------------------------------
+    async def _get_last_log(self, user_id: str) -> Optional[AuditLog]:
+        """Return the user's most recent log, ordered by ``sequence`` DESC."""
         stmt = (
-            select(AuditLog.integrity_hash)
+            select(AuditLog)
             .where(AuditLog.user_id == user_id)
-            .order_by(AuditLog.timestamp.desc())
+            .order_by(AuditLog.sequence.desc())
             .limit(1)
         )
         result = await self._db.execute(stmt)
-        row = result.scalar_one_or_none()
-        return row if row else _GENESIS_HASH
+        return result.scalar_one_or_none()
 
     @staticmethod
-    def _compute_hash(
-        timestamp: str,
+    def _canonical_fields_json(
+        *,
         user_id: str,
         action: str,
         endpoint: str,
-        previous_hash: str,
+        status: str,
+        timestamp_isoformat: str,
+        params_hash: str,
+        reasoning: Optional[str],
+        confidence_score: Optional[float],
     ) -> str:
-        """SHA-256 chain hash: H(timestamp + user_id + action + endpoint + prev_hash)."""
-        payload = f"{timestamp}{user_id}{action}{endpoint}{previous_hash}"
+        """Produce the deterministic canonical JSON used in the chain hash."""
+        payload = {
+            "user_id": str(user_id),
+            "action": action,
+            "endpoint": endpoint,
+            "status": status,
+            "timestamp_isoformat": timestamp_isoformat,
+            "params_hash": params_hash,
+            "reasoning": reasoning,
+            "confidence_score": confidence_score,
+        }
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+    @staticmethod
+    def _compute_chain_hash(canonical_fields_json: str, previous_hash: Optional[str]) -> str:
+        """SHA-256 chain hash: H(canonical_fields_json || (previous_hash or "GENESIS"))."""
+        prev = previous_hash if previous_hash is not None else "GENESIS"
+        payload = canonical_fields_json + prev
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
+    # --------------------------------------------------------------
+    # Public API
+    # --------------------------------------------------------------
     async def log_action(
         self,
         user_id: str,
@@ -115,21 +179,58 @@ class AuditService:
         endpoint: str,
         scope_used: str,
         status: AuditStatus,
-        reasoning_chain: Optional[str] = None,
+        reasoning_chain: Any = None,
         request_data: Any = None,
         response_summary: Optional[str] = None,
         detection_method: Optional[str] = None,
         confidence_score: Optional[float] = None,
         request_id: Optional[str] = None,
     ) -> AuditLog:
-        """Record an auditable action with integrity chaining."""
+        """Record an auditable action with chain integrity guarantees."""
+        # 1. Freeze the timestamp before hashing so the on-disk row matches the
+        #    value that was hashed.
         now = datetime.now(timezone.utc)
         timestamp_str = now.isoformat()
 
-        previous_hash = await self._get_last_hash(str(user_id))
-        integrity_hash = self._compute_hash(
-            timestamp_str, str(user_id), action, endpoint, previous_hash
+        # 2. Fetch the previous log for this user to chain into.
+        last_log = await self._get_last_log(str(user_id))
+        previous_hash = last_log.integrity_hash if last_log else None
+        sequence = (last_log.sequence + 1) if (last_log and last_log.sequence is not None) else 0
+
+        # 3. Compute params_hash (used as a tamper-evident fingerprint of the
+        #    request_data that doesn't store raw secrets).
+        params_hash = _compute_params_hash(
+            request_data if isinstance(request_data, dict) else None
         )
+
+        status_value = status.value if isinstance(status, AuditStatus) else str(status)
+
+        # 4. Build canonical fields JSON and the chain hash.
+        reasoning_repr: Optional[str]
+        if reasoning_chain is None:
+            reasoning_repr = None
+        elif isinstance(reasoning_chain, str):
+            reasoning_repr = reasoning_chain
+        else:
+            try:
+                reasoning_repr = json.dumps(
+                    reasoning_chain, sort_keys=True, separators=(",", ":"), default=str
+                )
+            except (TypeError, ValueError):
+                reasoning_repr = str(reasoning_chain)
+
+        canonical = self._canonical_fields_json(
+            user_id=str(user_id),
+            action=action,
+            endpoint=endpoint,
+            status=status_value,
+            timestamp_isoformat=timestamp_str,
+            params_hash=params_hash,
+            reasoning=reasoning_repr,
+            confidence_score=confidence_score,
+        )
+        integrity_hash = self._compute_chain_hash(canonical, previous_hash)
+
         sanitized_data = sanitize_request_data(request_data)
 
         record = AuditLog(
@@ -147,6 +248,8 @@ class AuditService:
             confidence_score=confidence_score,
             request_id=request_id or str(uuid.uuid4()),
             integrity_hash=integrity_hash,
+            previous_hash=previous_hash,
+            sequence=sequence,
         )
 
         self._db.add(record)
@@ -191,23 +294,36 @@ class AuditService:
 
     async def get_stats(self, user_id: str) -> dict[str, Any]:
         """Get aggregate audit statistics for dashboard."""
+        # Compare against ``.value`` strings — the column stores the lowercase
+        # string form of each enum member regardless of the Python attribute
+        # name (which is now uppercase per the model).
         base = select(func.count()).where(AuditLog.user_id == user_id)
 
         total = (await self._db.execute(base)).scalar() or 0
         approved = (
             await self._db.execute(
-                base.where(AuditLog.status == AuditStatus.APPROVED)
+                base.where(AuditLog.status == AuditStatus.APPROVED.value)
             )
         ).scalar() or 0
         blocked = (
             await self._db.execute(
-                base.where(AuditLog.status == AuditStatus.BLOCKED)
+                base.where(AuditLog.status == AuditStatus.BLOCKED.value)
             )
         ).scalar() or 0
         pending = (
             await self._db.execute(
-                base.where(AuditLog.status == AuditStatus.PENDING)
+                base.where(AuditLog.status == AuditStatus.PENDING.value)
             )
+        ).scalar() or 0
+        escalated = (
+            await self._db.execute(
+                base.where(AuditLog.status == AuditStatus.ESCALATED.value)
+            )
+        ).scalar() or 0
+
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+        last_24h_count = (
+            await self._db.execute(base.where(AuditLog.timestamp >= cutoff))
         ).scalar() or 0
 
         return {
@@ -215,15 +331,100 @@ class AuditService:
             "approved": approved,
             "blocked": blocked,
             "pending": pending,
+            "escalated": escalated,
+            "last_24h_count": last_24h_count,
         }
 
-    def verify_integrity(self, log_entry: AuditLog, previous_hash: str = _GENESIS_HASH) -> bool:
-        """Verify that a log entry's integrity hash is correct."""
-        expected = self._compute_hash(
-            log_entry.timestamp.isoformat(),
-            str(log_entry.user_id),
-            log_entry.action,
-            log_entry.endpoint,
-            previous_hash,
+    async def verify_integrity(self, user_id: str) -> dict[str, Any]:
+        """Walk the user's chain and verify hashes + sequence contiguity.
+
+        Returns a dict with::
+
+            {
+                "ok": bool,
+                "total": int,
+                "broken_at": <log id or None>,
+                "broken_field": "previous_hash" | "integrity_hash" | "sequence" | None,
+            }
+        """
+        stmt = (
+            select(AuditLog)
+            .where(AuditLog.user_id == user_id)
+            .order_by(AuditLog.sequence.asc())
         )
-        return expected == log_entry.integrity_hash
+        result = await self._db.execute(stmt)
+        logs = list(result.scalars().all())
+
+        prev_hash: Optional[str] = None
+        expected_sequence = 0
+        for log in logs:
+            # Sequence must be contiguous starting at 0.
+            if log.sequence != expected_sequence:
+                return {
+                    "ok": False,
+                    "total": len(logs),
+                    "broken_at": log.id,
+                    "broken_field": "sequence",
+                }
+
+            # previous_hash must match the prior row's integrity_hash.
+            if log.previous_hash != prev_hash:
+                return {
+                    "ok": False,
+                    "total": len(logs),
+                    "broken_at": log.id,
+                    "broken_field": "previous_hash",
+                }
+
+            # integrity_hash must equal the recomputed hash from the row's
+            # canonical fields plus the recorded previous_hash.
+            params_hash = _compute_params_hash(
+                log.request_data if isinstance(log.request_data, dict) else None
+            )
+            status_value = (
+                log.status.value if isinstance(log.status, AuditStatus) else str(log.status)
+            )
+            reasoning_repr: Optional[str]
+            if log.reasoning_chain is None:
+                reasoning_repr = None
+            elif isinstance(log.reasoning_chain, str):
+                reasoning_repr = log.reasoning_chain
+            else:
+                try:
+                    reasoning_repr = json.dumps(
+                        log.reasoning_chain,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        default=str,
+                    )
+                except (TypeError, ValueError):
+                    reasoning_repr = str(log.reasoning_chain)
+
+            canonical = self._canonical_fields_json(
+                user_id=str(log.user_id),
+                action=log.action,
+                endpoint=log.endpoint,
+                status=status_value,
+                timestamp_isoformat=log.timestamp.isoformat(),
+                params_hash=params_hash,
+                reasoning=reasoning_repr,
+                confidence_score=log.confidence_score,
+            )
+            expected_hash = self._compute_chain_hash(canonical, log.previous_hash)
+            if expected_hash != log.integrity_hash:
+                return {
+                    "ok": False,
+                    "total": len(logs),
+                    "broken_at": log.id,
+                    "broken_field": "integrity_hash",
+                }
+
+            prev_hash = log.integrity_hash
+            expected_sequence += 1
+
+        return {
+            "ok": True,
+            "total": len(logs),
+            "broken_at": None,
+            "broken_field": None,
+        }

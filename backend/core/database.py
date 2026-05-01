@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import (
@@ -14,10 +15,10 @@ from core.config import settings
 engine = create_async_engine(
     settings.DATABASE_URL,
     echo=(settings.ENVIRONMENT == "development"),
-    pool_size=20,
-    max_overflow=10,
+    pool_size=10,
+    max_overflow=20,
     pool_pre_ping=True,
-    pool_recycle=300,
+    pool_recycle=1800,
 )
 
 async_session = async_sessionmaker(
@@ -43,32 +44,19 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def init_db() -> None:
-    """Create tables and migrate missing columns for development convenience."""
-    from sqlalchemy import text
+    """Deprecated stub — schema is managed by Alembic.
 
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    Schema creation/migration used to live here as ``Base.metadata.create_all``
+    plus ad-hoc ``ALTER TABLE`` strings. That has been replaced by Alembic.
 
-        migrations = [
-            "ALTER TABLE users ADD COLUMN IF NOT EXISTS name VARCHAR(256)",
-            "ALTER TABLE users ADD COLUMN IF NOT EXISTS llm_provider VARCHAR(32) NOT NULL DEFAULT 'openai'",
-            "ALTER TABLE users ADD COLUMN IF NOT EXISTS llm_model VARCHAR(128) NOT NULL DEFAULT 'gpt-4o'",
-            "ALTER TABLE users ADD COLUMN IF NOT EXISTS llm_api_key_enc BYTEA",
-            "ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarding_completed BOOLEAN NOT NULL DEFAULT false",
-        ]
-
-        # Create the channel_type enum if it doesn't exist
-        try:
-            await conn.execute(text(
-                "DO $$ BEGIN "
-                "CREATE TYPE channel_type AS ENUM ('telegram','discord','slack','whatsapp','signal','webchat'); "
-                "EXCEPTION WHEN duplicate_object THEN null; END $$;"
-            ))
-        except Exception:
-            pass
-
-        for stmt in migrations:
-            try:
-                await conn.execute(text(stmt))
-            except Exception:
-                pass
+    Run ``alembic upgrade head`` (or ``./scripts/migrate.sh``) to apply
+    pending migrations. In development you can also set ``AUTO_MIGRATE=true``
+    to have ``main.py`` invoke the upgrade on startup.
+    """
+    if os.environ.get("ENVIRONMENT", settings.ENVIRONMENT) != "development":
+        raise RuntimeError(
+            "init_db is deprecated; use 'alembic upgrade head'"
+        )
+    raise RuntimeError(
+        "init_db is deprecated; use 'alembic upgrade head'"
+    )

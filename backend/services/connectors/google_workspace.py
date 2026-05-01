@@ -9,8 +9,10 @@ sanitized via PromptGuard before reaching the LLM layer.
 from __future__ import annotations
 
 import base64
+import email.utils
 import hashlib
 import secrets
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Any, Optional
 from urllib.parse import urlencode
@@ -83,12 +85,26 @@ class GoogleWorkspaceConnector(BaseConnector):
 
     # -- OAuth 2.0 + PKCE with incremental auth ------------------------------
 
-    def generate_auth_url(self, scopes: list[str] | None = None) -> tuple[str, str]:
+    def generate_auth_url(
+        self,
+        scopes: list[str] | None = None,
+        *,
+        first_auth: bool = True,
+    ) -> tuple[str, str]:
         """Build Google OAuth URL with PKCE.
 
         Supports *incremental authorization*: pass a subset of scopes to
         request only what is needed right now; further scopes can be
         requested later via a second auth round-trip.
+
+        ``first_auth`` controls the ``prompt`` parameter:
+        - On the very first OAuth round-trip, we send ``prompt=select_account``
+          so the user can pick which Google account to use.
+        - On re-auth / scope-extension rounds, we omit ``prompt`` entirely so
+          Google's default behavior (silent if a session exists, otherwise
+          full consent) takes over. Forcing ``prompt=consent`` every time
+          was a workaround for a stale-token issue and caused unnecessary
+          re-consent screens for already-authorized users.
 
         Returns ``(authorization_url, code_verifier)``.
         """
@@ -97,7 +113,7 @@ class GoogleWorkspaceConnector(BaseConnector):
         digest = hashlib.sha256(self._pkce_verifier.encode()).digest()
         code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
 
-        params = {
+        params: dict[str, str] = {
             "client_id": self._client_id,
             "response_type": "code",
             "redirect_uri": self._redirect_uri,
@@ -105,10 +121,11 @@ class GoogleWorkspaceConnector(BaseConnector):
             "code_challenge": code_challenge,
             "code_challenge_method": "S256",
             "access_type": "offline",
-            "prompt": "consent",
             "include_granted_scopes": "true",  # incremental auth
             "state": secrets.token_urlsafe(32),
         }
+        if first_auth:
+            params["prompt"] = "select_account"
         url = f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"
         return url, self._pkce_verifier
 
@@ -161,6 +178,16 @@ class GoogleWorkspaceConnector(BaseConnector):
         return True
 
     async def _refresh_access_token(self) -> None:
+        """Refresh the access token using the stored refresh token.
+
+        Google sometimes rotates the refresh token on refresh; if a new
+        one comes back we must persist it instead of clinging to the old
+        one (which may have been invalidated). The granted-scopes set is
+        also refreshed when present in the response.
+
+        TODO: wire the updated tokens back to ``ConnectorConfig.encrypted_credentials``
+        so they survive process restarts. Today they only live in memory.
+        """
         if not self._refresh_token:
             raise AuthenticationError("No refresh token available.")
         client = self._get_client()
@@ -176,6 +203,16 @@ class GoogleWorkspaceConnector(BaseConnector):
         resp.raise_for_status()
         data = resp.json()
         self._access_token = data["access_token"]
+        # Google may rotate the refresh token; replace ours when it does.
+        if rotated := data.get("refresh_token"):
+            self._refresh_token = rotated
+        # Some refresh responses include the granted scopes -- keep ours fresh.
+        if scope_str := data.get("scope"):
+            self._granted_scopes = set(scope_str.split())
+        self._log.info(
+            "access_token_refreshed",
+            rotated_refresh=bool(data.get("refresh_token")),
+        )
 
     # -- Internal HTTP helpers -----------------------------------------------
 
@@ -253,6 +290,43 @@ class GoogleWorkspaceConnector(BaseConnector):
             "label_ids": raw.get("labelIds", []),
         }
 
+    @staticmethod
+    def _build_raw_message(
+        *,
+        to: str,
+        subject: str,
+        body: str,
+        sender: Optional[str] = None,
+        cc: Optional[str] = None,
+        bcc: Optional[str] = None,
+        html_body: Optional[str] = None,
+    ) -> str:
+        """Build an RFC 5322 message and return it as Gmail-compatible
+        urlsafe base64 (no padding).
+
+        Gmail accepts the unpadded urlsafe-b64 form of the encoded MIME
+        message both at ``drafts.create`` and ``messages.send``.
+        """
+        if html_body:
+            mime: Any = MIMEMultipart("alternative")
+            mime.attach(MIMEText(body, "plain", "utf-8"))
+            mime.attach(MIMEText(html_body, "html", "utf-8"))
+        else:
+            mime = MIMEText(body, "plain", "utf-8")
+
+        mime["To"] = to
+        mime["Subject"] = subject
+        if sender:
+            mime["From"] = sender
+        if cc:
+            mime["Cc"] = cc
+        if bcc:
+            mime["Bcc"] = bcc
+        mime["Date"] = email.utils.formatdate(localtime=True)
+        mime["Message-ID"] = email.utils.make_msgid(domain="sentient.local")
+
+        return base64.urlsafe_b64encode(mime.as_bytes()).rstrip(b"=").decode()
+
     async def send_email(
         self,
         to: str,
@@ -260,49 +334,84 @@ class GoogleWorkspaceConnector(BaseConnector):
         body: str,
         *,
         user_confirmed: bool = False,
+        draft_id: Optional[str] = None,
+        sender: Optional[str] = None,
+        cc: Optional[str] = None,
+        bcc: Optional[str] = None,
+        html_body: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Create a draft and, if confirmed, send it.
+        """Create a draft, or send mail.
 
-        **Requires USER_CONFIRM** -- a draft is always created first so
-        the user can review before sending.
+        **Requires USER_CONFIRM** -- if ``user_confirmed`` is False we
+        only create a draft and return its review URL so the human can
+        eyeball it first. We never send during the unconfirmed path.
+
+        Three flows:
+
+        1. ``user_confirmed=False`` -> create draft, raise
+           :class:`UserConfirmationRequired` with the draft id and a Gmail
+           review URL. NO ``messages.send`` call.
+        2. ``user_confirmed=True`` and ``draft_id`` is set -> send the
+           previously-reviewed draft via ``drafts.send``. NO
+           ``drafts.create`` call, NO ``messages.send`` fallback.
+        3. ``user_confirmed=True`` and ``draft_id`` is None -> send
+           directly via ``messages.send``. NO draft is created.
         """
-        # Always create draft first
-        mime = MIMEText(body)
-        mime["to"] = to
-        mime["subject"] = subject
-        raw_msg = base64.urlsafe_b64encode(mime.as_bytes()).decode()
+        # Path 2: send a previously-reviewed draft.
+        if user_confirmed and draft_id:
+            send_resp = await self._gapi_post(
+                "https://gmail.googleapis.com/gmail/v1/users/me/drafts/send",
+                json_body={"id": draft_id},
+            )
+            return {
+                "status": "sent",
+                "message_id": send_resp.get("id"),
+                "thread_id": send_resp.get("threadId"),
+                "draft_id": draft_id,
+            }
 
+        raw_msg = self._build_raw_message(
+            to=to,
+            subject=subject,
+            body=body,
+            sender=sender,
+            cc=cc,
+            bcc=bcc,
+            html_body=html_body,
+        )
+
+        # Path 3: confirmed direct send -- DO NOT create a draft first.
+        if user_confirmed:
+            send_resp = await self._gapi_post(
+                "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+                json_body={"raw": raw_msg},
+            )
+            return {
+                "status": "sent",
+                "message_id": send_resp.get("id"),
+                "thread_id": send_resp.get("threadId"),
+            }
+
+        # Path 1: unconfirmed -- create draft only and prompt for review.
         draft_resp = await self._gapi_post(
             "https://gmail.googleapis.com/gmail/v1/users/me/drafts",
             json_body={"message": {"raw": raw_msg}},
         )
-        draft_id = draft_resp.get("id")
-
-        if not user_confirmed:
-            raise UserConfirmationRequired(
-                action="send_email",
-                details=(
-                    f"Draft created (id={draft_id}). "
-                    f"Send email to '{to}' with subject '{subject}'? "
-                    "Please confirm to proceed."
-                ),
-            )
-
-        # Send the draft
-        send_resp = await self._gapi_post(
-            f"https://gmail.googleapis.com/gmail/v1/users/me/drafts/{draft_id}",
-            json_body={},
+        new_draft_id = draft_resp.get("id")
+        review_url = (
+            f"https://mail.google.com/mail/u/0/#drafts/{new_draft_id}"
+            if new_draft_id
+            else "https://mail.google.com/mail/u/0/#drafts"
         )
-        # Actually the send endpoint is different -- use messages.send
-        send_resp = await self._gapi_post(
-            "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
-            json_body={"raw": raw_msg},
+        raise UserConfirmationRequired(
+            action="send_email",
+            details=(
+                f"Draft created (id={new_draft_id}). "
+                f"Review at {review_url} then re-invoke send_email with "
+                f"user_confirmed=True and draft_id='{new_draft_id}' to send. "
+                f"To '{to}' with subject '{subject}'."
+            ),
         )
-        return {
-            "status": "sent",
-            "message_id": send_resp.get("id"),
-            "thread_id": send_resp.get("threadId"),
-        }
 
     async def search_emails(self, query: str) -> list[dict[str, Any]]:
         """Search Gmail using Gmail search syntax."""
