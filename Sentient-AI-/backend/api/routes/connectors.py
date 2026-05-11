@@ -1,9 +1,9 @@
 from __future__ import annotations
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database import get_db
 from core.security import decrypt_credentials, encrypt_credentials
+from models.audit import AuditLog
 from models.connector import (
     AuthMethod,
     ConnectorConfig,
@@ -96,6 +97,84 @@ async def list_connectors(
         select(ConnectorConfig).where(ConnectorConfig.user_id == user_id)
     )
     return list(result.scalars().all())
+
+
+HealthStatus = Literal["healthy", "degraded", "unhealthy"]
+_DEGRADED_AFTER = timedelta(hours=24)
+
+
+class ConnectorHealthEntry(BaseModel):
+    id: uuid.UUID
+    name: str
+    type: ConnectorType
+    status: HealthStatus
+    uptime: float
+    last_check: str
+
+
+@router.get("/health", response_model=list[ConnectorHealthEntry])
+async def get_connector_health(
+    user_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> list[ConnectorHealthEntry]:
+    """Derive a per-connector health summary for the user.
+
+    Status rules (no third-party network calls; this is platform-level
+    health, not the remote service's health):
+    - ``unhealthy``: connector is disabled (``is_active = False``)
+    - ``degraded``: enabled but no audit-log activity in the last 24h
+    - ``healthy``:  enabled and used in the last 24h
+    """
+    conn_result = await db.execute(
+        select(ConnectorConfig).where(ConnectorConfig.user_id == user_id)
+    )
+    connectors = list(conn_result.scalars().all())
+
+    if not connectors:
+        return []
+
+    names = [c.display_name for c in connectors]
+    audit_result = await db.execute(
+        select(AuditLog)
+        .where(AuditLog.user_id == user_id)
+        .where(AuditLog.connector_name.in_(names))
+        .order_by(AuditLog.timestamp.desc())
+    )
+    audit_rows = list(audit_result.scalars().all())
+
+    last_seen_by_name: Dict[str, datetime] = {}
+    for row in audit_rows:
+        if row.connector_name not in last_seen_by_name:
+            last_seen_by_name[row.connector_name] = row.timestamp
+
+    now = datetime.now(timezone.utc)
+    entries: list[ConnectorHealthEntry] = []
+    for c in connectors:
+        last_seen = last_seen_by_name.get(c.display_name)
+
+        if not c.is_active:
+            status_value: HealthStatus = "unhealthy"
+            uptime = 0.0
+        elif last_seen is None or (now - last_seen) > _DEGRADED_AFTER:
+            status_value = "degraded"
+            uptime = 95.0
+        else:
+            status_value = "healthy"
+            uptime = 100.0
+
+        last_check = last_seen.isoformat() if last_seen else "Never"
+
+        entries.append(
+            ConnectorHealthEntry(
+                id=c.id,
+                name=c.display_name,
+                type=c.connector_type,
+                status=status_value,
+                uptime=uptime,
+                last_check=last_check,
+            )
+        )
+    return entries
 
 
 @router.get("/{connector_id}", response_model=ConnectorResponse)
