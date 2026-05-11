@@ -11,6 +11,8 @@ import type {
   AuditStats,
   DashboardStats,
   ScanResult,
+  AuditLogFilters,
+  AuditIntegrityCheck,
 } from "@/types";
 
 const API_BASE = "/api";
@@ -159,25 +161,20 @@ export async function testConnector(id: string): Promise<ScanResult> {
 }
 
 // Audit Logs
-export async function getAuditLogs(params?: {
-  connector_id?: string;
-  status?: string;
-  start_date?: string;
-  end_date?: string;
-  search?: string;
-  limit?: number;
-  offset?: number;
-}): Promise<AuditLog[]> {
-  const searchParams = new URLSearchParams();
-  if (params) {
-    Object.entries(params).forEach(([key, value]) => {
-      if (value !== undefined && value !== "") {
-        searchParams.set(key, String(value));
-      }
-    });
-  }
-  const query = searchParams.toString();
-  return request<AuditLog[]>(`/audit${query ? `?${query}` : ""}`);
+export async function getAuditLogs(
+  userId: string,
+  filters: AuditLogFilters = {}
+): Promise<AuditLog[]> {
+  const params = new URLSearchParams({ user_id: userId });
+  if (filters.connector_name) params.set("connector_name", filters.connector_name);
+  if (filters.status) params.set("status", filters.status);
+  if (filters.limit != null) params.set("limit", String(filters.limit));
+  if (filters.offset != null) params.set("offset", String(filters.offset));
+  return request<AuditLog[]>(`/audit/?${params.toString()}`);
+}
+
+export async function verifyAuditLog(id: string): Promise<AuditIntegrityCheck> {
+  return request<AuditIntegrityCheck>(`/audit/${id}/verify`);
 }
 
 export async function getAuditStats(): Promise<AuditStats> {
