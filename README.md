@@ -1,5 +1,7 @@
 # SentientAI
 
+[![CI](https://github.com/krishcodes1/Sentient-AI-/actions/workflows/ci.yml/badge.svg)](https://github.com/krishcodes1/Sentient-AI-/actions/workflows/ci.yml)
+
 **Secure AI Agent Platform — Powered by OpenClaw**
 
 A self-hosted AI assistant platform that wraps [OpenClaw](https://github.com/openclaw/openclaw) as its core agent engine, adding a security dashboard, multi-provider LLM support, and a management UI. Connect your AI to Telegram, Discord, Slack, WhatsApp, Signal, and more — with any AI provider you choose.
