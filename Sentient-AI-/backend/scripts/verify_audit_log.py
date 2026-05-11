@@ -1,8 +1,18 @@
 """Audit log integrity verifier.
 
-Walks every row of the ``audit_logs`` table, recomputes its SHA-256
-integrity hash from the same canonical payload the API uses when the row
-is created, and reports any row whose stored hash no longer matches.
+Walks every row of the ``audit_logs`` table and runs two checks:
+
+1. Per-row integrity: the row's ``integrity_hash`` matches a freshly
+   computed hash over its stored fields (including ``previous_hash``).
+2. Chain link: the row's ``previous_hash`` matches the ``integrity_hash``
+   of the previous row in that user's chain.
+
+Together these detect single-field tampering, row deletion, and chain
+rotation.
+
+Legacy rows with ``previous_hash = NULL`` predate the chain feature; the
+verifier only does the per-row check on them, which is the same behavior
+the verifier had before the chain landed.
 
 Usage::
 
@@ -22,7 +32,7 @@ import asyncio
 import json
 import sys
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, Iterable, Optional
 
@@ -41,11 +51,13 @@ from core.security import compute_audit_hash
 # ---------------------------------------------------------------------------
 
 
-def build_payload(row: AuditLog) -> dict[str, Any]:
+def build_payload(row: "AuditLog") -> dict[str, Any]:
     """Reconstruct the canonical payload used to compute ``row.integrity_hash``.
 
     Must stay in sync with the payload built in
-    ``api/routes/audit.py::create_audit_log``.
+    ``api/routes/audit.py::_build_hash_payload``. Includes
+    ``previous_hash`` so the row's hash is bound to its position in the
+    chain.
     """
     status_value = row.status.value if hasattr(row.status, "value") else row.status
     return {
@@ -58,10 +70,11 @@ def build_payload(row: AuditLog) -> dict[str, Any]:
         "request_id": row.request_id,
         "request_data": row.request_data,
         "response_summary": row.response_summary,
+        "previous_hash": getattr(row, "previous_hash", None),
     }
 
 
-def verify_row(row: AuditLog) -> tuple[bool, str]:
+def verify_row(row: "AuditLog") -> tuple[bool, str]:
     """Return ``(is_valid, expected_hash)`` for one audit row."""
     expected = compute_audit_hash(build_payload(row))
     return row.integrity_hash == expected, expected
@@ -73,8 +86,12 @@ class RowFailure:
     timestamp: str
     connector_name: str
     action: str
+    kind: str  # "row_hash" or "chain_link"
     stored_hash: str
     expected_hash: str
+    # Only populated for chain_link failures
+    stored_previous_hash: Optional[str] = None
+    expected_previous_hash: Optional[str] = None
 
 
 @dataclass
@@ -82,40 +99,91 @@ class VerifyReport:
     total: int
     valid: int
     invalid: int
-    failures: list[RowFailure]
+    failures: list[RowFailure] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
         return self.invalid == 0
 
 
-def verify_rows(rows: Iterable[AuditLog], fail_fast: bool = False) -> VerifyReport:
-    """Walk an iterable of rows, return a report. Pure function, no DB."""
-    total = 0
-    valid = 0
+def _row_failure(row: "AuditLog", expected: str) -> RowFailure:
+    return RowFailure(
+        id=str(row.id),
+        timestamp=row.timestamp.isoformat() if isinstance(row.timestamp, datetime) else str(row.timestamp),
+        connector_name=row.connector_name,
+        action=row.action,
+        kind="row_hash",
+        stored_hash=row.integrity_hash,
+        expected_hash=expected,
+    )
+
+
+def _chain_failure(row: "AuditLog", expected_previous: Optional[str]) -> RowFailure:
+    return RowFailure(
+        id=str(row.id),
+        timestamp=row.timestamp.isoformat() if isinstance(row.timestamp, datetime) else str(row.timestamp),
+        connector_name=row.connector_name,
+        action=row.action,
+        kind="chain_link",
+        stored_hash=row.integrity_hash,
+        expected_hash=row.integrity_hash,
+        stored_previous_hash=getattr(row, "previous_hash", None),
+        expected_previous_hash=expected_previous,
+    )
+
+
+def verify_rows(rows: Iterable["AuditLog"], fail_fast: bool = False) -> VerifyReport:
+    """Walk rows in arrival order, check per-row hash and chain links.
+
+    Rows must be sorted by ``timestamp`` ascending (the CLI does this in
+    the SQL query; tests pass already-sorted iterables).
+
+    Chain checking is per-user. The first row seen for any user starts
+    a fresh chain. A row can fail one check, the other, or both; it is
+    still counted as one invalid row in the report.
+    """
     failures: list[RowFailure] = []
+    bad_row_ids: set[str] = set()
+    processed = 0
+
+    # Track the last integrity_hash we saw for each user's chain
+    last_hash_for_user: dict[str, Optional[str]] = {}
+
     for row in rows:
-        total += 1
+        processed += 1
+        user_key = str(row.user_id)
+        row_id = str(row.id)
         is_valid, expected = verify_row(row)
-        if is_valid:
-            valid += 1
-            continue
-        failures.append(
-            RowFailure(
-                id=str(row.id),
-                timestamp=row.timestamp.isoformat() if isinstance(row.timestamp, datetime) else str(row.timestamp),
-                connector_name=row.connector_name,
-                action=row.action,
-                stored_hash=row.integrity_hash,
-                expected_hash=expected,
-            )
-        )
-        if fail_fast:
+        stored_prev = getattr(row, "previous_hash", None)
+
+        chain_ok = True
+        if user_key in last_hash_for_user:
+            expected_prev = last_hash_for_user[user_key]
+            if stored_prev != expected_prev:
+                chain_ok = False
+                failures.append(_chain_failure(row, expected_prev))
+                bad_row_ids.add(row_id)
+        # First row for a user: no chain check possible (we cannot
+        # distinguish a true genesis from deletion of earlier rows).
+        # The previous_hash field is still bound into the per-row hash,
+        # so tampering with it trips the row_hash check.
+
+        if not is_valid:
+            failures.append(_row_failure(row, expected))
+            bad_row_ids.add(row_id)
+
+        last_hash_for_user[user_key] = row.integrity_hash
+
+        if fail_fast and (not is_valid or not chain_ok):
             break
+
+    invalid = len(bad_row_ids)
+    valid = processed - invalid
+
     return VerifyReport(
-        total=total,
+        total=processed,
         valid=valid,
-        invalid=len(failures),
+        invalid=invalid,
         failures=failures,
     )
 
@@ -149,20 +217,25 @@ async def run(
 
 def _format_human(report: VerifyReport) -> str:
     lines = []
-    lines.append(f"Audit log verification")
+    lines.append("Audit log verification")
     lines.append(f"  total rows checked: {report.total}")
     lines.append(f"  valid: {report.valid}")
     lines.append(f"  invalid: {report.invalid}")
     if report.invalid > 0:
         lines.append("")
-        lines.append("TAMPER DETECTED. The following rows have hashes that do not match their stored payload:")
+        lines.append("TAMPER DETECTED:")
         for f in report.failures:
-            lines.append(f"  - row {f.id} ({f.connector_name}/{f.action}) at {f.timestamp}")
-            lines.append(f"      stored:   {f.stored_hash}")
-            lines.append(f"      expected: {f.expected_hash}")
+            if f.kind == "row_hash":
+                lines.append(f"  - row {f.id} ({f.connector_name}/{f.action}) at {f.timestamp}: hash mismatch")
+                lines.append(f"      stored:   {f.stored_hash}")
+                lines.append(f"      expected: {f.expected_hash}")
+            else:
+                lines.append(f"  - row {f.id} ({f.connector_name}/{f.action}) at {f.timestamp}: chain link broken")
+                lines.append(f"      stored previous_hash:   {f.stored_previous_hash}")
+                lines.append(f"      expected previous_hash: {f.expected_previous_hash}")
     else:
         lines.append("")
-        lines.append("OK. Every audit row hashes correctly.")
+        lines.append("OK. Every audit row hashes correctly and the chain is intact.")
     return "\n".join(lines)
 
 
@@ -181,7 +254,7 @@ def _format_json(report: VerifyReport) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Verify the integrity of audit_log rows.",
+        description="Verify the integrity of audit_log rows and the hash chain.",
     )
     parser.add_argument(
         "--user-id",

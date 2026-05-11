@@ -82,6 +82,15 @@ class AuditLog(Base):
         String(64),
         nullable=False,
     )
+    # Hash of the previous row in this user's audit chain. Forms a
+    # tamper-evident chain so deletions or reorderings are detectable,
+    # not just per-row tampering. Nullable for the first row in any
+    # user's chain (genesis) and for legacy rows created before the
+    # chain was introduced.
+    previous_hash: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        nullable=True,
+    )
     request_id: Mapped[str] = mapped_column(
         String(36),
         nullable=False,

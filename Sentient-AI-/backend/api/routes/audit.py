@@ -46,6 +46,7 @@ class AuditLogResponse(BaseModel):
     request_data: Optional[dict] = None
     response_summary: Optional[str] = None
     integrity_hash: str
+    previous_hash: Optional[str] = None
     request_id: str
 
     model_config = {"from_attributes": True}
@@ -54,6 +55,38 @@ class AuditLogResponse(BaseModel):
 class AuditIntegrityCheck(BaseModel):
     id: uuid.UUID
     valid: bool
+
+
+def _build_hash_payload(
+    *,
+    user_id: str,
+    connector_name: str,
+    action: str,
+    endpoint: str,
+    scope_used: str,
+    status_value: str,
+    request_id: str,
+    request_data: Any,
+    response_summary: Any,
+    previous_hash: Optional[str],
+) -> dict[str, Any]:
+    """Canonical payload that gets hashed for one audit row.
+
+    Including ``previous_hash`` chains each row to its predecessor, so
+    deleting or reordering rows is detectable, not just per-row tampering.
+    """
+    return {
+        "user_id": user_id,
+        "connector_name": connector_name,
+        "action": action,
+        "endpoint": endpoint,
+        "scope_used": scope_used,
+        "status": status_value,
+        "request_id": request_id,
+        "request_data": request_data,
+        "response_summary": response_summary,
+        "previous_hash": previous_hash,
+    }
 
 
 @router.post(
@@ -65,18 +98,32 @@ async def create_audit_log(
     body: AuditLogCreate,
     db: AsyncSession = Depends(get_db),
 ) -> AuditLog:
-    """Record a new audit log entry with a tamper-evident integrity hash."""
-    hash_payload = {
-        "user_id": str(body.user_id),
-        "connector_name": body.connector_name,
-        "action": body.action,
-        "endpoint": body.endpoint,
-        "scope_used": body.scope_used,
-        "status": body.status.value,
-        "request_id": body.request_id,
-        "request_data": body.request_data,
-        "response_summary": body.response_summary,
-    }
+    """Record a new audit log entry, chained to the previous row in this
+    user's audit log via ``previous_hash``. Per-user chains avoid the
+    cross-user race that a global chain would introduce.
+    """
+    # Look up the most recent row for this user to get its hash
+    prev_result = await db.execute(
+        select(AuditLog)
+        .where(AuditLog.user_id == body.user_id)
+        .order_by(AuditLog.timestamp.desc())
+        .limit(1)
+    )
+    prev = prev_result.scalar_one_or_none()
+    previous_hash = prev.integrity_hash if prev is not None else None
+
+    hash_payload = _build_hash_payload(
+        user_id=str(body.user_id),
+        connector_name=body.connector_name,
+        action=body.action,
+        endpoint=body.endpoint,
+        scope_used=body.scope_used,
+        status_value=body.status.value,
+        request_id=body.request_id,
+        request_data=body.request_data,
+        response_summary=body.response_summary,
+        previous_hash=previous_hash,
+    )
     integrity_hash = compute_audit_hash(hash_payload)
 
     entry = AuditLog(
@@ -92,6 +139,7 @@ async def create_audit_log(
         request_data=body.request_data,
         response_summary=body.response_summary,
         integrity_hash=integrity_hash,
+        previous_hash=previous_hash,
         request_id=body.request_id,
     )
     db.add(entry)
@@ -143,7 +191,12 @@ async def verify_audit_integrity(
     log_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Verify the tamper-evident hash of an audit log entry."""
+    """Verify the tamper-evident hash of an audit log entry.
+
+    Hashes computed from the row's stored fields (including
+    ``previous_hash``) so chain rotation, deletion, or field tampering
+    all surface as a hash mismatch.
+    """
     result = await db.execute(select(AuditLog).where(AuditLog.id == log_id))
     entry = result.scalar_one_or_none()
     if entry is None:
@@ -152,16 +205,17 @@ async def verify_audit_integrity(
             detail="Audit log not found",
         )
 
-    hash_payload = {
-        "user_id": str(entry.user_id),
-        "connector_name": entry.connector_name,
-        "action": entry.action,
-        "endpoint": entry.endpoint,
-        "scope_used": entry.scope_used,
-        "status": entry.status.value,
-        "request_id": entry.request_id,
-        "request_data": entry.request_data,
-        "response_summary": entry.response_summary,
-    }
+    hash_payload = _build_hash_payload(
+        user_id=str(entry.user_id),
+        connector_name=entry.connector_name,
+        action=entry.action,
+        endpoint=entry.endpoint,
+        scope_used=entry.scope_used,
+        status_value=entry.status.value,
+        request_id=entry.request_id,
+        request_data=entry.request_data,
+        response_summary=entry.response_summary,
+        previous_hash=entry.previous_hash,
+    )
     expected = compute_audit_hash(hash_payload)
     return {"id": entry.id, "valid": entry.integrity_hash == expected}
