@@ -4,8 +4,10 @@ import type {
   RegisterData,
   User,
   Conversation,
-  Message,
-  AgentResponse,
+  ConversationWithMessages,
+  AgentTurnResponse,
+  PendingApproval,
+  ApprovalDecisionResponse,
   Connector,
   AuditLog,
   AuditStats,
@@ -89,42 +91,55 @@ export function logout(): void {
   window.location.href = "/login";
 }
 
-// Conversations
-export async function getConversations(): Promise<Conversation[]> {
-  return request<Conversation[]>("/conversations");
+// Conversations and Agent
+export async function getConversations(userId: string): Promise<Conversation[]> {
+  const params = new URLSearchParams({ user_id: userId });
+  return request<Conversation[]>(`/agent/conversations?${params.toString()}`);
 }
 
-export async function createConversation(title: string): Promise<Conversation> {
-  return request<Conversation>("/conversations", {
+export async function createConversation(
+  userId: string,
+  title: string = "New Conversation"
+): Promise<Conversation> {
+  return request<Conversation>("/agent/conversations", {
     method: "POST",
-    body: JSON.stringify({ title }),
+    body: JSON.stringify({ user_id: userId, title }),
   });
 }
 
-export async function getMessages(conversationId: string): Promise<Message[]> {
-  return request<Message[]>(`/conversations/${conversationId}/messages`);
+export async function getConversation(
+  conversationId: string
+): Promise<ConversationWithMessages> {
+  return request<ConversationWithMessages>(`/agent/conversations/${conversationId}`);
 }
 
 export async function sendMessage(
   conversationId: string,
+  userId: string,
   content: string
-): Promise<AgentResponse> {
-  return request<AgentResponse>(
-    `/conversations/${conversationId}/messages`,
+): Promise<AgentTurnResponse> {
+  return request<AgentTurnResponse>(
+    `/agent/conversations/${conversationId}/messages`,
     {
       method: "POST",
-      body: JSON.stringify({ content }),
+      body: JSON.stringify({ content, user_id: userId }),
     }
   );
 }
 
-export async function approveAction(
-  approvalId: string,
+export async function getPendingApprovals(userId: string): Promise<PendingApproval[]> {
+  const params = new URLSearchParams({ user_id: userId });
+  return request<PendingApproval[]>(`/agent/approvals?${params.toString()}`);
+}
+
+export async function decideApproval(
+  actionId: string,
+  userId: string,
   approved: boolean
-): Promise<void> {
-  return request<void>(`/approvals/${approvalId}`, {
+): Promise<ApprovalDecisionResponse> {
+  return request<ApprovalDecisionResponse>(`/agent/approvals/${actionId}`, {
     method: "POST",
-    body: JSON.stringify({ approved }),
+    body: JSON.stringify({ user_id: userId, approved }),
   });
 }
 

@@ -19,6 +19,7 @@ from api.middleware.security import (
     SecurityHeadersMiddleware,
 )
 from api.routes import agent, audit, auth, connectors
+from services.agent.runtime import AgentRuntime
 
 logger = structlog.get_logger(__name__)
 
@@ -37,6 +38,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as exc:
         logger.error("database_init_failed", error=str(exc))
         logger.warning("app_starting_without_database")
+
+    try:
+        app.state.agent_runtime = AgentRuntime(config=settings)
+        logger.info("agent_runtime_initialized", provider=settings.LLM_PROVIDER)
+    except Exception as exc:
+        logger.error("agent_runtime_init_failed", error=str(exc))
+        app.state.agent_runtime = None
+
     yield
     logger.info("shutting_down_sentientai")
 

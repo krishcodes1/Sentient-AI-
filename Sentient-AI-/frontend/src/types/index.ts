@@ -64,10 +64,14 @@ export interface AuditIntegrityCheck {
 
 export interface Conversation {
   id: string;
+  user_id: string;
   title: string;
   created_at: string;
   updated_at: string;
-  message_count: number;
+}
+
+export interface ConversationWithMessages extends Conversation {
+  messages: Message[];
 }
 
 export interface Message {
@@ -75,33 +79,43 @@ export interface Message {
   conversation_id: string;
   role: "user" | "assistant" | "system";
   content: string;
-  tool_calls?: ToolCall[];
+  tool_calls?: ToolCall[] | null;
   pending_approvals?: PendingApproval[];
-  timestamp: string;
+  blocked_actions?: BlockedAction[];
+  created_at: string;
 }
 
 export interface ToolCall {
-  id: string;
-  connector: string;
-  action: string;
-  endpoint: string;
-  status: "success" | "blocked" | "pending" | "error";
-  result?: string;
+  name: string;
+  result?: unknown;
+  tool_call_id?: string | null;
 }
 
 export interface PendingApproval {
-  id: string;
-  connector: string;
-  action: string;
-  scope: string;
-  risk_level: "read" | "write" | "admin" | "financial";
-  reasoning: string;
+  action_id: string;
+  tool_name: string;
+  arguments: Record<string, unknown>;
+  reason: string;
 }
 
-export interface AgentResponse {
-  message: Message;
+export interface BlockedAction {
+  tool_name: string;
+  reason: string;
+  policy: string;
+}
+
+export interface AgentTurnResponse {
+  user_message: Message;
+  assistant_message: Message;
   tool_calls: ToolCall[];
   pending_approvals: PendingApproval[];
+  blocked_actions: BlockedAction[];
+}
+
+export interface ApprovalDecisionResponse {
+  action_id: string;
+  approved: boolean;
+  result?: Record<string, unknown> | null;
 }
 
 export interface ScanResult {
