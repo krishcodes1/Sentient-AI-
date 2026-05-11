@@ -43,6 +43,18 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def init_db() -> None:
-    """Create all tables that don't yet exist (development convenience)."""
+    """Create all tables that don't yet exist, and run inline additive
+    migrations (development convenience; production should use Alembic).
+    """
+    from sqlalchemy import text
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+        # SQLAlchemy's create_all() only creates new tables, it does
+        # not add columns to existing ones. ``ADD COLUMN IF NOT EXISTS``
+        # is idempotent on Postgres so this is safe to run on every
+        # startup.
+        await conn.execute(
+            text("ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS previous_hash VARCHAR(64)")
+        )
