@@ -1,5 +1,7 @@
 # SentientAI
 
+[![CI](https://github.com/krishcodes1/Sentient-AI-/actions/workflows/ci.yml/badge.svg)](https://github.com/krishcodes1/Sentient-AI-/actions/workflows/ci.yml)
+
 **Secure-by-Design Agentic AI Platform**
 
 A self-hosted AI assistant platform with security, user control, and auditability built into every layer. SentientAI integrates with Canvas LMS, Google Workspace, Robinhood Crypto, and more — with fine-grained permission scoping, multi-layer prompt injection defense, and tamper-evident audit logging.
