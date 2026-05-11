@@ -137,7 +137,7 @@ export default function Dashboard() {
         if (cancelled) return;
         const [logResult, connResult] = await Promise.all([
           getAuditLogs(user.id, { limit: 500 }).catch((): AuditLog[] => []),
-          getConnectors().catch((): Connector[] => []),
+          getConnectors(user.id).catch((): Connector[] => []),
         ]);
         if (cancelled) return;
         setLogs(logResult);
@@ -167,9 +167,7 @@ export default function Dashboard() {
     return { total, blocked, pending };
   }, [logs]);
 
-  const activeConnectors = connectors.filter(
-    (c) => c.status === "connected"
-  ).length;
+  const activeConnectors = connectors.filter((c) => c.is_active).length;
 
   return (
     <div className="space-y-6">
