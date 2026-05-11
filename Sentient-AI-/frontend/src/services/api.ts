@@ -9,6 +9,7 @@ import type {
   PendingApproval,
   ApprovalDecisionResponse,
   Connector,
+  ConnectorHealthEntry,
   CreateConnectorRequest,
   AuditLog,
   AuditStats,
@@ -170,6 +171,13 @@ export async function updateConnector(
 
 export async function deleteConnector(id: string): Promise<void> {
   return request<void>(`/connectors/${id}`, { method: "DELETE" });
+}
+
+export async function getConnectorHealth(
+  userId: string,
+): Promise<ConnectorHealthEntry[]> {
+  const params = new URLSearchParams({ user_id: userId });
+  return request<ConnectorHealthEntry[]>(`/connectors/health?${params.toString()}`);
 }
 
 // Audit Logs

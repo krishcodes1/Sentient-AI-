@@ -21,19 +21,15 @@ import type {
   ConnectorHealthEntry,
   SecurityTimelineEntry,
 } from "@/types";
-import { getAuditLogs, getConnectors, getMe } from "@/services/api";
+import {
+  getAuditLogs,
+  getConnectorHealth,
+  getConnectors,
+  getMe,
+} from "@/services/api";
 
 const TIMELINE_DAYS = 7;
 const FEED_LIMIT = 6;
-
-// Connector health is not yet exposed by the backend. Keep a placeholder list
-// so the bottom tile renders something useful until a /connectors/health
-// endpoint exists.
-const placeholderHealth: ConnectorHealthEntry[] = [
-  { id: "1", name: "Canvas LMS", type: "canvas", status: "healthy", uptime: 99.9, last_check: "—" },
-  { id: "2", name: "Google Workspace", type: "google", status: "healthy", uptime: 99.7, last_check: "—" },
-  { id: "3", name: "Robinhood Crypto", type: "robinhood", status: "degraded", uptime: 95.2, last_check: "—" },
-];
 
 const statusColors = {
   approved: "var(--accent-success)",
@@ -127,6 +123,7 @@ function StatCard({
 export default function Dashboard() {
   const [logs, setLogs] = useState<AuditLog[]>([]);
   const [connectors, setConnectors] = useState<Connector[]>([]);
+  const [health, setHealth] = useState<ConnectorHealthEntry[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -135,13 +132,15 @@ export default function Dashboard() {
       try {
         const user = await getMe();
         if (cancelled) return;
-        const [logResult, connResult] = await Promise.all([
+        const [logResult, connResult, healthResult] = await Promise.all([
           getAuditLogs(user.id, { limit: 500 }).catch((): AuditLog[] => []),
           getConnectors(user.id).catch((): Connector[] => []),
+          getConnectorHealth(user.id).catch((): ConnectorHealthEntry[] => []),
         ]);
         if (cancelled) return;
         setLogs(logResult);
         setConnectors(connResult);
+        setHealth(healthResult);
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -344,7 +343,7 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Connector Health (placeholder; backend endpoint not yet implemented) */}
+      {/* Connector Health */}
       <div
         className="rounded-xl border p-5"
         style={{
@@ -358,60 +357,79 @@ export default function Dashboard() {
         >
           Connector Health
         </h2>
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          {placeholderHealth.map((c) => (
-            <div
-              key={c.id}
-              className="rounded-lg border p-4"
-              style={{
-                backgroundColor: "var(--bg-primary)",
-                borderColor: "var(--border-primary)",
-              }}
-            >
-              <div className="flex items-center justify-between mb-2">
-                <span
-                  className="text-sm font-medium"
-                  style={{ color: "var(--text-primary)" }}
-                >
-                  {c.name}
-                </span>
-                <span
-                  className="text-xs px-2 py-0.5 rounded-full font-medium"
+        {!loading && health.length === 0 && (
+          <p className="text-sm" style={{ color: "var(--text-muted)" }}>
+            No connectors configured. Add one from the Connectors page.
+          </p>
+        )}
+        {loading && (
+          <p className="text-sm" style={{ color: "var(--text-muted)" }}>
+            Loading...
+          </p>
+        )}
+        {!loading && health.length > 0 && (
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            {health.map((c) => {
+              const lastCheckLabel =
+                c.last_check === "Never"
+                  ? "Never"
+                  : new Date(c.last_check).toLocaleString();
+              return (
+                <div
+                  key={c.id}
+                  className="rounded-lg border p-4"
                   style={{
-                    backgroundColor:
-                      c.status === "healthy"
-                        ? "rgba(34,197,94,0.1)"
-                        : c.status === "degraded"
-                        ? "rgba(245,158,11,0.1)"
-                        : "rgba(239,68,68,0.1)",
-                    color:
-                      c.status === "healthy"
-                        ? "var(--accent-success)"
-                        : c.status === "degraded"
-                        ? "var(--accent-warning)"
-                        : "var(--accent-danger)",
+                    backgroundColor: "var(--bg-primary)",
+                    borderColor: "var(--border-primary)",
                   }}
                 >
-                  {c.status}
-                </span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span
-                  className="text-xs"
-                  style={{ color: "var(--text-muted)" }}
-                >
-                  Uptime: {c.uptime}%
-                </span>
-                <span
-                  className="text-xs"
-                  style={{ color: "var(--text-muted)" }}
-                >
-                  {c.last_check}
-                </span>
-              </div>
-            </div>
-          ))}
-        </div>
+                  <div className="flex items-center justify-between mb-2">
+                    <span
+                      className="text-sm font-medium truncate"
+                      style={{ color: "var(--text-primary)" }}
+                    >
+                      {c.name}
+                    </span>
+                    <span
+                      className="text-xs px-2 py-0.5 rounded-full font-medium shrink-0"
+                      style={{
+                        backgroundColor:
+                          c.status === "healthy"
+                            ? "rgba(34,197,94,0.1)"
+                            : c.status === "degraded"
+                            ? "rgba(245,158,11,0.1)"
+                            : "rgba(239,68,68,0.1)",
+                        color:
+                          c.status === "healthy"
+                            ? "var(--accent-success)"
+                            : c.status === "degraded"
+                            ? "var(--accent-warning)"
+                            : "var(--accent-danger)",
+                      }}
+                    >
+                      {c.status}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span
+                      className="text-xs"
+                      style={{ color: "var(--text-muted)" }}
+                    >
+                      Uptime: {c.uptime}%
+                    </span>
+                    <span
+                      className="text-xs truncate"
+                      style={{ color: "var(--text-muted)" }}
+                      title={lastCheckLabel}
+                    >
+                      {lastCheckLabel}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );
