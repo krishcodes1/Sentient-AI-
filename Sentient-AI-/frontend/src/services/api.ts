@@ -9,10 +9,10 @@ import type {
   PendingApproval,
   ApprovalDecisionResponse,
   Connector,
+  CreateConnectorRequest,
   AuditLog,
   AuditStats,
   DashboardStats,
-  ScanResult,
   AuditLogFilters,
   AuditIntegrityCheck,
 } from "@/types";
@@ -144,22 +144,23 @@ export async function decideApproval(
 }
 
 // Connectors
-export async function getConnectors(): Promise<Connector[]> {
-  return request<Connector[]>("/connectors");
+export async function getConnectors(userId: string): Promise<Connector[]> {
+  const params = new URLSearchParams({ user_id: userId });
+  return request<Connector[]>(`/connectors/?${params.toString()}`);
 }
 
-export async function addConnector(
-  connector: Partial<Connector>
+export async function createConnector(
+  body: CreateConnectorRequest,
 ): Promise<Connector> {
-  return request<Connector>("/connectors", {
+  return request<Connector>("/connectors/", {
     method: "POST",
-    body: JSON.stringify(connector),
+    body: JSON.stringify(body),
   });
 }
 
 export async function updateConnector(
   id: string,
-  data: Partial<Connector>
+  data: Partial<CreateConnectorRequest>,
 ): Promise<Connector> {
   return request<Connector>(`/connectors/${id}`, {
     method: "PATCH",
@@ -169,10 +170,6 @@ export async function updateConnector(
 
 export async function deleteConnector(id: string): Promise<void> {
   return request<void>(`/connectors/${id}`, { method: "DELETE" });
-}
-
-export async function testConnector(id: string): Promise<ScanResult> {
-  return request<ScanResult>(`/connectors/${id}/test`, { method: "POST" });
 }
 
 // Audit Logs
@@ -238,6 +235,3 @@ export async function deleteAccount(): Promise<void> {
   return request<void>("/auth/account", { method: "DELETE" });
 }
 
-export async function resetConnectors(): Promise<void> {
-  return request<void>("/connectors/reset", { method: "POST" });
-}

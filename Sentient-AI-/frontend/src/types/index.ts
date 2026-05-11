@@ -7,27 +7,39 @@ export interface User {
   rate_limit: number;
 }
 
-export type PermissionTier = "open" | "supervised" | "restricted" | "locked";
+export type PermissionTier =
+  | "auto_approve"
+  | "user_confirm"
+  | "admin_only"
+  | "hard_blocked";
+
+export type ConnectorType = "canvas" | "google_workspace" | "robinhood" | "custom";
+
+export type AuthMethod = "oauth2" | "api_key" | "bearer_token";
 
 export interface Connector {
   id: string;
-  name: string;
-  type: string;
-  auth_method: "oauth2" | "api_key" | "service_account";
-  status: "connected" | "disconnected" | "error";
-  scopes: ConnectorScope[];
+  user_id: string;
+  connector_type: ConnectorType;
+  display_name: string;
+  is_active: boolean;
+  auth_method: AuthMethod;
+  granted_scopes: string[];
   permission_tier: PermissionTier;
-  base_url: string;
+  rate_limit_per_minute: number;
   created_at: string;
-  last_used?: string;
-  health?: "healthy" | "degraded" | "unhealthy";
+  updated_at: string;
 }
 
-export interface ConnectorScope {
-  name: string;
-  description: string;
-  risk_level: "read" | "write" | "admin" | "financial";
-  granted: boolean;
+export interface CreateConnectorRequest {
+  user_id: string;
+  connector_type: ConnectorType;
+  display_name: string;
+  auth_method: AuthMethod;
+  credentials: Record<string, unknown>;
+  granted_scopes?: string[];
+  permission_tier?: PermissionTier;
+  rate_limit_per_minute?: number;
 }
 
 export type AuditStatus = "approved" | "blocked" | "pending";

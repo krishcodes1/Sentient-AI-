@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   GraduationCap,
   Mail,
@@ -6,100 +6,63 @@ import {
   Plus,
   Check,
   X,
-  ChevronDown,
-  ExternalLink,
+  Plug,
+  Trash2,
+  Loader2,
   RefreshCw,
 } from "lucide-react";
-import clsx from "clsx";
-import type { Connector, ConnectorScope } from "@/types";
+import type { Connector, ConnectorType, User } from "@/types";
+import {
+  deleteConnector,
+  getConnectors,
+  getMe,
+} from "@/services/api";
 
-const scopeColors = {
-  read: { bg: "rgba(34,197,94,0.1)", text: "var(--accent-success)", label: "Read" },
-  write: { bg: "rgba(245,158,11,0.1)", text: "var(--accent-warning)", label: "Write" },
-  admin: { bg: "rgba(239,68,68,0.1)", text: "var(--accent-danger)", label: "Admin" },
-  financial: { bg: "rgba(239,68,68,0.15)", text: "var(--accent-danger)", label: "Financial" },
-};
-
-const connectorIcons: Record<string, any> = {
+const connectorIcons: Record<ConnectorType, typeof GraduationCap> = {
   canvas: GraduationCap,
-  google: Mail,
+  google_workspace: Mail,
   robinhood: TrendingUp,
+  custom: Plug,
 };
 
-const mockConnectors: Connector[] = [
-  {
-    id: "1",
-    name: "Canvas LMS",
-    type: "canvas",
-    auth_method: "oauth2",
-    status: "connected",
-    base_url: "https://nyit.instructure.com",
-    permission_tier: "supervised",
-    created_at: "2026-03-15",
-    last_used: "2 min ago",
-    health: "healthy",
-    scopes: [
-      { name: "courses.read", description: "List enrolled courses", risk_level: "read", granted: true },
-      { name: "assignments.read", description: "View assignments and due dates", risk_level: "read", granted: true },
-      { name: "submissions.read", description: "View submission status", risk_level: "read", granted: true },
-      { name: "grades.read", description: "Access grade information", risk_level: "read", granted: true },
-      { name: "calendar.read", description: "View calendar events", risk_level: "read", granted: true },
-      { name: "submissions.write", description: "Submit assignments", risk_level: "write", granted: false },
-    ],
-  },
-  {
-    id: "2",
-    name: "Google Workspace",
-    type: "google",
-    auth_method: "oauth2",
-    status: "connected",
-    base_url: "https://googleapis.com",
-    permission_tier: "supervised",
-    created_at: "2026-03-16",
-    last_used: "5 min ago",
-    health: "healthy",
-    scopes: [
-      { name: "gmail.readonly", description: "Read email messages", risk_level: "read", granted: true },
-      { name: "gmail.send", description: "Send emails on your behalf", risk_level: "write", granted: true },
-      { name: "calendar.readonly", description: "View calendar events", risk_level: "read", granted: true },
-      { name: "calendar.events", description: "Create/modify calendar events", risk_level: "write", granted: true },
-    ],
-  },
-  {
-    id: "3",
-    name: "Robinhood Crypto",
-    type: "robinhood",
-    auth_method: "api_key",
-    status: "connected",
-    base_url: "https://api.robinhood.com",
-    permission_tier: "restricted",
-    created_at: "2026-03-20",
-    last_used: "1h ago",
-    health: "degraded",
-    scopes: [
-      { name: "crypto.portfolio", description: "View crypto portfolio", risk_level: "read", granted: true },
-      { name: "crypto.prices", description: "View crypto prices", risk_level: "read", granted: true },
-      { name: "crypto.trade", description: "Execute crypto trades", risk_level: "financial", granted: false },
-    ],
-  },
-];
+const tierLabels: Record<string, { label: string; color: string }> = {
+  auto_approve: { label: "Auto Approve", color: "var(--accent-success)" },
+  user_confirm: { label: "User Confirm", color: "var(--accent-warning)" },
+  admin_only: { label: "Admin Only", color: "var(--accent-primary)" },
+  hard_blocked: { label: "Hard Blocked", color: "var(--accent-danger)" },
+};
 
-function ScopeTag({ scope }: { scope: ConnectorScope }) {
-  const c = scopeColors[scope.risk_level];
+function scopeRisk(scope: string): "read" | "write" | "financial" {
+  if (scope.includes("trade") || scope.includes("crypto.trade")) return "financial";
+  if (
+    scope.includes("write") ||
+    scope.includes("send") ||
+    scope.includes("create") ||
+    scope.includes("modify") ||
+    scope.includes("events")
+  ) {
+    return "write";
+  }
+  return "read";
+}
+
+const riskColors = {
+  read: { bg: "rgba(34,197,94,0.1)", text: "var(--accent-success)" },
+  write: { bg: "rgba(245,158,11,0.1)", text: "var(--accent-warning)" },
+  financial: { bg: "rgba(239,68,68,0.15)", text: "var(--accent-danger)" },
+};
+
+function ScopeTag({ name }: { name: string }) {
+  const risk = scopeRisk(name);
+  const c = riskColors[risk];
   return (
     <div
       className="inline-flex items-center gap-1.5 px-2 py-1 rounded text-xs"
       style={{ backgroundColor: c.bg }}
     >
-      {scope.granted ? (
-        <Check className="w-3 h-3" style={{ color: c.text }} />
-      ) : (
-        <X className="w-3 h-3" style={{ color: "var(--text-muted)" }} />
-      )}
-      <span style={{ color: scope.granted ? c.text : "var(--text-muted)" }}>
-        {scope.name}
-      </span>
-      {scope.risk_level === "financial" && (
+      <Check className="w-3 h-3" style={{ color: c.text }} />
+      <span style={{ color: c.text }}>{name}</span>
+      {risk === "financial" && (
         <span
           className="text-[10px] px-1 rounded font-bold"
           style={{
@@ -107,16 +70,40 @@ function ScopeTag({ scope }: { scope: ConnectorScope }) {
             color: "var(--accent-danger)",
           }}
         >
-          BLOCKED
+          HIGH RISK
         </span>
       )}
     </div>
   );
 }
 
-function ConnectorCard({ connector }: { connector: Connector }) {
-  const [expanded, setExpanded] = useState(false);
-  const Icon = connectorIcons[connector.type] || Plus;
+function ConnectorCard({
+  connector,
+  onDelete,
+}: {
+  connector: Connector;
+  onDelete: () => Promise<void>;
+}) {
+  const [deleting, setDeleting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const Icon = connectorIcons[connector.connector_type] || Plug;
+  const tier = tierLabels[connector.permission_tier] || {
+    label: connector.permission_tier,
+    color: "var(--text-muted)",
+  };
+
+  const handleDelete = async () => {
+    if (deleting) return;
+    if (!window.confirm(`Remove connector "${connector.display_name}"?`)) return;
+    setDeleting(true);
+    setError(null);
+    try {
+      await onDelete();
+    } catch (err) {
+      setError((err as Error).message);
+      setDeleting(false);
+    }
+  };
 
   return (
     <div
@@ -126,93 +113,78 @@ function ConnectorCard({ connector }: { connector: Connector }) {
         borderColor: "var(--border-primary)",
       }}
     >
-      {/* Header */}
       <div className="p-5">
         <div className="flex items-start justify-between mb-3">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 min-w-0">
             <div
-              className="w-10 h-10 rounded-lg flex items-center justify-center"
+              className="w-10 h-10 rounded-lg flex items-center justify-center shrink-0"
               style={{ backgroundColor: "rgba(99,102,241,0.15)" }}
             >
               <Icon className="w-5 h-5" style={{ color: "var(--accent-primary)" }} />
             </div>
-            <div>
+            <div className="min-w-0">
               <h3
-                className="text-sm font-semibold"
+                className="text-sm font-semibold truncate"
                 style={{ color: "var(--text-primary)" }}
               >
-                {connector.name}
+                {connector.display_name}
               </h3>
               <p className="text-xs" style={{ color: "var(--text-muted)" }}>
-                {connector.auth_method.toUpperCase()} | {connector.base_url}
+                {connector.auth_method.toUpperCase()} · {connector.connector_type}
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            <span
-              className="text-xs px-2 py-0.5 rounded-full font-medium"
-              style={{
-                backgroundColor:
-                  connector.status === "connected"
-                    ? "rgba(34,197,94,0.1)"
-                    : "rgba(239,68,68,0.1)",
-                color:
-                  connector.status === "connected"
-                    ? "var(--accent-success)"
-                    : "var(--accent-danger)",
-              }}
-            >
-              {connector.status}
-            </span>
-            {connector.health && connector.health !== "healthy" && (
-              <span
-                className="text-xs px-2 py-0.5 rounded-full font-medium"
-                style={{
-                  backgroundColor: "rgba(245,158,11,0.1)",
-                  color: "var(--accent-warning)",
-                }}
-              >
-                {connector.health}
-              </span>
-            )}
-          </div>
+          <span
+            className="text-xs px-2 py-0.5 rounded-full font-medium shrink-0"
+            style={{
+              backgroundColor: connector.is_active
+                ? "rgba(34,197,94,0.1)"
+                : "rgba(148,163,184,0.15)",
+              color: connector.is_active ? "var(--accent-success)" : "var(--text-muted)",
+            }}
+          >
+            {connector.is_active ? "active" : "inactive"}
+          </span>
         </div>
 
-        {/* Permission Tier */}
         <div className="flex items-center gap-4 mb-3">
           <div>
             <span className="text-xs" style={{ color: "var(--text-muted)" }}>
               Permission Tier
             </span>
-            <p
-              className="text-sm font-medium capitalize"
-              style={{ color: "var(--text-primary)" }}
-            >
-              {connector.permission_tier}
+            <p className="text-sm font-medium" style={{ color: tier.color }}>
+              {tier.label}
             </p>
           </div>
           <div>
             <span className="text-xs" style={{ color: "var(--text-muted)" }}>
-              Last Used
+              Rate Limit
             </span>
-            <p
-              className="text-sm font-medium"
-              style={{ color: "var(--text-primary)" }}
-            >
-              {connector.last_used || "Never"}
+            <p className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
+              {connector.rate_limit_per_minute}/min
+            </p>
+          </div>
+          <div>
+            <span className="text-xs" style={{ color: "var(--text-muted)" }}>
+              Added
+            </span>
+            <p className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
+              {new Date(connector.created_at).toLocaleDateString()}
             </p>
           </div>
         </div>
 
-        {/* Scopes */}
         <div className="flex flex-wrap gap-1.5">
-          {connector.scopes.map((s) => (
-            <ScopeTag key={s.name} scope={s} />
-          ))}
+          {connector.granted_scopes.length === 0 ? (
+            <span className="text-xs" style={{ color: "var(--text-muted)" }}>
+              No scopes granted
+            </span>
+          ) : (
+            connector.granted_scopes.map((s) => <ScopeTag key={s} name={s} />)
+          )}
         </div>
       </div>
 
-      {/* Actions */}
       <div
         className="flex items-center justify-between px-5 py-3 border-t"
         style={{
@@ -220,21 +192,28 @@ function ConnectorCard({ connector }: { connector: Connector }) {
           backgroundColor: "var(--bg-primary)",
         }}
       >
+        {error ? (
+          <span className="text-xs" style={{ color: "var(--accent-danger)" }}>
+            {error}
+          </span>
+        ) : (
+          <span className="text-xs" style={{ color: "var(--text-muted)" }}>
+            Updated {new Date(connector.updated_at).toLocaleDateString()}
+          </span>
+        )}
         <button
-          className="flex items-center gap-1.5 text-xs font-medium"
-          style={{ color: "var(--accent-primary)" }}
+          type="button"
+          onClick={handleDelete}
+          disabled={deleting}
+          className="flex items-center gap-1.5 text-xs font-medium disabled:opacity-50"
+          style={{ color: "var(--accent-danger)" }}
         >
-          <RefreshCw className="w-3.5 h-3.5" /> Test Connection
-        </button>
-        <button
-          onClick={() => setExpanded(!expanded)}
-          className="flex items-center gap-1 text-xs font-medium"
-          style={{ color: "var(--text-secondary)" }}
-        >
-          Configure{" "}
-          <ChevronDown
-            className={clsx("w-3.5 h-3.5 transition-transform", expanded && "rotate-180")}
-          />
+          {deleting ? (
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          ) : (
+            <Trash2 className="w-3.5 h-3.5" />
+          )}
+          Remove
         </button>
       </div>
     </div>
@@ -242,49 +221,172 @@ function ConnectorCard({ connector }: { connector: Connector }) {
 }
 
 export default function Connectors() {
+  const [me, setMe] = useState<User | null>(null);
+  const [connectors, setConnectors] = useState<Connector[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    getMe()
+      .then((u) => {
+        if (!cancelled) setMe(u);
+      })
+      .catch((err: Error) => {
+        if (!cancelled) {
+          setError(err.message);
+          setLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!me) return;
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    getConnectors(me.id)
+      .then((data) => {
+        if (!cancelled) setConnectors(data);
+      })
+      .catch((err: Error) => {
+        if (!cancelled) setError(err.message);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [me, refreshKey]);
+
+  const handleDelete = async (id: string) => {
+    await deleteConnector(id);
+    setConnectors((prev) => prev.filter((c) => c.id !== id));
+  };
+
+  const counts = useMemo(() => {
+    let active = 0;
+    let inactive = 0;
+    for (const c of connectors) {
+      if (c.is_active) active += 1;
+      else inactive += 1;
+    }
+    return { active, inactive };
+  }, [connectors]);
+
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-4">
         <div>
-          <h1
-            className="text-2xl font-bold"
-            style={{ color: "var(--text-primary)" }}
-          >
+          <h1 className="text-2xl font-bold" style={{ color: "var(--text-primary)" }}>
             Connectors
           </h1>
-          <p
-            className="text-sm mt-1"
-            style={{ color: "var(--text-secondary)" }}
-          >
-            Manage third-party integrations and their security policies
+          <p className="text-sm mt-1" style={{ color: "var(--text-secondary)" }}>
+            Manage third-party integrations and their security policies.
+            {!loading && (
+              <>
+                {" "}
+                <span style={{ color: "var(--accent-success)" }}>{counts.active} active</span>
+                {counts.inactive > 0 && (
+                  <>
+                    , <span style={{ color: "var(--text-muted)" }}>{counts.inactive} inactive</span>
+                  </>
+                )}
+              </>
+            )}
           </p>
         </div>
-        <button
-          className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white"
-          style={{ backgroundColor: "var(--accent-primary)" }}
-        >
-          <Plus className="w-4 h-4" /> Add Connector
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setRefreshKey((k) => k + 1)}
+            disabled={loading}
+            className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border text-sm font-medium disabled:opacity-50"
+            style={{
+              backgroundColor: "var(--bg-input)",
+              borderColor: "var(--border-primary)",
+              color: "var(--text-primary)",
+            }}
+          >
+            <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
+            Refresh
+          </button>
+          {/* Adding a connector requires an OAuth/API-key flow. Disabled
+              until that UI is built. */}
+          <button
+            type="button"
+            disabled
+            title="Add Connector flow coming soon"
+            className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white disabled:opacity-50 cursor-not-allowed"
+            style={{ backgroundColor: "var(--accent-primary)" }}
+          >
+            <Plus className="w-4 h-4" /> Add Connector
+          </button>
+        </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {mockConnectors.map((c) => (
-          <ConnectorCard key={c.id} connector={c} />
-        ))}
+      {loading && (
+        <div
+          className="rounded-xl border p-8 flex items-center justify-center gap-2"
+          style={{
+            backgroundColor: "var(--bg-secondary)",
+            borderColor: "var(--border-primary)",
+            color: "var(--text-muted)",
+          }}
+        >
+          <Loader2 className="w-4 h-4 animate-spin" />
+          <span className="text-sm">Loading connectors...</span>
+        </div>
+      )}
 
-        {/* Add New Card */}
-        <button
-          className="rounded-xl border-2 border-dashed p-8 flex flex-col items-center justify-center gap-2 transition-colors hover:opacity-80"
+      {!loading && error && (
+        <div
+          className="rounded-xl border p-6 text-center"
+          style={{
+            backgroundColor: "var(--bg-secondary)",
+            borderColor: "var(--border-primary)",
+            color: "var(--accent-danger)",
+          }}
+        >
+          <p className="text-sm">{error}</p>
+        </div>
+      )}
+
+      {!loading && !error && connectors.length === 0 && (
+        <div
+          className="rounded-xl border-2 border-dashed p-12 flex flex-col items-center justify-center gap-2 text-center"
           style={{
             borderColor: "var(--border-primary)",
             color: "var(--text-muted)",
           }}
         >
-          <Plus className="w-8 h-8" />
-          <span className="text-sm font-medium">Add New Connector</span>
-          <span className="text-xs">GitHub, Slack, Notion, Spotify...</span>
-        </button>
-      </div>
+          <Plug className="w-10 h-10" />
+          <p className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
+            No connectors yet
+          </p>
+          <p className="text-xs max-w-sm">
+            Once an Add Connector flow lands, Canvas, Google Workspace, and
+            Robinhood integrations will appear here.
+          </p>
+        </div>
+      )}
+
+      {!loading && !error && connectors.length > 0 && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {connectors.map((c) => (
+            <ConnectorCard
+              key={c.id}
+              connector={c}
+              onDelete={() => handleDelete(c.id)}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
