@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Plug,
   Activity,
@@ -6,7 +6,6 @@ import {
   Clock,
   CheckCircle2,
   XCircle,
-  AlertTriangle,
 } from "lucide-react";
 import {
   AreaChart,
@@ -17,42 +16,23 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import type {
-  ActivityEntry,
-  SecurityTimelineEntry,
+  AuditLog,
+  Connector,
   ConnectorHealthEntry,
+  SecurityTimelineEntry,
 } from "@/types";
+import { getAuditLogs, getConnectors, getMe } from "@/services/api";
 
-// Mock data for demo
-const stats = {
-  active_connectors: 3,
-  total_actions_24h: 142,
-  blocked_threats: 7,
-  pending_approvals: 2,
-};
+const TIMELINE_DAYS = 7;
+const FEED_LIMIT = 6;
 
-const mockTimeline: SecurityTimelineEntry[] = [
-  { date: "Mar 31", approved: 45, blocked: 2 },
-  { date: "Apr 01", approved: 52, blocked: 3 },
-  { date: "Apr 02", approved: 38, blocked: 1 },
-  { date: "Apr 03", approved: 61, blocked: 4 },
-  { date: "Apr 04", approved: 49, blocked: 2 },
-  { date: "Apr 05", approved: 55, blocked: 3 },
-  { date: "Apr 06", approved: 42, blocked: 1 },
-];
-
-const mockActivity: ActivityEntry[] = [
-  { id: "1", connector: "Canvas LMS", action: "get_assignments", status: "approved", timestamp: "2 min ago" },
-  { id: "2", connector: "Gmail", action: "search_emails", status: "approved", timestamp: "5 min ago" },
-  { id: "3", connector: "Robinhood", action: "execute_trade", status: "blocked", timestamp: "12 min ago" },
-  { id: "4", connector: "Google Calendar", action: "create_event", status: "pending", timestamp: "18 min ago" },
-  { id: "5", connector: "Canvas LMS", action: "get_grades", status: "approved", timestamp: "25 min ago" },
-  { id: "6", connector: "Gmail", action: "send_email", status: "pending", timestamp: "31 min ago" },
-];
-
-const mockHealth: ConnectorHealthEntry[] = [
-  { id: "1", name: "Canvas LMS", type: "canvas", status: "healthy", uptime: 99.9, last_check: "1 min ago" },
-  { id: "2", name: "Google Workspace", type: "google", status: "healthy", uptime: 99.7, last_check: "2 min ago" },
-  { id: "3", name: "Robinhood Crypto", type: "robinhood", status: "degraded", uptime: 95.2, last_check: "3 min ago" },
+// Connector health is not yet exposed by the backend. Keep a placeholder list
+// so the bottom tile renders something useful until a /connectors/health
+// endpoint exists.
+const placeholderHealth: ConnectorHealthEntry[] = [
+  { id: "1", name: "Canvas LMS", type: "canvas", status: "healthy", uptime: 99.9, last_check: "—" },
+  { id: "2", name: "Google Workspace", type: "google", status: "healthy", uptime: 99.7, last_check: "—" },
+  { id: "3", name: "Robinhood Crypto", type: "robinhood", status: "degraded", uptime: 95.2, last_check: "—" },
 ];
 
 const statusColors = {
@@ -67,6 +47,46 @@ const statusIcons = {
   pending: Clock,
 };
 
+function bucketByDay(logs: AuditLog[], days: number): SecurityTimelineEntry[] {
+  const now = new Date();
+  const buckets: SecurityTimelineEntry[] = [];
+  const keyByDay = new Map<string, SecurityTimelineEntry>();
+
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(now);
+    d.setHours(0, 0, 0, 0);
+    d.setDate(d.getDate() - i);
+    const key = d.toISOString().slice(0, 10);
+    const label = d.toLocaleDateString(undefined, { month: "short", day: "2-digit" });
+    const entry: SecurityTimelineEntry = { date: label, approved: 0, blocked: 0 };
+    buckets.push(entry);
+    keyByDay.set(key, entry);
+  }
+
+  for (const log of logs) {
+    const key = new Date(log.timestamp).toISOString().slice(0, 10);
+    const bucket = keyByDay.get(key);
+    if (!bucket) continue;
+    if (log.status === "approved") bucket.approved += 1;
+    else if (log.status === "blocked") bucket.blocked += 1;
+  }
+  return buckets;
+}
+
+function formatRelative(iso: string): string {
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return "—";
+  const diffSec = Math.max(0, Math.round((Date.now() - then) / 1000));
+  if (diffSec < 60) return `${diffSec}s ago`;
+  const diffMin = Math.round(diffSec / 60);
+  if (diffMin < 60) return `${diffMin} min ago`;
+  const diffHr = Math.round(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h ago`;
+  const diffDay = Math.round(diffHr / 24);
+  if (diffDay < 7) return `${diffDay}d ago`;
+  return new Date(iso).toLocaleDateString();
+}
+
 function StatCard({
   label,
   value,
@@ -74,7 +94,7 @@ function StatCard({
   color,
 }: {
   label: string;
-  value: number;
+  value: number | string;
   icon: any;
   color: string;
 }) {
@@ -105,6 +125,52 @@ function StatCard({
 }
 
 export default function Dashboard() {
+  const [logs, setLogs] = useState<AuditLog[]>([]);
+  const [connectors, setConnectors] = useState<Connector[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const user = await getMe();
+        if (cancelled) return;
+        const [logResult, connResult] = await Promise.all([
+          getAuditLogs(user.id, { limit: 500 }).catch((): AuditLog[] => []),
+          getConnectors().catch((): Connector[] => []),
+        ]);
+        if (cancelled) return;
+        setLogs(logResult);
+        setConnectors(connResult);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const timeline = useMemo(() => bucketByDay(logs, TIMELINE_DAYS), [logs]);
+  const recentActivity = useMemo(() => logs.slice(0, FEED_LIMIT), [logs]);
+  const counts24h = useMemo(() => {
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    let total = 0;
+    let blocked = 0;
+    let pending = 0;
+    for (const l of logs) {
+      if (new Date(l.timestamp).getTime() < cutoff) continue;
+      total += 1;
+      if (l.status === "blocked") blocked += 1;
+      else if (l.status === "pending") pending += 1;
+    }
+    return { total, blocked, pending };
+  }, [logs]);
+
+  const activeConnectors = connectors.filter(
+    (c) => c.status === "connected"
+  ).length;
+
   return (
     <div className="space-y-6">
       <div>
@@ -123,25 +189,25 @@ export default function Dashboard() {
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard
           label="Active Connectors"
-          value={stats.active_connectors}
+          value={loading ? "…" : activeConnectors}
           icon={Plug}
           color="var(--accent-success)"
         />
         <StatCard
           label="Actions (24h)"
-          value={stats.total_actions_24h}
+          value={loading ? "…" : counts24h.total}
           icon={Activity}
           color="var(--accent-primary)"
         />
         <StatCard
-          label="Blocked Threats"
-          value={stats.blocked_threats}
+          label="Blocked (24h)"
+          value={loading ? "…" : counts24h.blocked}
           icon={ShieldAlert}
           color="var(--accent-danger)"
         />
         <StatCard
-          label="Pending Approvals"
-          value={stats.pending_approvals}
+          label="Pending (24h)"
+          value={loading ? "…" : counts24h.pending}
           icon={Clock}
           color="var(--accent-warning)"
         />
@@ -161,10 +227,10 @@ export default function Dashboard() {
             className="text-lg font-semibold mb-4"
             style={{ color: "var(--text-primary)" }}
           >
-            Security Events (7 Days)
+            Security Events (Last {TIMELINE_DAYS} Days)
           </h2>
           <ResponsiveContainer width="100%" height={260}>
-            <AreaChart data={mockTimeline}>
+            <AreaChart data={timeline}>
               <defs>
                 <linearGradient id="approvedGrad" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="5%" stopColor="#6366f1" stopOpacity={0.3} />
@@ -230,46 +296,57 @@ export default function Dashboard() {
             Recent Activity
           </h2>
           <div className="space-y-3">
-            {mockActivity.map((entry) => {
-              const StatusIcon = statusIcons[entry.status];
-              return (
-                <div
-                  key={entry.id}
-                  className="flex items-start gap-3 py-2 border-b last:border-b-0"
-                  style={{ borderColor: "var(--border-primary)" }}
-                >
-                  <StatusIcon
-                    className="w-4 h-4 mt-0.5 shrink-0"
-                    style={{ color: statusColors[entry.status] }}
-                  />
-                  <div className="flex-1 min-w-0">
-                    <p
-                      className="text-sm font-medium truncate"
-                      style={{ color: "var(--text-primary)" }}
-                    >
-                      {entry.action}
-                    </p>
-                    <p
-                      className="text-xs"
+            {loading && (
+              <p className="text-sm" style={{ color: "var(--text-muted)" }}>
+                Loading...
+              </p>
+            )}
+            {!loading && recentActivity.length === 0 && (
+              <p className="text-sm" style={{ color: "var(--text-muted)" }}>
+                No agent activity yet.
+              </p>
+            )}
+            {!loading &&
+              recentActivity.map((entry) => {
+                const StatusIcon = statusIcons[entry.status];
+                return (
+                  <div
+                    key={entry.id}
+                    className="flex items-start gap-3 py-2 border-b last:border-b-0"
+                    style={{ borderColor: "var(--border-primary)" }}
+                  >
+                    <StatusIcon
+                      className="w-4 h-4 mt-0.5 shrink-0"
+                      style={{ color: statusColors[entry.status] }}
+                    />
+                    <div className="flex-1 min-w-0">
+                      <p
+                        className="text-sm font-medium truncate"
+                        style={{ color: "var(--text-primary)" }}
+                      >
+                        {entry.action}
+                      </p>
+                      <p
+                        className="text-xs"
+                        style={{ color: "var(--text-muted)" }}
+                      >
+                        {entry.connector_name}
+                      </p>
+                    </div>
+                    <span
+                      className="text-xs shrink-0"
                       style={{ color: "var(--text-muted)" }}
                     >
-                      {entry.connector}
-                    </p>
+                      {formatRelative(entry.timestamp)}
+                    </span>
                   </div>
-                  <span
-                    className="text-xs shrink-0"
-                    style={{ color: "var(--text-muted)" }}
-                  >
-                    {entry.timestamp}
-                  </span>
-                </div>
-              );
-            })}
+                );
+              })}
           </div>
         </div>
       </div>
 
-      {/* Connector Health */}
+      {/* Connector Health (placeholder; backend endpoint not yet implemented) */}
       <div
         className="rounded-xl border p-5"
         style={{
@@ -284,7 +361,7 @@ export default function Dashboard() {
           Connector Health
         </h2>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          {mockHealth.map((c) => (
+          {placeholderHealth.map((c) => (
             <div
               key={c.id}
               className="rounded-lg border p-4"

@@ -30,24 +30,36 @@ export interface ConnectorScope {
   granted: boolean;
 }
 
+export type AuditStatus = "approved" | "blocked" | "pending";
+
 export interface AuditLog {
   id: string;
-  connector_id: string;
+  user_id: string;
+  timestamp: string;
   connector_name: string;
   action: string;
   endpoint: string;
-  scope: string;
-  status: "approved" | "blocked" | "pending" | "escalated";
-  decision_method: "auto" | "user" | "policy";
-  reasoning: string;
-  detection_method?: string;
-  confidence_score?: number;
-  request_data?: Record<string, unknown>;
-  response_summary?: string;
+  scope_used: string;
+  status: AuditStatus;
+  reasoning_chain?: Record<string, unknown> | unknown[] | string | null;
+  detection_method?: string | null;
+  confidence_score?: number | null;
+  request_data?: Record<string, unknown> | null;
+  response_summary?: string | null;
   integrity_hash: string;
-  integrity_valid: boolean;
-  timestamp: string;
-  user_id: string;
+  request_id: string;
+}
+
+export interface AuditLogFilters {
+  connector_name?: string;
+  status?: AuditStatus;
+  limit?: number;
+  offset?: number;
+}
+
+export interface AuditIntegrityCheck {
+  id: string;
+  valid: boolean;
 }
 
 export interface Conversation {
