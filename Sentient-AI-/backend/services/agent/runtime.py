@@ -518,6 +518,42 @@ class AgentRuntime:
         yield {"type": "done", "data": {}}
 
     # ------------------------------------------------------------------
+    # Pending-approval helpers
+    # ------------------------------------------------------------------
+
+    def list_pending_approvals(self, user_id: str) -> list[PendingApproval]:
+        """Return all pending approvals for the given user."""
+        return [
+            PendingApproval(
+                action_id=aid,
+                tool_name=data["tool_call"].name,
+                arguments=data["tool_call"].arguments,
+                reason=f"Tool '{data['tool_call'].name}' requires explicit user approval",
+            )
+            for aid, data in self._pending.items()
+            if data["user_id"] == user_id
+        ]
+
+    async def deny_action(self, action_id: str, user_id: str) -> dict[str, Any]:
+        """Drop a pending action without executing it."""
+        pending = self._pending.get(action_id)
+        if not pending:
+            return {"error": "Action not found or already processed"}
+        if pending["user_id"] != user_id:
+            return {"error": "Unauthorized"}
+        self._pending.pop(action_id, None)
+        await self._audit.log(
+            {
+                "event": "tool_denied",
+                "user_id": user_id,
+                "tool": pending["tool_call"].name,
+                "action_id": action_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        return {"denied": True, "action_id": action_id}
+
+    # ------------------------------------------------------------------
     # Approve a pending action
     # ------------------------------------------------------------------
 
