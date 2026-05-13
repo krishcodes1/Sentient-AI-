@@ -2,7 +2,23 @@
 
 __version__ = "0.1.0"
 
-# Public API surface — anything imported here is part of the stable contract.
-# Internal modules (engine internals, rail base class) are not re-exported.
+from openclaw_guardrails.exceptions import ConfigError, GuardrailsError, RailError
+from openclaw_guardrails.types import (
+    RailAction,
+    RailContext,
+    RailDecision,
+    ScanResult,
+    Verdict,
+)
 
-# Imports added as components land in later tasks.
+__all__ = [
+    "__version__",
+    "ConfigError",
+    "GuardrailsError",
+    "RailAction",
+    "RailContext",
+    "RailDecision",
+    "RailError",
+    "ScanResult",
+    "Verdict",
+]
