@@ -1,7 +1,8 @@
-# Environment
-backend/.env
-.env
-*.env.local
+# Environment (catch all .env variants, allow templates)
+*.env
+*.env.*
+!*.env.example
+!*.env.sample
 
 # Python
 __pycache__/
