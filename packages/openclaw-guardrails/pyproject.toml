@@ -1,0 +1,62 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "openclaw-guardrails"
+version = "0.1.0"
+description = "Provider-agnostic guardrails for LLM applications. Closed-source for now; architected for OSS later."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Krish Shroff" }]
+license = { text = "Proprietary" }
+dependencies = [
+    "pydantic>=2.5,<3.0",
+    "pyyaml>=6.0,<7.0",
+]
+
+[project.optional-dependencies]
+pii = [
+    "presidio-analyzer>=2.2.350,<3.0",
+    "presidio-anonymizer>=2.2.350,<3.0",
+]
+toxicity = [
+    "detoxify>=0.5.2,<1.0",
+]
+all = [
+    "presidio-analyzer>=2.2.350,<3.0",
+    "presidio-anonymizer>=2.2.350,<3.0",
+    "detoxify>=0.5.2,<1.0",
+]
+dev = [
+    "pytest>=8.0,<9.0",
+    "pytest-asyncio>=0.23,<1.0",
+    "ruff>=0.4,<1.0",
+    "mypy>=1.10,<2.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/openclaw_guardrails"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "SIM"]
+ignore = ["E501", "B008", "N805"]
+
+[tool.mypy]
+python_version = "3.11"
+strict_optional = true
+warn_unused_ignores = true
+no_implicit_optional = true
+check_untyped_defs = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-ra --strict-markers --tb=short"
+markers = ["slow: slow tests (model loads, network)"]
