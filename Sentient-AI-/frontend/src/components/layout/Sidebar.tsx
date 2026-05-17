@@ -1,4 +1,5 @@
-import { NavLink, useNavigate } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { NavLink } from "react-router-dom";
 import {
   LayoutDashboard,
   MessageSquare,
@@ -9,6 +10,8 @@ import {
   Brain,
 } from "lucide-react";
 import clsx from "clsx";
+import type { User } from "@/types";
+import { getMe, logout } from "@/services/api";
 
 const navItems = [
   { to: "/", icon: LayoutDashboard, label: "Dashboard" },
@@ -19,12 +22,30 @@ const navItems = [
 ];
 
 export default function Sidebar() {
-  const navigate = useNavigate();
+  const [me, setMe] = useState<User | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getMe()
+      .then((u) => {
+        if (!cancelled) setMe(u);
+      })
+      .catch(() => {
+        // Token invalid or expired; logout() handles the redirect.
+        logout();
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleLogout = () => {
-    localStorage.removeItem("auth_token");
-    navigate("/login");
+    logout();
   };
+
+  const displayName = me?.name?.trim() || "User";
+  const displayEmail = me?.email || "Loading...";
+  const initial = (me?.name?.trim()?.[0] || me?.email?.[0] || "U").toUpperCase();
 
   return (
     <aside
@@ -112,26 +133,27 @@ export default function Sidebar() {
       >
         <div className="flex items-center gap-3">
           <div
-            className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-semibold"
+            className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-semibold shrink-0"
             style={{
               backgroundColor: "rgba(99, 102, 241, 0.2)",
               color: "var(--accent-primary)",
             }}
           >
-            U
+            {initial}
           </div>
           <div className="flex-1 min-w-0">
             <p
               className="text-sm font-medium truncate"
               style={{ color: "var(--text-primary)" }}
             >
-              User
+              {displayName}
             </p>
             <p
               className="text-xs truncate"
               style={{ color: "var(--text-muted)" }}
+              title={displayEmail}
             >
-              user@example.com
+              {displayEmail}
             </p>
           </div>
           <button

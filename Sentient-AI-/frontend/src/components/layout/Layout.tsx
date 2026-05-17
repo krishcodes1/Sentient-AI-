@@ -2,12 +2,14 @@ import { Outlet } from "react-router-dom";
 import Sidebar from "./Sidebar";
 
 export default function Layout() {
+  // Sidebar is position: fixed (256px wide), so the main column just
+  // needs a matching left margin. No flex wrapper required.
   return (
-    <div className="flex min-h-screen">
+    <>
       <Sidebar />
-      <main className="flex-1 ml-64 p-6 overflow-auto">
+      <main className="ml-64 min-h-screen p-6 overflow-x-hidden">
         <Outlet />
       </main>
-    </div>
+    </>
   );
 }
