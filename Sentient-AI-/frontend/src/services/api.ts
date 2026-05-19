@@ -20,12 +20,29 @@ import type {
 
 const API_BASE = "/api";
 
+// Endpoints that should NOT trigger an auto-redirect on 401. Hitting
+// /auth/login with the wrong password legitimately returns 401, and we
+// want the Login page to render that error inline, not bounce back to
+// itself.
+const AUTH_EXEMPT_FROM_REDIRECT = new Set<string>([
+  "/auth/login",
+  "/auth/register",
+]);
+
 class ApiError extends Error {
   status: number;
   constructor(message: string, status: number) {
     super(message);
     this.status = status;
     this.name = "ApiError";
+  }
+}
+
+function handleUnauthorized() {
+  localStorage.removeItem("auth_token");
+  // Use replace so the broken page is not in the back-button history.
+  if (window.location.pathname !== "/login") {
+    window.location.replace("/login");
   }
 }
 
@@ -51,6 +68,18 @@ async function request<T>(
 
   if (!response.ok) {
     const errorBody = await response.json().catch(() => ({}));
+
+    // Token is missing, invalid, or expired. Clear it and bounce to
+    // /login so the user is not stuck on a page making 401 requests
+    // in a loop. Skip this for the login/register endpoints themselves
+    // so wrong-password errors render inline on the form.
+    if (
+      response.status === 401 &&
+      !AUTH_EXEMPT_FROM_REDIRECT.has(endpoint)
+    ) {
+      handleUnauthorized();
+    }
+
     throw new ApiError(
       errorBody.detail || `Request failed: ${response.statusText}`,
       response.status
