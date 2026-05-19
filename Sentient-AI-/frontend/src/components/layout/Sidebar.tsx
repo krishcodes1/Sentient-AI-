@@ -5,20 +5,20 @@ import {
   MessageSquare,
   Plug,
   Shield,
-  Settings,
+  Settings as SettingsIcon,
   LogOut,
-  Brain,
 } from "lucide-react";
 import clsx from "clsx";
 import type { User } from "@/types";
 import { getMe, logout } from "@/services/api";
+import Brand, { Wordmark } from "@/components/Brand";
 
 const navItems = [
-  { to: "/", icon: LayoutDashboard, label: "Dashboard" },
+  { to: "/", icon: LayoutDashboard, label: "Gateway", end: true },
   { to: "/chat", icon: MessageSquare, label: "Chat" },
   { to: "/connectors", icon: Plug, label: "Connectors" },
-  { to: "/audit", icon: Shield, label: "Audit Logs" },
-  { to: "/settings", icon: Settings, label: "Settings" },
+  { to: "/audit", icon: Shield, label: "Audit logs" },
+  { to: "/settings", icon: SettingsIcon, label: "Settings" },
 ];
 
 export default function Sidebar() {
@@ -31,7 +31,6 @@ export default function Sidebar() {
         if (!cancelled) setMe(u);
       })
       .catch(() => {
-        // Token invalid or expired; logout() handles the redirect.
         logout();
       });
     return () => {
@@ -44,80 +43,101 @@ export default function Sidebar() {
   };
 
   const displayName = me?.name?.trim() || "User";
-  const displayEmail = me?.email || "Loading...";
+  const displayEmail = me?.email || "loading...";
   const initial = (me?.name?.trim()?.[0] || me?.email?.[0] || "U").toUpperCase();
 
   return (
     <aside
-      className="fixed left-0 top-0 h-screen w-64 flex flex-col border-r"
+      className="fixed left-0 top-0 h-screen flex flex-col flex-shrink-0"
       style={{
-        backgroundColor: "var(--bg-sidebar)",
-        borderColor: "var(--border-primary)",
+        width: 248,
+        background: "var(--claw-sidebar)",
+        borderRight: "1px solid var(--claw-border)",
+        padding: "20px 14px",
       }}
     >
-      {/* Logo */}
+      {/* Brand */}
       <div
-        className="flex items-center gap-3 px-6 py-5 border-b"
-        style={{ borderColor: "var(--border-primary)" }}
+        className="flex items-center gap-3"
+        style={{
+          padding: "0 4px 20px",
+          borderBottom: "1px solid var(--border-subtle)",
+        }}
       >
-        <div
-          className="w-9 h-9 rounded-lg flex items-center justify-center"
-          style={{ backgroundColor: "var(--accent-primary)" }}
-        >
-          <Brain className="w-5 h-5 text-white" />
-        </div>
-        <div>
-          <h1
-            className="text-lg font-bold tracking-tight"
-            style={{ color: "var(--text-primary)" }}
+        <Brand size={44} variant="emblem" rounded={0} />
+        <div className="flex flex-col leading-none min-w-0">
+          <Wordmark height={18} />
+          <span
+            className="eyebrow mt-2"
+            style={{ letterSpacing: "0.14em" }}
           >
-            SentientAI
-          </h1>
-          <p className="text-xs" style={{ color: "var(--text-muted)" }}>
-            Secure Agent Platform
-          </p>
+            Control UI
+          </span>
         </div>
       </div>
 
-      {/* Navigation */}
-      <nav className="flex-1 px-3 py-4 space-y-1">
+      {/* Nav */}
+      <nav className="mt-5 flex flex-col gap-1">
+        <div className="eyebrow px-2.5 pb-2">Workspace</div>
         {navItems.map((item) => (
           <NavLink
             key={item.to}
             to={item.to}
-            end={item.to === "/"}
+            end={item.end}
             className={({ isActive }) =>
               clsx(
-                "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-150",
-                isActive
-                  ? "shadow-sm"
-                  : "hover:opacity-90"
+                "group relative flex items-center gap-3 px-3 py-2 rounded-[10px] text-sm transition-colors",
+                isActive ? "font-medium" : "font-normal"
               )
             }
             style={({ isActive }) => ({
-              backgroundColor: isActive
-                ? "rgba(99, 102, 241, 0.15)"
+              background: isActive
+                ? "var(--claw-surface-active)"
                 : "transparent",
+              border: `1px solid ${
+                isActive ? "var(--claw-border)" : "transparent"
+              }`,
               color: isActive
-                ? "var(--accent-primary-hover)"
+                ? "var(--text-primary)"
                 : "var(--text-secondary)",
+              boxShadow: isActive ? "var(--shadow-bevel)" : "none",
             })}
           >
             {({ isActive }) => (
               <>
+                {isActive && (
+                  <span
+                    aria-hidden
+                    style={{
+                      position: "absolute",
+                      left: -14,
+                      top: 10,
+                      bottom: 10,
+                      width: 2,
+                      background: "var(--accent-primary)",
+                      borderRadius: "0 2px 2px 0",
+                    }}
+                  />
+                )}
                 <item.icon
-                  className="w-5 h-5"
+                  size={16}
+                  strokeWidth={isActive ? 2 : 1.75}
                   style={{
                     color: isActive
-                      ? "var(--accent-primary)"
+                      ? "var(--text-primary)"
                       : "var(--text-muted)",
                   }}
                 />
-                {item.label}
+                <span className="flex-1">{item.label}</span>
                 {isActive && (
-                  <div
-                    className="ml-auto w-1.5 h-1.5 rounded-full"
-                    style={{ backgroundColor: "var(--accent-primary)" }}
+                  <span
+                    aria-hidden
+                    style={{
+                      width: 4,
+                      height: 4,
+                      borderRadius: 999,
+                      background: "var(--accent-primary)",
+                    }}
                   />
                 )}
               </>
@@ -126,43 +146,46 @@ export default function Sidebar() {
         ))}
       </nav>
 
-      {/* User section */}
+      {/* Footer */}
       <div
-        className="px-4 py-4 border-t"
-        style={{ borderColor: "var(--border-primary)" }}
+        className="mt-auto pt-4"
+        style={{ borderTop: "1px solid var(--border-subtle)" }}
       >
-        <div className="flex items-center gap-3">
+        <div
+          className="flex items-center gap-2.5 px-2 py-2.5 rounded-[10px]"
+        >
           <div
-            className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-semibold shrink-0"
+            className="w-8 h-8 rounded-full flex items-center justify-center text-[13px] font-semibold shrink-0"
             style={{
-              backgroundColor: "rgba(99, 102, 241, 0.2)",
+              background: "var(--accent-glow)",
               color: "var(--accent-primary)",
+              border: "1px solid var(--claw-border)",
             }}
           >
             {initial}
           </div>
-          <div className="flex-1 min-w-0">
-            <p
-              className="text-sm font-medium truncate"
+          <div className="flex-1 min-w-0 leading-tight">
+            <div
+              className="text-[13px] font-medium truncate"
               style={{ color: "var(--text-primary)" }}
             >
               {displayName}
-            </p>
-            <p
-              className="text-xs truncate"
+            </div>
+            <div
+              className="mono-tag truncate"
               style={{ color: "var(--text-muted)" }}
               title={displayEmail}
             >
               {displayEmail}
-            </p>
+            </div>
           </div>
           <button
             onClick={handleLogout}
-            className="p-1.5 rounded-md transition-colors hover:opacity-80"
+            className="p-1 transition-colors"
             style={{ color: "var(--text-muted)" }}
-            title="Logout"
+            title="Sign out"
           >
-            <LogOut className="w-4 h-4" />
+            <LogOut size={15} strokeWidth={1.75} />
           </button>
         </div>
       </div>
