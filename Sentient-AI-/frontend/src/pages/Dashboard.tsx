@@ -88,34 +88,41 @@ function StatCard({
   value,
   icon: Icon,
   color,
+  eyebrow,
 }: {
   label: string;
   value: number | string;
   icon: any;
   color: string;
+  eyebrow: string;
 }) {
   return (
     <div
-      className="rounded-xl p-5 border"
+      className="rounded-[14px] p-5"
       style={{
-        backgroundColor: "var(--bg-secondary)",
-        borderColor: "var(--border-primary)",
+        background: "var(--claw-panel)",
+        border: "1px solid var(--claw-border)",
+        boxShadow: "var(--shadow-card)",
       }}
     >
-      <div className="flex items-center justify-between mb-3">
-        <span className="text-sm" style={{ color: "var(--text-secondary)" }}>
-          {label}
-        </span>
+      <div className="flex items-start justify-between mb-3">
+        <div className="flex flex-col gap-1">
+          <span className="eyebrow">{eyebrow}</span>
+          <span className="text-sm" style={{ color: "var(--text-secondary)" }}>
+            {label}
+          </span>
+        </div>
         <div
-          className="w-9 h-9 rounded-lg flex items-center justify-center"
-          style={{ backgroundColor: `${color}15` }}
+          className="w-8 h-8 rounded-[8px] flex items-center justify-center"
+          style={{
+            background: `${color}1f`,
+            border: `1px solid ${color}40`,
+          }}
         >
-          <Icon className="w-5 h-5" style={{ color }} />
+          <Icon size={16} strokeWidth={2} style={{ color }} />
         </div>
       </div>
-      <p className="text-3xl font-bold" style={{ color: "var(--text-primary)" }}>
-        {value}
-      </p>
+      <p className="metric">{value}</p>
     </div>
   );
 }
@@ -171,42 +178,46 @@ export default function Dashboard() {
   return (
     <div className="space-y-6">
       <div>
-        <h1
-          className="text-2xl font-bold"
-          style={{ color: "var(--text-primary)" }}
+        <div className="eyebrow mb-2">Control center</div>
+        <h1 style={{ color: "var(--text-primary)" }}>Gateway &amp; workspace</h1>
+        <p
+          className="text-sm mt-1.5 max-w-2xl"
+          style={{ color: "var(--text-secondary)" }}
         >
-          Dashboard
-        </h1>
-        <p className="text-sm mt-1" style={{ color: "var(--text-secondary)" }}>
-          Real-time monitoring of agent activity and security events
+          Mirror of the native OpenClaw dashboard. Live agent activity, blocked
+          actions, and connector health — all flowing through the policy layer.
         </p>
       </div>
 
       {/* Stat cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard
-          label="Active Connectors"
+          eyebrow="Connectors"
+          label="Active"
           value={loading ? "…" : activeConnectors}
           icon={Plug}
-          color="var(--accent-success)"
+          color="#34d399"
         />
         <StatCard
-          label="Actions (24h)"
+          eyebrow="Actions"
+          label="Last 24h"
           value={loading ? "…" : counts24h.total}
           icon={Activity}
-          color="var(--accent-primary)"
+          color="#22d3ee"
         />
         <StatCard
-          label="Blocked (24h)"
+          eyebrow="Blocked"
+          label="Last 24h"
           value={loading ? "…" : counts24h.blocked}
           icon={ShieldAlert}
-          color="var(--accent-danger)"
+          color="#f87171"
         />
         <StatCard
-          label="Pending (24h)"
+          eyebrow="Pending"
+          label="Last 24h"
           value={loading ? "…" : counts24h.pending}
           icon={Clock}
-          color="var(--accent-warning)"
+          color="#fbbf24"
         />
       </div>
 
@@ -214,63 +225,63 @@ export default function Dashboard() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Security Timeline */}
         <div
-          className="lg:col-span-2 rounded-xl border p-5"
+          className="lg:col-span-2 rounded-[14px] p-5"
           style={{
-            backgroundColor: "var(--bg-secondary)",
-            borderColor: "var(--border-primary)",
+            background: "var(--claw-panel)",
+            border: "1px solid var(--claw-border)",
+            boxShadow: "var(--shadow-card)",
           }}
         >
-          <h2
-            className="text-lg font-semibold mb-4"
-            style={{ color: "var(--text-primary)" }}
-          >
-            Security Events (Last {TIMELINE_DAYS} Days)
-          </h2>
+          <div className="eyebrow mb-1">Policy timeline</div>
+          <h2 className="mb-4">Security events · last {TIMELINE_DAYS} days</h2>
           <ResponsiveContainer width="100%" height={260}>
             <AreaChart data={timeline}>
               <defs>
                 <linearGradient id="approvedGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#6366f1" stopOpacity={0.3} />
-                  <stop offset="95%" stopColor="#6366f1" stopOpacity={0} />
+                  <stop offset="5%" stopColor="#22d3ee" stopOpacity={0.3} />
+                  <stop offset="95%" stopColor="#22d3ee" stopOpacity={0} />
                 </linearGradient>
                 <linearGradient id="blockedGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#ef4444" stopOpacity={0.3} />
-                  <stop offset="95%" stopColor="#ef4444" stopOpacity={0} />
+                  <stop offset="5%" stopColor="#f87171" stopOpacity={0.3} />
+                  <stop offset="95%" stopColor="#f87171" stopOpacity={0} />
                 </linearGradient>
               </defs>
               <XAxis
                 dataKey="date"
-                stroke="#64748b"
-                fontSize={12}
+                stroke="#a1a1aa"
+                fontSize={11}
                 tickLine={false}
                 axisLine={false}
+                style={{ fontFamily: "var(--font-mono)" }}
               />
               <YAxis
-                stroke="#64748b"
-                fontSize={12}
+                stroke="#a1a1aa"
+                fontSize={11}
                 tickLine={false}
                 axisLine={false}
+                style={{ fontFamily: "var(--font-mono)" }}
               />
               <Tooltip
                 contentStyle={{
-                  backgroundColor: "#1a1d27",
-                  border: "1px solid #2a2d3a",
-                  borderRadius: "8px",
-                  color: "#f1f5f9",
+                  backgroundColor: "#131316",
+                  border: "1px solid rgba(63,63,70,0.65)",
+                  borderRadius: "10px",
+                  color: "#f4f4f5",
                   fontSize: "13px",
+                  fontFamily: "var(--font-mono)",
                 }}
               />
               <Area
                 type="monotone"
                 dataKey="approved"
-                stroke="#6366f1"
+                stroke="#22d3ee"
                 fill="url(#approvedGrad)"
                 strokeWidth={2}
               />
               <Area
                 type="monotone"
                 dataKey="blocked"
-                stroke="#ef4444"
+                stroke="#f87171"
                 fill="url(#blockedGrad)"
                 strokeWidth={2}
               />
@@ -280,18 +291,15 @@ export default function Dashboard() {
 
         {/* Activity Feed */}
         <div
-          className="rounded-xl border p-5"
+          className="rounded-[14px] p-5"
           style={{
-            backgroundColor: "var(--bg-secondary)",
-            borderColor: "var(--border-primary)",
+            background: "var(--claw-panel)",
+            border: "1px solid var(--claw-border)",
+            boxShadow: "var(--shadow-card)",
           }}
         >
-          <h2
-            className="text-lg font-semibold mb-4"
-            style={{ color: "var(--text-primary)" }}
-          >
-            Recent Activity
-          </h2>
+          <div className="eyebrow mb-1">Live feed</div>
+          <h2 className="mb-4">Recent activity</h2>
           <div className="space-y-3">
             {loading && (
               <p className="text-sm" style={{ color: "var(--text-muted)" }}>
@@ -345,18 +353,15 @@ export default function Dashboard() {
 
       {/* Connector Health */}
       <div
-        className="rounded-xl border p-5"
+        className="rounded-[14px] p-5"
         style={{
-          backgroundColor: "var(--bg-secondary)",
-          borderColor: "var(--border-primary)",
+          background: "var(--claw-panel)",
+          border: "1px solid var(--claw-border)",
+          boxShadow: "var(--shadow-card)",
         }}
       >
-        <h2
-          className="text-lg font-semibold mb-4"
-          style={{ color: "var(--text-primary)" }}
-        >
-          Connector Health
-        </h2>
+        <div className="eyebrow mb-1">Integrations</div>
+        <h2 className="mb-4">Connector health</h2>
         {!loading && health.length === 0 && (
           <p className="text-sm" style={{ color: "var(--text-muted)" }}>
             No connectors configured. Add one from the Connectors page.

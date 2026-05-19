@@ -1,33 +1,122 @@
 @import "tailwindcss";
+/* Fonts (Inter + JetBrains Mono) are loaded via <link> in index.html.
+   They can't live here because Tailwind v4 strips @import url() during build. */
 
+/* ============================================================
+   SentientAI Design Tokens
+   Source: design-bundle/sentientai-design-system/project/colors_and_type.css
+   ============================================================ */
 :root {
-  --bg-primary: #0f1117;
-  --bg-secondary: #1a1d27;
-  --bg-sidebar: #141620;
-  --bg-hover: #252836;
-  --bg-input: #1e2132;
-  --border-primary: #2a2d3a;
-  --border-focus: #6366f1;
-  --accent-primary: #6366f1;
-  --accent-primary-hover: #818cf8;
-  --accent-success: #22c55e;
-  --accent-warning: #f59e0b;
-  --accent-danger: #ef4444;
-  --text-primary: #f1f5f9;
-  --text-secondary: #94a3b8;
-  --text-muted: #64748b;
+  /* Backgrounds */
+  --bg-primary: #0a0a0b;
+  --bg-secondary: #141416;
+  --bg-tertiary: #1c1c1f;
+  --bg-sidebar: #161618;
+  --bg-hover: #3a3a3c;
+  --bg-input: #161618;
+
+  /* OpenClaw Control-UI shell */
+  --claw-sidebar: #0f0f10;
+  --claw-panel: #131316;
+  --claw-surface: #18181c;
+  --claw-surface-active: #1f1f24;
+
+  /* Borders */
+  --border-primary: rgba(84, 84, 88, 0.48);
+  --border-subtle: rgba(84, 84, 88, 0.28);
+  --border-focus: #22d3ee;
+  --claw-border: rgba(63, 63, 70, 0.65);
+
+  /* Accent palette */
+  --accent-primary: #22d3ee;
+  --accent-primary-hover: #67e8f9;
+  --accent-bright: #5eead4;
+  --accent-glow: rgba(34, 211, 238, 0.12);
+
+  /* Status */
+  --accent-success: #34d399;
+  --accent-warning: #fbbf24;
+  --accent-danger: #f87171;
+
+  --fill-success: rgba(52, 211, 153, 0.15);
+  --fill-warning: rgba(251, 191, 36, 0.15);
+  --fill-danger: rgba(248, 113, 113, 0.15);
+  --border-success: rgba(52, 211, 153, 0.35);
+  --border-warning: rgba(251, 191, 36, 0.35);
+  --border-danger: rgba(248, 113, 113, 0.35);
+
+  /* Text */
+  --text-primary: #f4f4f5;
+  --text-secondary: rgba(244, 244, 245, 0.72);
+  --text-muted: rgba(161, 161, 170, 0.9);
+
+  /* Channel brand colors */
+  --ch-telegram: #22d3ee;
+  --ch-telegram-brand: #0088cc;
+  --ch-discord: #5865f2;
+  --ch-slack: #4a154b;
+  --ch-whatsapp: #25d366;
+  --ch-signal: #3a76f0;
+  --ch-webchat: #0a84ff;
+
+  /* Chart */
+  --chart-ok: #22d3ee;
+  --chart-block: #f87171;
+  --chart-grid: rgba(255, 255, 255, 0.08);
+
+  /* Radii */
+  --radius-xs: 6px;
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-pill: 999px;
+
+  /* Spacing (4px base) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 28px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* Shadows / elevation */
+  --shadow-card: inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 1px 2px rgba(0, 0, 0, 0.45);
+  --shadow-bevel: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  --shadow-bevel-hi: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  --shadow-modal: 0 32px 64px rgba(0, 0, 0, 0.5);
+  --shadow-focus-ring: 0 0 0 2px var(--accent-primary);
+
+  /* Fonts */
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "SF Pro Display", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco,
+    Consolas, "Liberation Mono", "Courier New", monospace;
+
+  /* Letter spacing */
+  --tracking-body: -0.01em;
+  --tracking-tight: -0.015em;
+  --tracking-eyebrow: 0.14em;
+  --tracking-eyebrow-narrow: 0.12em;
+
+  /* Transitions */
+  --dur-fast: 150ms;
+  --dur-base: 200ms;
+  --dur-slow: 300ms;
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
-/* Body and root styling. Tailwind's preflight already handles the
-   margin / padding / box-sizing reset; defining a universal `*` rule
-   here would override Tailwind utilities like ml-64 and p-6 because it
-   sits outside Tailwind's @layer. */
 @layer base {
   body {
-    font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-      sans-serif;
+    font-family: var(--font-sans);
     background-color: var(--bg-primary);
     color: var(--text-primary);
+    letter-spacing: var(--tracking-body);
     min-height: 100vh;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
@@ -38,7 +127,96 @@
   }
 }
 
-/* Custom scrollbar */
+/* ============================================================
+   Semantic type roles
+   ============================================================ */
+
+h1,
+.h1 {
+  font-size: 28px;
+  line-height: 1.15;
+  letter-spacing: var(--tracking-tight);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+@media (min-width: 768px) {
+  h1,
+  .h1 {
+    font-size: 32px;
+  }
+}
+
+h2,
+.h2 {
+  font-size: 22px;
+  line-height: 1.2;
+  letter-spacing: var(--tracking-tight);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+h3,
+.h3 {
+  font-size: 17px;
+  line-height: 1.3;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.title-md {
+  font-size: 15px;
+  line-height: 1.4;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-eyebrow);
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.metric {
+  font-family: var(--font-mono);
+  font-size: 26px;
+  line-height: 1;
+  font-weight: 600;
+  letter-spacing: var(--tracking-tight);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+code,
+.code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  padding: 2px 6px;
+  border-radius: var(--radius-xs);
+  background: var(--bg-tertiary);
+  color: var(--accent-primary);
+}
+
+.mono-tag {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.mono-num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+
+/* ============================================================
+   Scrollbars / selection / autofill
+   ============================================================ */
+
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -57,25 +235,21 @@
   background: var(--text-muted);
 }
 
-/* Firefox scrollbar */
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--border-primary) var(--bg-primary);
 }
 
-/* Selection */
 ::selection {
-  background-color: rgba(99, 102, 241, 0.3);
+  background: rgba(34, 211, 238, 0.35);
   color: var(--text-primary);
 }
 
-/* Focus outline */
 *:focus-visible {
   outline: 2px solid var(--accent-primary);
   outline-offset: 2px;
 }
 
-/* Input autofill */
 input:-webkit-autofill,
 input:-webkit-autofill:hover,
 input:-webkit-autofill:focus {
