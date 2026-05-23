@@ -1,10 +1,13 @@
 export interface User {
   id: string;
   email: string;
-  name: string;
+  name: string | null;
+  is_active?: boolean;
   created_at: string;
   default_permission_tier: PermissionTier;
   rate_limit: number;
+  llm_provider?: string;
+  llm_model?: string;
 }
 
 export type PermissionTier =
