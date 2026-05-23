@@ -30,6 +30,18 @@ const timeRangeMs: Record<Exclude<TimeRangeFilter, "all">, number> = {
   "30d": 30 * 24 * 60 * 60 * 1000,
 };
 
+const panelStyle = {
+  background: "var(--claw-panel)",
+  border: "1px solid var(--claw-border)",
+  boxShadow: "var(--shadow-card)",
+};
+
+const inputStyle = {
+  background: "var(--bg-input)",
+  border: "1px solid var(--claw-border)",
+  color: "var(--text-primary)",
+};
+
 function renderReasoning(value: AuditLog["reasoning_chain"]): React.ReactNode {
   if (value == null || value === "") {
     return <span style={{ color: "var(--text-muted)" }}>No reasoning recorded.</span>;
@@ -50,7 +62,7 @@ function renderReasoning(value: AuditLog["reasoning_chain"]): React.ReactNode {
     <dl className="text-xs grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1" style={{ color: "var(--text-primary)" }}>
       {Object.entries(value).map(([k, v]) => (
         <div key={k} className="contents">
-          <dt className="font-semibold" style={{ color: "var(--text-muted)" }}>{k}</dt>
+          <dt className="font-semibold mono-tag" style={{ color: "var(--text-muted)" }}>{k}</dt>
           <dd className="break-words">{typeof v === "string" ? v : JSON.stringify(v)}</dd>
         </div>
       ))}
@@ -81,9 +93,9 @@ function LogRow({ log }: { log: AuditLog }) {
     <>
       <tr
         className="cursor-pointer transition-colors"
-        style={{ borderBottom: "1px solid var(--border-primary)" }}
+        style={{ borderBottom: "1px solid var(--border-subtle)" }}
         onClick={() => setExpanded(!expanded)}
-        onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "var(--bg-hover)")}
+        onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "var(--claw-surface)")}
         onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
       >
         <td className="px-4 py-3">
@@ -92,7 +104,7 @@ function LogRow({ log }: { log: AuditLog }) {
             style={{ color: "var(--text-muted)" }}
           />
         </td>
-        <td className="px-4 py-3 text-xs" style={{ color: "var(--text-secondary)" }}>
+        <td className="px-4 py-3 text-xs mono-num">
           {ts.toLocaleTimeString()} <br />
           <span style={{ color: "var(--text-muted)" }}>{ts.toLocaleDateString()}</span>
         </td>
@@ -103,14 +115,17 @@ function LogRow({ log }: { log: AuditLog }) {
           {log.action}
         </td>
         <td className="px-4 py-3">
-          <code className="text-xs px-1.5 py-0.5 rounded" style={{ backgroundColor: "var(--bg-primary)", color: "var(--text-muted)" }}>
+          <code
+            className="mono-tag px-2 py-1 rounded-[6px]"
+            style={{ background: "var(--claw-surface)", color: "var(--text-muted)" }}
+          >
             {log.scope_used}
           </code>
         </td>
         <td className="px-4 py-3">
           <span
-            className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full"
-            style={{ backgroundColor: `${cfg.color}15`, color: cfg.color }}
+            className="mono-tag inline-flex items-center gap-1.5 px-2 py-1 rounded-[6px]"
+            style={{ backgroundColor: `${cfg.color}1f`, color: cfg.color, border: `1px solid ${cfg.color}40` }}
           >
             <StatusIcon className="w-3 h-3" /> {cfg.label}
           </span>
@@ -127,83 +142,85 @@ function LogRow({ log }: { log: AuditLog }) {
       </tr>
       {expanded && (
         <tr>
-          <td colSpan={7} className="px-4 py-4" style={{ backgroundColor: "var(--bg-primary)" }}>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-4xl">
+          <td colSpan={7} className="px-5 py-5" style={{ background: "var(--claw-surface)" }}>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-5 max-w-4xl">
               <div>
-                <h4 className="text-xs font-semibold mb-2" style={{ color: "var(--text-secondary)" }}>
-                  Reasoning Chain
-                </h4>
+                <div className="eyebrow mb-2">Reasoning chain</div>
                 {renderReasoning(log.reasoning_chain)}
                 {log.response_summary && (
-                  <div className="mt-3">
-                    <h4 className="text-xs font-semibold mb-1" style={{ color: "var(--text-secondary)" }}>
-                      Response Summary
-                    </h4>
+                  <div className="mt-4">
+                    <div className="eyebrow mb-1">Response summary</div>
                     <p className="text-xs" style={{ color: "var(--text-secondary)" }}>
                       {log.response_summary}
                     </p>
                   </div>
                 )}
               </div>
-              <div className="space-y-3">
+              <div className="space-y-4">
                 <div>
-                  <h4 className="text-xs font-semibold mb-1" style={{ color: "var(--text-secondary)" }}>
-                    Endpoint
-                  </h4>
+                  <div className="eyebrow mb-1">Endpoint</div>
                   <code className="text-xs break-all" style={{ color: "var(--accent-primary)" }}>
                     {log.endpoint}
                   </code>
                 </div>
                 {log.detection_method && (
                   <div>
-                    <h4 className="text-xs font-semibold mb-1" style={{ color: "var(--text-secondary)" }}>
-                      Detection Method
-                    </h4>
+                    <div className="eyebrow mb-1">Detection method</div>
                     <span className="text-sm" style={{ color: "var(--text-primary)" }}>
                       {log.detection_method}
                       {log.confidence_score != null && (
-                        <span style={{ color: "var(--text-muted)" }}>
-                          {" "}(confidence: {(log.confidence_score * 100).toFixed(0)}%)
+                        <span className="mono-num" style={{ color: "var(--text-muted)" }}>
+                          {" "}({(log.confidence_score * 100).toFixed(0)}% confidence)
                         </span>
                       )}
                     </span>
                   </div>
                 )}
                 <div>
-                  <h4 className="text-xs font-semibold mb-1" style={{ color: "var(--text-secondary)" }}>
-                    Request ID
-                  </h4>
+                  <div className="eyebrow mb-1">Request ID</div>
                   <code className="text-xs break-all" style={{ color: "var(--text-muted)" }}>
                     {log.request_id}
                   </code>
                 </div>
                 <div>
-                  <h4 className="text-xs font-semibold mb-1" style={{ color: "var(--text-secondary)" }}>
-                    Integrity Hash (SHA-256)
-                  </h4>
+                  <div className="eyebrow mb-1">Integrity hash · SHA-256</div>
                   <div className="flex items-center gap-2">
                     <Hash className="w-3 h-3 shrink-0" style={{ color: "var(--text-muted)" }} />
                     <code className="text-xs break-all" style={{ color: "var(--text-muted)" }}>
                       {log.integrity_hash}
                     </code>
                   </div>
-                  <div className="mt-2 text-xs">
+                  <div className="mt-2.5 text-xs">
                     {verifying && (
-                      <span className="inline-flex items-center gap-1.5" style={{ color: "var(--text-muted)" }}>
+                      <span className="mono-tag inline-flex items-center gap-1.5" style={{ color: "var(--text-muted)" }}>
                         <Loader2 className="w-3 h-3 animate-spin" />
                         Verifying chain...
                       </span>
                     )}
                     {!verifying && valid === true && (
-                      <span className="inline-flex items-center gap-1.5 font-medium" style={{ color: "var(--accent-success)" }}>
+                      <span
+                        className="mono-tag inline-flex items-center gap-1.5 px-2 py-1 rounded-[6px]"
+                        style={{
+                          background: "var(--fill-success)",
+                          color: "var(--accent-success)",
+                          border: "1px solid var(--border-success)",
+                        }}
+                      >
                         <ShieldCheck className="w-3 h-3" />
                         Integrity verified
                       </span>
                     )}
                     {!verifying && valid === false && (
-                      <span className="inline-flex items-center gap-1.5 font-medium" style={{ color: "var(--accent-danger)" }}>
+                      <span
+                        className="mono-tag inline-flex items-center gap-1.5 px-2 py-1 rounded-[6px]"
+                        style={{
+                          background: "var(--fill-danger)",
+                          color: "var(--accent-danger)",
+                          border: "1px solid var(--border-danger)",
+                        }}
+                      >
                         <ShieldAlert className="w-3 h-3" />
-                        TAMPER DETECTED. Hash does not match stored payload.
+                        TAMPER DETECTED · hash does not match stored payload
                       </span>
                     )}
                     {!verifying && verifyError && (
@@ -302,33 +319,23 @@ export default function AuditLogs() {
     });
   }, [logs, timeRange, searchQuery]);
 
-  const selectStyle = {
-    backgroundColor: "var(--bg-input)",
-    borderColor: "var(--border-primary)",
-    color: "var(--text-primary)",
-  };
-
   return (
     <div className="space-y-6">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold" style={{ color: "var(--text-primary)" }}>
-            Audit Logs
-          </h1>
-          <p className="text-sm mt-1" style={{ color: "var(--text-secondary)" }}>
-            Immutable, tamper-evident record of every agent action. Expand any row to verify its SHA-256 hash against the chain.
+          <div className="eyebrow mb-2">Audit trail</div>
+          <h1 style={{ color: "var(--text-primary)" }}>Audit logs</h1>
+          <p className="text-sm mt-1.5 max-w-2xl" style={{ color: "var(--text-secondary)" }}>
+            Immutable, tamper-evident record of every agent action. Expand any row
+            to verify its SHA-256 hash against the chain.
           </p>
         </div>
         <button
           type="button"
           onClick={() => setRefreshKey((k) => k + 1)}
           disabled={loading}
-          className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border text-sm font-medium disabled:opacity-50 transition-colors"
-          style={{
-            backgroundColor: "var(--bg-input)",
-            borderColor: "var(--border-primary)",
-            color: "var(--text-primary)",
-          }}
+          className="inline-flex items-center gap-2 px-3.5 py-2 rounded-[10px] text-sm font-medium disabled:opacity-50 transition-colors shrink-0"
+          style={inputStyle}
         >
           <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
           Refresh
@@ -336,11 +343,8 @@ export default function AuditLogs() {
       </div>
 
       <div
-        className="flex flex-wrap items-center gap-3 p-4 rounded-xl border"
-        style={{
-          backgroundColor: "var(--bg-secondary)",
-          borderColor: "var(--border-primary)",
-        }}
+        className="flex flex-wrap items-center gap-3 p-4 rounded-[14px]"
+        style={panelStyle}
       >
         <div className="relative flex-1 min-w-[200px]">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4" style={{ color: "var(--text-muted)" }} />
@@ -349,20 +353,16 @@ export default function AuditLogs() {
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder="Search by action, endpoint, hash, reasoning..."
-            className="w-full pl-10 pr-4 py-2 rounded-lg border text-sm outline-none"
-            style={{
-              backgroundColor: "var(--bg-input)",
-              borderColor: "var(--border-primary)",
-              color: "var(--text-primary)",
-            }}
+            className="w-full pl-10 pr-4 py-2.5 rounded-[10px] text-sm outline-none"
+            style={inputStyle}
           />
         </div>
 
         <select
           value={connectorFilter}
           onChange={(e) => setConnectorFilter(e.target.value)}
-          className="px-3 py-2 rounded-lg border text-sm outline-none"
-          style={selectStyle}
+          className="px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
+          style={inputStyle}
         >
           <option value="all">All Connectors</option>
           {availableConnectors.map((name) => (
@@ -375,8 +375,8 @@ export default function AuditLogs() {
         <select
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
-          className="px-3 py-2 rounded-lg border text-sm outline-none"
-          style={selectStyle}
+          className="px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
+          style={inputStyle}
         >
           <option value="all">All Statuses</option>
           <option value="approved">Approved</option>
@@ -387,8 +387,8 @@ export default function AuditLogs() {
         <select
           value={timeRange}
           onChange={(e) => setTimeRange(e.target.value as TimeRangeFilter)}
-          className="px-3 py-2 rounded-lg border text-sm outline-none"
-          style={selectStyle}
+          className="px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
+          style={inputStyle}
         >
           <option value="all">All Time</option>
           <option value="24h">Last 24 hours</option>
@@ -397,42 +397,33 @@ export default function AuditLogs() {
         </select>
       </div>
 
-      <div
-        className="rounded-xl border overflow-hidden"
-        style={{
-          backgroundColor: "var(--bg-secondary)",
-          borderColor: "var(--border-primary)",
-        }}
-      >
+      <div className="rounded-[14px] overflow-hidden" style={panelStyle}>
+        <div className="px-5 pt-4 pb-3">
+          <div className="eyebrow">Action log</div>
+        </div>
         <div className="overflow-x-auto">
           <table className="w-full">
             <thead>
-              <tr style={{ borderBottom: "1px solid var(--border-primary)" }}>
-                <th className="px-4 py-3 text-left w-8"></th>
-                <th className="px-4 py-3 text-left text-xs font-semibold" style={{ color: "var(--text-muted)" }}>
-                  Timestamp
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-semibold" style={{ color: "var(--text-muted)" }}>
-                  Connector
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-semibold" style={{ color: "var(--text-muted)" }}>
-                  Action
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-semibold" style={{ color: "var(--text-muted)" }}>
-                  Scope
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-semibold" style={{ color: "var(--text-muted)" }}>
-                  Status
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-semibold" style={{ color: "var(--text-muted)" }}>
-                  Integrity
-                </th>
+              <tr
+                style={{
+                  borderTop: "1px solid var(--border-subtle)",
+                  borderBottom: "1px solid var(--border-subtle)",
+                  background: "var(--claw-surface)",
+                }}
+              >
+                <th className="px-4 py-2.5 text-left w-8"></th>
+                <th className="px-4 py-2.5 text-left eyebrow">Timestamp</th>
+                <th className="px-4 py-2.5 text-left eyebrow">Connector</th>
+                <th className="px-4 py-2.5 text-left eyebrow">Action</th>
+                <th className="px-4 py-2.5 text-left eyebrow">Scope</th>
+                <th className="px-4 py-2.5 text-left eyebrow">Status</th>
+                <th className="px-4 py-2.5 text-left eyebrow">Integrity</th>
               </tr>
             </thead>
             <tbody>
               {loading && (
                 <tr>
-                  <td colSpan={7} className="px-4 py-8 text-center text-sm" style={{ color: "var(--text-muted)" }}>
+                  <td colSpan={7} className="px-4 py-10 text-center text-sm" style={{ color: "var(--text-muted)" }}>
                     <span className="inline-flex items-center gap-2">
                       <Loader2 className="w-4 h-4 animate-spin" />
                       Loading audit logs...
@@ -442,7 +433,7 @@ export default function AuditLogs() {
               )}
               {!loading && error && (
                 <tr>
-                  <td colSpan={7} className="px-4 py-8 text-center text-sm" style={{ color: "var(--accent-danger)" }}>
+                  <td colSpan={7} className="px-4 py-10 text-center text-sm" style={{ color: "var(--accent-danger)" }}>
                     {error}
                   </td>
                 </tr>
@@ -450,7 +441,7 @@ export default function AuditLogs() {
               {!loading && !error && filtered.map((log) => <LogRow key={log.id} log={log} />)}
               {!loading && !error && filtered.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="px-4 py-8 text-center text-sm" style={{ color: "var(--text-muted)" }}>
+                  <td colSpan={7} className="px-4 py-10 text-center text-sm" style={{ color: "var(--text-muted)" }}>
                     {logs.length === 0
                       ? "No audit log entries yet. Agent actions will appear here once recorded."
                       : "No audit logs match your filters."}

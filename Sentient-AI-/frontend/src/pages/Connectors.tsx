@@ -5,7 +5,6 @@ import {
   TrendingUp,
   Plus,
   Check,
-  X,
   Plug,
   Trash2,
   Loader2,
@@ -32,6 +31,18 @@ const tierLabels: Record<string, { label: string; color: string }> = {
   hard_blocked: { label: "Hard Blocked", color: "var(--accent-danger)" },
 };
 
+const panelStyle = {
+  background: "var(--claw-panel)",
+  border: "1px solid var(--claw-border)",
+  boxShadow: "var(--shadow-card)",
+};
+
+const inputStyle = {
+  background: "var(--bg-input)",
+  border: "1px solid var(--claw-border)",
+  color: "var(--text-primary)",
+};
+
 function scopeRisk(scope: string): "read" | "write" | "financial" {
   if (scope.includes("trade") || scope.includes("crypto.trade")) return "financial";
   if (
@@ -47,9 +58,9 @@ function scopeRisk(scope: string): "read" | "write" | "financial" {
 }
 
 const riskColors = {
-  read: { bg: "rgba(34,197,94,0.1)", text: "var(--accent-success)" },
-  write: { bg: "rgba(245,158,11,0.1)", text: "var(--accent-warning)" },
-  financial: { bg: "rgba(239,68,68,0.15)", text: "var(--accent-danger)" },
+  read: { text: "var(--accent-success)" },
+  write: { text: "var(--accent-warning)" },
+  financial: { text: "var(--accent-danger)" },
 };
 
 function ScopeTag({ name }: { name: string }) {
@@ -57,8 +68,8 @@ function ScopeTag({ name }: { name: string }) {
   const c = riskColors[risk];
   return (
     <div
-      className="inline-flex items-center gap-1.5 px-2 py-1 rounded text-xs"
-      style={{ backgroundColor: c.bg }}
+      className="mono-tag inline-flex items-center gap-1.5 px-2 py-1 rounded-[6px]"
+      style={{ backgroundColor: `${c.text}1a`, border: `1px solid ${c.text}33` }}
     >
       <Check className="w-3 h-3" style={{ color: c.text }} />
       <span style={{ color: c.text }}>{name}</span>
@@ -66,7 +77,7 @@ function ScopeTag({ name }: { name: string }) {
         <span
           className="text-[10px] px-1 rounded font-bold"
           style={{
-            backgroundColor: "rgba(239,68,68,0.2)",
+            backgroundColor: "var(--fill-danger)",
             color: "var(--accent-danger)",
           }}
         >
@@ -106,69 +117,56 @@ function ConnectorCard({
   };
 
   return (
-    <div
-      className="rounded-xl border overflow-hidden"
-      style={{
-        backgroundColor: "var(--bg-secondary)",
-        borderColor: "var(--border-primary)",
-      }}
-    >
+    <div className="rounded-[14px] overflow-hidden" style={panelStyle}>
       <div className="p-5">
-        <div className="flex items-start justify-between mb-3">
+        <div className="flex items-start justify-between mb-4">
           <div className="flex items-center gap-3 min-w-0">
             <div
-              className="w-10 h-10 rounded-lg flex items-center justify-center shrink-0"
-              style={{ backgroundColor: "rgba(99,102,241,0.15)" }}
+              className="w-10 h-10 rounded-[10px] flex items-center justify-center shrink-0"
+              style={{
+                background: "var(--accent-glow)",
+                border: "1px solid rgba(34,211,238,0.35)",
+              }}
             >
               <Icon className="w-5 h-5" style={{ color: "var(--accent-primary)" }} />
             </div>
             <div className="min-w-0">
-              <h3
-                className="text-sm font-semibold truncate"
-                style={{ color: "var(--text-primary)" }}
-              >
+              <h3 className="truncate" style={{ color: "var(--text-primary)" }}>
                 {connector.display_name}
               </h3>
-              <p className="text-xs" style={{ color: "var(--text-muted)" }}>
+              <p className="mono-tag mt-0.5" style={{ color: "var(--text-muted)" }}>
                 {connector.auth_method.toUpperCase()} · {connector.connector_type}
               </p>
             </div>
           </div>
           <span
-            className="text-xs px-2 py-0.5 rounded-full font-medium shrink-0"
+            className="mono-tag px-2 py-1 rounded-[6px] shrink-0"
             style={{
-              backgroundColor: connector.is_active
-                ? "rgba(34,197,94,0.1)"
-                : "rgba(148,163,184,0.15)",
+              background: connector.is_active ? "var(--fill-success)" : "rgba(148,163,184,0.12)",
               color: connector.is_active ? "var(--accent-success)" : "var(--text-muted)",
+              border: connector.is_active ? "1px solid var(--border-success)" : "1px solid var(--claw-border)",
             }}
           >
             {connector.is_active ? "active" : "inactive"}
           </span>
         </div>
 
-        <div className="flex items-center gap-4 mb-3">
+        <div className="flex items-center gap-6 mb-4">
           <div>
-            <span className="text-xs" style={{ color: "var(--text-muted)" }}>
-              Permission Tier
-            </span>
+            <div className="eyebrow mb-1">Tier</div>
             <p className="text-sm font-medium" style={{ color: tier.color }}>
               {tier.label}
             </p>
           </div>
           <div>
-            <span className="text-xs" style={{ color: "var(--text-muted)" }}>
-              Rate Limit
-            </span>
-            <p className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
+            <div className="eyebrow mb-1">Rate limit</div>
+            <p className="text-sm font-medium mono-num" style={{ color: "var(--text-primary)" }}>
               {connector.rate_limit_per_minute}/min
             </p>
           </div>
           <div>
-            <span className="text-xs" style={{ color: "var(--text-muted)" }}>
-              Added
-            </span>
-            <p className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
+            <div className="eyebrow mb-1">Added</div>
+            <p className="text-sm font-medium mono-num" style={{ color: "var(--text-primary)" }}>
               {new Date(connector.created_at).toLocaleDateString()}
             </p>
           </div>
@@ -186,10 +184,10 @@ function ConnectorCard({
       </div>
 
       <div
-        className="flex items-center justify-between px-5 py-3 border-t"
+        className="flex items-center justify-between px-5 py-3"
         style={{
-          borderColor: "var(--border-primary)",
-          backgroundColor: "var(--bg-primary)",
+          borderTop: "1px solid var(--border-subtle)",
+          background: "var(--claw-surface)",
         }}
       >
         {error ? (
@@ -197,7 +195,7 @@ function ConnectorCard({
             {error}
           </span>
         ) : (
-          <span className="text-xs" style={{ color: "var(--text-muted)" }}>
+          <span className="mono-tag" style={{ color: "var(--text-muted)" }}>
             Updated {new Date(connector.updated_at).toLocaleDateString()}
           </span>
         )}
@@ -283,10 +281,9 @@ export default function Connectors() {
     <div className="space-y-6">
       <div className="flex items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold" style={{ color: "var(--text-primary)" }}>
-            Connectors
-          </h1>
-          <p className="text-sm mt-1" style={{ color: "var(--text-secondary)" }}>
+          <div className="eyebrow mb-2">Integrations</div>
+          <h1 style={{ color: "var(--text-primary)" }}>Connectors</h1>
+          <p className="text-sm mt-1.5 max-w-2xl" style={{ color: "var(--text-secondary)" }}>
             Manage third-party integrations and their security policies.
             {!loading && (
               <>
@@ -301,17 +298,13 @@ export default function Connectors() {
             )}
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 shrink-0">
           <button
             type="button"
             onClick={() => setRefreshKey((k) => k + 1)}
             disabled={loading}
-            className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border text-sm font-medium disabled:opacity-50"
-            style={{
-              backgroundColor: "var(--bg-input)",
-              borderColor: "var(--border-primary)",
-              color: "var(--text-primary)",
-            }}
+            className="inline-flex items-center gap-2 px-3.5 py-2 rounded-[10px] text-sm font-medium disabled:opacity-50"
+            style={inputStyle}
           >
             <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
             Refresh
@@ -322,8 +315,8 @@ export default function Connectors() {
             type="button"
             disabled
             title="Add Connector flow coming soon"
-            className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white disabled:opacity-50 cursor-not-allowed"
-            style={{ backgroundColor: "var(--accent-primary)" }}
+            className="flex items-center gap-2 px-4 py-2 rounded-[10px] text-sm font-semibold disabled:opacity-50 cursor-not-allowed"
+            style={{ background: "var(--accent-primary)", color: "#0a0a0b" }}
           >
             <Plus className="w-4 h-4" /> Add Connector
           </button>
@@ -332,12 +325,8 @@ export default function Connectors() {
 
       {loading && (
         <div
-          className="rounded-xl border p-8 flex items-center justify-center gap-2"
-          style={{
-            backgroundColor: "var(--bg-secondary)",
-            borderColor: "var(--border-primary)",
-            color: "var(--text-muted)",
-          }}
+          className="rounded-[14px] p-8 flex items-center justify-center gap-2"
+          style={{ ...panelStyle, color: "var(--text-muted)" }}
         >
           <Loader2 className="w-4 h-4 animate-spin" />
           <span className="text-sm">Loading connectors...</span>
@@ -346,12 +335,8 @@ export default function Connectors() {
 
       {!loading && error && (
         <div
-          className="rounded-xl border p-6 text-center"
-          style={{
-            backgroundColor: "var(--bg-secondary)",
-            borderColor: "var(--border-primary)",
-            color: "var(--accent-danger)",
-          }}
+          className="rounded-[14px] p-6 text-center"
+          style={{ ...panelStyle, color: "var(--accent-danger)" }}
         >
           <p className="text-sm">{error}</p>
         </div>
@@ -359,9 +344,9 @@ export default function Connectors() {
 
       {!loading && !error && connectors.length === 0 && (
         <div
-          className="rounded-xl border-2 border-dashed p-12 flex flex-col items-center justify-center gap-2 text-center"
+          className="rounded-[14px] border-2 border-dashed p-12 flex flex-col items-center justify-center gap-2 text-center"
           style={{
-            borderColor: "var(--border-primary)",
+            borderColor: "var(--claw-border)",
             color: "var(--text-muted)",
           }}
         >
