@@ -1,7 +1,14 @@
 import { useEffect, useState } from "react";
-import { Save, AlertTriangle, Trash2, Info, Loader2 } from "lucide-react";
+import { Save, AlertTriangle, Trash2, Loader2, CheckCircle2, XCircle } from "lucide-react";
 import type { User } from "@/types";
-import { getMe, logout } from "@/services/api";
+import {
+  changePassword,
+  deleteAccount,
+  getMe,
+  logout,
+  updateProfile,
+  updateSettings,
+} from "@/services/api";
 
 // Backend uses the canonical enum from the permission engine. Keeping
 // these in sync with PermissionTier in backend/services/agent/permissions.py
@@ -36,10 +43,51 @@ const inputStyle = {
   color: "var(--text-primary)",
 };
 
+type Feedback = { ok: boolean; text: string } | null;
+
+function FeedbackLine({ feedback }: { feedback: Feedback }) {
+  if (!feedback) return null;
+  const color = feedback.ok ? "var(--accent-success)" : "var(--accent-danger)";
+  const Icon = feedback.ok ? CheckCircle2 : XCircle;
+  return (
+    <span className="inline-flex items-center gap-1.5 text-xs" style={{ color }}>
+      <Icon className="w-3.5 h-3.5" />
+      {feedback.text}
+    </span>
+  );
+}
+
+function SaveButton({
+  label,
+  onClick,
+  saving,
+}: {
+  label: string;
+  onClick: () => void;
+  saving: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={saving}
+      className="flex items-center gap-2 px-4 py-2 rounded-[10px] text-sm font-semibold disabled:opacity-50"
+      style={{ background: "var(--accent-primary)", color: "#0a0a0b" }}
+    >
+      {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+      {label}
+    </button>
+  );
+}
+
 export default function Settings() {
-  const [me, setMe] = useState<User | null>(null);
+  const [, setMe] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  // Editable fields
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [permissionTier, setPermissionTier] = useState("user_confirm");
@@ -47,27 +95,32 @@ export default function Settings() {
   const [llmProvider, setLlmProvider] = useState("anthropic");
   const [llmModel, setLlmModel] = useState("claude-sonnet-4-20250514");
 
+  // Per-section saving + feedback
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [savingPassword, setSavingPassword] = useState(false);
+  const [savingSecurity, setSavingSecurity] = useState(false);
+  const [savingLlm, setSavingLlm] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [profileFeedback, setProfileFeedback] = useState<Feedback>(null);
+  const [passwordFeedback, setPasswordFeedback] = useState<Feedback>(null);
+  const [securityFeedback, setSecurityFeedback] = useState<Feedback>(null);
+  const [llmFeedback, setLlmFeedback] = useState<Feedback>(null);
+
   useEffect(() => {
     let cancelled = false;
     getMe()
       .then((u) => {
         if (cancelled) return;
         setMe(u);
-        // Seed editable fields from whatever the backend already knows
-        // about the user (these fields may not exist yet; this is
-        // defensive).
-        const tier = (u as unknown as { default_permission_tier?: string })
-          .default_permission_tier;
-        if (tier) setPermissionTier(tier);
-        const rl = (u as unknown as { rate_limit?: number }).rate_limit;
-        if (typeof rl === "number") setRateLimit(rl);
-        const prov = (u as unknown as { llm_provider?: string }).llm_provider;
-        if (prov) setLlmProvider(prov);
-        const model = (u as unknown as { llm_model?: string }).llm_model;
-        if (model) setLlmModel(model);
+        setName(u.name ?? "");
+        setEmail(u.email ?? "");
+        if (u.default_permission_tier) setPermissionTier(u.default_permission_tier);
+        if (typeof u.rate_limit === "number") setRateLimit(u.rate_limit);
+        if (u.llm_provider) setLlmProvider(u.llm_provider);
+        if (u.llm_model) setLlmModel(u.llm_model);
       })
       .catch((err: Error) => {
-        if (!cancelled) setError(err.message);
+        if (!cancelled) setLoadError(err.message);
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -77,25 +130,93 @@ export default function Settings() {
     };
   }, []);
 
-  // Every Save button on this page targets a backend endpoint that
-  // does not exist yet (see backend/api/routes/auth.py — only register,
-  // login, me are implemented). Rather than wiring buttons to dead
-  // routes, disable them with a clear tooltip until those endpoints
-  // land.
-  const disabledTooltip =
-    "Saving settings is not yet supported by the backend (see /auth routes).";
+  const handleSaveProfile = async () => {
+    setSavingProfile(true);
+    setProfileFeedback(null);
+    try {
+      const updated = await updateProfile({ name, email });
+      setMe(updated);
+      setProfileFeedback({ ok: true, text: "Profile saved" });
+    } catch (err) {
+      setProfileFeedback({ ok: false, text: (err as Error).message });
+    } finally {
+      setSavingProfile(false);
+    }
+  };
 
-  const DisabledSaveButton = ({ label }: { label: string }) => (
-    <button
-      type="button"
-      disabled
-      title={disabledTooltip}
-      className="flex items-center gap-2 px-4 py-2 rounded-[10px] text-sm font-semibold opacity-50 cursor-not-allowed"
-      style={{ background: "var(--accent-primary)", color: "#0a0a0b" }}
-    >
-      <Save className="w-4 h-4" /> {label}
-    </button>
-  );
+  const handleChangePassword = async () => {
+    if (!currentPassword || !newPassword) {
+      setPasswordFeedback({ ok: false, text: "Both password fields are required" });
+      return;
+    }
+    setSavingPassword(true);
+    setPasswordFeedback(null);
+    try {
+      await changePassword({
+        current_password: currentPassword,
+        new_password: newPassword,
+      });
+      setCurrentPassword("");
+      setNewPassword("");
+      setPasswordFeedback({ ok: true, text: "Password changed" });
+    } catch (err) {
+      setPasswordFeedback({ ok: false, text: (err as Error).message });
+    } finally {
+      setSavingPassword(false);
+    }
+  };
+
+  const handleSaveSecurity = async () => {
+    setSavingSecurity(true);
+    setSecurityFeedback(null);
+    try {
+      const updated = await updateSettings({
+        default_permission_tier: permissionTier,
+        rate_limit: rateLimit,
+      });
+      setMe(updated);
+      setSecurityFeedback({ ok: true, text: "Security settings saved" });
+    } catch (err) {
+      setSecurityFeedback({ ok: false, text: (err as Error).message });
+    } finally {
+      setSavingSecurity(false);
+    }
+  };
+
+  const handleSaveLlm = async () => {
+    setSavingLlm(true);
+    setLlmFeedback(null);
+    try {
+      const updated = await updateSettings({
+        llm_provider: llmProvider,
+        llm_model: llmModel,
+      });
+      setMe(updated);
+      setLlmFeedback({ ok: true, text: "LLM settings saved" });
+    } catch (err) {
+      setLlmFeedback({ ok: false, text: (err as Error).message });
+    } finally {
+      setSavingLlm(false);
+    }
+  };
+
+  const handleDeleteAccount = async () => {
+    if (
+      !window.confirm(
+        "Permanently delete your account? This removes all your conversations, connectors, and audit logs. This cannot be undone.",
+      )
+    ) {
+      return;
+    }
+    setDeleting(true);
+    try {
+      await deleteAccount();
+      logout();
+    } catch (err) {
+      window.alert(`Could not delete account: ${(err as Error).message}`);
+      setDeleting(false);
+    }
+  };
 
   return (
     <div className="space-y-6 max-w-3xl">
@@ -107,22 +228,7 @@ export default function Settings() {
         </p>
       </div>
 
-      <div
-        className="flex items-start gap-3 rounded-[12px] p-4"
-        style={{
-          background: "var(--accent-glow)",
-          border: "1px solid rgba(34,211,238,0.35)",
-        }}
-      >
-        <Info className="w-4 h-4 mt-0.5 shrink-0" style={{ color: "var(--accent-primary)" }} />
-        <p className="text-xs leading-relaxed" style={{ color: "var(--text-secondary)" }}>
-          Most fields below are read-only until the corresponding backend
-          routes land. The data shown reflects what the server currently
-          knows about your account.
-        </p>
-      </div>
-
-      {error && (
+      {loadError && (
         <div
           className="rounded-[12px] p-4 text-sm"
           style={{
@@ -131,7 +237,7 @@ export default function Settings() {
             color: "var(--accent-danger)",
           }}
         >
-          {error}
+          {loadError}
         </div>
       )}
 
@@ -146,11 +252,11 @@ export default function Settings() {
             </label>
             <input
               type="text"
-              value={loading ? "" : me?.name ?? ""}
-              readOnly
-              className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none opacity-80"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
               style={inputStyle}
-              placeholder={loading ? "Loading..." : "No name set"}
+              placeholder={loading ? "Loading..." : "Your name"}
             />
           </div>
           <div>
@@ -159,13 +265,25 @@ export default function Settings() {
             </label>
             <input
               type="email"
-              value={loading ? "" : me?.email ?? ""}
-              readOnly
-              className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none opacity-80"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
               style={inputStyle}
               placeholder={loading ? "Loading..." : ""}
             />
           </div>
+          <div className="flex items-center gap-3">
+            <SaveButton label="Save Profile" onClick={handleSaveProfile} saving={savingProfile} />
+            <FeedbackLine feedback={profileFeedback} />
+          </div>
+        </div>
+      </section>
+
+      {/* Password */}
+      <section className="rounded-[14px] p-6" style={panelStyle}>
+        <div className="eyebrow mb-1">Security</div>
+        <h2 className="mb-4">Change password</h2>
+        <div className="space-y-4">
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium mb-1.5" style={{ color: "var(--text-secondary)" }}>
@@ -175,8 +293,7 @@ export default function Settings() {
                 type="password"
                 value={currentPassword}
                 onChange={(e) => setCurrentPassword(e.target.value)}
-                disabled
-                className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+                className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
                 style={inputStyle}
                 placeholder="Enter current password"
               />
@@ -189,18 +306,20 @@ export default function Settings() {
                 type="password"
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
-                disabled
-                className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+                className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
                 style={inputStyle}
                 placeholder="Min. 8 characters"
               />
             </div>
           </div>
-          <DisabledSaveButton label="Save Profile" />
+          <div className="flex items-center gap-3">
+            <SaveButton label="Change Password" onClick={handleChangePassword} saving={savingPassword} />
+            <FeedbackLine feedback={passwordFeedback} />
+          </div>
         </div>
       </section>
 
-      {/* Security */}
+      {/* Security policy */}
       <section className="rounded-[14px] p-6" style={panelStyle}>
         <div className="eyebrow mb-1">Policy</div>
         <h2 className="mb-4">Security settings</h2>
@@ -236,12 +355,15 @@ export default function Settings() {
               value={rateLimit}
               onChange={(e) => setRateLimit(Number(e.target.value))}
               min={10}
-              max={200}
+              max={600}
               className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none mono-num"
               style={inputStyle}
             />
           </div>
-          <DisabledSaveButton label="Save Security Settings" />
+          <div className="flex items-center gap-3">
+            <SaveButton label="Save Security Settings" onClick={handleSaveSecurity} saving={savingSecurity} />
+            <FeedbackLine feedback={securityFeedback} />
+          </div>
         </div>
       </section>
 
@@ -302,13 +424,17 @@ export default function Settings() {
               ))}
             </select>
             <p className="text-xs mt-1.5" style={{ color: "var(--text-muted)" }}>
-              Active provider is configured at server startup via{" "}
+              This is your saved preference. The runtime's active provider is
+              still set at server startup via{" "}
               <code style={{ color: "var(--accent-primary)" }}>LLM_PROVIDER</code> and{" "}
               <code style={{ color: "var(--accent-primary)" }}>LLM_MODEL</code> in{" "}
               <code style={{ color: "var(--accent-primary)" }}>backend/.env</code>.
             </p>
           </div>
-          <DisabledSaveButton label="Save LLM Settings" />
+          <div className="flex items-center gap-3">
+            <SaveButton label="Save LLM Settings" onClick={handleSaveLlm} saving={savingLlm} />
+            <FeedbackLine feedback={llmFeedback} />
+          </div>
         </div>
       </section>
 
@@ -345,18 +471,18 @@ export default function Settings() {
           <AlertTriangle className="w-5 h-5" /> Delete account
         </h2>
         <p className="text-sm mb-4" style={{ color: "var(--text-muted)" }}>
-          Account deletion requires a backend route that has not been
-          implemented yet. The button below is disabled to prevent calls
-          that would return a 404.
+          Permanently delete your account and all associated conversations,
+          connectors, and audit logs. This cannot be undone.
         </p>
         <button
           type="button"
-          disabled
-          title="Account deletion is not yet supported by the backend."
-          className="flex items-center gap-2 px-4 py-2 rounded-[10px] text-sm font-semibold opacity-50 cursor-not-allowed"
+          onClick={handleDeleteAccount}
+          disabled={deleting}
+          className="flex items-center gap-2 px-4 py-2 rounded-[10px] text-sm font-semibold disabled:opacity-50"
           style={{ background: "var(--accent-danger)", color: "#0a0a0b" }}
         >
-          <Trash2 className="w-4 h-4" /> Delete Account
+          {deleting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+          Delete Account
         </button>
       </section>
 

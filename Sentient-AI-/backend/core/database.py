@@ -54,7 +54,15 @@ async def init_db() -> None:
         # SQLAlchemy's create_all() only creates new tables, it does
         # not add columns to existing ones. ``ADD COLUMN IF NOT EXISTS``
         # is idempotent on Postgres so this is safe to run on every
-        # startup.
-        await conn.execute(
-            text("ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS previous_hash VARCHAR(64)")
-        )
+        # startup. NOT NULL columns include a DEFAULT so existing rows
+        # backfill cleanly.
+        migrations = [
+            "ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS previous_hash VARCHAR(64)",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS name VARCHAR(255)",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS default_permission_tier VARCHAR(32) NOT NULL DEFAULT 'user_confirm'",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS rate_limit INTEGER NOT NULL DEFAULT 60",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS llm_provider VARCHAR(32) NOT NULL DEFAULT 'anthropic'",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS llm_model VARCHAR(128) NOT NULL DEFAULT 'claude-sonnet-4-20250514'",
+        ]
+        for statement in migrations:
+            await conn.execute(text(statement))

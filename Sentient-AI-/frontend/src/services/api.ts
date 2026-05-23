@@ -261,8 +261,8 @@ export async function updateSettings(data: {
   rate_limit?: number;
   llm_provider?: string;
   llm_model?: string;
-}): Promise<void> {
-  return request<void>("/settings", {
+}): Promise<User> {
+  return request<User>("/auth/settings", {
     method: "PATCH",
     body: JSON.stringify(data),
   });

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,10 +16,15 @@ from services.auth import get_current_user
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
+PermissionTierLiteral = Literal[
+    "auto_approve", "user_confirm", "admin_only", "hard_blocked"
+]
+
 
 class RegisterRequest(BaseModel):
     email: EmailStr
     password: str
+    name: Optional[str] = None
 
 
 class LoginRequest(BaseModel):
@@ -34,10 +40,32 @@ class TokenResponse(BaseModel):
 class UserResponse(BaseModel):
     id: uuid.UUID
     email: str
+    name: Optional[str] = None
     is_active: bool
+    default_permission_tier: str
+    rate_limit: int
+    llm_provider: str
+    llm_model: str
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class ProfileUpdateRequest(BaseModel):
+    name: Optional[str] = Field(default=None, max_length=255)
+    email: Optional[EmailStr] = None
+
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=8)
+
+
+class SettingsUpdateRequest(BaseModel):
+    default_permission_tier: Optional[PermissionTierLiteral] = None
+    rate_limit: Optional[int] = Field(default=None, ge=10, le=600)
+    llm_provider: Optional[str] = Field(default=None, max_length=32)
+    llm_model: Optional[str] = Field(default=None, max_length=128)
 
 
 @router.post(
@@ -62,6 +90,7 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)) ->
 
     user = User(
         email=body.email,
+        name=body.name,
         hashed_password=hash_password(body.password),
     )
     db.add(user)
@@ -96,3 +125,84 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)) -> dict:
 async def get_me(current_user: User = Depends(get_current_user)) -> User:
     """Return the currently authenticated user."""
     return current_user
+
+
+@router.patch("/profile", response_model=UserResponse)
+async def update_profile(
+    body: ProfileUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    """Update the current user's name and/or email."""
+    if body.email is not None and body.email != current_user.email:
+        existing = await db.execute(
+            select(User).where(User.email == body.email)
+        )
+        if existing.scalar_one_or_none() is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Email already in use by another account",
+            )
+        current_user.email = body.email
+
+    if body.name is not None:
+        current_user.name = body.name
+
+    await db.flush()
+    await db.refresh(current_user)
+    return current_user
+
+
+@router.post("/password", status_code=status.HTTP_204_NO_CONTENT)
+async def change_password(
+    body: PasswordChangeRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Change the current user's password after verifying the old one."""
+    if not verify_password(body.current_password, current_user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Current password is incorrect",
+        )
+    current_user.hashed_password = hash_password(body.new_password)
+    await db.flush()
+
+
+@router.patch("/settings", response_model=UserResponse)
+async def update_settings(
+    body: SettingsUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    """Update the current user's account settings.
+
+    Field validation (tier enum, rate-limit range) is enforced by the
+    Pydantic model, so anything that reaches here is already valid.
+    """
+    if body.default_permission_tier is not None:
+        current_user.default_permission_tier = body.default_permission_tier
+    if body.rate_limit is not None:
+        current_user.rate_limit = body.rate_limit
+    if body.llm_provider is not None:
+        current_user.llm_provider = body.llm_provider
+    if body.llm_model is not None:
+        current_user.llm_model = body.llm_model
+
+    await db.flush()
+    await db.refresh(current_user)
+    return current_user
+
+
+@router.delete("/account", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_account(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Permanently delete the current user.
+
+    Conversations, connectors, and audit logs are removed via the
+    existing ON DELETE CASCADE foreign keys.
+    """
+    await db.delete(current_user)
+    await db.flush()
