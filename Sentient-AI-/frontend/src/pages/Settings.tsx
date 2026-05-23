@@ -24,6 +24,18 @@ const LLM_MODELS: Record<string, string[]> = {
   ollama: ["llama3.2", "llama3.2:1b", "mistral", "codellama", "mixtral"],
 };
 
+const panelStyle = {
+  background: "var(--claw-panel)",
+  border: "1px solid var(--claw-border)",
+  boxShadow: "var(--shadow-card)",
+};
+
+const inputStyle = {
+  background: "var(--bg-input)",
+  border: "1px solid var(--claw-border)",
+  color: "var(--text-primary)",
+};
+
 export default function Settings() {
   const [me, setMe] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
@@ -65,12 +77,6 @@ export default function Settings() {
     };
   }, []);
 
-  const inputStyle = {
-    backgroundColor: "var(--bg-input)",
-    borderColor: "var(--border-primary)",
-    color: "var(--text-primary)",
-  };
-
   // Every Save button on this page targets a backend endpoint that
   // does not exist yet (see backend/api/routes/auth.py — only register,
   // login, me are implemented). Rather than wiring buttons to dead
@@ -84,8 +90,8 @@ export default function Settings() {
       type="button"
       disabled
       title={disabledTooltip}
-      className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white opacity-50 cursor-not-allowed"
-      style={{ backgroundColor: "var(--accent-primary)" }}
+      className="flex items-center gap-2 px-4 py-2 rounded-[10px] text-sm font-semibold opacity-50 cursor-not-allowed"
+      style={{ background: "var(--accent-primary)", color: "#0a0a0b" }}
     >
       <Save className="w-4 h-4" /> {label}
     </button>
@@ -94,19 +100,18 @@ export default function Settings() {
   return (
     <div className="space-y-6 max-w-3xl">
       <div>
-        <h1 className="text-2xl font-bold" style={{ color: "var(--text-primary)" }}>
-          Settings
-        </h1>
-        <p className="text-sm mt-1" style={{ color: "var(--text-secondary)" }}>
+        <div className="eyebrow mb-2">Account</div>
+        <h1 style={{ color: "var(--text-primary)" }}>Settings</h1>
+        <p className="text-sm mt-1.5" style={{ color: "var(--text-secondary)" }}>
           Configure your account, security policies, and LLM provider.
         </p>
       </div>
 
       <div
-        className="flex items-start gap-3 rounded-xl border p-4"
+        className="flex items-start gap-3 rounded-[12px] p-4"
         style={{
-          backgroundColor: "rgba(99,102,241,0.05)",
-          borderColor: "rgba(99,102,241,0.25)",
+          background: "var(--accent-glow)",
+          border: "1px solid rgba(34,211,238,0.35)",
         }}
       >
         <Info className="w-4 h-4 mt-0.5 shrink-0" style={{ color: "var(--accent-primary)" }} />
@@ -119,10 +124,10 @@ export default function Settings() {
 
       {error && (
         <div
-          className="rounded-xl border p-4 text-sm"
+          className="rounded-[12px] p-4 text-sm"
           style={{
-            backgroundColor: "rgba(239,68,68,0.05)",
-            borderColor: "rgba(239,68,68,0.25)",
+            background: "var(--fill-danger)",
+            border: "1px solid var(--border-danger)",
             color: "var(--accent-danger)",
           }}
         >
@@ -131,13 +136,9 @@ export default function Settings() {
       )}
 
       {/* Profile */}
-      <section
-        className="rounded-xl border p-6"
-        style={{ backgroundColor: "var(--bg-secondary)", borderColor: "var(--border-primary)" }}
-      >
-        <h2 className="text-lg font-semibold mb-4" style={{ color: "var(--text-primary)" }}>
-          Profile
-        </h2>
+      <section className="rounded-[14px] p-6" style={panelStyle}>
+        <div className="eyebrow mb-1">Profile</div>
+        <h2 className="mb-4">Account details</h2>
         <div className="space-y-4">
           <div>
             <label className="block text-sm font-medium mb-1.5" style={{ color: "var(--text-secondary)" }}>
@@ -147,7 +148,7 @@ export default function Settings() {
               type="text"
               value={loading ? "" : me?.name ?? ""}
               readOnly
-              className="w-full px-4 py-2.5 rounded-lg border text-sm outline-none opacity-80"
+              className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none opacity-80"
               style={inputStyle}
               placeholder={loading ? "Loading..." : "No name set"}
             />
@@ -160,7 +161,7 @@ export default function Settings() {
               type="email"
               value={loading ? "" : me?.email ?? ""}
               readOnly
-              className="w-full px-4 py-2.5 rounded-lg border text-sm outline-none opacity-80"
+              className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none opacity-80"
               style={inputStyle}
               placeholder={loading ? "Loading..." : ""}
             />
@@ -175,7 +176,7 @@ export default function Settings() {
                 value={currentPassword}
                 onChange={(e) => setCurrentPassword(e.target.value)}
                 disabled
-                className="w-full px-4 py-2.5 rounded-lg border text-sm outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+                className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none disabled:opacity-50 disabled:cursor-not-allowed"
                 style={inputStyle}
                 placeholder="Enter current password"
               />
@@ -189,7 +190,7 @@ export default function Settings() {
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
                 disabled
-                className="w-full px-4 py-2.5 rounded-lg border text-sm outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+                className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none disabled:opacity-50 disabled:cursor-not-allowed"
                 style={inputStyle}
                 placeholder="Min. 8 characters"
               />
@@ -200,13 +201,9 @@ export default function Settings() {
       </section>
 
       {/* Security */}
-      <section
-        className="rounded-xl border p-6"
-        style={{ backgroundColor: "var(--bg-secondary)", borderColor: "var(--border-primary)" }}
-      >
-        <h2 className="text-lg font-semibold mb-4" style={{ color: "var(--text-primary)" }}>
-          Security Settings
-        </h2>
+      <section className="rounded-[14px] p-6" style={panelStyle}>
+        <div className="eyebrow mb-1">Policy</div>
+        <h2 className="mb-4">Security settings</h2>
         <div className="space-y-4">
           <div>
             <label className="block text-sm font-medium mb-1.5" style={{ color: "var(--text-secondary)" }}>
@@ -215,7 +212,7 @@ export default function Settings() {
             <select
               value={permissionTier}
               onChange={(e) => setPermissionTier(e.target.value)}
-              className="w-full px-4 py-2.5 rounded-lg border text-sm outline-none"
+              className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
               style={inputStyle}
             >
               {PERMISSION_TIERS.map((t) => (
@@ -240,7 +237,7 @@ export default function Settings() {
               onChange={(e) => setRateLimit(Number(e.target.value))}
               min={10}
               max={200}
-              className="w-full px-4 py-2.5 rounded-lg border text-sm outline-none"
+              className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none mono-num"
               style={inputStyle}
             />
           </div>
@@ -249,42 +246,43 @@ export default function Settings() {
       </section>
 
       {/* LLM Provider */}
-      <section
-        className="rounded-xl border p-6"
-        style={{ backgroundColor: "var(--bg-secondary)", borderColor: "var(--border-primary)" }}
-      >
-        <h2 className="text-lg font-semibold mb-4" style={{ color: "var(--text-primary)" }}>
-          LLM Provider
-        </h2>
+      <section className="rounded-[14px] p-6" style={panelStyle}>
+        <div className="eyebrow mb-1">Runtime</div>
+        <h2 className="mb-4">LLM provider</h2>
         <div className="space-y-4">
           <div>
             <label className="block text-sm font-medium mb-1.5" style={{ color: "var(--text-secondary)" }}>
               Provider
             </label>
             <div className="grid grid-cols-4 gap-3">
-              {(["anthropic", "openai", "gemini", "grok", "deepseek", "groq", "mistral", "ollama"] as const).map((p) => (
-                <button
-                  key={p}
-                  type="button"
-                  onClick={() => {
-                    setLlmProvider(p);
-                    setLlmModel(LLM_MODELS[p][0]);
-                  }}
-                  className="px-4 py-3 rounded-lg border text-sm font-medium capitalize transition-colors"
-                  style={{
-                    backgroundColor: llmProvider === p ? "rgba(99,102,241,0.15)" : "var(--bg-input)",
-                    borderColor: llmProvider === p ? "var(--accent-primary)" : "var(--border-primary)",
-                    color: llmProvider === p ? "var(--accent-primary)" : "var(--text-secondary)",
-                  }}
-                >
-                  {p}
-                  {p === "ollama" && (
-                    <span className="block text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>
-                      Local / Self-hosted
-                    </span>
-                  )}
-                </button>
-              ))}
+              {(["anthropic", "openai", "gemini", "grok", "deepseek", "groq", "mistral", "ollama"] as const).map((p) => {
+                const isActive = llmProvider === p;
+                return (
+                  <button
+                    key={p}
+                    type="button"
+                    onClick={() => {
+                      setLlmProvider(p);
+                      setLlmModel(LLM_MODELS[p][0]);
+                    }}
+                    className="px-4 py-3 rounded-[10px] text-sm font-medium capitalize transition-colors"
+                    style={{
+                      background: isActive ? "var(--accent-glow)" : "var(--claw-surface)",
+                      border: isActive
+                        ? "1px solid rgba(34,211,238,0.35)"
+                        : "1px solid var(--claw-border)",
+                      color: isActive ? "var(--accent-primary)" : "var(--text-secondary)",
+                    }}
+                  >
+                    {p}
+                    {p === "ollama" && (
+                      <span className="block text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>
+                        Local / Self-hosted
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
             </div>
           </div>
           <div>
@@ -294,7 +292,7 @@ export default function Settings() {
             <select
               value={llmModel}
               onChange={(e) => setLlmModel(e.target.value)}
-              className="w-full px-4 py-2.5 rounded-lg border text-sm outline-none"
+              className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
               style={inputStyle}
             >
               {LLM_MODELS[llmProvider].map((m) => (
@@ -315,27 +313,17 @@ export default function Settings() {
       </section>
 
       {/* Account actions */}
-      <section
-        className="rounded-xl border p-6"
-        style={{
-          backgroundColor: "var(--bg-secondary)",
-          borderColor: "var(--border-primary)",
-        }}
-      >
-        <h2 className="text-lg font-semibold mb-1" style={{ color: "var(--text-primary)" }}>
-          Account
-        </h2>
+      <section className="rounded-[14px] p-6" style={panelStyle}>
+        <div className="eyebrow mb-1">Session</div>
+        <h2 className="mb-1">Sign out</h2>
         <p className="text-sm mb-4" style={{ color: "var(--text-muted)" }}>
           Sign out of this device. Your data is preserved on the server.
         </p>
         <button
           type="button"
           onClick={() => logout()}
-          className="flex items-center gap-2 px-4 py-2 rounded-lg border text-sm font-medium"
-          style={{
-            borderColor: "var(--border-primary)",
-            color: "var(--text-primary)",
-          }}
+          className="flex items-center gap-2 px-4 py-2 rounded-[10px] text-sm font-medium"
+          style={inputStyle}
         >
           Sign out
         </button>
@@ -343,14 +331,18 @@ export default function Settings() {
 
       {/* Danger Zone */}
       <section
-        className="rounded-xl border p-6"
+        className="rounded-[14px] p-6"
         style={{
-          backgroundColor: "var(--bg-secondary)",
-          borderColor: "rgba(239,68,68,0.3)",
+          background: "var(--claw-panel)",
+          border: "1px solid var(--border-danger)",
+          boxShadow: "var(--shadow-card)",
         }}
       >
-        <h2 className="text-lg font-semibold mb-1 flex items-center gap-2" style={{ color: "var(--accent-danger)" }}>
-          <AlertTriangle className="w-5 h-5" /> Danger Zone
+        <div className="eyebrow mb-1" style={{ color: "var(--accent-danger)" }}>
+          Danger zone
+        </div>
+        <h2 className="mb-1 flex items-center gap-2" style={{ color: "var(--accent-danger)" }}>
+          <AlertTriangle className="w-5 h-5" /> Delete account
         </h2>
         <p className="text-sm mb-4" style={{ color: "var(--text-muted)" }}>
           Account deletion requires a backend route that has not been
@@ -361,8 +353,8 @@ export default function Settings() {
           type="button"
           disabled
           title="Account deletion is not yet supported by the backend."
-          className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white opacity-50 cursor-not-allowed"
-          style={{ backgroundColor: "var(--accent-danger)" }}
+          className="flex items-center gap-2 px-4 py-2 rounded-[10px] text-sm font-semibold opacity-50 cursor-not-allowed"
+          style={{ background: "var(--accent-danger)", color: "#0a0a0b" }}
         >
           <Trash2 className="w-4 h-4" /> Delete Account
         </button>
