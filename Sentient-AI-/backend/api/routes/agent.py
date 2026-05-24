@@ -10,8 +10,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database import get_db
+from models.connector import ConnectorConfig
 from models.conversation import Conversation, Message, MessageRole
 from services.agent.runtime import AgentRuntime
+from services.agent.tool_registry import ConnectorSpec, build_tools
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
@@ -242,11 +244,29 @@ async def send_message(
         for m in history_result.scalars().all()
     ]
 
-    # 3. Run the agent. Tools list is empty until the connector registry is
-    #    wired in; the runtime will simply return the LLM text.
+    # 3. Build the tool list from the user's active connectors. The
+    #    runtime's permission adapter and executor (injected at startup)
+    #    handle tiering, approval, and dispatch. A user with no connectors
+    #    gets an empty list and simply chats with the LLM.
+    conn_result = await db.execute(
+        select(ConnectorConfig).where(
+            ConnectorConfig.user_id == body.user_id,
+            ConnectorConfig.is_active.is_(True),
+        )
+    )
+    connector_specs = [
+        ConnectorSpec(connector_type=c.connector_type.value, is_active=c.is_active)
+        for c in conn_result.scalars().all()
+    ]
+    # user_tier defaults to STANDARD: the User model has no role/admin
+    # field yet, so admin-tier tools are not unlocked for anyone. When a
+    # role column is added, resolve it here and pass user_tier=... so
+    # ADMIN_ONLY tools become available to admins.
+    tools = build_tools(connector_specs)
+
     agent_response = await runtime.chat(
         messages=history,
-        tools=[],
+        tools=tools,
         user_id=str(body.user_id),
     )
 

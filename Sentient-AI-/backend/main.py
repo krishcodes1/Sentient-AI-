@@ -20,6 +20,10 @@ from api.middleware.security import (
 )
 from api.routes import agent, audit, auth, connectors
 from services.agent.runtime import AgentRuntime
+from services.agent.tool_registry import (
+    ConnectorToolExecutor,
+    RuntimePermissionAdapter,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -40,7 +44,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.warning("app_starting_without_database")
 
     try:
-        app.state.agent_runtime = AgentRuntime(config=settings)
+        # SEAM: audit_service is left as the runtime's default (logs tool
+        # outcomes via structlog only). Wiring a DB-backed AuditService that
+        # writes to audit_logs on approve/deny is a follow-up; it needs a
+        # per-request DB session, which the singleton runtime does not hold.
+        app.state.agent_runtime = AgentRuntime(
+            config=settings,
+            permission_engine=RuntimePermissionAdapter(),
+            tool_executor=ConnectorToolExecutor(),
+        )
         logger.info("agent_runtime_initialized", provider=settings.LLM_PROVIDER)
     except Exception as exc:
         logger.error("agent_runtime_init_failed", error=str(exc))
