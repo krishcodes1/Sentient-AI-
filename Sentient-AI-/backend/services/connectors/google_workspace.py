@@ -261,39 +261,32 @@ class GoogleWorkspaceConnector(BaseConnector):
         *,
         user_confirmed: bool = False,
     ) -> dict[str, Any]:
-        """Create a draft and, if confirmed, send it.
+        """Send an email, gated behind explicit user confirmation.
 
-        **Requires USER_CONFIRM** -- a draft is always created first so
-        the user can review before sending.
+        **Requires USER_CONFIRM**. Without confirmation a draft is created
+        so the user can review the exact content, and the call raises
+        ``UserConfirmationRequired``. With confirmation the message is sent
+        directly via ``messages.send`` — no second draft is created.
         """
-        # Always create draft first
         mime = MIMEText(body)
         mime["to"] = to
         mime["subject"] = subject
         raw_msg = base64.urlsafe_b64encode(mime.as_bytes()).decode()
 
-        draft_resp = await self._gapi_post(
-            "https://gmail.googleapis.com/gmail/v1/users/me/drafts",
-            json_body={"message": {"raw": raw_msg}},
-        )
-        draft_id = draft_resp.get("id")
-
         if not user_confirmed:
+            draft_resp = await self._gapi_post(
+                "https://gmail.googleapis.com/gmail/v1/users/me/drafts",
+                json_body={"message": {"raw": raw_msg}},
+            )
             raise UserConfirmationRequired(
                 action="send_email",
                 details=(
-                    f"Draft created (id={draft_id}). "
+                    f"Draft created (id={draft_resp.get('id')}). "
                     f"Send email to '{to}' with subject '{subject}'? "
                     "Please confirm to proceed."
                 ),
             )
 
-        # Send the draft
-        send_resp = await self._gapi_post(
-            f"https://gmail.googleapis.com/gmail/v1/users/me/drafts/{draft_id}",
-            json_body={},
-        )
-        # Actually the send endpoint is different -- use messages.send
         send_resp = await self._gapi_post(
             "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
             json_body={"raw": raw_msg},
@@ -311,9 +304,16 @@ class GoogleWorkspaceConnector(BaseConnector):
     # -- Calendar methods ----------------------------------------------------
 
     async def get_events(
-        self, time_min: str, time_max: str
+        self,
+        time_min: Optional[str] = None,
+        time_max: Optional[str] = None,
     ) -> list[dict[str, Any]]:
-        """Fetch calendar events within a time window (RFC 3339 strings)."""
+        """Fetch calendar events within a time window (RFC 3339 strings).
+
+        Defaults to the next 7 days when no window is given, matching the
+        tool catalog where both parameters are optional.
+        """
+        time_min, time_max = self._default_window(time_min, time_max)
         data = await self._gapi_get(
             "https://www.googleapis.com/calendar/v3/calendars/primary/events",
             params={
@@ -353,10 +353,26 @@ class GoogleWorkspaceConnector(BaseConnector):
             json_body=event_data,
         )
 
+    @staticmethod
+    def _default_window(
+        time_min: Optional[str], time_max: Optional[str]
+    ) -> tuple[str, str]:
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+        return (
+            time_min or now.isoformat(),
+            time_max or (now + timedelta(days=7)).isoformat(),
+        )
+
     async def check_availability(
-        self, time_min: str, time_max: str
+        self,
+        time_min: Optional[str] = None,
+        time_max: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Check free/busy status for the primary calendar."""
+        """Check free/busy status for the primary calendar (defaults to the
+        next 7 days)."""
+        time_min, time_max = self._default_window(time_min, time_max)
         data = await self._gapi_post(
             "https://www.googleapis.com/calendar/v3/freeBusy",
             json_body={

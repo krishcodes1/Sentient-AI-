@@ -1,23 +1,39 @@
 """
 Tamper-evident audit logging service for SentientAI.
 
-Uses the canonical AuditLog model from models.audit. Every agent action
-is recorded with a SHA-256 integrity hash chained to the previous entry.
+Single write path for the ``audit_logs`` table. Every row is chained to
+the previous row in the same user's log via ``previous_hash``, and the
+chain link is bound into the row's own SHA-256 ``integrity_hash``, so
+field tampering, row deletion, and reordering are all detectable.
+
+Three layers live here:
+
+- ``sanitize_request_data`` / ``_sanitize``: strip credentials and other
+  sensitive values before anything is persisted.
+- ``build_hash_payload`` + ``append_audit_log``: the canonical hash
+  payload (shared with ``api/routes/audit.py`` verification and
+  ``scripts/verify_audit_log.py``) and the chained insert.
+- ``RuntimeAuditLogger``: adapter implementing the agent runtime's audit
+  protocol (``log(entry: dict)``); opens its own short-lived sessions so
+  the singleton runtime never holds a request-scoped session.
 """
 
 from __future__ import annotations
 
-import hashlib
+import asyncio
 import json
 import re
 import uuid
-from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
-from sqlalchemy import select, func
+import structlog
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core.security import compute_audit_hash
 from models.audit import AuditLog, AuditStatus
+
+logger = structlog.get_logger(__name__)
 
 
 # ------------------------------------------------------------------ #
@@ -71,159 +87,206 @@ def sanitize_request_data(data: Any) -> str:
 
 
 # ------------------------------------------------------------------ #
-# Audit Service
+# Canonical hash payload + chained writes
 # ------------------------------------------------------------------ #
 
-_GENESIS_HASH = "0" * 64
+
+def build_hash_payload(
+    *,
+    user_id: str,
+    connector_name: str,
+    action: str,
+    endpoint: str,
+    scope_used: str,
+    status_value: str,
+    request_id: str,
+    request_data: Any,
+    response_summary: Any,
+    previous_hash: Optional[str],
+) -> dict[str, Any]:
+    """Canonical payload that gets hashed for one audit row.
+
+    Must stay in sync with ``scripts/verify_audit_log.py::build_payload``.
+    Including ``previous_hash`` chains each row to its predecessor, so
+    deleting or reordering rows is detectable, not just per-row tampering.
+    """
+    return {
+        "user_id": user_id,
+        "connector_name": connector_name,
+        "action": action,
+        "endpoint": endpoint,
+        "scope_used": scope_used,
+        "status": status_value,
+        "request_id": request_id,
+        "request_data": request_data,
+        "response_summary": response_summary,
+        "previous_hash": previous_hash,
+    }
 
 
-class AuditService:
-    """Chain-linked, tamper-evident audit logging backed by async SQLAlchemy."""
+# Serializes chain writes per user within this process so two concurrent
+# tool executions cannot both read the same head and fork the chain.
+# NOTE: this guards a single process only. Multi-worker deployments need a
+# DB-level guard (e.g. SELECT ... FOR UPDATE on the chain head, or a
+# serialized writer); documented in SECURITY.md as a deployment constraint.
+_chain_locks: dict[str, asyncio.Lock] = {}
+_chain_locks_guard = asyncio.Lock()
 
-    def __init__(self, db: AsyncSession) -> None:
-        self._db = db
 
-    async def _get_last_hash(self, user_id: str) -> str:
-        """Retrieve the most recent integrity hash for this user's log chain."""
-        stmt = (
-            select(AuditLog.integrity_hash)
-            .where(AuditLog.user_id == user_id)
+async def _lock_for_user(user_id: str) -> asyncio.Lock:
+    async with _chain_locks_guard:
+        lock = _chain_locks.get(user_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _chain_locks[user_id] = lock
+        return lock
+
+
+async def append_audit_log(
+    db: AsyncSession,
+    *,
+    user_id: uuid.UUID | str,
+    connector_name: str,
+    action: str,
+    endpoint: str,
+    scope_used: str,
+    status: AuditStatus,
+    reasoning_chain: Any = None,
+    detection_method: Optional[str] = None,
+    confidence_score: Optional[float] = None,
+    request_data: Any = None,
+    response_summary: Optional[str] = None,
+    request_id: Optional[str] = None,
+) -> AuditLog:
+    """Append one chained, sanitized row to the user's audit log.
+
+    This is the only sanctioned way to write audit rows. Request data and
+    the response summary are sanitized before hashing so the stored values
+    and the hash always agree.
+    """
+    user_uuid = user_id if isinstance(user_id, uuid.UUID) else uuid.UUID(str(user_id))
+    rid = request_id or str(uuid.uuid4())
+
+    sanitized_request = json.loads(sanitize_request_data(request_data)) if request_data is not None else None
+    sanitized_summary = _sanitize(response_summary) if response_summary is not None else None
+
+    lock = await _lock_for_user(str(user_uuid))
+    async with lock:
+        prev_result = await db.execute(
+            select(AuditLog)
+            .where(AuditLog.user_id == user_uuid)
             .order_by(AuditLog.timestamp.desc())
             .limit(1)
         )
-        result = await self._db.execute(stmt)
-        row = result.scalar_one_or_none()
-        return row if row else _GENESIS_HASH
+        prev = prev_result.scalar_one_or_none()
+        previous_hash = prev.integrity_hash if prev is not None else None
 
-    @staticmethod
-    def _compute_hash(
-        timestamp: str,
-        user_id: str,
-        action: str,
-        endpoint: str,
-        previous_hash: str,
-    ) -> str:
-        """SHA-256 chain hash: H(timestamp + user_id + action + endpoint + prev_hash)."""
-        payload = f"{timestamp}{user_id}{action}{endpoint}{previous_hash}"
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-    async def log_action(
-        self,
-        user_id: str,
-        connector_name: str,
-        action: str,
-        endpoint: str,
-        scope_used: str,
-        status: AuditStatus,
-        reasoning_chain: Optional[str] = None,
-        request_data: Any = None,
-        response_summary: Optional[str] = None,
-        detection_method: Optional[str] = None,
-        confidence_score: Optional[float] = None,
-        request_id: Optional[str] = None,
-    ) -> AuditLog:
-        """Record an auditable action with integrity chaining."""
-        now = datetime.now(timezone.utc)
-        timestamp_str = now.isoformat()
-
-        previous_hash = await self._get_last_hash(str(user_id))
-        integrity_hash = self._compute_hash(
-            timestamp_str, str(user_id), action, endpoint, previous_hash
+        payload = build_hash_payload(
+            user_id=str(user_uuid),
+            connector_name=connector_name,
+            action=action,
+            endpoint=endpoint,
+            scope_used=scope_used,
+            status_value=status.value,
+            request_id=rid,
+            request_data=sanitized_request,
+            response_summary=sanitized_summary,
+            previous_hash=previous_hash,
         )
-        sanitized_data = sanitize_request_data(request_data)
+        integrity_hash = compute_audit_hash(payload)
 
-        record = AuditLog(
-            user_id=user_id,
-            timestamp=now,
+        entry = AuditLog(
+            user_id=user_uuid,
             connector_name=connector_name,
             action=action,
             endpoint=endpoint,
             scope_used=scope_used,
             status=status,
-            reasoning_chain=reasoning_chain,
-            request_data=json.loads(sanitized_data) if sanitized_data else None,
-            response_summary=response_summary,
+            reasoning_chain=_sanitize(reasoning_chain) if reasoning_chain is not None else None,
             detection_method=detection_method,
             confidence_score=confidence_score,
-            request_id=request_id or str(uuid.uuid4()),
+            request_data=sanitized_request,
+            response_summary=sanitized_summary,
             integrity_hash=integrity_hash,
+            previous_hash=previous_hash,
+            request_id=rid,
         )
+        db.add(entry)
+        await db.flush()
+        await db.refresh(entry)
+        return entry
 
-        self._db.add(record)
-        await self._db.flush()
-        await self._db.refresh(record)
-        return record
 
-    async def get_logs(
+# ------------------------------------------------------------------ #
+# Runtime adapter
+# ------------------------------------------------------------------ #
+
+# Maps runtime event names to the audit row status they should record.
+_EVENT_STATUS: dict[str, AuditStatus] = {
+    "tool_executed": AuditStatus.approved,
+    "tool_approved_and_executed": AuditStatus.approved,
+    "tool_pending_approval": AuditStatus.pending,
+    "tool_blocked": AuditStatus.blocked,
+    "tool_denied": AuditStatus.blocked,
+    "tool_expired": AuditStatus.blocked,
+    "input_blocked": AuditStatus.blocked,
+    "output_blocked": AuditStatus.blocked,
+}
+
+
+class RuntimeAuditLogger:
+    """DB-backed implementation of the agent runtime's audit protocol.
+
+    The runtime is a process-wide singleton, so this adapter opens its own
+    short-lived session per entry instead of borrowing a request session.
+    Failures propagate to the caller: a tool action whose audit row cannot
+    be written should fail loudly rather than execute unrecorded.
+    """
+
+    def __init__(
         self,
-        user_id: str,
-        filters: Optional[dict[str, Any]] = None,
-    ) -> list[AuditLog]:
-        """Retrieve audit logs with optional filtering."""
-        stmt = (
-            select(AuditLog)
-            .where(AuditLog.user_id == user_id)
-            .order_by(AuditLog.timestamp.desc())
-        )
+        session_factory: Optional[Callable[[], AsyncSession]] = None,
+    ) -> None:
+        if session_factory is None:
+            from core.database import async_session
 
-        if filters:
-            if "connector_name" in filters:
-                stmt = stmt.where(AuditLog.connector_name == filters["connector_name"])
-            if "status" in filters:
-                stmt = stmt.where(AuditLog.status == filters["status"])
-            if "since" in filters:
-                stmt = stmt.where(AuditLog.timestamp >= filters["since"])
-            if "until" in filters:
-                stmt = stmt.where(AuditLog.timestamp <= filters["until"])
-            if "search" in filters:
-                search_term = f"%{filters['search']}%"
-                stmt = stmt.where(
-                    AuditLog.action.ilike(search_term)
-                    | AuditLog.connector_name.ilike(search_term)
-                    | AuditLog.endpoint.ilike(search_term)
-                )
-            stmt = stmt.limit(filters.get("limit", 100))
+            session_factory = async_session
+        self._session_factory = session_factory
+
+    async def log(self, entry: dict[str, Any]) -> None:
+        event = str(entry.get("event", "unknown"))
+        user_id = entry.get("user_id")
+        if not user_id:
+            logger.warning("audit_entry_missing_user", event=event)
+            return
+
+        tool = str(entry.get("tool", ""))
+        if "." in tool:
+            connector_name, _, action = tool.partition(".")
         else:
-            stmt = stmt.limit(100)
+            connector_name, action = "agent", (tool or event)
 
-        result = await self._db.execute(stmt)
-        return list(result.scalars().all())
+        status = _EVENT_STATUS.get(event, AuditStatus.blocked)
 
-    async def get_stats(self, user_id: str) -> dict[str, Any]:
-        """Get aggregate audit statistics for dashboard."""
-        base = select(func.count()).where(AuditLog.user_id == user_id)
+        reasoning: dict[str, Any] = {"event": event}
+        for key in ("reason", "policy", "action_id", "threat_level"):
+            if entry.get(key) is not None:
+                reasoning[key] = entry[key]
 
-        total = (await self._db.execute(base)).scalar() or 0
-        approved = (
-            await self._db.execute(
-                base.where(AuditLog.status == AuditStatus.APPROVED)
+        async with self._session_factory() as session:
+            await append_audit_log(
+                session,
+                user_id=str(user_id),
+                connector_name=connector_name,
+                action=action,
+                endpoint=str(entry.get("endpoint", f"agent.{event}")),
+                scope_used=str(entry.get("scope", connector_name)),
+                status=status,
+                reasoning_chain=reasoning,
+                detection_method=entry.get("detection_method"),
+                confidence_score=entry.get("confidence_score"),
+                request_data=entry.get("arguments"),
+                response_summary=entry.get("result_summary") or entry.get("reason"),
+                request_id=entry.get("request_id"),
             )
-        ).scalar() or 0
-        blocked = (
-            await self._db.execute(
-                base.where(AuditLog.status == AuditStatus.BLOCKED)
-            )
-        ).scalar() or 0
-        pending = (
-            await self._db.execute(
-                base.where(AuditLog.status == AuditStatus.PENDING)
-            )
-        ).scalar() or 0
-
-        return {
-            "total": total,
-            "approved": approved,
-            "blocked": blocked,
-            "pending": pending,
-        }
-
-    def verify_integrity(self, log_entry: AuditLog, previous_hash: str = _GENESIS_HASH) -> bool:
-        """Verify that a log entry's integrity hash is correct."""
-        expected = self._compute_hash(
-            log_entry.timestamp.isoformat(),
-            str(log_entry.user_id),
-            log_entry.action,
-            log_entry.endpoint,
-            previous_hash,
-        )
-        return expected == log_entry.integrity_hash
+            await session.commit()

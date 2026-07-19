@@ -159,13 +159,15 @@ async def test_adapter_block_reason_and_policy_name():
 
 
 @pytest.mark.asyncio
-async def test_executor_dispatches_known_tool():
+async def test_executor_without_database_fails_closed():
+    # Real dispatch requires a session factory (to load and decrypt the
+    # user's connector credentials). Without one the executor refuses
+    # rather than pretending to execute. Full dispatch behavior is covered
+    # in test_executor_security.py.
     executor = ConnectorToolExecutor()
     res = await executor.execute("canvas.get_assignments", {"course_id": "1"}, "u")
-    assert res["ok"] is True
-    assert res["connector"] == "canvas"
-    assert res["action"] == "get_assignments"
-    assert res["arguments"] == {"course_id": "1"}
+    assert res["ok"] is False
+    assert "not configured" in res["error"]
 
 
 @pytest.mark.asyncio
@@ -245,3 +247,84 @@ def test_build_tools_admin_user_gets_admin_only_tools_as_approval():
     assert courses is not None
     # ADMIN_ONLY for an admin resolves to requires_approval -> "approval".
     assert courses.permission_tier == "approval"
+
+
+# ---------------------------------------------------------------------------
+# Per-connector permission_tier enforcement (+ user default floor)
+# ---------------------------------------------------------------------------
+
+
+from services.agent.tool_registry import effective_tier  # noqa: E402
+
+
+def test_effective_tier_is_the_stricter_of_the_two():
+    assert effective_tier("auto_approve", "auto_approve") == "auto_approve"
+    assert effective_tier("auto_approve", "user_confirm") == "user_confirm"
+    assert effective_tier("user_confirm", "auto_approve") == "user_confirm"
+    assert effective_tier("auto_approve", "admin_only") == "admin_only"
+    assert effective_tier("admin_only", "auto_approve") == "admin_only"
+    # Unknown / missing values fall back to user_confirm.
+    assert effective_tier(None, None) == "user_confirm"
+    assert effective_tier("bogus", "auto_approve") == "user_confirm"
+
+
+def test_auto_approve_tier_makes_write_tools_auto():
+    tools = build_tools(
+        [ConnectorSpec("google_workspace", permission_tier="auto_approve")],
+        user_default_tier="auto_approve",
+    )
+    send = next(t for t in tools if t.name == "google_workspace.send_email")
+    assert send.permission_tier == "auto"
+
+
+def test_auto_approve_tier_is_floored_by_user_default():
+    # Connector says auto_approve, but the user's account default is
+    # user_confirm — the stricter wins, so writes still require approval.
+    tools = build_tools(
+        [ConnectorSpec("google_workspace", permission_tier="auto_approve")],
+        user_default_tier="user_confirm",
+    )
+    send = next(t for t in tools if t.name == "google_workspace.send_email")
+    assert send.permission_tier == "approval"
+
+
+def test_default_tier_keeps_current_behavior():
+    tools = build_tools([ConnectorSpec("google_workspace")])
+    send = next(t for t in tools if t.name == "google_workspace.send_email")
+    reads = next(t for t in tools if t.name == "google_workspace.get_messages")
+    assert send.permission_tier == "approval"
+    assert reads.permission_tier == "auto"
+
+
+def test_admin_only_connector_contributes_no_tools():
+    tools = build_tools(
+        [
+            ConnectorSpec("canvas", permission_tier="admin_only"),
+            ConnectorSpec("google_workspace"),  # unaffected sibling
+        ],
+        user_default_tier="auto_approve",
+    )
+    names = {t.name for t in tools}
+    assert not any(n.startswith("canvas.") for n in names)
+    assert any(n.startswith("google_workspace.") for n in names)
+
+
+def test_admin_only_user_default_excludes_everything():
+    tools = build_tools(
+        [ConnectorSpec("canvas", permission_tier="auto_approve")],
+        user_default_tier="admin_only",
+    )
+    assert tools == []
+
+
+def test_auto_approve_never_resurrects_financial_or_blocked_tools():
+    tools = build_tools(
+        [ConnectorSpec("robinhood", permission_tier="auto_approve")],
+        user_default_tier="auto_approve",
+    )
+    names = {t.name for t in tools}
+    # The financial hard block is absolute regardless of tier.
+    assert "robinhood.execute_trade" not in names
+    # Reads become auto under the user's explicit standing consent.
+    holdings = next(t for t in tools if t.name == "robinhood.get_crypto_holdings")
+    assert holdings.permission_tier == "auto"

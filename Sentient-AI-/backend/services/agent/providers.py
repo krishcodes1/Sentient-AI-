@@ -20,6 +20,24 @@ import httpx
 # ---------------------------------------------------------------------------
 
 
+class ProviderError(Exception):
+    """A provider call failed. The message is safe to surface to users and
+    logs: it never contains request URLs, API keys, or auth headers."""
+
+    def __init__(self, provider: str, status_code: int | None, detail: str):
+        self.provider = provider
+        self.status_code = status_code
+        self.detail = detail
+        suffix = f" (HTTP {status_code})" if status_code else ""
+        super().__init__(f"{provider} provider error{suffix}: {detail}")
+
+
+def _raise_provider_error(provider: str, exc: httpx.HTTPStatusError) -> None:
+    """Convert an httpx error into a ProviderError without leaking the URL."""
+    body = exc.response.text[:300] if exc.response is not None else ""
+    raise ProviderError(provider, exc.response.status_code, body) from None
+
+
 @dataclass(frozen=True)
 class ToolCall:
     """A single tool invocation requested by the LLM."""
@@ -114,7 +132,13 @@ class AnthropicProvider(LLMProvider):
         if anthropic_tools:
             kwargs["tools"] = anthropic_tools
 
-        resp = await self._client.messages.create(**kwargs)
+        import anthropic
+        try:
+            resp = await self._client.messages.create(**kwargs)
+        except anthropic.APIError as exc:
+            raise ProviderError(
+                "anthropic", getattr(exc, "status_code", None), str(exc)[:300]
+            ) from None
         text_parts = [b.text for b in resp.content if getattr(b, "type", None) == "text"]
         return LLMResponse(
             content="".join(text_parts),
@@ -198,7 +222,13 @@ class OpenAICompatibleProvider(LLMProvider):
         if oai_tools:
             kwargs["tools"] = oai_tools
 
-        resp = await self._client.chat.completions.create(**kwargs)
+        import openai
+        try:
+            resp = await self._client.chat.completions.create(**kwargs)
+        except openai.APIError as exc:
+            raise ProviderError(
+                self._provider_name, getattr(exc, "status_code", None), str(exc)[:300]
+            ) from None
         choice = resp.choices[0]
         return LLMResponse(
             content=choice.message.content or "",
@@ -282,12 +312,18 @@ class GeminiProvider(LLMProvider):
 
     def __init__(self, api_key: str, model: str = "gemini-2.5-flash"):
         self._api_key = api_key
-        self._model = model
+        # Gemini model ids are lowercase; normalise so a misconfigured
+        # "Gemini-2.5-Flash" still resolves.
+        self._model = model.lower()
         self._base_url = "https://generativelanguage.googleapis.com/v1beta"
-        self._client = httpx.AsyncClient(timeout=120.0)
+        # Key travels in a header, never in the URL, so it cannot leak into
+        # logs or tracebacks.
+        self._client = httpx.AsyncClient(
+            timeout=120.0, headers={"x-goog-api-key": api_key}
+        )
 
     def _build_url(self, action: str = "generateContent") -> str:
-        return f"{self._base_url}/models/{self._model}:{action}?key={self._api_key}"
+        return f"{self._base_url}/models/{self._model}:{action}"
 
     @staticmethod
     def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str | None, list[dict[str, Any]]]:
@@ -325,7 +361,10 @@ class GeminiProvider(LLMProvider):
             payload["tools"] = gemini_tools
 
         resp = await self._client.post(self._build_url(), json=payload)
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            _raise_provider_error("gemini", exc)
         data = resp.json()
 
         # Parse response
@@ -364,11 +403,17 @@ class GeminiProvider(LLMProvider):
         payload: dict[str, Any] = {"contents": contents}
         if system_instruction:
             payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
+        gemini_tools = self._convert_tools(tools)
+        if gemini_tools:
+            payload["tools"] = gemini_tools
 
         async with self._client.stream(
             "POST", self._build_url("streamGenerateContent"), json=payload
         ) as resp:
-            resp.raise_for_status()
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                _raise_provider_error("gemini", exc)
             async for line in resp.aiter_lines():
                 if not line:
                     continue
@@ -418,7 +463,10 @@ class OllamaProvider(LLMProvider):
             payload["tools"] = ollama_tools
 
         resp = await self._client.post("/api/chat", json=payload)
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            _raise_provider_error("ollama", exc)
         data = resp.json()
 
         tool_calls: list[ToolCall] = []
@@ -444,7 +492,10 @@ class OllamaProvider(LLMProvider):
             payload["tools"] = ollama_tools
 
         async with self._client.stream("POST", "/api/chat", json=payload) as resp:
-            resp.raise_for_status()
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                _raise_provider_error("ollama", exc)
             async for line in resp.aiter_lines():
                 if not line:
                     continue

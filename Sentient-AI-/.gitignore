@@ -28,3 +28,6 @@ docker/data/
 
 # Claude
 .claude/
+
+# TypeScript incremental build state
+frontend/tsconfig.tsbuildinfo

@@ -6,6 +6,7 @@ from models.connector import (
     PermissionTier,
 )
 from models.conversation import Conversation, Message, MessageRole
+from models.pending_action import PendingAction, PendingActionStatus
 from models.user import User
 
 __all__ = [
@@ -17,6 +18,8 @@ __all__ = [
     "Conversation",
     "Message",
     "MessageRole",
+    "PendingAction",
+    "PendingActionStatus",
     "PermissionTier",
     "User",
 ]

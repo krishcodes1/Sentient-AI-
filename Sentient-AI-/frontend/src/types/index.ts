@@ -16,7 +16,14 @@ export type PermissionTier =
   | "admin_only"
   | "hard_blocked";
 
-export type ConnectorType = "canvas" | "google_workspace" | "robinhood" | "custom";
+// "custom" is no longer creatable (the backend rejects it with 422) but
+// stays in the union so connectors created before that change still render.
+export type ConnectorType =
+  | "canvas"
+  | "google_workspace"
+  | "robinhood"
+  | "mcp"
+  | "custom";
 
 export type AuthMethod = "oauth2" | "api_key" | "bearer_token";
 
@@ -35,7 +42,6 @@ export interface Connector {
 }
 
 export interface CreateConnectorRequest {
-  user_id: string;
   connector_type: ConnectorType;
   display_name: string;
   auth_method: AuthMethod;
@@ -43,6 +49,23 @@ export interface CreateConnectorRequest {
   granted_scopes?: string[];
   permission_tier?: PermissionTier;
   rate_limit_per_minute?: number;
+}
+
+// Mirrors the backend's ConnectorUpdateRequest (PATCH /connectors/{id}).
+// Omitted fields keep their stored value; credentials, when present,
+// replace the encrypted set wholesale.
+export interface UpdateConnectorRequest {
+  display_name?: string;
+  is_active?: boolean;
+  credentials?: Record<string, unknown>;
+  granted_scopes?: string[];
+  permission_tier?: PermissionTier;
+  rate_limit_per_minute?: number;
+}
+
+export interface ConnectorTestResult {
+  ok: boolean;
+  detail: string;
 }
 
 export type AuditStatus = "approved" | "blocked" | "pending";
@@ -62,6 +85,7 @@ export interface AuditLog {
   request_data?: Record<string, unknown> | null;
   response_summary?: string | null;
   integrity_hash: string;
+  previous_hash?: string | null;
   request_id: string;
 }
 
@@ -95,7 +119,6 @@ export interface Message {
   role: "user" | "assistant" | "system";
   content: string;
   tool_calls?: ToolCall[] | null;
-  pending_approvals?: PendingApproval[];
   blocked_actions?: BlockedAction[];
   created_at: string;
 }
@@ -111,6 +134,10 @@ export interface PendingApproval {
   tool_name: string;
   arguments: Record<string, unknown>;
   reason: string;
+  expires_at?: string | null;
+  // Present on GET /agent/approvals so Chat can scope cards to the open
+  // conversation; approvals without it are shown everywhere.
+  conversation_id?: string | null;
 }
 
 export interface BlockedAction {
@@ -133,44 +160,6 @@ export interface ApprovalDecisionResponse {
   result?: Record<string, unknown> | null;
 }
 
-export interface ScanResult {
-  safe: boolean;
-  threats: string[];
-  risk_score: number;
-  details: Record<string, unknown>;
-}
-
-export interface PermissionDecision {
-  allowed: boolean;
-  reason: string;
-  tier: PermissionTier;
-  requires_approval: boolean;
-}
-
-export interface DashboardStats {
-  active_connectors: number;
-  total_actions_24h: number;
-  blocked_threats: number;
-  pending_approvals: number;
-  recent_activity: ActivityEntry[];
-  security_timeline: SecurityTimelineEntry[];
-  connector_health: ConnectorHealthEntry[];
-}
-
-export interface ActivityEntry {
-  id: string;
-  connector: string;
-  action: string;
-  status: "approved" | "blocked" | "pending";
-  timestamp: string;
-}
-
-export interface SecurityTimelineEntry {
-  date: string;
-  approved: number;
-  blocked: number;
-}
-
 export interface ConnectorHealthEntry {
   id: string;
   name: string;
@@ -180,12 +169,21 @@ export interface ConnectorHealthEntry {
   last_check: string;
 }
 
-export interface AuditStats {
-  total: number;
+// Server-computed dashboard stats (GET /audit/stats). Counting happens in
+// the database, so the numbers stay correct past the 500-row fetch cap.
+export interface AuditStatsDay {
+  date: string;
   approved: number;
   blocked: number;
   pending: number;
-  by_connector: Record<string, number>;
+}
+
+export interface AuditStats {
+  total_actions_24h: number;
+  blocked_24h: number;
+  approved_24h: number;
+  pending_approvals: number;
+  by_day: AuditStatsDay[];
 }
 
 export interface LoginCredentials {
@@ -199,8 +197,9 @@ export interface RegisterData {
   name: string;
 }
 
+// The backend's TokenResponse: /auth/login returns only the token pair.
+// The user object is fetched separately via GET /auth/me.
 export interface AuthResponse {
   access_token: string;
   token_type: string;
-  user: User;
 }

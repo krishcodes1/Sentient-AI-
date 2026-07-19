@@ -1,4 +1,13 @@
-FROM node:20-alpine
+# syntax=docker/dockerfile:1
+# Multi-stage frontend image.
+#   dev  — Vite dev server, source bind-mounted by docker-compose.yml
+#   prod — `npm run build` output served by nginx with an /api reverse
+#          proxy to the backend service
+# The dev compose builds `target: dev`; docker-compose.prod.yml builds
+# `target: prod`. The nginx config is inlined below (heredoc) because the
+# build context is ../frontend, which cannot COPY files from docker/.
+
+FROM node:20-alpine AS base
 
 WORKDIR /app
 
@@ -9,6 +18,51 @@ RUN npm install
 # Copy application code
 COPY . .
 
+# ── Development ──────────────────────────────────────────────────────
+FROM base AS dev
+
 EXPOSE 3000
 
 CMD ["npx", "vite", "--host", "0.0.0.0"]
+
+# ── Production build ─────────────────────────────────────────────────
+FROM base AS build
+
+RUN npm run build
+
+# ── Production runtime ───────────────────────────────────────────────
+FROM nginx:1.27-alpine AS prod
+
+COPY --from=build /app/dist /usr/share/nginx/html
+
+COPY <<'EOF' /etc/nginx/conf.d/default.conf
+server {
+    listen 80;
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # SPA fallback — client-side routing
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # Reverse proxy to the FastAPI backend
+    location /api/ {
+        proxy_pass http://backend:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        # Overwrite (never append) so clients cannot spoof the IP the
+        # backend rate limiter reads from X-Forwarded-For.
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+EOF
+
+EXPOSE 80
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+    CMD wget -q -O /dev/null http://127.0.0.1/ || exit 1

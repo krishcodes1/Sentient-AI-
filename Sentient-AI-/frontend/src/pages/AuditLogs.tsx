@@ -12,7 +12,9 @@ import {
   RefreshCw,
 } from "lucide-react";
 import type { AuditLog, AuditStatus } from "@/types";
-import { getAuditLogs, getMe, verifyAuditLog } from "@/services/api";
+import { getAuditLogs, getConnectors, verifyAuditLog } from "@/services/api";
+
+const PAGE_SIZE = 100;
 
 type StatusFilter = "all" | AuditStatus;
 type ConnectorFilter = "all" | string;
@@ -240,27 +242,28 @@ function LogRow({ log }: { log: AuditLog }) {
 }
 
 export default function AuditLogs() {
-  const [userId, setUserId] = useState<string | null>(null);
   const [logs, setLogs] = useState<AuditLog[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [connectorFilter, setConnectorFilter] = useState<ConnectorFilter>("all");
   const [timeRange, setTimeRange] = useState<TimeRangeFilter>("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [refreshKey, setRefreshKey] = useState(0);
+  const [connectorNames, setConnectorNames] = useState<string[]>([]);
 
+  // The filter dropdown lists every configured connector, not just the ones
+  // present in the currently loaded (already-filtered) page of logs.
   useEffect(() => {
     let cancelled = false;
-    getMe()
-      .then((user) => {
-        if (!cancelled) setUserId(user.id);
+    getConnectors()
+      .then((data) => {
+        if (!cancelled) setConnectorNames(data.map((c) => c.display_name));
       })
-      .catch((err: Error) => {
-        if (!cancelled) {
-          setError(err.message);
-          setLoading(false);
-        }
+      .catch(() => {
+        // Fall back to the names visible in the loaded logs.
       });
     return () => {
       cancelled = true;
@@ -268,17 +271,18 @@ export default function AuditLogs() {
   }, []);
 
   useEffect(() => {
-    if (!userId) return;
     let cancelled = false;
     setLoading(true);
     setError(null);
-    getAuditLogs(userId, {
+    getAuditLogs({
       connector_name: connectorFilter === "all" ? undefined : connectorFilter,
       status: statusFilter === "all" ? undefined : statusFilter,
-      limit: 200,
+      limit: PAGE_SIZE,
     })
       .then((data) => {
-        if (!cancelled) setLogs(data);
+        if (cancelled) return;
+        setLogs(data);
+        setHasMore(data.length === PAGE_SIZE);
       })
       .catch((err: Error) => {
         if (!cancelled) setError(err.message);
@@ -289,13 +293,36 @@ export default function AuditLogs() {
     return () => {
       cancelled = true;
     };
-  }, [userId, connectorFilter, statusFilter, refreshKey]);
+  }, [connectorFilter, statusFilter, refreshKey]);
+
+  const loadMore = async () => {
+    if (loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const next = await getAuditLogs({
+        connector_name: connectorFilter === "all" ? undefined : connectorFilter,
+        status: statusFilter === "all" ? undefined : statusFilter,
+        limit: PAGE_SIZE,
+        offset: logs.length,
+      });
+      setLogs((prev) => [...prev, ...next]);
+      setHasMore(next.length === PAGE_SIZE);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoadingMore(false);
+    }
+  };
 
   const availableConnectors = useMemo(() => {
-    const set = new Set<string>();
+    // Union of configured connectors and names seen in the logs, so system
+    // entries (or connectors deleted since) remain filterable, and the
+    // current selection never vanishes from the dropdown.
+    const set = new Set<string>(connectorNames);
     for (const l of logs) set.add(l.connector_name);
+    if (connectorFilter !== "all") set.add(connectorFilter);
     return Array.from(set).sort();
-  }, [logs]);
+  }, [connectorNames, logs, connectorFilter]);
 
   const filtered = useMemo(() => {
     const now = Date.now();
@@ -451,6 +478,25 @@ export default function AuditLogs() {
             </tbody>
           </table>
         </div>
+        {!loading && !error && hasMore && (
+          <div
+            className="flex justify-center px-5 py-3"
+            style={{ borderTop: "1px solid var(--border-subtle)" }}
+          >
+            <button
+              type="button"
+              onClick={() => void loadMore()}
+              disabled={loadingMore}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-[10px] text-sm font-medium disabled:opacity-50"
+              style={inputStyle}
+            >
+              {loadingMore ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : null}
+              {loadingMore ? "Loading..." : `Load ${PAGE_SIZE} more`}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

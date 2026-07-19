@@ -56,7 +56,10 @@ DEFAULT_POLICIES: dict[str, NetworkPolicy] = {
         connector_type="canvas",
         allowed_hosts=["*.instructure.com"],
         allowed_paths={
-            "*.instructure.com": ["/api/v1/"],
+            # /login/oauth2/token is the OAuth code-exchange + refresh
+            # endpoint used by CanvasConnector; the interactive
+            # /login/oauth2/auth page is browser-side and stays blocked.
+            "*.instructure.com": ["/api/v1/", "/login/oauth2/token"],
         },
     ),
     "google": NetworkPolicy(
@@ -76,9 +79,19 @@ DEFAULT_POLICIES: dict[str, NetworkPolicy] = {
     ),
     "robinhood": NetworkPolicy(
         connector_type="robinhood",
-        allowed_hosts=["api.robinhood.com"],
+        # Robinhood's Crypto API lives at trading.robinhood.com under
+        # /api/v1/crypto/. Only the read-only endpoints the connector
+        # actually uses are allowlisted; trading/order endpoints
+        # (e.g. /api/v1/crypto/trading/orders/) are deliberately NOT
+        # listed — the financial hard block is enforced at the network
+        # layer too.
+        allowed_hosts=["trading.robinhood.com"],
         allowed_paths={
-            "api.robinhood.com": ["/api/crypto/"],
+            "trading.robinhood.com": [
+                "/api/v1/crypto/trading/accounts/",
+                "/api/v1/crypto/trading/holdings/",
+                "/api/v1/crypto/marketdata/",
+            ],
         },
     ),
 }

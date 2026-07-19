@@ -21,7 +21,7 @@ class Settings(BaseSettings):
         "postgresql+asyncpg://sentientai:sentientai@localhost:5432/sentientai"
     )
 
-    # ── Redis / Celery ────────────────────────────────────────────────────
+    # ── Redis (shared rate limiting) ──────────────────────────────────────
     REDIS_URL: str = "redis://localhost:6379/0"
 
     # ── Security — required, no defaults ──────────────────────────────────
@@ -52,9 +52,16 @@ class Settings(BaseSettings):
 
     # ── Rate limiting ─────────────────────────────────────────────────────
     RATE_LIMIT_PER_MINUTE: int = 60
+    # Stricter bucket for credential endpoints (login/register) to slow
+    # brute-force attempts. Counted separately from the general limit.
+    AUTH_RATE_LIMIT_PER_MINUTE: int = 10
 
     # ── Auth ──────────────────────────────────────────────────────────────
     TOKEN_EXPIRE_MINUTES: int = 60
+
+    # ── Approvals ─────────────────────────────────────────────────────────
+    # How long a pending tool-approval stays actionable before it expires.
+    APPROVAL_TTL_MINUTES: int = 15
 
     # ── Environment ───────────────────────────────────────────────────────
     ENVIRONMENT: str = "development"

@@ -4,18 +4,25 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, Integer, String
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Boolean, DateTime, Integer, String, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from core.database import Base
+
+
+def _server_llm_defaults() -> tuple[str, str]:
+    """Provider/model the server is configured for, resolved lazily so the
+    model module never imports settings at class-definition time."""
+    from core.config import settings
+
+    return settings.LLM_PROVIDER, settings.LLM_MODEL
 
 
 class User(Base):
     __tablename__ = "users"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
+        Uuid(),
         primary_key=True,
         default=uuid.uuid4,
     )
@@ -51,15 +58,17 @@ class User(Base):
         server_default="60",
         nullable=False,
     )
+    # New accounts inherit the provider/model the server is actually
+    # configured for, so chat works before the user ever opens Settings.
     llm_provider: Mapped[str] = mapped_column(
         String(32),
-        default="anthropic",
+        default=lambda: _server_llm_defaults()[0],
         server_default="anthropic",
         nullable=False,
     )
     llm_model: Mapped[str] = mapped_column(
         String(128),
-        default="claude-sonnet-4-20250514",
+        default=lambda: _server_llm_defaults()[1],
         server_default="claude-sonnet-4-20250514",
         nullable=False,
     )

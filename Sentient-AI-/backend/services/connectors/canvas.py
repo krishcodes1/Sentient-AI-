@@ -123,6 +123,10 @@ class CanvasConnector(BaseConnector):
         """
         if token := credentials.get("access_token"):
             self._access_token = token
+            # Keep the stored refresh token so an expired bearer token can
+            # be renewed mid-session (401 -> _refresh_access_token) when
+            # refresh credentials were provided with the connector.
+            self._refresh_token = credentials.get("refresh_token") or None
             self._authenticated = True
             self._log.info("authenticated_with_token")
             return True

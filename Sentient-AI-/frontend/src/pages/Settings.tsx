@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Save, AlertTriangle, Trash2, Loader2, CheckCircle2, XCircle } from "lucide-react";
+import ConfirmDialog from "@/components/ConfirmDialog";
 import type { User } from "@/types";
 import {
   changePassword,
@@ -101,6 +102,7 @@ export default function Settings() {
   const [savingSecurity, setSavingSecurity] = useState(false);
   const [savingLlm, setSavingLlm] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [profileFeedback, setProfileFeedback] = useState<Feedback>(null);
   const [passwordFeedback, setPasswordFeedback] = useState<Feedback>(null);
   const [securityFeedback, setSecurityFeedback] = useState<Feedback>(null);
@@ -201,20 +203,13 @@ export default function Settings() {
   };
 
   const handleDeleteAccount = async () => {
-    if (
-      !window.confirm(
-        "Permanently delete your account? This removes all your conversations, connectors, and audit logs. This cannot be undone.",
-      )
-    ) {
-      return;
-    }
     setDeleting(true);
     try {
       await deleteAccount();
       logout();
     } catch (err) {
-      window.alert(`Could not delete account: ${(err as Error).message}`);
       setDeleting(false);
+      throw err; // ConfirmDialog surfaces the failure inline
     }
   };
 
@@ -424,11 +419,11 @@ export default function Settings() {
               ))}
             </select>
             <p className="text-xs mt-1.5" style={{ color: "var(--text-muted)" }}>
-              This is your saved preference. The runtime's active provider is
-              still set at server startup via{" "}
-              <code style={{ color: "var(--accent-primary)" }}>LLM_PROVIDER</code> and{" "}
-              <code style={{ color: "var(--accent-primary)" }}>LLM_MODEL</code> in{" "}
-              <code style={{ color: "var(--accent-primary)" }}>backend/.env</code>.
+              Takes effect on your next message. The server must have this
+              provider's API key configured in{" "}
+              <code style={{ color: "var(--accent-primary)" }}>backend/.env</code>{" "}
+              — if the key is missing, chat returns a clear error instead of
+              silently falling back to another provider.
             </p>
           </div>
           <div className="flex items-center gap-3">
@@ -476,7 +471,7 @@ export default function Settings() {
         </p>
         <button
           type="button"
-          onClick={handleDeleteAccount}
+          onClick={() => setConfirmDeleteOpen(true)}
           disabled={deleting}
           className="flex items-center gap-2 px-4 py-2 rounded-[10px] text-sm font-semibold disabled:opacity-50"
           style={{ background: "var(--accent-danger)", color: "#0a0a0b" }}
@@ -485,6 +480,16 @@ export default function Settings() {
           Delete Account
         </button>
       </section>
+
+      <ConfirmDialog
+        open={confirmDeleteOpen}
+        danger
+        title="Delete your account?"
+        message="This permanently removes your account, conversations, connectors (including their encrypted credentials), pending approvals, and audit logs. This cannot be undone."
+        confirmLabel="Delete everything"
+        onCancel={() => setConfirmDeleteOpen(false)}
+        onConfirm={handleDeleteAccount}
+      />
 
       {loading && (
         <div

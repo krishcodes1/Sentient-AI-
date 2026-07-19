@@ -106,6 +106,13 @@ _HARD_BLOCKED_ACTIONS: set[str] = {
 }
 
 
+def is_hard_blocked_action(action: str) -> bool:
+    """True when the action name is on the unconditional financial
+    hard-block list. Used by callers (e.g. the tool registry) that must
+    never loosen these regardless of any configured permission tier."""
+    return action.lower() in _HARD_BLOCKED_ACTIONS
+
+
 class PermissionEngine:
     """Evaluates permission decisions for agent actions."""
 

@@ -10,12 +10,13 @@ import type {
   ApprovalDecisionResponse,
   Connector,
   ConnectorHealthEntry,
+  ConnectorTestResult,
   CreateConnectorRequest,
+  UpdateConnectorRequest,
   AuditLog,
-  AuditStats,
-  DashboardStats,
   AuditLogFilters,
   AuditIntegrityCheck,
+  AuditStats,
 } from "@/types";
 
 const API_BASE = "/api";
@@ -38,8 +39,39 @@ class ApiError extends Error {
   }
 }
 
+// FastAPI error bodies are not always strings: validation failures (422)
+// return an array of {loc, msg, ...} objects. Normalize everything to a
+// readable sentence so the UI never renders "[object Object]".
+function errorDetailToMessage(detail: unknown, fallback: string): string {
+  if (typeof detail === "string" && detail.trim()) return detail;
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item) => {
+        if (item && typeof item === "object" && "msg" in item) {
+          const loc = Array.isArray((item as { loc?: unknown[] }).loc)
+            ? (item as { loc: unknown[] }).loc.slice(1).join(".")
+            : "";
+          const msg = String((item as { msg: unknown }).msg);
+          return loc ? `${loc}: ${msg}` : msg;
+        }
+        return String(item);
+      })
+      .filter(Boolean);
+    if (messages.length) return messages.join("; ");
+  }
+  if (detail && typeof detail === "object") {
+    try {
+      return JSON.stringify(detail);
+    } catch {
+      /* fall through */
+    }
+  }
+  return fallback;
+}
+
 function handleUnauthorized() {
   localStorage.removeItem("auth_token");
+  clearMeCache();
   // Use replace so the broken page is not in the back-button history.
   if (window.location.pathname !== "/login") {
     window.location.replace("/login");
@@ -81,7 +113,10 @@ async function request<T>(
     }
 
     throw new ApiError(
-      errorBody.detail || `Request failed: ${response.statusText}`,
+      errorDetailToMessage(
+        errorBody.detail,
+        `Request failed: ${response.statusText}`
+      ),
       response.status
     );
   }
@@ -100,40 +135,70 @@ export async function login(credentials: LoginCredentials): Promise<AuthResponse
     body: JSON.stringify(credentials),
   });
   localStorage.setItem("auth_token", data.access_token);
+  clearMeCache();
   return data;
 }
 
 export async function register(data: RegisterData): Promise<AuthResponse> {
-  const result = await request<AuthResponse>("/auth/register", {
+  // The backend's /auth/register creates the account and returns the new
+  // User — but no auth token. We immediately authenticate so signup logs
+  // the user straight in. Without this, the caller stores `undefined` as
+  // the token and ProtectedRoute bounces the new user back to /login.
+  await request<User>("/auth/register", {
     method: "POST",
     body: JSON.stringify(data),
   });
-  localStorage.setItem("auth_token", result.access_token);
-  return result;
+  return login({ email: data.email, password: data.password });
+}
+
+// The sidebar plus every page needs the current user, so without caching
+// each component mount fires its own /auth/me (4+ requests per page load
+// under StrictMode). Share one in-flight/resolved request; it is cleared on
+// any auth or profile change via clearMeCache().
+let meCache: Promise<User> | null = null;
+
+export function clearMeCache(): void {
+  meCache = null;
 }
 
 export async function getMe(): Promise<User> {
-  return request<User>("/auth/me");
+  if (!meCache) {
+    meCache = request<User>("/auth/me").catch((err) => {
+      meCache = null; // never cache a failed lookup
+      throw err;
+    });
+  }
+  return meCache;
 }
 
 export function logout(): void {
   localStorage.removeItem("auth_token");
+  clearMeCache();
   window.location.href = "/login";
 }
 
-// Conversations and Agent
-export async function getConversations(userId: string): Promise<Conversation[]> {
-  const params = new URLSearchParams({ user_id: userId });
-  return request<Conversation[]>(`/agent/conversations?${params.toString()}`);
+// Conversations and Agent.
+// Identity comes from the JWT — the backend scopes every query to the
+// authenticated user, so no user_id is ever sent from the client.
+export async function getConversations(options: {
+  limit?: number;
+  offset?: number;
+} = {}): Promise<Conversation[]> {
+  const params = new URLSearchParams();
+  if (options.limit != null) params.set("limit", String(options.limit));
+  if (options.offset != null) params.set("offset", String(options.offset));
+  const query = params.toString();
+  return request<Conversation[]>(
+    `/agent/conversations${query ? `?${query}` : ""}`
+  );
 }
 
 export async function createConversation(
-  userId: string,
   title: string = "New Conversation"
 ): Promise<Conversation> {
   return request<Conversation>("/agent/conversations", {
     method: "POST",
-    body: JSON.stringify({ user_id: userId, title }),
+    body: JSON.stringify({ title }),
   });
 }
 
@@ -143,40 +208,52 @@ export async function getConversation(
   return request<ConversationWithMessages>(`/agent/conversations/${conversationId}`);
 }
 
+export async function updateConversation(
+  conversationId: string,
+  data: { title: string }
+): Promise<Conversation> {
+  return request<Conversation>(`/agent/conversations/${conversationId}`, {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteConversation(conversationId: string): Promise<void> {
+  return request<void>(`/agent/conversations/${conversationId}`, {
+    method: "DELETE",
+  });
+}
+
 export async function sendMessage(
   conversationId: string,
-  userId: string,
   content: string
 ): Promise<AgentTurnResponse> {
   return request<AgentTurnResponse>(
     `/agent/conversations/${conversationId}/messages`,
     {
       method: "POST",
-      body: JSON.stringify({ content, user_id: userId }),
+      body: JSON.stringify({ content }),
     }
   );
 }
 
-export async function getPendingApprovals(userId: string): Promise<PendingApproval[]> {
-  const params = new URLSearchParams({ user_id: userId });
-  return request<PendingApproval[]>(`/agent/approvals?${params.toString()}`);
+export async function getPendingApprovals(): Promise<PendingApproval[]> {
+  return request<PendingApproval[]>("/agent/approvals");
 }
 
 export async function decideApproval(
   actionId: string,
-  userId: string,
   approved: boolean
 ): Promise<ApprovalDecisionResponse> {
   return request<ApprovalDecisionResponse>(`/agent/approvals/${actionId}`, {
     method: "POST",
-    body: JSON.stringify({ user_id: userId, approved }),
+    body: JSON.stringify({ approved }),
   });
 }
 
 // Connectors
-export async function getConnectors(userId: string): Promise<Connector[]> {
-  const params = new URLSearchParams({ user_id: userId });
-  return request<Connector[]>(`/connectors/?${params.toString()}`);
+export async function getConnectors(): Promise<Connector[]> {
+  return request<Connector[]>("/connectors/");
 }
 
 export async function createConnector(
@@ -190,7 +267,7 @@ export async function createConnector(
 
 export async function updateConnector(
   id: string,
-  data: Partial<CreateConnectorRequest>,
+  data: UpdateConnectorRequest,
 ): Promise<Connector> {
   return request<Connector>(`/connectors/${id}`, {
     method: "PATCH",
@@ -202,24 +279,27 @@ export async function deleteConnector(id: string): Promise<void> {
   return request<void>(`/connectors/${id}`, { method: "DELETE" });
 }
 
-export async function getConnectorHealth(
-  userId: string,
-): Promise<ConnectorHealthEntry[]> {
-  const params = new URLSearchParams({ user_id: userId });
-  return request<ConnectorHealthEntry[]>(`/connectors/health?${params.toString()}`);
+export async function testConnector(id: string): Promise<ConnectorTestResult> {
+  return request<ConnectorTestResult>(`/connectors/${id}/test`, {
+    method: "POST",
+  });
+}
+
+export async function getConnectorHealth(): Promise<ConnectorHealthEntry[]> {
+  return request<ConnectorHealthEntry[]>("/connectors/health");
 }
 
 // Audit Logs
 export async function getAuditLogs(
-  userId: string,
   filters: AuditLogFilters = {}
 ): Promise<AuditLog[]> {
-  const params = new URLSearchParams({ user_id: userId });
+  const params = new URLSearchParams();
   if (filters.connector_name) params.set("connector_name", filters.connector_name);
   if (filters.status) params.set("status", filters.status);
   if (filters.limit != null) params.set("limit", String(filters.limit));
   if (filters.offset != null) params.set("offset", String(filters.offset));
-  return request<AuditLog[]>(`/audit/?${params.toString()}`);
+  const query = params.toString();
+  return request<AuditLog[]>(`/audit/${query ? `?${query}` : ""}`);
 }
 
 export async function verifyAuditLog(id: string): Promise<AuditIntegrityCheck> {
@@ -230,20 +310,17 @@ export async function getAuditStats(): Promise<AuditStats> {
   return request<AuditStats>("/audit/stats");
 }
 
-// Dashboard
-export async function getDashboardStats(): Promise<DashboardStats> {
-  return request<DashboardStats>("/dashboard/stats");
-}
-
 // Settings
 export async function updateProfile(data: {
   name?: string;
   email?: string;
 }): Promise<User> {
-  return request<User>("/auth/profile", {
+  const user = await request<User>("/auth/profile", {
     method: "PATCH",
     body: JSON.stringify(data),
   });
+  clearMeCache();
+  return user;
 }
 
 export async function changePassword(data: {
@@ -262,10 +339,12 @@ export async function updateSettings(data: {
   llm_provider?: string;
   llm_model?: string;
 }): Promise<User> {
-  return request<User>("/auth/settings", {
+  const user = await request<User>("/auth/settings", {
     method: "PATCH",
     body: JSON.stringify(data),
   });
+  clearMeCache();
+  return user;
 }
 
 export async function deleteAccount(): Promise<void> {

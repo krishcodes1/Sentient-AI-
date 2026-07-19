@@ -1,0 +1,221 @@
+"""Minimal MCP client (JSON-RPC 2.0 over Streamable HTTP).
+
+Self-contained on purpose: the official ``mcp`` SDK is not a project
+dependency, and the platform only needs three operations — initialize,
+tools/list, and tools/call. The transport is a seam so tests (and a
+future stdio implementation) can swap it out.
+
+Security properties:
+- Every outbound request URL is SSRF-checked (private/internal ranges
+  refused), including redirect hops, via an httpx request hook.
+- Responses are data, never trusted: callers sanitize tool output before
+  it reaches the LLM (see ``MCPDispatcher``).
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from typing import Any, Optional, Protocol
+
+import httpx
+import structlog
+
+logger = structlog.get_logger(__name__)
+
+MCP_PROTOCOL_VERSION = "2025-03-26"
+
+
+class MCPError(Exception):
+    """Raised for transport failures or JSON-RPC error responses."""
+
+
+@dataclass(frozen=True)
+class MCPToolInfo:
+    """One tool advertised by an MCP server."""
+
+    name: str
+    description: str = ""
+    input_schema: dict[str, Any] = field(default_factory=dict)
+
+
+class MCPTransport(Protocol):
+    async def request(self, method: str, params: dict[str, Any]) -> Any: ...
+
+    async def notify(self, method: str, params: dict[str, Any]) -> None: ...
+
+    async def close(self) -> None: ...
+
+
+class HttpMCPTransport:
+    """Streamable-HTTP transport: JSON-RPC requests POSTed to one URL.
+
+    Handles plain JSON responses and single-response SSE bodies (servers
+    may answer ``text/event-stream`` even for one-shot calls).
+    """
+
+    def __init__(
+        self,
+        url: str,
+        headers: Optional[dict[str, str]] = None,
+        timeout_s: float = 30.0,
+    ) -> None:
+        self._url = url
+        self._headers = dict(headers or {})
+        self._timeout = timeout_s
+        self._client: Optional[httpx.AsyncClient] = None
+        self._next_id = 0
+        self._session_id: Optional[str] = None
+
+    async def _check_ssrf(self, request: httpx.Request) -> None:
+        from core.network_security import check_ssrf
+
+        result = check_ssrf(str(request.url))
+        if not result.safe:
+            raise MCPError(f"MCP request blocked (SSRF protection): {result.reason}")
+
+    def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(self._timeout),
+                event_hooks={"request": [self._check_ssrf]},
+            )
+        return self._client
+
+    def _build_headers(self) -> dict[str, str]:
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            **self._headers,
+        }
+        if self._session_id:
+            headers["Mcp-Session-Id"] = self._session_id
+        return headers
+
+    @staticmethod
+    def _parse_sse(body: str, request_id: int) -> Any:
+        """Extract the JSON-RPC response with *request_id* from an SSE body."""
+        for raw_event in body.split("\n\n"):
+            data_lines = [
+                line[5:].strip()
+                for line in raw_event.splitlines()
+                if line.startswith("data:")
+            ]
+            if not data_lines:
+                continue
+            try:
+                message = json.loads("\n".join(data_lines))
+            except json.JSONDecodeError:
+                continue
+            if isinstance(message, dict) and message.get("id") == request_id:
+                return message
+        raise MCPError("No matching JSON-RPC response in SSE stream")
+
+    async def _post(self, payload: dict[str, Any]) -> Optional[httpx.Response]:
+        client = self._get_client()
+        try:
+            response = await client.post(
+                self._url, json=payload, headers=self._build_headers()
+            )
+        except MCPError:
+            raise
+        except httpx.HTTPError as exc:
+            raise MCPError(f"MCP transport error: {exc}") from exc
+
+        if session_id := response.headers.get("Mcp-Session-Id"):
+            self._session_id = session_id
+        return response
+
+    async def request(self, method: str, params: dict[str, Any]) -> Any:
+        self._next_id += 1
+        request_id = self._next_id
+        response = await self._post(
+            {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
+        )
+        if response.status_code >= 400:
+            raise MCPError(
+                f"MCP server returned HTTP {response.status_code} for '{method}'"
+            )
+
+        content_type = response.headers.get("content-type", "")
+        if "text/event-stream" in content_type:
+            message = self._parse_sse(response.text, request_id)
+        else:
+            try:
+                message = response.json()
+            except json.JSONDecodeError as exc:
+                raise MCPError("MCP server returned invalid JSON") from exc
+
+        if not isinstance(message, dict):
+            raise MCPError("MCP server returned a non-object response")
+        if message.get("error"):
+            error = message["error"]
+            raise MCPError(
+                f"MCP error {error.get('code', '?')}: {error.get('message', 'unknown')}"
+            )
+        return message.get("result")
+
+    async def notify(self, method: str, params: dict[str, Any]) -> None:
+        await self._post({"jsonrpc": "2.0", "method": method, "params": params})
+
+    async def close(self) -> None:
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
+            self._client = None
+
+
+class MCPClient:
+    """High-level MCP operations over any transport."""
+
+    def __init__(self, transport: MCPTransport) -> None:
+        self._transport = transport
+        self._initialized = False
+
+    async def initialize(self) -> None:
+        if self._initialized:
+            return
+        await self._transport.request(
+            "initialize",
+            {
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "sentientai", "version": "0.1.0"},
+            },
+        )
+        await self._transport.notify("notifications/initialized", {})
+        self._initialized = True
+
+    async def list_tools(self) -> list[MCPToolInfo]:
+        await self.initialize()
+        result = await self._transport.request("tools/list", {})
+        tools = (result or {}).get("tools", [])
+        return [
+            MCPToolInfo(
+                name=str(t.get("name", "")),
+                description=str(t.get("description", "")),
+                input_schema=t.get("inputSchema")
+                or {"type": "object", "properties": {}},
+            )
+            for t in tools
+            if t.get("name")
+        ]
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        await self.initialize()
+        result = await self._transport.request(
+            "tools/call", {"name": name, "arguments": arguments}
+        )
+        result = result or {}
+        content_blocks = result.get("content", [])
+        text_parts = [
+            block.get("text", "")
+            for block in content_blocks
+            if isinstance(block, dict) and block.get("type") == "text"
+        ]
+        return {
+            "ok": not result.get("isError", False),
+            "content": "\n".join(text_parts) if text_parts else content_blocks,
+        }
+
+    async def close(self) -> None:
+        await self._transport.close()

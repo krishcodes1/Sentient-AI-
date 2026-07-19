@@ -47,9 +47,12 @@ A self-hosted AI assistant platform with security, user control, and auditabilit
    - **Linux:** `sudo apt install docker.io docker-compose-v2` (Ubuntu/Debian) or `sudo dnf install docker docker-compose` (Fedora)
 
 2. **Clone the repo**
+
+   The project lives in the `Sentient-AI-/` subdirectory of the repository,
+   so change into it after cloning:
    ```bash
    git clone https://github.com/krishcodes1/Sentient-AI-.git
-   cd Sentient-AI-
+   cd Sentient-AI-/Sentient-AI-
    ```
 
 3. **Configure environment**
@@ -61,13 +64,23 @@ A self-hosted AI assistant platform with security, user control, and auditabilit
 4. **Start everything**
    ```bash
    cd docker
-   docker compose up
+   docker compose up --build
    ```
 
 5. **Open the app**
    - Frontend: http://localhost:3000
    - Backend API: http://localhost:8000
    - API Docs: http://localhost:8000/docs
+
+**Production deployment:** the dev compose above runs hot-reload servers
+with the source bind-mounted. For production shape (non-root backend, no
+reload, static frontend served by nginx with an `/api` proxy, internal-only
+Postgres/Redis, container healthchecks) use the production compose file:
+
+```bash
+cd docker
+docker compose -f docker-compose.prod.yml up --build -d
+```
 
 ---
 
@@ -229,7 +242,7 @@ Copy `backend/.env.example` to `backend/.env` and configure:
 | `SECRET_KEY` | Yes | Signs your login tokens. Generate with the command below. |
 | `ENCRYPTION_KEY` | Yes | Encrypts stored API keys in the database. Generate with the command below. |
 | `DATABASE_URL` | Yes | PostgreSQL connection string. Default works with Docker. |
-| `REDIS_URL` | Yes | Redis connection string. Default works with Docker. |
+| `REDIS_URL` | Recommended | Redis connection string (used for shared rate limiting; the API falls back to in-memory rate limiting if Redis is unreachable). Default works with Docker. |
 | `LLM_PROVIDER` | Yes | Which AI to use: `anthropic`, `openai`, `gemini`, `grok`, `deepseek`, `groq`, `mistral`, or `ollama` |
 | `LLM_MODEL` | Yes | Model name (e.g., `claude-sonnet-4-20250514`, `gpt-4o`, `gemini-2.5-flash`) |
 | `ANTHROPIC_API_KEY` | If using Anthropic | Get from [console.anthropic.com](https://console.anthropic.com) |
@@ -240,6 +253,11 @@ Copy `backend/.env.example` to `backend/.env` and configure:
 | `GROQ_API_KEY` | If using Groq | Get from [console.groq.com](https://console.groq.com) |
 | `MISTRAL_API_KEY` | If using Mistral | Get from [console.mistral.ai](https://console.mistral.ai) |
 | `OLLAMA_BASE_URL` | If using Ollama | Default: `http://localhost:11434` |
+| `RATE_LIMIT_PER_MINUTE` | No | General per-IP API rate limit (default 60) |
+| `AUTH_RATE_LIMIT_PER_MINUTE` | No | Stricter per-IP limit on login/register (default 10) |
+| `TOKEN_EXPIRE_MINUTES` | No | JWT lifetime (default 60) |
+| `APPROVAL_TTL_MINUTES` | No | How long a pending tool approval stays actionable (default 15) |
+| `CORS_ORIGINS` | No | Allowed browser origins (default localhost dev ports) |
 
 **You only need ONE API key** — whichever provider you choose.
 
@@ -269,13 +287,15 @@ Copy those two lines into your `backend/.env` file, replacing the `REPLACE_ME` p
 sentientai/
 ├── backend/                    # Python / FastAPI
 │   ├── core/                   # Config, database, security, network policy
-│   ├── models/                 # SQLAlchemy ORM models
+│   ├── models/                 # SQLAlchemy ORM models (incl. pending_actions)
 │   ├── services/
-│   │   ├── agent/              # LLM runtime, providers, prompt guard, permissions, context manager
-│   │   ├── connectors/         # Canvas LMS, Google Workspace, Robinhood
-│   │   ├── audit.py            # Tamper-evident audit logging
+│   │   ├── agent/              # LLM runtime, providers, prompt guard, permissions, approvals, tool registry
+│   │   ├── connectors/         # Canvas LMS, Google Workspace, Robinhood + factory
+│   │   ├── mcp/                # MCP client + server integration (experimental)
+│   │   ├── audit.py            # Tamper-evident audit logging (hash chain)
 │   │   └── auth.py             # JWT authentication
-│   └── api/                    # FastAPI routes + middleware
+│   ├── api/                    # FastAPI routes + middleware
+│   └── tests/                  # pytest suite (route security, executor, approvals, audit, MCP)
 ├── frontend/                   # React / TypeScript / Vite / Tailwind
 │   └── src/
 │       ├── pages/              # Dashboard, Chat, Connectors, Audit Logs, Settings
@@ -286,16 +306,32 @@ sentientai/
 
 ### Security Features
 
-- **Multi-layer prompt injection defense** — regex pattern matching, heuristic analysis, output validation
-- **Tiered permission engine** — auto-approve, user-confirm, admin-only, hard-blocked
-- **Financial transaction hard block** — trades/transfers permanently blocked regardless of config
-- **AES-256-GCM credential encryption** — API keys encrypted at rest
-- **SHA-256 chain-linked audit logs** — tamper-evident, immutable action history
-- **SSRF protection** — DNS resolution + IP validation against all private ranges (NemoClaw-inspired)
-- **Deny-by-default network policies** — connectors can only reach allowlisted hosts/paths
-- **OAuth 2.0 + PKCE** — secure auth for Canvas and Google integrations
-- **Security headers** — X-Frame-Options, CSP, HSTS, etc.
-- **Rate limiting** — per-IP request throttling
+The full security model — every layer, where it is enforced, and what is
+still open — lives in **[SECURITY.md](SECURITY.md)**. Highlights:
+
+- **JWT-scoped API** — identity comes only from the verified token; every
+  resource is owner-scoped (no client-supplied user ids, no IDOR)
+- **Explicit consent flow** — sensitive actions are persisted as pending
+  approvals (owned, single-use, expiring) and run only after the user clicks
+  Approve, in chat or on the dashboard
+- **Least-privilege scopes** — connectors default to read-only; write scopes
+  are granted per connector and re-checked at dispatch
+- **Financial transaction hard block** — trades/transfers permanently blocked
+  at four independent layers, regardless of config
+- **Multi-layer prompt injection defense** — security system prompt,
+  untrusted tool-result envelope, input/argument/output scanning, connector
+  response sanitization
+- **AES-256-GCM credential encryption** — secrets encrypted at rest, never
+  returned by any API, decrypted only at dispatch
+- **SHA-256 chain-linked audit logs** — tamper-evident history with per-row
+  verification in the UI and a CLI verifier
+- **SSRF protection + deny-by-default network policies** — connectors and
+  MCP servers can only reach allowlisted, public endpoints (redirects included)
+- **MCP server support (experimental)** — register external MCP servers;
+  every MCP tool requires approval, financial-looking tools are refused
+- **Rate limiting** — per-IP throttling with a stricter bucket on
+  login/register, plus per-connector rate limits
+- **Security headers** — CSP, HSTS, X-Frame-Options, nosniff, etc.
 
 ### Smart Context Management
 

@@ -9,6 +9,10 @@ import {
   Shield,
   ChevronRight,
   Loader2,
+  Pencil,
+  Trash2,
+  AlertTriangle,
+  RefreshCw,
 } from "lucide-react";
 import clsx from "clsx";
 import type {
@@ -22,11 +26,19 @@ import type {
 import {
   createConversation,
   decideApproval,
+  deleteConversation,
   getConversation,
   getConversations,
   getMe,
+  getPendingApprovals,
   sendMessage,
+  updateConversation,
 } from "@/services/api";
+import ConfirmDialog from "@/components/ConfirmDialog";
+
+const CONV_PAGE_SIZE = 50;
+const DEFAULT_TITLE = "New Conversation";
+const AUTO_TITLE_MAX = 40;
 
 function formatRelative(iso: string | undefined): string {
   if (!iso) return "";
@@ -179,11 +191,23 @@ export default function Chat() {
   const [me, setMe] = useState<User | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [convError, setConvError] = useState<string | null>(null);
+  const [convRetryKey, setConvRetryKey] = useState(0);
+  const [hasMoreConvs, setHasMoreConvs] = useState(false);
+  const [loadingMoreConvs, setLoadingMoreConvs] = useState(false);
   const [activeConv, setActiveConv] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [messagesError, setMessagesError] = useState<string | null>(null);
+  const [messagesRetryKey, setMessagesRetryKey] = useState(0);
+  const [approvals, setApprovals] = useState<PendingApproval[]>([]);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [sending, setSending] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameText, setRenameText] = useState("");
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Conversation | null>(null);
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -202,38 +226,62 @@ export default function Chat() {
     };
   }, []);
 
-  // Load conversations when we know the user
+  // Load the first page of conversations when we know the user
   useEffect(() => {
     if (!me) return;
     let cancelled = false;
-    getConversations(me.id)
+    setConvError(null);
+    getConversations({ limit: CONV_PAGE_SIZE, offset: 0 })
       .then((convs) => {
         if (cancelled) return;
         setConversations(convs);
+        setHasMoreConvs(convs.length === CONV_PAGE_SIZE);
         if (convs.length > 0) setActiveConv((current) => current ?? convs[0].id);
       })
-      .catch(() => {
-        // empty list on error
+      .catch((err: Error) => {
+        if (!cancelled) setConvError(err.message);
       });
     return () => {
       cancelled = true;
     };
-  }, [me]);
+  }, [me, convRetryKey]);
 
-  // Load messages when the active conversation changes
+  // Load messages (and any still-pending approvals) when the active
+  // conversation changes. Approvals are persisted server-side, so fetching
+  // them here means Approve/Deny cards survive page reloads instead of
+  // living only in the transient send-message response.
   useEffect(() => {
     if (!activeConv) {
       setMessages([]);
+      setApprovals([]);
+      setMessagesError(null);
       return;
     }
     let cancelled = false;
     setLoadingMessages(true);
-    getConversation(activeConv)
-      .then((conv) => {
-        if (!cancelled) setMessages(conv.messages ?? []);
+    setMessagesError(null);
+    setApprovals([]);
+    Promise.all([
+      getConversation(activeConv),
+      // A failed approvals fetch should not block the thread itself.
+      getPendingApprovals().catch(() => null),
+    ])
+      .then(([conv, pending]) => {
+        if (cancelled) return;
+        setMessages(conv.messages ?? []);
+        if (pending) {
+          setApprovals(
+            pending.filter(
+              (pa) => !pa.conversation_id || pa.conversation_id === activeConv,
+            ),
+          );
+        }
       })
-      .catch(() => {
-        if (!cancelled) setMessages([]);
+      .catch((err: Error) => {
+        if (!cancelled) {
+          setMessages([]);
+          setMessagesError(err.message);
+        }
       })
       .finally(() => {
         if (!cancelled) setLoadingMessages(false);
@@ -241,26 +289,112 @@ export default function Chat() {
     return () => {
       cancelled = true;
     };
-  }, [activeConv]);
+  }, [activeConv, messagesRetryKey]);
 
   // Scroll to bottom on message updates
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages, approvals]);
 
   const handleNewConversation = async () => {
     if (!me || creating) return;
     setCreating(true);
+    setCreateError(null);
     try {
-      const conv = await createConversation(me.id, "New Conversation");
+      const conv = await createConversation(DEFAULT_TITLE);
       setConversations((prev) => [conv, ...prev]);
       setActiveConv(conv.id);
       setMessages([]);
-    } catch {
-      // ignore
+    } catch (err) {
+      setCreateError((err as Error).message);
     } finally {
       setCreating(false);
     }
+  };
+
+  const handleLoadMoreConversations = async () => {
+    if (loadingMoreConvs) return;
+    setLoadingMoreConvs(true);
+    try {
+      const next = await getConversations({
+        limit: CONV_PAGE_SIZE,
+        offset: conversations.length,
+      });
+      setConversations((prev) => {
+        const seen = new Set(prev.map((c) => c.id));
+        return [...prev, ...next.filter((c) => !seen.has(c.id))];
+      });
+      setHasMoreConvs(next.length === CONV_PAGE_SIZE);
+    } catch (err) {
+      setConvError((err as Error).message);
+    } finally {
+      setLoadingMoreConvs(false);
+    }
+  };
+
+  const startRename = (conv: Conversation) => {
+    setRenamingId(conv.id);
+    setRenameText(conv.title || "");
+    setRenameError(null);
+  };
+
+  const cancelRename = () => {
+    setRenamingId(null);
+    setRenameError(null);
+  };
+
+  const commitRename = async () => {
+    if (!renamingId) return;
+    const title = renameText.trim();
+    const current = conversations.find((c) => c.id === renamingId);
+    if (!title || !current || title === current.title) {
+      cancelRename();
+      return;
+    }
+    try {
+      const updated = await updateConversation(renamingId, { title });
+      setConversations((prev) =>
+        prev.map((c) => (c.id === updated.id ? updated : c)),
+      );
+      cancelRename();
+    } catch (err) {
+      setRenameError((err as Error).message);
+    }
+  };
+
+  const handleDeleteConversation = async () => {
+    if (!deleteTarget) return;
+    await deleteConversation(deleteTarget.id);
+    const deletedId = deleteTarget.id;
+    const remaining = conversations.filter((c) => c.id !== deletedId);
+    setConversations(remaining);
+    if (activeConv === deletedId) {
+      setActiveConv(remaining[0]?.id ?? null);
+    }
+    setDeleteTarget(null);
+  };
+
+  // After the first user message, give the conversation a real title so the
+  // sidebar is not a wall of identical "New Conversation" rows. Cosmetic —
+  // failures are ignored and the default title simply stays.
+  const maybeAutoTitle = (conversationId: string, content: string) => {
+    const conv = conversations.find((c) => c.id === conversationId);
+    if (!conv || conv.title !== DEFAULT_TITLE) return;
+    const compact = content.replace(/\s+/g, " ").trim();
+    if (!compact) return;
+    const title =
+      compact.length > AUTO_TITLE_MAX
+        ? `${compact.slice(0, AUTO_TITLE_MAX).trimEnd()}…`
+        : compact;
+    updateConversation(conversationId, { title })
+      .then((updated) => {
+        setConversations((prev) =>
+          prev.map((c) => (c.id === updated.id ? updated : c)),
+        );
+      })
+      .catch(() => {
+        /* keep the default title on failure */
+      });
   };
 
   const handleSend = async (e: FormEvent) => {
@@ -282,11 +416,10 @@ export default function Chat() {
     setSending(true);
 
     try {
-      const res = await sendMessage(activeConv, me.id, content);
+      const res = await sendMessage(activeConv, content);
       const assistant: Message = {
         ...res.assistant_message,
         tool_calls: res.tool_calls,
-        pending_approvals: res.pending_approvals,
         blocked_actions: res.blocked_actions,
       };
       // Replace the optimistic user message with the server's saved copy and append the assistant
@@ -295,6 +428,16 @@ export default function Chat() {
         res.user_message,
         assistant,
       ]);
+      if (res.pending_approvals.length > 0) {
+        setApprovals((prev) => {
+          const seen = new Set(prev.map((pa) => pa.action_id));
+          return [
+            ...prev,
+            ...res.pending_approvals.filter((pa) => !seen.has(pa.action_id)),
+          ];
+        });
+      }
+      maybeAutoTitle(activeConv, content);
     } catch (err) {
       setMessages((prev) => [
         ...prev.filter((m) => m.id !== tempId),
@@ -313,17 +456,18 @@ export default function Chat() {
   };
 
   const handleApprovalDecision = async (actionId: string, approved: boolean) => {
-    if (!me) return;
-    await decideApproval(actionId, me.id, approved);
-    // Remove the approval from any message that still shows it
-    setMessages((prev) =>
-      prev.map((m) => ({
-        ...m,
-        pending_approvals: (m.pending_approvals ?? []).filter(
-          (pa) => pa.action_id !== actionId,
-        ),
-      })),
-    );
+    await decideApproval(actionId, approved);
+    setApprovals((prev) => prev.filter((pa) => pa.action_id !== actionId));
+    // The backend persists an assistant message with the tool outcome —
+    // refetch the thread so the result of the decision is visible.
+    if (activeConv) {
+      try {
+        const conv = await getConversation(activeConv);
+        setMessages(conv.messages ?? []);
+      } catch {
+        // The decision itself succeeded; the thread catches up on next load.
+      }
+    }
   };
 
   if (authError) {
@@ -364,12 +508,39 @@ export default function Chat() {
             {creating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
             New Chat
           </button>
+          {createError && (
+            <p className="text-xs mt-2" style={{ color: "var(--accent-danger)" }}>
+              Could not create a conversation: {createError}
+            </p>
+          )}
         </div>
         <div className="px-4 pt-3 pb-1">
           <div className="eyebrow">Conversations</div>
         </div>
         <div className="flex-1 overflow-y-auto">
-          {conversations.length === 0 && (
+          {convError && (
+            <div
+              className="mx-3 my-2 px-3 py-2.5 rounded-[8px]"
+              style={{
+                background: "var(--fill-danger)",
+                border: "1px solid var(--border-danger)",
+              }}
+            >
+              <p className="text-xs mb-2" style={{ color: "var(--accent-danger)" }}>
+                Conversations failed to load: {convError}
+              </p>
+              <button
+                type="button"
+                onClick={() => setConvRetryKey((k) => k + 1)}
+                className="inline-flex items-center gap-1.5 text-xs font-semibold"
+                style={{ color: "var(--accent-danger)" }}
+              >
+                <RefreshCw className="w-3 h-3" />
+                Retry
+              </button>
+            </div>
+          )}
+          {!convError && conversations.length === 0 && (
             <p
               className="text-xs text-center px-4 py-8"
               style={{ color: "var(--text-muted)" }}
@@ -379,13 +550,23 @@ export default function Chat() {
           )}
           {conversations.map((conv) => {
             const isActive = activeConv === conv.id;
+            const isRenaming = renamingId === conv.id;
             return (
-              <button
+              <div
                 key={conv.id}
-                type="button"
-                onClick={() => setActiveConv(conv.id)}
+                role="button"
+                tabIndex={0}
+                onClick={() => {
+                  if (!isRenaming) setActiveConv(conv.id);
+                }}
+                onKeyDown={(e) => {
+                  if (!isRenaming && (e.key === "Enter" || e.key === " ")) {
+                    e.preventDefault();
+                    setActiveConv(conv.id);
+                  }
+                }}
                 className={clsx(
-                  "w-full text-left px-4 py-3 transition-colors relative",
+                  "group w-full text-left px-4 py-3 transition-colors relative cursor-pointer",
                 )}
                 style={{
                   borderBottom: "1px solid var(--border-subtle)",
@@ -395,20 +576,93 @@ export default function Chat() {
                     : "none",
                 }}
               >
-                <div className="flex items-center justify-between gap-2">
-                  <span
-                    className="text-sm font-medium truncate"
-                    style={{ color: isActive ? "var(--text-primary)" : "var(--text-secondary)" }}
-                  >
-                    {conv.title || "Untitled"}
-                  </span>
-                  <span className="mono-tag shrink-0" style={{ color: "var(--text-muted)" }}>
-                    {formatRelative(conv.updated_at)}
-                  </span>
-                </div>
-              </button>
+                {isRenaming ? (
+                  <div onClick={(e) => e.stopPropagation()}>
+                    <input
+                      type="text"
+                      value={renameText}
+                      autoFocus
+                      onChange={(e) => setRenameText(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") void commitRename();
+                        if (e.key === "Escape") cancelRename();
+                      }}
+                      onBlur={() => void commitRename()}
+                      className="w-full px-2 py-1 rounded-[6px] text-sm outline-none"
+                      style={{
+                        background: "var(--bg-input)",
+                        border: "1px solid var(--accent-primary)",
+                        color: "var(--text-primary)",
+                      }}
+                    />
+                    {renameError && (
+                      <p className="text-xs mt-1" style={{ color: "var(--accent-danger)" }}>
+                        {renameError}
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <div className="flex items-center justify-between gap-2">
+                    <span
+                      className="text-sm font-medium truncate"
+                      style={{ color: isActive ? "var(--text-primary)" : "var(--text-secondary)" }}
+                    >
+                      {conv.title || "Untitled"}
+                    </span>
+                    <span className="mono-tag shrink-0 group-hover:hidden" style={{ color: "var(--text-muted)" }}>
+                      {formatRelative(conv.updated_at)}
+                    </span>
+                    <span className="hidden group-hover:flex items-center gap-1 shrink-0">
+                      <button
+                        type="button"
+                        aria-label="Rename conversation"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          startRename(conv);
+                        }}
+                        className="p-1 rounded-[6px] hover:opacity-80"
+                        style={{ color: "var(--text-muted)" }}
+                      >
+                        <Pencil className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        aria-label="Delete conversation"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setDeleteTarget(conv);
+                        }}
+                        className="p-1 rounded-[6px] hover:opacity-80"
+                        style={{ color: "var(--accent-danger)" }}
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </span>
+                  </div>
+                )}
+              </div>
             );
           })}
+          {!convError && hasMoreConvs && (
+            <div className="px-4 py-3">
+              <button
+                type="button"
+                onClick={() => void handleLoadMoreConversations()}
+                disabled={loadingMoreConvs}
+                className="w-full inline-flex items-center justify-center gap-2 py-2 rounded-[8px] text-xs font-medium disabled:opacity-50"
+                style={{
+                  background: "var(--bg-input)",
+                  border: "1px solid var(--claw-border)",
+                  color: "var(--text-secondary)",
+                }}
+              >
+                {loadingMoreConvs ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : null}
+                {loadingMoreConvs ? "Loading..." : "Load more"}
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
@@ -429,14 +683,48 @@ export default function Chat() {
               <span className="text-sm">Loading messages...</span>
             </div>
           )}
-          {!loadingMessages && activeConv && messages.length === 0 && (
+          {!loadingMessages && activeConv && messagesError && (
+            <div className="flex items-center justify-center h-full">
+              <div
+                className="flex flex-col items-center gap-3 px-6 py-5 rounded-[12px]"
+                style={{
+                  background: "var(--fill-danger)",
+                  border: "1px solid var(--border-danger)",
+                }}
+              >
+                <div className="flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4" style={{ color: "var(--accent-danger)" }} />
+                  <p className="text-sm" style={{ color: "var(--accent-danger)" }}>
+                    This conversation failed to load: {messagesError}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setMessagesRetryKey((k) => k + 1)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-[8px] text-xs font-semibold"
+                  style={{
+                    border: "1px solid var(--border-danger)",
+                    color: "var(--accent-danger)",
+                  }}
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  Retry
+                </button>
+              </div>
+            </div>
+          )}
+          {!loadingMessages &&
+            activeConv &&
+            !messagesError &&
+            messages.length === 0 &&
+            approvals.length === 0 && (
             <div className="flex items-center justify-center h-full">
               <p className="text-sm" style={{ color: "var(--text-muted)" }}>
                 No messages yet. Say hello.
               </p>
             </div>
           )}
-          {messages.map((msg) => (
+          {!messagesError && messages.map((msg) => (
             <div
               key={msg.id}
               className={clsx("flex gap-3", msg.role === "user" ? "justify-end" : "")}
@@ -491,17 +779,6 @@ export default function Chat() {
                     ))}
                   </div>
                 )}
-                {msg.pending_approvals && msg.pending_approvals.length > 0 && (
-                  <div className="mt-2 space-y-2">
-                    {msg.pending_approvals.map((pa) => (
-                      <ApprovalCard
-                        key={pa.action_id}
-                        approval={pa}
-                        onDecide={(approved) => handleApprovalDecision(pa.action_id, approved)}
-                      />
-                    ))}
-                  </div>
-                )}
               </div>
               {msg.role === "user" && (
                 <div
@@ -516,6 +793,30 @@ export default function Chat() {
               )}
             </div>
           ))}
+          {/* Pending approvals for this conversation — sourced from the
+              server so they survive reloads, plus any raised this turn. */}
+          {!loadingMessages && !messagesError && approvals.length > 0 && (
+            <div className="flex gap-3">
+              <div
+                className="w-8 h-8 rounded-[8px] flex items-center justify-center shrink-0"
+                style={{
+                  background: "var(--accent-glow)",
+                  border: "1px solid rgba(34,211,238,0.35)",
+                }}
+              >
+                <Shield className="w-4 h-4" style={{ color: "var(--accent-warning)" }} />
+              </div>
+              <div className="max-w-[70%] flex-1 space-y-2">
+                {approvals.map((pa) => (
+                  <ApprovalCard
+                    key={pa.action_id}
+                    approval={pa}
+                    onDecide={(approved) => handleApprovalDecision(pa.action_id, approved)}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
           <div ref={messagesEndRef} />
         </div>
 
@@ -563,6 +864,16 @@ export default function Chat() {
           </div>
         </form>
       </div>
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        danger
+        title="Delete conversation?"
+        message={`"${deleteTarget?.title || "Untitled"}" and all of its messages will be permanently deleted. This cannot be undone.`}
+        confirmLabel="Delete"
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={handleDeleteConversation}
+      />
     </div>
   );
 }

@@ -12,18 +12,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from core.config import settings
-from core.database import init_db
+from core.database import async_session, init_db
 from api.middleware.security import (
     RateLimitMiddleware,
     RequestIdMiddleware,
     SecurityHeadersMiddleware,
 )
 from api.routes import agent, audit, auth, connectors
+from services.agent.approvals import DbApprovalStore
 from services.agent.runtime import AgentRuntime
 from services.agent.tool_registry import (
     ConnectorToolExecutor,
     RuntimePermissionAdapter,
 )
+from services.audit import RuntimeAuditLogger
+from services.mcp.integration import MCPConnectorLoader, MCPToolCatalog
 
 logger = structlog.get_logger(__name__)
 
@@ -44,19 +47,25 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.warning("app_starting_without_database")
 
     try:
-        # SEAM: audit_service is left as the runtime's default (logs tool
-        # outcomes via structlog only). Wiring a DB-backed AuditService that
-        # writes to audit_logs on approve/deny is a follow-up; it needs a
-        # per-request DB session, which the singleton runtime does not hold.
+        # All security-relevant services own short-lived sessions via the
+        # application session factory: the executor decrypts credentials and
+        # dispatches real connectors, the audit logger writes hash-chained
+        # rows, and the approval store persists pending actions across
+        # restarts and workers.
         app.state.agent_runtime = AgentRuntime(
             config=settings,
             permission_engine=RuntimePermissionAdapter(),
-            tool_executor=ConnectorToolExecutor(),
+            tool_executor=ConnectorToolExecutor(session_factory=async_session),
+            audit_service=RuntimeAuditLogger(session_factory=async_session),
+            approval_store=DbApprovalStore(session_factory=async_session),
         )
         logger.info("agent_runtime_initialized", provider=settings.LLM_PROVIDER)
     except Exception as exc:
         logger.error("agent_runtime_init_failed", error=str(exc))
         app.state.agent_runtime = None
+
+    # Tool discovery for user-registered MCP servers (short-TTL cache).
+    app.state.mcp_catalog = MCPToolCatalog(MCPConnectorLoader(async_session))
 
     yield
     logger.info("shutting_down_sentientai")
@@ -72,13 +81,19 @@ app = FastAPI(
 # ── Middleware (applied bottom-to-top) ────────────────────────────────────────
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(RequestIdMiddleware)
-app.add_middleware(RateLimitMiddleware, max_requests=settings.RATE_LIMIT_PER_MINUTE)
+app.add_middleware(
+    RateLimitMiddleware,
+    max_requests=settings.RATE_LIMIT_PER_MINUTE,
+    auth_max_requests=settings.AUTH_RATE_LIMIT_PER_MINUTE,
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    # Enumerate exactly what the SPA uses; wildcards + credentials is a
+    # combination browsers reject and an unnecessarily wide surface anyway.
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
 )
 
 # ── Routers ───────────────────────────────────────────────────────────────────

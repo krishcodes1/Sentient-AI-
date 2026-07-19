@@ -260,7 +260,10 @@ class SemanticCache:
     """Simple hash-based semantic cache for repeated queries.
 
     Caches exact query matches to avoid re-sending identical requests.
-    For production, use embedding-based similarity with Redis.
+    ``scope`` (e.g. ``"<user_id>:<conversation_id>"``) partitions the
+    cache so an entry can never be replayed across users or
+    conversations. For production, use embedding-based similarity with
+    Redis.
     """
 
     def __init__(self, max_entries: int = 500):
@@ -268,27 +271,35 @@ class SemanticCache:
         self._max_entries = max_entries
 
     @staticmethod
-    def _hash_query(messages: list[dict[str, Any]]) -> str:
-        # Hash the last user message + recent context
+    def _hash_query(messages: list[dict[str, Any]], scope: str = "") -> str:
+        # Hash the scope + last user message + recent context
         relevant = messages[-3:] if len(messages) >= 3 else messages
-        payload = json.dumps(relevant, sort_keys=True, default=str)
+        payload = scope + "\n" + json.dumps(relevant, sort_keys=True, default=str)
         return hashlib.sha256(payload.encode()).hexdigest()
 
-    def get(self, messages: list[dict[str, Any]]) -> Optional[CacheEntry]:
-        key = self._hash_query(messages)
+    def get(
+        self, messages: list[dict[str, Any]], scope: str = ""
+    ) -> Optional[CacheEntry]:
+        key = self._hash_query(messages, scope)
         entry = self._cache.get(key)
         if entry:
             entry.hits += 1
             return entry
         return None
 
-    def put(self, messages: list[dict[str, Any]], response: str, usage: dict[str, int]) -> None:
+    def put(
+        self,
+        messages: list[dict[str, Any]],
+        response: str,
+        usage: dict[str, int],
+        scope: str = "",
+    ) -> None:
         if len(self._cache) >= self._max_entries:
             # Evict least-hit entry
             min_key = min(self._cache, key=lambda k: self._cache[k].hits)
             del self._cache[min_key]
 
-        key = self._hash_query(messages)
+        key = self._hash_query(messages, scope)
         self._cache[key] = CacheEntry(query_hash=key, response=response, usage=usage)
 
 
@@ -397,13 +408,21 @@ class ContextManager:
 
         return optimized_messages, optimized_tools
 
-    def check_cache(self, messages: list[dict[str, Any]]) -> Optional[CacheEntry]:
-        """Check if we have a cached response for this query."""
-        return self._cache.get(messages)
+    def check_cache(
+        self, messages: list[dict[str, Any]], scope: str = ""
+    ) -> Optional[CacheEntry]:
+        """Check if we have a cached response for this query (within scope)."""
+        return self._cache.get(messages, scope=scope)
 
-    def cache_response(self, messages: list[dict[str, Any]], response: str, usage: dict[str, int]) -> None:
-        """Cache a response for future reuse."""
-        self._cache.put(messages, response, usage)
+    def cache_response(
+        self,
+        messages: list[dict[str, Any]],
+        response: str,
+        usage: dict[str, int],
+        scope: str = "",
+    ) -> None:
+        """Cache a response for future reuse (within scope)."""
+        self._cache.put(messages, response, usage, scope=scope)
 
     def _compress_tool_results(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Compress large tool results in the message history."""

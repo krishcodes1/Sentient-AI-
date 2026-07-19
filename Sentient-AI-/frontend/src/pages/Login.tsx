@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowRight, Eye, EyeOff, Check, Lock } from "lucide-react";
+import { ArrowRight, Eye, EyeOff, HardDrive, Server } from "lucide-react";
 import { login, register } from "@/services/api";
 import { Wordmark } from "@/components/Brand";
 
@@ -150,7 +150,7 @@ export default function Login() {
                   border: "1px solid var(--claw-border)",
                   color: "var(--text-primary)",
                 }}
-                placeholder="you@self-hosted.local"
+                placeholder="you@yourdomain.com"
                 required
               />
             </div>
@@ -187,13 +187,14 @@ export default function Login() {
               </div>
             </div>
 
-            {/* Status pills */}
+            {/* Deployment badges — static descriptions of how SentientAI is
+                deployed, not live status checks. */}
             <div className="flex items-center gap-2 mt-1">
               <StatusPill tone="ok">
-                <Check size={11} strokeWidth={2.5} /> host verified
+                <Server size={11} strokeWidth={2.5} /> self-hosted
               </StatusPill>
               <StatusPill tone="accent">
-                <Lock size={11} strokeWidth={2.5} /> e2ee session
+                <HardDrive size={11} strokeWidth={2.5} /> local first
               </StatusPill>
             </div>
 
@@ -243,7 +244,7 @@ export default function Login() {
           className="mono-tag text-center"
           style={{ color: "var(--text-muted)" }}
         >
-          v0.4.2 · self-hosted · krishcodes1/sentient-ai-
+          self-hosted · krishcodes1/sentient-ai-
         </div>
       </div>
     </div>

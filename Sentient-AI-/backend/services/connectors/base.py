@@ -175,7 +175,38 @@ class BaseConnector(ABC):
         self._rate_limiter = RateLimiter(rate_limit or self.DEFAULT_RATE_LIMIT)
         self._authenticated = False
         self._http_client: httpx.AsyncClient | None = None
+        self._network_policy_key: Optional[str] = None
         self._log = logger.bind(connector=self.name)
+
+    # -- Network policy --------------------------------------------------------
+
+    def set_network_policy(self, policy_key: str) -> None:
+        """Enable deny-by-default outbound filtering for this connector.
+
+        Every HTTP request issued through ``_get_client()`` (including
+        redirect targets) is validated against
+        ``core.network_security.DEFAULT_POLICIES[policy_key]`` plus the SSRF
+        ranges. Must be called before the first request; the executor does
+        this for every connector it instantiates.
+        """
+        self._network_policy_key = policy_key
+
+    async def _enforce_network_policy(self, request: httpx.Request) -> None:
+        if not self._network_policy_key:
+            return
+        from core.network_security import check_network_policy
+
+        result = check_network_policy(str(request.url), self._network_policy_key)
+        if not result.safe:
+            self._log.warning(
+                "network_policy_blocked",
+                url=str(request.url),
+                policy=self._network_policy_key,
+                reason=result.reason,
+            )
+            raise ConnectorError(
+                f"Outbound request blocked by network policy: {result.reason}"
+            )
 
     # -- Properties (abstract) -----------------------------------------------
 
@@ -219,10 +250,10 @@ class BaseConnector(ABC):
 
     # -- Concrete helpers ----------------------------------------------------
 
-    async def validate_scopes(self, requested: list[str]) -> bool:
-        """Return True when every *requested* scope is in ``required_scopes``."""
-        allowed = set(self.required_scopes)
-        return all(s in allowed for s in requested)
+    # NOTE: scope enforcement is NOT done here. The authoritative check is
+    # ConnectorToolExecutor._check_scope (services/agent/tool_registry.py),
+    # which validates the catalog's short scope names (e.g. "gmail.read")
+    # against the scopes granted on the ConnectorConfig row.
 
     async def execute(self, action: str, params: dict[str, Any]) -> ConnectorResponse:
         """Public entry point.  Enforces rate limiting, timeout, and
@@ -263,10 +294,20 @@ class BaseConnector(ABC):
     # -- HTTP client management ----------------------------------------------
 
     def _get_client(self, **kwargs: Any) -> httpx.AsyncClient:
-        """Return a shared ``httpx.AsyncClient``, lazily created."""
+        """Return a shared ``httpx.AsyncClient``, lazily created.
+
+        When a network policy is set, a request hook validates every
+        outbound URL (initial requests and redirect hops alike) against the
+        connector's allowlist before it leaves the process.
+        """
         if self._http_client is None or self._http_client.is_closed:
+            event_hooks = kwargs.pop("event_hooks", {})
+            request_hooks = list(event_hooks.get("request", []))
+            request_hooks.append(self._enforce_network_policy)
+            event_hooks["request"] = request_hooks
             self._http_client = httpx.AsyncClient(
                 timeout=httpx.Timeout(self._timeout),
+                event_hooks=event_hooks,
                 **kwargs,
             )
         return self._http_client

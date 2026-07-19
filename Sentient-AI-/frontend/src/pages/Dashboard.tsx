@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Plug,
   Activity,
@@ -6,6 +6,10 @@ import {
   Clock,
   CheckCircle2,
   XCircle,
+  AlertTriangle,
+  ShieldQuestion,
+  Loader2,
+  RefreshCw,
 } from "lucide-react";
 import {
   AreaChart,
@@ -17,19 +21,22 @@ import {
 } from "recharts";
 import type {
   AuditLog,
+  AuditStats,
   Connector,
   ConnectorHealthEntry,
-  SecurityTimelineEntry,
+  PendingApproval,
 } from "@/types";
 import {
+  decideApproval,
   getAuditLogs,
+  getAuditStats,
   getConnectorHealth,
   getConnectors,
-  getMe,
+  getPendingApprovals,
 } from "@/services/api";
 
-const TIMELINE_DAYS = 7;
 const FEED_LIMIT = 6;
+const POLL_INTERVAL_MS = 30_000;
 
 const statusColors = {
   approved: "var(--accent-success)",
@@ -43,32 +50,6 @@ const statusIcons = {
   pending: Clock,
 };
 
-function bucketByDay(logs: AuditLog[], days: number): SecurityTimelineEntry[] {
-  const now = new Date();
-  const buckets: SecurityTimelineEntry[] = [];
-  const keyByDay = new Map<string, SecurityTimelineEntry>();
-
-  for (let i = days - 1; i >= 0; i--) {
-    const d = new Date(now);
-    d.setHours(0, 0, 0, 0);
-    d.setDate(d.getDate() - i);
-    const key = d.toISOString().slice(0, 10);
-    const label = d.toLocaleDateString(undefined, { month: "short", day: "2-digit" });
-    const entry: SecurityTimelineEntry = { date: label, approved: 0, blocked: 0 };
-    buckets.push(entry);
-    keyByDay.set(key, entry);
-  }
-
-  for (const log of logs) {
-    const key = new Date(log.timestamp).toISOString().slice(0, 10);
-    const bucket = keyByDay.get(key);
-    if (!bucket) continue;
-    if (log.status === "approved") bucket.approved += 1;
-    else if (log.status === "blocked") bucket.blocked += 1;
-  }
-  return buckets;
-}
-
 function formatRelative(iso: string): string {
   const then = new Date(iso).getTime();
   if (Number.isNaN(then)) return "—";
@@ -81,6 +62,106 @@ function formatRelative(iso: string): string {
   const diffDay = Math.round(diffHr / 24);
   if (diffDay < 7) return `${diffDay}d ago`;
   return new Date(iso).toLocaleDateString();
+}
+
+function ApprovalRow({
+  approval,
+  onDecide,
+}: {
+  approval: PendingApproval;
+  onDecide: (approved: boolean) => Promise<void>;
+}) {
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const decide = async (approved: boolean) => {
+    setPending(true);
+    setError(null);
+    try {
+      await onDecide(approved);
+    } catch (err) {
+      setError((err as Error).message);
+      setPending(false);
+    }
+  };
+
+  const expiresLabel = approval.expires_at
+    ? `expires ${formatRelativeFuture(approval.expires_at)}`
+    : null;
+
+  return (
+    <div
+      className="rounded-[10px] p-3"
+      style={{
+        background: "var(--claw-surface)",
+        border: "1px solid var(--claw-border)",
+      }}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
+            <span className="mono-tag">{approval.tool_name}</span>
+          </p>
+          <p className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>
+            {approval.reason}
+            {expiresLabel ? ` · ${expiresLabel}` : ""}
+          </p>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            disabled={pending}
+            onClick={() => void decide(true)}
+            className="px-3 py-1.5 rounded-[8px] text-xs font-semibold disabled:opacity-50 inline-flex items-center gap-1.5"
+            style={{ background: "var(--accent-success)", color: "#0a0a0b" }}
+          >
+            {pending ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
+            Approve
+          </button>
+          <button
+            type="button"
+            disabled={pending}
+            onClick={() => void decide(false)}
+            className="px-3 py-1.5 rounded-[8px] text-xs font-medium disabled:opacity-50"
+            style={{
+              border: "1px solid var(--border-danger)",
+              color: "var(--accent-danger)",
+            }}
+          >
+            Deny
+          </button>
+        </div>
+      </div>
+      {Object.keys(approval.arguments ?? {}).length > 0 && (
+        <pre
+          className="text-xs mt-2 p-2 rounded-[8px] overflow-x-auto"
+          style={{
+            background: "var(--bg-primary)",
+            color: "var(--text-secondary)",
+            border: "1px solid var(--border-subtle)",
+          }}
+        >
+          {JSON.stringify(approval.arguments, null, 2)}
+        </pre>
+      )}
+      {error && (
+        <p className="text-xs mt-2" style={{ color: "var(--accent-danger)" }}>
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function formatRelativeFuture(iso: string): string {
+  const target = new Date(iso).getTime();
+  if (Number.isNaN(target)) return "soon";
+  const diffSec = Math.round((target - Date.now()) / 1000);
+  if (diffSec <= 0) return "now";
+  if (diffSec < 60) return `in ${diffSec}s`;
+  const diffMin = Math.round(diffSec / 60);
+  if (diffMin < 60) return `in ${diffMin} min`;
+  return `in ${Math.round(diffMin / 60)}h`;
 }
 
 function StatCard({
@@ -98,11 +179,19 @@ function StatCard({
 }) {
   return (
     <div
-      className="rounded-[14px] p-5"
+      className="rounded-[14px] p-5 transition-all duration-200"
       style={{
         background: "var(--claw-panel)",
         border: "1px solid var(--claw-border)",
         boxShadow: "var(--shadow-card)",
+      }}
+      onMouseOver={(e) => {
+        e.currentTarget.style.borderColor = "rgba(34,211,238,0.4)";
+        e.currentTarget.style.transform = "translateY(-2px)";
+      }}
+      onMouseOut={(e) => {
+        e.currentTarget.style.borderColor = "var(--claw-border)";
+        e.currentTarget.style.transform = "translateY(0)";
       }}
     >
       <div className="flex items-start justify-between mb-3">
@@ -128,66 +217,193 @@ function StatCard({
 }
 
 export default function Dashboard() {
+  const [stats, setStats] = useState<AuditStats | null>(null);
   const [logs, setLogs] = useState<AuditLog[]>([]);
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [health, setHealth] = useState<ConnectorHealthEntry[]>([]);
+  const [approvals, setApprovals] = useState<PendingApproval[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const user = await getMe();
-        if (cancelled) return;
-        const [logResult, connResult, healthResult] = await Promise.all([
-          getAuditLogs(user.id, { limit: 500 }).catch((): AuditLog[] => []),
-          getConnectors(user.id).catch((): Connector[] => []),
-          getConnectorHealth(user.id).catch((): ConnectorHealthEntry[] => []),
-        ]);
-        if (cancelled) return;
-        setLogs(logResult);
-        setConnectors(connResult);
-        setHealth(healthResult);
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
+  // `background` refreshes (polling, post-approval) skip the loading state
+  // so the page does not flicker every 30 seconds.
+  const load = useCallback(async (background = false) => {
+    if (!background) setLoading(true);
+    setLoadError(null);
+    const failures: string[] = [];
+    const fallback = <T,>(label: string, empty: T) => (err: Error): T => {
+      failures.push(label);
+      console.error(`dashboard: ${label} failed`, err);
+      return empty;
     };
+    try {
+      const [statsResult, logResult, connResult, healthResult, approvalResult] =
+        await Promise.all([
+          getAuditStats().catch(fallback("stats", null as AuditStats | null)),
+          getAuditLogs({ limit: FEED_LIMIT }).catch(
+            fallback("audit logs", [] as AuditLog[])
+          ),
+          getConnectors().catch(fallback("connectors", [] as Connector[])),
+          getConnectorHealth().catch(
+            fallback("connector health", [] as ConnectorHealthEntry[])
+          ),
+          getPendingApprovals().catch(
+            fallback("pending approvals", [] as PendingApproval[])
+          ),
+        ]);
+      // On a failed stats fetch keep the previous numbers on screen rather
+      // than blanking them; the banner below reports the failure.
+      if (statsResult) setStats(statsResult);
+      setLogs(logResult);
+      setConnectors(connResult);
+      setHealth(healthResult);
+      setApprovals(approvalResult);
+      if (failures.length > 0) {
+        setLoadError(`Some data could not be loaded (${failures.join(", ")}).`);
+      }
+    } finally {
+      if (!background) setLoading(false);
+    }
   }, []);
 
-  const timeline = useMemo(() => bucketByDay(logs, TIMELINE_DAYS), [logs]);
+  useEffect(() => {
+    void load();
+    const interval = setInterval(() => void load(true), POLL_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [load]);
+
+  const handleApproval = async (actionId: string, approved: boolean) => {
+    await decideApproval(actionId, approved);
+    setApprovals((prev) => prev.filter((a) => a.action_id !== actionId));
+    // Refresh stats and the feed so the decided action shows up immediately.
+    void load(true);
+  };
+
+  const timeline = useMemo(
+    () =>
+      (stats?.by_day ?? []).map((d) => {
+        const parsed = new Date(`${d.date}T00:00:00`);
+        return {
+          date: Number.isNaN(parsed.getTime())
+            ? d.date
+            : parsed.toLocaleDateString(undefined, {
+                month: "short",
+                day: "2-digit",
+              }),
+          approved: d.approved,
+          blocked: d.blocked,
+        };
+      }),
+    [stats]
+  );
+  const timelineDays = stats?.by_day.length ?? 7;
   const recentActivity = useMemo(() => logs.slice(0, FEED_LIMIT), [logs]);
-  const counts24h = useMemo(() => {
-    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-    let total = 0;
-    let blocked = 0;
-    let pending = 0;
-    for (const l of logs) {
-      if (new Date(l.timestamp).getTime() < cutoff) continue;
-      total += 1;
-      if (l.status === "blocked") blocked += 1;
-      else if (l.status === "pending") pending += 1;
-    }
-    return { total, blocked, pending };
-  }, [logs]);
 
   const activeConnectors = connectors.filter((c) => c.is_active).length;
 
   return (
     <div className="space-y-6">
-      <div>
-        <div className="eyebrow mb-2">Control center</div>
-        <h1 style={{ color: "var(--text-primary)" }}>Gateway &amp; workspace</h1>
-        <p
-          className="text-sm mt-1.5 max-w-2xl"
-          style={{ color: "var(--text-secondary)" }}
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <div className="eyebrow mb-2">Control center</div>
+          <h1 style={{ color: "var(--text-primary)" }}>Gateway &amp; workspace</h1>
+          <p
+            className="text-sm mt-1.5 max-w-2xl"
+            style={{ color: "var(--text-secondary)" }}
+          >
+            Live agent activity, blocked actions, pending approvals, and
+            connector health — everything the agent does flows through the
+            policy layer and lands here. Refreshes every{" "}
+            {POLL_INTERVAL_MS / 1000}s.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => void load()}
+          disabled={loading}
+          className="inline-flex items-center gap-2 px-3.5 py-2 rounded-[10px] text-sm font-medium disabled:opacity-50 shrink-0"
+          style={{
+            background: "var(--bg-input)",
+            border: "1px solid var(--claw-border)",
+            color: "var(--text-primary)",
+          }}
         >
-          Mirror of the native OpenClaw dashboard. Live agent activity, blocked
-          actions, and connector health — all flowing through the policy layer.
-        </p>
+          <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
+          Refresh
+        </button>
       </div>
+
+      {/* Load error banner */}
+      {loadError && (
+        <div
+          className="flex items-center justify-between gap-3 rounded-[12px] px-4 py-3"
+          style={{
+            background: "var(--fill-warning)",
+            border: "1px solid var(--border-warning)",
+          }}
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <AlertTriangle
+              className="w-4 h-4 shrink-0"
+              style={{ color: "var(--accent-warning)" }}
+            />
+            <span className="text-sm truncate" style={{ color: "var(--text-secondary)" }}>
+              {loadError}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => void load()}
+            className="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-[8px] shrink-0"
+            style={{
+              border: "1px solid var(--border-warning)",
+              color: "var(--accent-warning)",
+            }}
+          >
+            <RefreshCw className="w-3 h-3" />
+            Retry
+          </button>
+        </div>
+      )}
+
+      {/* Pending approvals — the consent queue. Shown above everything
+          else because these are actions waiting on the user. */}
+      {approvals.length > 0 && (
+        <div
+          className="rounded-[14px] p-5"
+          style={{
+            background: "var(--claw-panel)",
+            border: "1px solid var(--border-warning)",
+            boxShadow: "var(--shadow-card)",
+          }}
+        >
+          <div className="flex items-center gap-2 mb-1">
+            <ShieldQuestion className="w-4 h-4" style={{ color: "var(--accent-warning)" }} />
+            <div className="eyebrow" style={{ color: "var(--accent-warning)" }}>
+              Awaiting your approval
+            </div>
+          </div>
+          <h2 className="mb-1">
+            {approvals.length} action{approvals.length === 1 ? "" : "s"} need
+            {approvals.length === 1 ? "s" : ""} a decision
+          </h2>
+          <p className="text-xs mb-4" style={{ color: "var(--text-muted)" }}>
+            The agent will not run these until you approve them. Undecided
+            requests expire automatically.
+          </p>
+          <div className="space-y-3">
+            {approvals.map((approval) => (
+              <ApprovalRow
+                key={approval.action_id}
+                approval={approval}
+                onDecide={(approved) =>
+                  handleApproval(approval.action_id, approved)
+                }
+              />
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Stat cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -201,21 +417,21 @@ export default function Dashboard() {
         <StatCard
           eyebrow="Actions"
           label="Last 24h"
-          value={loading ? "…" : counts24h.total}
+          value={loading ? "…" : stats ? stats.total_actions_24h : "—"}
           icon={Activity}
           color="#22d3ee"
         />
         <StatCard
           eyebrow="Blocked"
           label="Last 24h"
-          value={loading ? "…" : counts24h.blocked}
+          value={loading ? "…" : stats ? stats.blocked_24h : "—"}
           icon={ShieldAlert}
           color="#f87171"
         />
         <StatCard
           eyebrow="Pending"
-          label="Last 24h"
-          value={loading ? "…" : counts24h.pending}
+          label="Awaiting approval"
+          value={loading ? "…" : stats ? stats.pending_approvals : "—"}
           icon={Clock}
           color="#fbbf24"
         />
@@ -233,7 +449,7 @@ export default function Dashboard() {
           }}
         >
           <div className="eyebrow mb-1">Policy timeline</div>
-          <h2 className="mb-4">Security events · last {TIMELINE_DAYS} days</h2>
+          <h2 className="mb-4">Security events · last {timelineDays} days</h2>
           <ResponsiveContainer width="100%" height={260}>
             <AreaChart data={timeline}>
               <defs>

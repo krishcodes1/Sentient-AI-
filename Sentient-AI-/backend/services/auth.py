@@ -89,11 +89,14 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    user_id: str = payload.get("sub", "")
-    if not user_id:
+    import uuid
+
+    try:
+        user_id = uuid.UUID(str(payload.get("sub", "")))
+    except ValueError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token payload missing subject.",
+            detail="Token payload missing or malformed subject.",
             headers={"WWW-Authenticate": "Bearer"},
         )
 

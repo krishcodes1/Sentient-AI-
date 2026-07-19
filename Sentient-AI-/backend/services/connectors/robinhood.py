@@ -278,10 +278,15 @@ class RobinhoodConnector(BaseConnector):
     # -- Health check --------------------------------------------------------
 
     async def health_check(self) -> bool:
-        """Check Robinhood API reachability (unauthenticated ping)."""
+        """Check Robinhood API reachability (unauthenticated ping).
+
+        Pings a read-only market-data endpoint that is inside the
+        connector's network-policy allowlist ("/" is not). An auth
+        error (401/403) still proves the service is reachable.
+        """
         try:
             client = self._get_client(base_url=self.BASE_URL)
-            resp = await client.get("/")
+            resp = await client.get("/api/v1/crypto/marketdata/best_bid_ask/")
             return resp.status_code < 500
         except Exception:
             return False

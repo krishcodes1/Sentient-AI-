@@ -34,7 +34,12 @@ import sys
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Iterable, Optional
+
+# Allow both ``python -m scripts.verify_audit_log`` and a direct
+# ``python scripts/verify_audit_log.py`` from the backend directory.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.security import compute_audit_hash
 

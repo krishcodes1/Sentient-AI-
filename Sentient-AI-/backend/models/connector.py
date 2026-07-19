@@ -5,6 +5,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     DateTime,
     Enum,
@@ -12,8 +13,8 @@ from sqlalchemy import (
     Integer,
     LargeBinary,
     String,
+    Uuid,
 )
-from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from core.database import Base
@@ -23,6 +24,7 @@ class ConnectorType(str, enum.Enum):
     canvas = "canvas"
     google_workspace = "google_workspace"
     robinhood = "robinhood"
+    mcp = "mcp"
     custom = "custom"
 
 
@@ -43,12 +45,12 @@ class ConnectorConfig(Base):
     __tablename__ = "connector_configs"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
+        Uuid(),
         primary_key=True,
         default=uuid.uuid4,
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
+        Uuid(),
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
