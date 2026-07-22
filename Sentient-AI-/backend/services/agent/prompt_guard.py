@@ -91,10 +91,19 @@ class PromptGuard:
         (
             "system_prompt_extract",
             re.compile(
-                r"(?:reveal|show|display|print|output|repeat|echo|leak|expose|dump)"
-                r"\s+(?:your\s+)?(?:system\s+prompt|instructions?|initial\s+prompt|"
+                r"(?:reveal|show|display|print|output|repeat|echo|leak|expose|"
+                r"dump|tell|give)"
+                # Allow up to four filler words (e.g. "me your full verbatim")
+                # between the verb and the target so "print your full system
+                # prompt" is caught, not just "print your system prompt".
+                r"\s+(?:(?:your|the|me|us|entire|full|complete|exact|verbatim|raw|"
+                r"initial|original|hidden|secret|base|actual)\s+){0,4}"
+                r"(?:system\s+prompt|instructions?|initial\s+prompt|"
                 r"hidden\s+prompt|secret\s+prompt|original\s+prompt|base\s+prompt|"
-                r"pre-?prompt|meta-?prompt)",
+                r"pre-?prompt|meta-?prompt|"
+                # Only the full "guidelines and rules" phrasing, so ordinary
+                # requests mentioning "rules" or "guidelines" alone are safe.
+                r"guidelines?\s+and\s+rules?|rules?\s+and\s+guidelines?)",
                 re.IGNORECASE,
             ),
             "high",
@@ -135,8 +144,11 @@ class PromptGuard:
         (
             "data_exfiltration",
             re.compile(
-                r"(?:send|post|transmit|exfiltrate|forward|upload|email)\s+"
-                r"(?:to|the|all|my|user|this)\s*"
+                r"(?:send|post|transmit|exfiltrate|forward|upload|email|leak|"
+                r"share|export)\s+"
+                # One or more stacked determiners so "send all my api keys" is
+                # caught, not just "send my api keys".
+                r"(?:(?:to|the|all|my|your|user|this|out|me)\s+){0,4}"
                 r"(?:data|info(?:rmation)?|credentials?|tokens?|keys?|passwords?|secrets?|"
                 r"api[\s_-]?keys?|results?)",
                 re.IGNORECASE,

@@ -103,12 +103,25 @@ def build_hash_payload(
     request_data: Any,
     response_summary: Any,
     previous_hash: Optional[str],
+    reasoning_chain: Any = None,
+    detection_method: Optional[str] = None,
+    confidence_score: Optional[float] = None,
 ) -> dict[str, Any]:
     """Canonical payload that gets hashed for one audit row.
 
     Must stay in sync with ``scripts/verify_audit_log.py::build_payload``.
     Including ``previous_hash`` chains each row to its predecessor, so
     deleting or reordering rows is detectable, not just per-row tampering.
+
+    ``reasoning_chain``, ``detection_method``, and ``confidence_score`` carry
+    the security semantics of the event (why an action was blocked, how a
+    threat was detected, the detector's confidence). They are covered by the
+    hash so a database-write adversary cannot rewrite a "blocked, critical
+    threat" row into a benign one without invalidating the integrity hash.
+    ``timestamp`` is deliberately excluded: it is assigned by the database and
+    can be re-serialised with different precision on read-back, which would
+    produce false tamper positives; row ordering is instead protected by the
+    ``previous_hash`` chain.
     """
     return {
         "user_id": user_id,
@@ -120,6 +133,9 @@ def build_hash_payload(
         "request_id": request_id,
         "request_data": request_data,
         "response_summary": response_summary,
+        "reasoning_chain": reasoning_chain,
+        "detection_method": detection_method,
+        "confidence_score": confidence_score,
         "previous_hash": previous_hash,
     }
 
@@ -169,6 +185,9 @@ async def append_audit_log(
 
     sanitized_request = json.loads(sanitize_request_data(request_data)) if request_data is not None else None
     sanitized_summary = _sanitize(response_summary) if response_summary is not None else None
+    # Sanitise once and hash exactly what is stored, so the row and its hash
+    # always agree on the reasoning chain.
+    sanitized_reasoning = _sanitize(reasoning_chain) if reasoning_chain is not None else None
 
     lock = await _lock_for_user(str(user_uuid))
     async with lock:
@@ -192,6 +211,9 @@ async def append_audit_log(
             request_data=sanitized_request,
             response_summary=sanitized_summary,
             previous_hash=previous_hash,
+            reasoning_chain=sanitized_reasoning,
+            detection_method=detection_method,
+            confidence_score=confidence_score,
         )
         integrity_hash = compute_audit_hash(payload)
 
@@ -202,7 +224,7 @@ async def append_audit_log(
             endpoint=endpoint,
             scope_used=scope_used,
             status=status,
-            reasoning_chain=_sanitize(reasoning_chain) if reasoning_chain is not None else None,
+            reasoning_chain=sanitized_reasoning,
             detection_method=detection_method,
             confidence_score=confidence_score,
             request_data=sanitized_request,

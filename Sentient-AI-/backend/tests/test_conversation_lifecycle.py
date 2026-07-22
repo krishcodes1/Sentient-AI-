@@ -98,6 +98,70 @@ async def test_lifecycle_routes_require_auth(client):
 
 
 @pytest.mark.asyncio
+async def test_input_hardening_returns_422_not_500(client, session_factory):
+    """NUL bytes and over-long titles are rejected at the API boundary (422),
+    never allowed to reach the DB driver and surface as a 500."""
+    _, token = await make_user(session_factory)
+
+    # Over-length conversation title (column is String(512)).
+    over = await client.post(
+        "/api/agent/conversations",
+        headers=auth_headers(token),
+        json={"title": "t" * 513},
+    )
+    assert over.status_code == 422
+    at_limit = await client.post(
+        "/api/agent/conversations",
+        headers=auth_headers(token),
+        json={"title": "t" * 512},
+    )
+    assert at_limit.status_code == 201
+    conv_id = at_limit.json()["id"]
+
+    # NUL byte in create title, patch title, and message content.
+    assert (
+        await client.post(
+            "/api/agent/conversations",
+            headers=auth_headers(token),
+            json={"title": "a\x00b"},
+        )
+    ).status_code == 422
+    assert (
+        await client.patch(
+            f"/api/agent/conversations/{conv_id}",
+            headers=auth_headers(token),
+            json={"title": "a\x00b"},
+        )
+    ).status_code == 422
+
+    # NUL byte in message content (needs a runtime so the endpoint is
+    # reachable; the 422 is raised at body validation, before dispatch).
+    from api.routes import agent as agent_routes
+    from main import app
+
+    app.dependency_overrides[agent_routes.get_runtime] = _fake_runtime_override()
+    try:
+        assert (
+            await client.post(
+                f"/api/agent/conversations/{conv_id}/messages",
+                headers=auth_headers(token),
+                json={"content": "hi\x00there"},
+            )
+        ).status_code == 422
+    finally:
+        app.dependency_overrides.pop(agent_routes.get_runtime, None)
+
+    # NUL byte in profile name is rejected too.
+    assert (
+        await client.patch(
+            "/api/auth/profile",
+            headers=auth_headers(token),
+            json={"name": "bob\x00smith"},
+        )
+    ).status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_rename_conversation(client, session_factory):
     _, token = await make_user(session_factory)
     created = await client.post(

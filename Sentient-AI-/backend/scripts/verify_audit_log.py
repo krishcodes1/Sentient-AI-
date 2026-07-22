@@ -75,6 +75,9 @@ def build_payload(row: "AuditLog") -> dict[str, Any]:
         "request_id": row.request_id,
         "request_data": row.request_data,
         "response_summary": row.response_summary,
+        "reasoning_chain": getattr(row, "reasoning_chain", None),
+        "detection_method": getattr(row, "detection_method", None),
+        "confidence_score": getattr(row, "confidence_score", None),
         "previous_hash": getattr(row, "previous_hash", None),
     }
 

@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database import get_db
 from core.security import encrypt_credentials
+from core.validation import SafeStr
 from models.audit import AuditLog
 from models.connector import (
     AuthMethod,
@@ -20,11 +21,38 @@ from models.connector import (
     PermissionTier,
 )
 from models.user import User
-from services.agent.tool_registry import default_read_scopes
+from services.agent.tool_registry import connector_scopes, default_read_scopes
 from services.auth import get_current_user
 from services.connectors.factory import validate_credentials
 
 router = APIRouter(prefix="/connectors", tags=["connectors"])
+
+
+def _validate_scopes(connector_type: str, scopes: list[str]) -> None:
+    """Reject scopes that are not in a first-party connector's catalog.
+
+    MCP servers expose dynamic, per-server tools, so their scope names are
+    not knowable ahead of time and are left unvalidated. For Canvas, Google
+    Workspace, and Robinhood the catalog is fixed: an unknown scope is a
+    typo or an attempt to grant something that does not exist, and is
+    inert at dispatch anyway, so reject it up front with a clear 422.
+    Financial scopes (e.g. crypto.trade) are intentionally absent from the
+    catalog and therefore rejected here too.
+    """
+    catalog = connector_scopes(connector_type)
+    known = set(catalog["read"]) | set(catalog["write"])
+    if not known:
+        # Unknown/dynamic connector type (mcp) — nothing to validate against.
+        return
+    unknown = sorted(s for s in scopes if s not in known)
+    if unknown:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"Unknown scope(s) for {connector_type}: {', '.join(unknown)}. "
+                f"Allowed: {', '.join(sorted(known))}."
+            ),
+        )
 
 
 # Identity comes exclusively from the verified JWT (get_current_user).
@@ -36,10 +64,10 @@ router = APIRouter(prefix="/connectors", tags=["connectors"])
 
 class ConnectorCreateRequest(BaseModel):
     connector_type: ConnectorType
-    display_name: str = Field(..., min_length=1, max_length=255)
+    display_name: SafeStr = Field(..., min_length=1, max_length=255)
     auth_method: AuthMethod
     credentials: dict
-    granted_scopes: list[str] = []
+    granted_scopes: list[SafeStr] = Field(default_factory=list, max_length=64)
     permission_tier: PermissionTier = PermissionTier.user_confirm
     rate_limit_per_minute: int = Field(default=30, ge=1, le=600)
 
@@ -61,10 +89,10 @@ class ConnectorResponse(BaseModel):
 
 
 class ConnectorUpdateRequest(BaseModel):
-    display_name: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    display_name: Optional[SafeStr] = Field(default=None, min_length=1, max_length=255)
     is_active: Optional[bool] = None
     credentials: Optional[dict] = None
-    granted_scopes: Optional[List[str]] = None
+    granted_scopes: Optional[List[SafeStr]] = Field(default=None, max_length=64)
     permission_tier: Optional[PermissionTier] = None
     rate_limit_per_minute: Optional[int] = Field(default=None, ge=1, le=600)
 
@@ -120,6 +148,8 @@ async def create_connector(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="; ".join(problems),
         )
+
+    _validate_scopes(body.connector_type.value, body.granted_scopes)
 
     encrypted = encrypt_credentials(json.dumps(body.credentials))
     granted_scopes = body.granted_scopes or default_read_scopes(
@@ -282,6 +312,9 @@ async def update_connector(
 
     update_data = body.model_dump(exclude_unset=True)
 
+    if update_data.get("granted_scopes") is not None:
+        _validate_scopes(connector.connector_type.value, update_data["granted_scopes"])
+
     if "credentials" in update_data:
         connector.encrypted_credentials = encrypt_credentials(
             json.dumps(update_data.pop("credentials"))
@@ -382,8 +415,16 @@ async def test_connector(
         healthy = await connector.health_check()
         if healthy:
             return ConnectorTestResult(ok=True, detail="Connection verified.")
+        # Token-based connectors (Canvas, Google) store the token without a
+        # round-trip to the service, so reaching here means the stored
+        # credentials did not pass the live health check — most often they are
+        # invalid or expired. Do not claim the credentials "authenticated".
         return ConnectorTestResult(
-            ok=False, detail="Authenticated, but the service health check failed."
+            ok=False,
+            detail=(
+                "Service health check failed — the stored credentials may be "
+                "invalid or expired. Re-enter them to fix."
+            ),
         )
     except AuthenticationError as exc:
         return ConnectorTestResult(ok=False, detail=f"Authentication failed: {exc}")

@@ -42,6 +42,91 @@ def test_custom_enum_value_kept_for_forward_compat():
 
 
 # ---------------------------------------------------------------------------
+# granted_scopes validation against the first-party catalog
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_unknown_scopes_rejected_on_create(client, session_factory):
+    _, token = await make_user(session_factory)
+    response = await client.post(
+        "/api/connectors/",
+        headers=auth_headers(token),
+        json={
+            "connector_type": "canvas",
+            "display_name": "bad scopes",
+            "auth_method": "bearer_token",
+            "credentials": {
+                "base_url": "https://s.instructure.com",
+                "access_token": "t",
+            },
+            "granted_scopes": ["not.a.real.scope", "'; DROP TABLE users;--"],
+        },
+    )
+    assert response.status_code == 422
+    assert "Unknown scope" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_financial_scope_rejected(client, session_factory):
+    """crypto.trade is a financial scope, deliberately absent from the
+    catalog, so granting it is refused up front."""
+    _, token = await make_user(session_factory)
+    response = await client.post(
+        "/api/connectors/",
+        headers=auth_headers(token),
+        json={
+            "connector_type": "robinhood",
+            "display_name": "trade grab",
+            "auth_method": "api_key",
+            "credentials": {"api_key": "k", "api_secret": "s"},
+            "granted_scopes": ["crypto.read", "crypto.trade"],
+        },
+    )
+    assert response.status_code == 422
+    assert "crypto.trade" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_valid_scopes_accepted(client, session_factory):
+    _, token = await make_user(session_factory)
+    response = await client.post(
+        "/api/connectors/",
+        headers=auth_headers(token),
+        json={
+            "connector_type": "canvas",
+            "display_name": "good scopes",
+            "auth_method": "bearer_token",
+            "credentials": {
+                "base_url": "https://s.instructure.com",
+                "access_token": "t",
+            },
+            "granted_scopes": ["courses.read", "submissions.write"],
+        },
+    )
+    assert response.status_code == 201
+
+
+@pytest.mark.asyncio
+async def test_mcp_scopes_not_validated(client, session_factory):
+    """MCP servers expose dynamic tools, so their scope names are free-form
+    and must not be rejected by the first-party catalog check."""
+    _, token = await make_user(session_factory)
+    response = await client.post(
+        "/api/connectors/",
+        headers=auth_headers(token),
+        json={
+            "connector_type": "mcp",
+            "display_name": "mcp server",
+            "auth_method": "api_key",
+            "credentials": {"url": "https://mcp.example.com/rpc"},
+            "granted_scopes": ["anything.goes", "custom.scope"],
+        },
+    )
+    assert response.status_code == 201
+
+
+# ---------------------------------------------------------------------------
 # MCP health via the activity registry
 # ---------------------------------------------------------------------------
 

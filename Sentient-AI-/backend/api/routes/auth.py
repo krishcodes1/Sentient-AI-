@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database import get_db
 from core.security import create_access_token, hash_password, verify_password
+from core.validation import SafeStr
 from models.user import User
 from services.auth import get_current_user
 
@@ -24,7 +25,7 @@ PermissionTierLiteral = Literal[
 class RegisterRequest(BaseModel):
     email: EmailStr
     password: str
-    name: Optional[str] = None
+    name: Optional[SafeStr] = Field(default=None, max_length=255)
 
 
 class LoginRequest(BaseModel):
@@ -52,7 +53,7 @@ class UserResponse(BaseModel):
 
 
 class ProfileUpdateRequest(BaseModel):
-    name: Optional[str] = Field(default=None, max_length=255)
+    name: Optional[SafeStr] = Field(default=None, max_length=255)
     email: Optional[EmailStr] = None
 
 
@@ -64,8 +65,8 @@ class PasswordChangeRequest(BaseModel):
 class SettingsUpdateRequest(BaseModel):
     default_permission_tier: Optional[PermissionTierLiteral] = None
     rate_limit: Optional[int] = Field(default=None, ge=10, le=600)
-    llm_provider: Optional[str] = Field(default=None, max_length=32)
-    llm_model: Optional[str] = Field(default=None, max_length=128)
+    llm_provider: Optional[SafeStr] = Field(default=None, max_length=32)
+    llm_model: Optional[SafeStr] = Field(default=None, max_length=128)
 
 
 @router.post(

@@ -150,7 +150,13 @@ every connector client (covers redirects too):
   expiry is written through one code path (`services/audit.py::append_audit_log`).
 - Rows carry a SHA-256 `integrity_hash` over a canonical payload that
   includes `previous_hash`, forming a per-user chain: field tampering, row
-  deletion, and reordering all surface as mismatches.
+  deletion, and reordering all surface as mismatches. The hash covers the
+  security-semantic columns — `reasoning_chain` (why an action was blocked),
+  `detection_method`, and `confidence_score` — so a database-write adversary
+  cannot rewrite a "blocked, critical threat" row into a benign one without
+  breaking the hash. (`timestamp` is intentionally excluded because DB
+  round-trip precision would cause false positives; ordering is instead
+  protected by the `previous_hash` chain.)
 - Verify per-row in the UI (expand a row → integrity check), via
   `GET /api/audit/{id}/verify`, or for the whole table with
   `python -m scripts.verify_audit_log`.

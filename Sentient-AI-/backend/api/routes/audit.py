@@ -220,6 +220,9 @@ async def verify_audit_integrity(
         request_data=entry.request_data,
         response_summary=entry.response_summary,
         previous_hash=entry.previous_hash,
+        reasoning_chain=entry.reasoning_chain,
+        detection_method=entry.detection_method,
+        confidence_score=entry.confidence_score,
     )
     expected = compute_audit_hash(hash_payload)
     return {"id": entry.id, "valid": entry.integrity_hash == expected}

@@ -13,6 +13,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database import get_db
+from core.validation import SafeStr
 from models.connector import ConnectorConfig
 from models.conversation import Conversation, Message, MessageRole
 from models.pending_action import PendingAction
@@ -86,15 +87,17 @@ def get_runtime(request: Request) -> AgentRuntime:
 
 
 class CreateConversationRequest(BaseModel):
-    title: str = "New Conversation"
+    # max_length matches the Conversation.title column (String(512)); without
+    # it an over-long title overflows the column and raises an unhandled 500.
+    title: SafeStr = Field(default="New Conversation", min_length=1, max_length=512)
 
 
 class UpdateConversationRequest(BaseModel):
-    title: str = Field(min_length=1, max_length=200)
+    title: SafeStr = Field(min_length=1, max_length=200)
 
 
 class SendMessageRequest(BaseModel):
-    content: str
+    content: SafeStr = Field(min_length=1, max_length=100_000)
 
 
 class MessageResponse(BaseModel):

@@ -147,6 +147,11 @@ def check_ssrf(url: str) -> SSRFCheckResult:
 
         for network in _BLOCKED_NETWORKS:
             if ip in network:
+                # The full detail (which hostname resolved to which internal IP
+                # in which blocked CIDR) goes to the server log only. Returning
+                # it to the caller would turn a connector "test" into a DNS /
+                # internal-network resolution oracle, so the caller-facing
+                # reason stays generic.
                 logger.warning(
                     "ssrf_blocked",
                     url=url,
@@ -156,7 +161,10 @@ def check_ssrf(url: str) -> SSRFCheckResult:
                 )
                 return SSRFCheckResult(
                     safe=False,
-                    reason=f"Resolved IP {ip_str} is in blocked range {network}",
+                    reason=(
+                        "Destination is not permitted by the network security "
+                        "policy (resolves to a private or internal address)."
+                    ),
                     resolved_ip=ip_str,
                 )
 
