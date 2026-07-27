@@ -35,6 +35,7 @@ import {
   updateConversation,
 } from "@/services/api";
 import ConfirmDialog from "@/components/ConfirmDialog";
+import MarkdownMessage from "@/components/MarkdownMessage";
 
 const CONV_PAGE_SIZE = 50;
 const DEFAULT_TITLE = "New Conversation";
@@ -757,14 +758,21 @@ export default function Chat() {
                       : "none",
                 }}
               >
-                <p
-                  className="text-sm whitespace-pre-wrap"
-                  style={{
-                    color: msg.role === "user" ? "#0a0a0b" : "var(--text-primary)",
-                  }}
-                >
-                  {msg.content}
-                </p>
+                {msg.role === "assistant" ? (
+                  // Assistant output may be shaped by untrusted tool data, so
+                  // it renders through the exfiltration-safe markdown component
+                  // (no auto-fetched images, no raw HTML, inert links).
+                  <MarkdownMessage content={msg.content} />
+                ) : (
+                  <p
+                    className="text-sm whitespace-pre-wrap"
+                    style={{
+                      color: msg.role === "user" ? "#0a0a0b" : "var(--text-primary)",
+                    }}
+                  >
+                    {msg.content}
+                  </p>
+                )}
                 {msg.tool_calls && msg.tool_calls.length > 0 && (
                   <div className="mt-2 space-y-1">
                     {msg.tool_calls.map((tc, i) => (
