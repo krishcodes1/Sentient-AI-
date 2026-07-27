@@ -55,6 +55,22 @@ class Settings(BaseSettings):
     # Stricter bucket for credential endpoints (login/register) to slow
     # brute-force attempts. Counted separately from the general limit.
     AUTH_RATE_LIMIT_PER_MINUTE: int = 10
+    # Proxy IP ranges (CIDR) whose X-Forwarded-For header is trusted for
+    # client-IP attribution. Only when the DIRECT peer is in one of these
+    # ranges is XFF honored; otherwise the peer address is used. This stops
+    # a directly-reachable client from spoofing XFF to mint a fresh
+    # rate-limit bucket per request and bypass the login brute-force
+    # throttle. Defaults cover loopback + RFC1918/ULA private ranges, which
+    # is where a reverse proxy (nginx in the compose network) sits. Set to
+    # an empty list to never trust XFF.
+    TRUSTED_PROXIES: list[str] = [
+        "127.0.0.0/8",
+        "::1/128",
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "fc00::/7",
+    ]
 
     # ── Auth ──────────────────────────────────────────────────────────────
     TOKEN_EXPIRE_MINUTES: int = 60

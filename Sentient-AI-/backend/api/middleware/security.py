@@ -13,6 +13,7 @@ Provides:
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import time
 import uuid
 from collections import defaultdict
@@ -130,6 +131,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         cleanup_interval: int = 300,
         auth_max_requests: int = 10,
         redis_url: str | None = None,
+        trusted_proxies: list[str] | None = None,
     ) -> None:
         super().__init__(app)
         self.max_requests = max_requests
@@ -152,12 +154,55 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self._redis_down_until = 0.0
         self._redis_was_down = False
 
+        if trusted_proxies is None:
+            try:
+                from core.config import settings
+
+                trusted_proxies = settings.TRUSTED_PROXIES
+            except Exception:
+                trusted_proxies = []
+        self._trusted_proxies = self._parse_networks(trusted_proxies)
+
+    @staticmethod
+    def _parse_networks(cidrs: list[str]) -> list:
+        nets = []
+        for cidr in cidrs or []:
+            try:
+                nets.append(ipaddress.ip_network(cidr, strict=False))
+            except ValueError:
+                logger.warning("rate_limiter_bad_trusted_proxy", value=str(cidr))
+        return nets
+
+    def _peer_is_trusted(self, peer: str | None) -> bool:
+        if not peer or not self._trusted_proxies:
+            return False
+        try:
+            addr = ipaddress.ip_address(peer)
+        except ValueError:
+            return False
+        return any(addr in net for net in self._trusted_proxies)
+
     def _get_client_ip(self, request: Request) -> str:
-        """Extract client IP, respecting X-Forwarded-For behind a reverse proxy."""
-        forwarded = request.headers.get("x-forwarded-for")
-        if forwarded:
-            return forwarded.split(",")[0].strip()
-        return request.client.host if request.client else "unknown"
+        """Attribute the request to a client IP for rate limiting.
+
+        X-Forwarded-For is honored ONLY when the direct peer is a trusted
+        proxy (settings.TRUSTED_PROXIES). Otherwise a client could set the
+        header itself to get a fresh bucket per request and defeat the
+        login brute-force throttle. When trusted, the left-most XFF entry
+        (the original client, as set by nginx) is used; a malformed entry
+        falls back to the peer address.
+        """
+        peer = request.client.host if request.client else None
+        if self._peer_is_trusted(peer):
+            forwarded = request.headers.get("x-forwarded-for")
+            if forwarded:
+                candidate = forwarded.split(",")[0].strip()
+                try:
+                    ipaddress.ip_address(candidate)
+                    return candidate
+                except ValueError:
+                    pass  # malformed XFF — fall back to the peer
+        return peer or "unknown"
 
     async def _cleanup_expired(self, now: float) -> None:
         """Remove entries older than the window to prevent memory growth."""

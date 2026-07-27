@@ -11,9 +11,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database import get_db
 from core.security import create_access_token, hash_password, verify_password
-from core.validation import SafeStr
+from core.validation import SafeStr, normalize_email
 from models.user import User
 from services.auth import get_current_user
+
+# LLM providers the platform can construct. Validated at the settings
+# boundary so an unknown provider fails fast with 422 instead of surfacing
+# later as a 502 mid-chat.
+_KNOWN_PROVIDERS = frozenset(
+    {"anthropic", "openai", "gemini", "grok", "deepseek", "groq", "mistral", "ollama"}
+)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -76,7 +83,8 @@ class SettingsUpdateRequest(BaseModel):
 )
 async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)) -> User:
     """Create a new user account."""
-    result = await db.execute(select(User).where(User.email == body.email))
+    email = normalize_email(body.email)
+    result = await db.execute(select(User).where(User.email == email))
     if result.scalar_one_or_none() is not None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -90,7 +98,7 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)) ->
         )
 
     user = User(
-        email=body.email,
+        email=email,
         name=body.name,
         hashed_password=hash_password(body.password),
     )
@@ -103,7 +111,8 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)) ->
 @router.post("/login", response_model=TokenResponse)
 async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)) -> dict:
     """Authenticate and return a JWT."""
-    result = await db.execute(select(User).where(User.email == body.email))
+    email = normalize_email(body.email)
+    result = await db.execute(select(User).where(User.email == email))
     user = result.scalar_one_or_none()
 
     if user is None or not verify_password(body.password, user.hashed_password):
@@ -135,16 +144,18 @@ async def update_profile(
     db: AsyncSession = Depends(get_db),
 ) -> User:
     """Update the current user's name and/or email."""
-    if body.email is not None and body.email != current_user.email:
-        existing = await db.execute(
-            select(User).where(User.email == body.email)
-        )
-        if existing.scalar_one_or_none() is not None:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Email already in use by another account",
+    if body.email is not None:
+        new_email = normalize_email(body.email)
+        if new_email != current_user.email:
+            existing = await db.execute(
+                select(User).where(User.email == new_email)
             )
-        current_user.email = body.email
+            if existing.scalar_one_or_none() is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Email already in use by another account",
+                )
+            current_user.email = new_email
 
     if body.name is not None:
         current_user.name = body.name
@@ -186,7 +197,16 @@ async def update_settings(
     if body.rate_limit is not None:
         current_user.rate_limit = body.rate_limit
     if body.llm_provider is not None:
-        current_user.llm_provider = body.llm_provider
+        provider = body.llm_provider.strip().lower()
+        if provider not in _KNOWN_PROVIDERS:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"Unknown LLM provider '{body.llm_provider}'. Choose one of: "
+                    + ", ".join(sorted(_KNOWN_PROVIDERS))
+                ),
+            )
+        current_user.llm_provider = provider
     if body.llm_model is not None:
         current_user.llm_model = body.llm_model
 

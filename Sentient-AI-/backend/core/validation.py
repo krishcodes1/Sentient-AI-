@@ -23,3 +23,16 @@ def reject_null_bytes(value: str) -> str:
 # ``Field(max_length=...)`` on the field as usual; the length constraint and
 # this validator both apply.
 SafeStr = Annotated[str, AfterValidator(reject_null_bytes)]
+
+
+def normalize_email(email: str) -> str:
+    """Canonicalize an email for storage and lookup.
+
+    Email addresses are case-insensitive in practice (every major provider
+    treats the mailbox case-insensitively), so accounts must be keyed on a
+    single normalized form. Without this, ``Bob@x.com`` and ``bob@x.com``
+    register as two distinct accounts and a user who signs up with one
+    casing but logs in with another is locked out. Lowercasing + trimming
+    is the standard pragmatic normalization.
+    """
+    return email.strip().lower()

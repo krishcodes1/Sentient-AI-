@@ -81,8 +81,13 @@ async def client(session_factory):
 
     app.dependency_overrides[get_db] = _override_get_db
 
+    # Give each client a unique *peer* IP (the ASGI scope's client host), so
+    # rate-limit buckets never bleed between tests regardless of the
+    # TRUSTED_PROXIES setting. Relying on X-Forwarded-For for isolation only
+    # works when the peer is a trusted proxy; a distinct peer is faithful to
+    # "these are different external clients" and independent of that config.
     fake_ip = f"198.51.100.{uuid.uuid4().int % 254 + 1}"
-    transport = httpx.ASGITransport(app=app)
+    transport = httpx.ASGITransport(app=app, client=(fake_ip, 54321))
     async with httpx.AsyncClient(
         transport=transport,
         base_url="http://testserver",
