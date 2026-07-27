@@ -4,13 +4,14 @@ checks, prompt scanning, approval flow, and audit logging.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import secrets
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import structlog
 
@@ -257,7 +258,13 @@ class AuditService:
     """Persists audit log entries."""
 
     async def log(self, entry: dict[str, Any]) -> None:
-        logger.info("audit_log", **entry)
+        # ``entry`` carries an "event" key (e.g. "tool_executed"), which
+        # collides with structlog's reserved positional ``event`` argument
+        # and raises "multiple values for argument 'event'". Remap it so a
+        # runtime built without a custom audit service (the permissive
+        # default) never crashes a turn on the first tool call.
+        safe = {("audit_event" if k == "event" else k): v for k, v in entry.items()}
+        logger.info("audit_log", **safe)
 
 
 class ToolExecutor:
@@ -511,6 +518,7 @@ class AgentRuntime:
         llm_provider: Optional[str] = None,
         llm_model: Optional[str] = None,
         memory_block: Optional[str] = None,
+        event_sink: Optional[Callable[[dict[str, Any]], Awaitable[None]]] = None,
     ) -> AgentResponse:
         """Process a conversation turn.
 
@@ -524,6 +532,16 @@ class AgentRuntime:
         """
         messages = self._with_system_prompt(messages, memory_block)
         provider = self._resolve_provider(llm_provider, llm_model)
+
+        async def emit(event: dict[str, Any]) -> None:
+            """Best-effort progress emission for the streaming path. A sink
+            error must never break the turn, so failures are swallowed."""
+            if event_sink is None:
+                return
+            try:
+                await event_sink(event)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("event_sink_error", error=str(exc))
 
         # 1. Scan the latest user message for prompt injection
         last_user_msg = next(
@@ -669,6 +687,7 @@ class AgentRuntime:
                     blocked_actions.append(
                         BlockedAction(tool_name=tc.name, reason=reason, policy=policy)
                     )
+                    await emit({"type": "blocked", "data": {"tool": tc.name, "reason": reason, "policy": policy}})
                     await self._audit.log(
                         {
                             "event": "tool_blocked",
@@ -692,6 +711,7 @@ class AgentRuntime:
                         ttl_minutes=self._approval_ttl_minutes,
                     )
                     pending_approvals.append(_stored_to_pending(stored))
+                    await emit({"type": "pending_approval", "data": {"tool": tc.name, "action_id": stored.action_id, "expires_at": stored.expires_at}})
                     await self._audit.log(
                         {
                             "event": "tool_pending_approval",
@@ -719,6 +739,7 @@ class AgentRuntime:
                 # 3c. Execute the tool. ``approved=True`` only when the
                 # user's own connector tier auto-approved this write —
                 # standing consent replaces the per-call approval flow.
+                await emit({"type": "tool_call", "data": {"name": tc.name}})
                 try:
                     result = await self._executor.execute(
                         tc.name, tc.arguments, user_id, approved=approved_via_tier
@@ -748,6 +769,7 @@ class AgentRuntime:
                 # reuses data from this read is caught.
                 taint.add_result(result)
 
+                await emit({"type": "tool_result", "data": {"name": tc.name}})
                 round_results.append(
                     {
                         "tool_call_id": tc.id,
@@ -823,6 +845,12 @@ class AgentRuntime:
     # Streaming chat
     # ------------------------------------------------------------------
 
+    # Delay (seconds) between typewriter chunks of the final answer. The
+    # answer is scanned before any of it is streamed, so this is purely a
+    # progressive-render effect, never a security window.
+    _CONTENT_CHUNK_CHARS = 24
+    _CONTENT_CHUNK_DELAY = 0.02
+
     async def stream_chat(
         self,
         messages: list[dict[str, Any]],
@@ -831,70 +859,99 @@ class AgentRuntime:
         conversation_id: Optional[str] = None,
         llm_provider: Optional[str] = None,
         llm_model: Optional[str] = None,
+        memory_block: Optional[str] = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Streaming variant — yields dicts with ``type`` and ``data`` keys.
 
         Event types:
-        - ``content_delta``: incremental text chunk
-        - ``tool_call``: a tool was invoked or parked for approval
-        - ``tool_result``: result of an executed tool
-        - ``error``: a blocked action or provider failure
-        - ``done``: stream finished
+        - ``start``: the turn began
+        - ``tool_call`` / ``tool_result``: a tool ran (emitted in REAL TIME as
+          the agent loop reaches it, via the ``event_sink`` callback)
+        - ``pending_approval``: an action was parked for user approval
+        - ``blocked``: an action was blocked by policy
+        - ``content_delta``: incremental chunk of the FINAL answer
+        - ``error``: a provider failure
+        - ``done``: stream finished, carries usage + the full content
 
-        Implemented as an adapter over :meth:`chat` so every security
-        layer — prompt-guard scanning (input, arguments, results, final
-        output), permission checks, the approval flow, audit logging, and
-        the bounded multi-round loop — applies identically to streaming.
-        Events are emitted once the turn completes (no route currently
-        exposes this endpoint; if one is added, true incremental streaming
-        needs provider-level tool-call streaming first).
+        Implemented as an adapter over :meth:`chat` so every security layer —
+        prompt-guard scanning (input, arguments, results, final output),
+        permission checks, taint gate, the approval flow, audit logging, and
+        the bounded multi-round loop — applies identically. Tool progress is
+        genuinely live (chat() pushes events through the sink while the loop
+        runs); the final answer is scanned in full THEN typewriter-streamed,
+        so the client never sees unscanned output.
         """
-        try:
-            response = await self.chat(
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+        async def sink(event: dict[str, Any]) -> None:
+            await queue.put(event)
+
+        yield {"type": "start", "data": {}}
+
+        task = asyncio.create_task(
+            self.chat(
                 messages,
                 tools,
                 user_id,
                 conversation_id=conversation_id,
                 llm_provider=llm_provider,
                 llm_model=llm_model,
+                memory_block=memory_block,
+                event_sink=sink,
             )
+        )
+
+        # Drain real-time progress events until chat() finishes, interleaving
+        # queue items with the task's completion.
+        while not task.done() or not queue.empty():
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=0.25)
+                yield event
+            except asyncio.TimeoutError:
+                continue
+
+        try:
+            response = task.result()
         except ProviderError as exc:
             yield {"type": "error", "data": {"reason": str(exc)}}
             yield {"type": "done", "data": {}}
             return
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error("stream_chat_failed", error=str(exc))
+            yield {"type": "error", "data": {"reason": "The assistant failed to respond."}}
+            yield {"type": "done", "data": {}}
+            return
 
-        for ba in response.blocked_actions:
-            yield {
-                "type": "error",
-                "data": {"tool": ba.tool_name, "reason": ba.reason, "policy": ba.policy},
-            }
-
-        for pa in response.pending_approvals:
-            yield {
-                "type": "tool_call",
-                "data": {
-                    "name": pa.tool_name,
-                    "pending_approval": True,
-                    "action_id": pa.action_id,
-                    "expires_at": pa.expires_at,
-                },
-            }
-
-        for tr in response.tool_calls:
-            yield {
-                "type": "tool_call",
-                "data": {"name": tr.get("name", ""), "permission": "approved"},
-            }
-            yield {
-                "type": "tool_result",
-                "data": {"name": tr.get("name", ""), "result": tr.get("result")},
-            }
-
+        # The final answer is already fully scanned; typewriter it out.
         content = response.content or ""
-        for i in range(0, len(content), 20):
-            yield {"type": "content_delta", "data": {"text": content[i : i + 20]}}
+        for i in range(0, len(content), self._CONTENT_CHUNK_CHARS):
+            yield {"type": "content_delta", "data": {"text": content[i : i + self._CONTENT_CHUNK_CHARS]}}
+            if self._CONTENT_CHUNK_DELAY:
+                await asyncio.sleep(self._CONTENT_CHUNK_DELAY)
 
-        yield {"type": "done", "data": {"usage": response.usage}}
+        yield {
+            "type": "done",
+            "data": {
+                "content": content,
+                "usage": response.usage,
+                "tool_calls": response.tool_calls,
+                "pending_approvals": [
+                    {
+                        "action_id": pa.action_id,
+                        "tool_name": pa.tool_name,
+                        "arguments": pa.arguments,
+                        "reason": pa.reason,
+                        "expires_at": pa.expires_at,
+                        "conversation_id": pa.conversation_id,
+                    }
+                    for pa in response.pending_approvals
+                ],
+                "blocked_actions": [
+                    {"tool_name": ba.tool_name, "reason": ba.reason, "policy": ba.policy}
+                    for ba in response.blocked_actions
+                ],
+            },
+        }
 
     # ------------------------------------------------------------------
     # Pending-approval helpers

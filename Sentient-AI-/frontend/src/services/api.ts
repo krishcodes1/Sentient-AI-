@@ -20,6 +20,9 @@ import type {
   Memory,
   CreateMemoryRequest,
   UpdateMemoryRequest,
+  Message,
+  ToolCall,
+  BlockedAction,
 } from "@/types";
 
 const API_BASE = "/api";
@@ -238,6 +241,121 @@ export async function sendMessage(
       body: JSON.stringify({ content }),
     }
   );
+}
+
+export interface StreamHandlers {
+  onUserMessage?: (message: Message) => void;
+  onContentDelta?: (text: string) => void;
+  onToolCall?: (name: string) => void;
+  onToolResult?: (name: string) => void;
+  onPendingApproval?: (approval: PendingApproval) => void;
+  onBlocked?: (blocked: BlockedAction) => void;
+  onDone?: (data: {
+    content: string;
+    usage?: Record<string, number>;
+    tool_calls?: ToolCall[];
+    pending_approvals?: PendingApproval[];
+    blocked_actions?: BlockedAction[];
+  }) => void;
+  onSaved?: (assistant: Message | null) => void;
+  onError?: (reason: string) => void;
+}
+
+/**
+ * Stream an agent turn over Server-Sent Events. Uses fetch (not
+ * EventSource) so the Authorization header and POST body can be sent.
+ * Parses `event:`/`data:` frames and dispatches to typed handlers.
+ */
+export async function streamMessage(
+  conversationId: string,
+  content: string,
+  handlers: StreamHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  const token = localStorage.getItem("auth_token");
+  const response = await fetch(
+    `${API_BASE}/agent/conversations/${conversationId}/messages/stream`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({ content }),
+      signal,
+    },
+  );
+
+  if (!response.ok || !response.body) {
+    const errorBody = await response.json().catch(() => ({}));
+    if (response.status === 401) handleUnauthorized();
+    throw new ApiError(
+      errorDetailToMessage(errorBody.detail, `Request failed: ${response.statusText}`),
+      response.status,
+    );
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  const dispatch = (frame: string) => {
+    let event = "message";
+    const dataLines: string[] = [];
+    for (const line of frame.split("\n")) {
+      if (line.startsWith("event:")) event = line.slice(6).trim();
+      else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+    }
+    if (dataLines.length === 0) return;
+    let data: Record<string, unknown>;
+    try {
+      data = JSON.parse(dataLines.join("\n"));
+    } catch {
+      return;
+    }
+    switch (event) {
+      case "user_message":
+        handlers.onUserMessage?.(data.user_message as Message);
+        break;
+      case "content_delta":
+        handlers.onContentDelta?.(String(data.text ?? ""));
+        break;
+      case "tool_call":
+        handlers.onToolCall?.(String(data.name ?? ""));
+        break;
+      case "tool_result":
+        handlers.onToolResult?.(String(data.name ?? ""));
+        break;
+      case "pending_approval":
+        handlers.onPendingApproval?.(data as unknown as PendingApproval);
+        break;
+      case "blocked":
+        handlers.onBlocked?.(data as unknown as BlockedAction);
+        break;
+      case "done":
+        handlers.onDone?.(data as Parameters<NonNullable<StreamHandlers["onDone"]>>[0]);
+        break;
+      case "saved":
+        handlers.onSaved?.((data.assistant_message ?? null) as Message | null);
+        break;
+      case "error":
+        handlers.onError?.(String(data.reason ?? "Stream error"));
+        break;
+    }
+  };
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let idx: number;
+    while ((idx = buffer.indexOf("\n\n")) !== -1) {
+      const frame = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 2);
+      if (frame.trim()) dispatch(frame);
+    }
+  }
+  if (buffer.trim()) dispatch(buffer);
 }
 
 export async function getPendingApprovals(): Promise<PendingApproval[]> {

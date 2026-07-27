@@ -31,7 +31,7 @@ import {
   getConversations,
   getMe,
   getPendingApprovals,
-  sendMessage,
+  streamMessage,
   updateConversation,
 } from "@/services/api";
 import ConfirmDialog from "@/components/ConfirmDialog";
@@ -210,6 +210,8 @@ export default function Chat() {
   const [renameError, setRenameError] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Conversation | null>(null);
   const [input, setInput] = useState("");
+  // Live status line while a turn streams ("Running canvas.get_courses…").
+  const [streamStatus, setStreamStatus] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Load the current user once
@@ -402,50 +404,96 @@ export default function Chat() {
     e.preventDefault();
     if (!input.trim() || !activeConv || !me || sending) return;
     const content = input.trim();
+    const conv = activeConv;
 
-    // Optimistically render the user message
-    const tempId = `temp-${Date.now()}`;
-    const optimistic: Message = {
-      id: tempId,
-      conversation_id: activeConv,
+    // Optimistically render the user message + an empty assistant bubble
+    // that fills in as content_delta events arrive.
+    const userTempId = `temp-user-${Date.now()}`;
+    const asstTempId = `temp-asst-${Date.now()}`;
+    const optimisticUser: Message = {
+      id: userTempId,
+      conversation_id: conv,
       role: "user",
       content,
       created_at: new Date().toISOString(),
     };
-    setMessages((prev) => [...prev, optimistic]);
+    const streamingAssistant: Message = {
+      id: asstTempId,
+      conversation_id: conv,
+      role: "assistant",
+      content: "",
+      tool_calls: [],
+      blocked_actions: [],
+      created_at: new Date().toISOString(),
+    };
+    setMessages((prev) => [...prev, optimisticUser, streamingAssistant]);
     setInput("");
     setSending(true);
+    setStreamStatus(null);
+
+    const patchAssistant = (patch: Partial<Message>) =>
+      setMessages((prev) =>
+        prev.map((m) => (m.id === asstTempId ? { ...m, ...patch } : m)),
+      );
 
     try {
-      const res = await sendMessage(activeConv, content);
-      const assistant: Message = {
-        ...res.assistant_message,
-        tool_calls: res.tool_calls,
-        blocked_actions: res.blocked_actions,
-      };
-      // Replace the optimistic user message with the server's saved copy and append the assistant
-      setMessages((prev) => [
-        ...prev.filter((m) => m.id !== tempId),
-        res.user_message,
-        assistant,
-      ]);
-      if (res.pending_approvals.length > 0) {
-        setApprovals((prev) => {
-          const seen = new Set(prev.map((pa) => pa.action_id));
-          return [
-            ...prev,
-            ...res.pending_approvals.filter((pa) => !seen.has(pa.action_id)),
-          ];
-        });
-      }
-      maybeAutoTitle(activeConv, content);
+      await streamMessage(conv, content, {
+        onUserMessage: (saved) =>
+          setMessages((prev) =>
+            prev.map((m) => (m.id === userTempId ? saved : m)),
+          ),
+        onToolCall: (name) => setStreamStatus(`Running ${name}…`),
+        onToolResult: (name) => setStreamStatus(`Finished ${name}`),
+        onContentDelta: (text) => {
+          setStreamStatus(null);
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === asstTempId ? { ...m, content: m.content + text } : m,
+            ),
+          );
+        },
+        onPendingApproval: (approval) =>
+          setApprovals((prev) => {
+            const seen = new Set(prev.map((pa) => pa.action_id));
+            return seen.has(approval.action_id) ? prev : [...prev, approval];
+          }),
+        onBlocked: (blocked) =>
+          patchAssistant({
+            blocked_actions: [
+              ...(streamingAssistant.blocked_actions ?? []),
+              blocked,
+            ],
+          }),
+        onDone: (data) =>
+          patchAssistant({
+            content: data.content ?? "",
+            tool_calls: data.tool_calls ?? [],
+            blocked_actions: data.blocked_actions ?? [],
+          }),
+        onSaved: (saved) => {
+          if (saved) {
+            // Swap the temp assistant bubble for the persisted row, keeping
+            // the streamed tool_calls/blocked metadata.
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === asstTempId
+                  ? { ...saved, tool_calls: m.tool_calls, blocked_actions: m.blocked_actions }
+                  : m,
+              ),
+            );
+          }
+        },
+        onError: (reason) => patchAssistant({ content: `Error: ${reason}` }),
+      });
+      maybeAutoTitle(conv, content);
     } catch (err) {
+      // The whole request failed (auth, network, 4xx). Drop the streaming
+      // bubble and surface the error; keep the user's message visible.
       setMessages((prev) => [
-        ...prev.filter((m) => m.id !== tempId),
-        optimistic,
+        ...prev.filter((m) => m.id !== asstTempId),
         {
           id: `err-${Date.now()}`,
-          conversation_id: activeConv,
+          conversation_id: conv,
           role: "system",
           content: `Error: ${(err as Error).message}`,
           created_at: new Date().toISOString(),
@@ -453,6 +501,7 @@ export default function Chat() {
       ]);
     } finally {
       setSending(false);
+      setStreamStatus(null);
     }
   };
 
@@ -823,6 +872,14 @@ export default function Chat() {
                   />
                 ))}
               </div>
+            </div>
+          )}
+          {/* Live turn status: tool activity or a thinking indicator while
+              the stream is in flight before the first token arrives. */}
+          {sending && (
+            <div className="flex items-center gap-2 pl-11" style={{ color: "var(--text-muted)" }}>
+              <Loader2 className="w-3.5 h-3.5 animate-spin" style={{ color: "var(--accent-primary)" }} />
+              <span className="text-xs">{streamStatus ?? "Thinking…"}</span>
             </div>
           )}
           <div ref={messagesEndRef} />

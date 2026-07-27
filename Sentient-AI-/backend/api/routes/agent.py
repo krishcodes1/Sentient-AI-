@@ -8,6 +8,7 @@ from collections import defaultdict, deque
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -180,6 +181,74 @@ class ApprovalDecisionResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
+
+async def _build_tools_and_memory(
+    request: Request,
+    current_user: User,
+    db: AsyncSession,
+) -> tuple[list, Optional[str]]:
+    """Build the runtime tool list (connector + MCP tools) and the memory
+    block for a user. Shared by the blocking and streaming send paths so
+    both offer exactly the same tools and context.
+    """
+    conn_result = await db.execute(
+        select(ConnectorConfig).where(
+            ConnectorConfig.user_id == current_user.id,
+            ConnectorConfig.is_active.is_(True),
+        )
+    )
+    connector_rows = list(conn_result.scalars().all())
+    connector_specs = [
+        ConnectorSpec(
+            connector_type=c.connector_type.value,
+            is_active=c.is_active,
+            granted_scopes=tuple(c.granted_scopes) if c.granted_scopes else None,
+            permission_tier=(
+                c.permission_tier.value if c.permission_tier else "user_confirm"
+            ),
+        )
+        for c in connector_rows
+    ]
+    tools = build_tools(
+        connector_specs,
+        user_default_tier=current_user.default_permission_tier,
+    )
+
+    if any(spec.connector_type == "mcp" for spec in connector_specs):
+        mcp_catalog = getattr(request.app.state, "mcp_catalog", None)
+        if mcp_catalog is not None:
+            from services.mcp.integration import slugify_label, split_mcp_tool
+
+            excluded_labels = {
+                slugify_label(c.display_name)
+                for c in connector_rows
+                if c.connector_type.value == "mcp"
+                and effective_tier(
+                    c.permission_tier.value if c.permission_tier else None,
+                    current_user.default_permission_tier,
+                )
+                in ("admin_only", "hard_blocked")
+            }
+            mcp_tools = await mcp_catalog.tools_for_user(str(current_user.id))
+            if excluded_labels:
+                mcp_tools = [
+                    t
+                    for t in mcp_tools
+                    if (split_mcp_tool(t.name) or ("", ""))[0] not in excluded_labels
+                ]
+            tools += mcp_tools
+
+    memory_block: Optional[str] = None
+    if getattr(current_user, "memory_enabled", True):
+        mem_result = await db.execute(
+            select(Memory)
+            .where(Memory.user_id == current_user.id)
+            .order_by(Memory.created_at.desc())
+        )
+        memory_block = render_memory_block(list(mem_result.scalars().all()))
+
+    return tools, memory_block
 
 
 async def _get_owned_conversation(
@@ -355,78 +424,11 @@ async def send_message(
         for m in history_result.scalars().all()
     ]
 
-    # 3. Build the tool list from the user's active connectors. The
+    # 3. Build the tool list (connectors + MCP) and memory block. The
     #    runtime's permission adapter and executor (injected at startup)
     #    handle tiering, approval, and dispatch. A user with no connectors
     #    gets an empty list and simply chats with the LLM.
-    conn_result = await db.execute(
-        select(ConnectorConfig).where(
-            ConnectorConfig.user_id == current_user.id,
-            ConnectorConfig.is_active.is_(True),
-        )
-    )
-    connector_rows = list(conn_result.scalars().all())
-    connector_specs = [
-        ConnectorSpec(
-            connector_type=c.connector_type.value,
-            is_active=c.is_active,
-            granted_scopes=tuple(c.granted_scopes) if c.granted_scopes else None,
-            permission_tier=(
-                c.permission_tier.value if c.permission_tier else "user_confirm"
-            ),
-        )
-        for c in connector_rows
-    ]
-    # user_tier defaults to STANDARD: the User model has no role/admin
-    # field yet, so admin-tier tools are not unlocked for anyone. When a
-    # role column is added, resolve it here and pass user_tier=... so
-    # ADMIN_ONLY tools become available to admins.
-    #
-    # Each connector's stored permission_tier is enforced here, floored by
-    # the user's account-level default (the stricter of the two wins).
-    tools = build_tools(
-        connector_specs,
-        user_default_tier=current_user.default_permission_tier,
-    )
-
-    # Registered MCP servers contribute their discovered tools under the
-    # mcp.<server>.<tool> namespace; every one of them requires approval.
-    # MCP connectors whose effective tier is admin_only contribute nothing.
-    if any(spec.connector_type == "mcp" for spec in connector_specs):
-        mcp_catalog = getattr(request.app.state, "mcp_catalog", None)
-        if mcp_catalog is not None:
-            from services.mcp.integration import slugify_label, split_mcp_tool
-
-            excluded_labels = {
-                slugify_label(c.display_name)
-                for c in connector_rows
-                if c.connector_type.value == "mcp"
-                and effective_tier(
-                    c.permission_tier.value if c.permission_tier else None,
-                    current_user.default_permission_tier,
-                )
-                in ("admin_only", "hard_blocked")
-            }
-            mcp_tools = await mcp_catalog.tools_for_user(str(current_user.id))
-            if excluded_labels:
-                mcp_tools = [
-                    t
-                    for t in mcp_tools
-                    if (split_mcp_tool(t.name) or ("", ""))[0] not in excluded_labels
-                ]
-            tools += mcp_tools
-
-    # 3b. Load the user's saved memories (if memory is enabled) and render
-    #     them into a system-prompt block. Memories are trusted user context
-    #     but were injection-screened on write.
-    memory_block: Optional[str] = None
-    if getattr(current_user, "memory_enabled", True):
-        mem_result = await db.execute(
-            select(Memory)
-            .where(Memory.user_id == current_user.id)
-            .order_by(Memory.created_at.desc())
-        )
-        memory_block = render_memory_block(list(mem_result.scalars().all()))
+    tools, memory_block = await _build_tools_and_memory(request, current_user, db)
 
     try:
         agent_response = await runtime.chat(
@@ -488,6 +490,134 @@ async def send_message(
             )
             for ba in agent_response.blocked_actions
         ],
+    )
+
+
+def _sse(event: str, data: dict[str, Any]) -> str:
+    """Format one Server-Sent Event frame."""
+    return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
+
+
+@router.post("/conversations/{conversation_id}/messages/stream")
+async def stream_message(
+    conversation_id: uuid.UUID,
+    body: SendMessageRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    runtime: AgentRuntime = Depends(get_runtime),
+) -> StreamingResponse:
+    """Streaming variant of send_message using Server-Sent Events.
+
+    Emits real-time progress (tool_call/tool_result/pending_approval/blocked
+    as the agent loop reaches them), then typewriter-streams the final
+    answer, then a ``done`` event carrying the saved message ids. Every
+    security layer is identical to the blocking path — the stream is an
+    adapter over the same ``runtime.chat``.
+
+    The user message is persisted before streaming; the assistant message is
+    persisted in a fresh session once the turn completes, so the DB write
+    does not depend on the request session staying open across the stream.
+    """
+    if not body.content.strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Message content cannot be empty",
+        )
+    if not _user_rate_limiter.allow(str(current_user.id), current_user.rate_limit):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=(
+                f"Rate limit exceeded: your account allows "
+                f"{current_user.rate_limit} agent messages per minute. "
+                "Wait a moment and try again."
+            ),
+        )
+
+    conversation = await _get_owned_conversation(conversation_id, current_user, db)
+
+    user_message = Message(
+        conversation_id=conversation.id,
+        role=MessageRole.user,
+        content=body.content.strip(),
+    )
+    db.add(user_message)
+    await db.flush()
+    await db.refresh(user_message)
+    user_message_out = MessageResponse.model_validate(user_message).model_dump()
+
+    history_result = await db.execute(
+        select(Message)
+        .where(Message.conversation_id == conversation.id)
+        .order_by(Message.created_at)
+    )
+    history = [
+        {"role": m.role.value, "content": m.content}
+        for m in history_result.scalars().all()
+    ]
+    tools, memory_block = await _build_tools_and_memory(request, current_user, db)
+    conv_id = conversation.id
+    user_provider = current_user.llm_provider
+    user_model = current_user.llm_model
+    user_id_str = str(current_user.id)
+
+    async def event_stream():
+        yield _sse("user_message", {"user_message": user_message_out})
+
+        final_content = ""
+        tool_calls_payload: list[dict[str, Any]] = []
+        try:
+            async for event in runtime.stream_chat(
+                messages=history,
+                tools=tools,
+                user_id=user_id_str,
+                conversation_id=str(conv_id),
+                llm_provider=user_provider,
+                llm_model=user_model,
+                memory_block=memory_block,
+            ):
+                etype = event.get("type", "message")
+                data = event.get("data", {})
+                if etype == "done":
+                    final_content = data.get("content", "")
+                    tool_calls_payload = data.get("tool_calls", []) or []
+                yield _sse(etype, data)
+        except Exception:  # pragma: no cover - defensive
+            yield _sse("error", {"reason": "The assistant failed to respond."})
+            yield _sse("done", {})
+            return
+
+        # Persist the assistant message. The request DB session is still
+        # open here — FastAPI finalizes yield-dependencies only after the
+        # streaming response body is exhausted — and using it means the
+        # write respects the same session (and test overrides) as the rest
+        # of the request, committing atomically with the user message.
+        try:
+            assistant = Message(
+                conversation_id=conv_id,
+                role=MessageRole.assistant,
+                content=final_content,
+                tool_calls=tool_calls_payload or None,
+            )
+            db.add(assistant)
+            conversation.updated_at = datetime.now(timezone.utc)
+            await db.flush()
+            await db.refresh(assistant)
+            assistant_out = MessageResponse.model_validate(assistant).model_dump()
+            yield _sse("saved", {"assistant_message": assistant_out})
+        except Exception:  # pragma: no cover - defensive
+            # The content already streamed; a persistence failure just means
+            # the client should refetch the thread on next load.
+            yield _sse("saved", {"assistant_message": None})
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # disable proxy buffering (nginx)
+            "Connection": "keep-alive",
+        },
     )
 
 
