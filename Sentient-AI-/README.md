@@ -6,6 +6,11 @@
 
 A self-hosted AI assistant platform with security, user control, and auditability built into every layer. SentientAI integrates with Canvas LMS, Google Workspace, Robinhood Crypto, and more — with fine-grained permission scoping, multi-layer prompt injection defense, and tamper-evident audit logging.
 
+**Assistant features:** streaming chat with live tool-progress and rendered
+markdown, persistent per-user memory (saved facts injected into every
+conversation, screened for injection on write), an explicit human-approval
+flow for sensitive actions, and eight swappable LLM providers.
+
 **Author:** Krish Shroff — CSCI-456 Senior Project, New York Institute of Technology
 
 ---
@@ -318,9 +323,14 @@ still open — lives in **[SECURITY.md](SECURITY.md)**. Highlights:
   are granted per connector and re-checked at dispatch
 - **Financial transaction hard block** — trades/transfers permanently blocked
   at four independent layers, regardless of config
-- **Multi-layer prompt injection defense** — security system prompt,
-  untrusted tool-result envelope, input/argument/output scanning, connector
-  response sanitization
+- **Multi-layer prompt injection defense** — instruction-hierarchy system
+  prompt, nonce-spotlighted untrusted tool-result envelope, a deterministic
+  CaMeL-lite taint gate (injected data can't drive an auto-approved write),
+  input/argument/output scanning, connector response sanitization, and a
+  CI red-team regression suite
+- **Exfiltration-safe rendering** — assistant markdown never auto-fetches
+  model-emitted images (the EchoLeak channel) or parses raw HTML; links are
+  inert and show their destination host
 - **AES-256-GCM credential encryption** — secrets encrypted at rest, never
   returned by any API, decrypted only at dispatch
 - **SHA-256 chain-linked audit logs** — tamper-evident history with per-row
