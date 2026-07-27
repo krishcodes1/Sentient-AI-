@@ -269,3 +269,41 @@ async def test_untampered_approval_still_executes():
     assert "error" not in result
     assert result["tool"] == "google_workspace.send_email"
     assert executor.calls and executor.calls[0]["approved"] is True
+
+
+# ---------------------------------------------------------------------------
+# The risk note reaches the API surface (new column -> store -> route)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_risk_note_is_returned_by_the_approvals_endpoint(client, session_factory):
+    """GET /agent/approvals must carry risk_note through to the client, or
+    the warning never reaches the human who has to decide."""
+    from api.routes import agent as agent_routes
+    from main import app
+    from services.agent.approvals import DbApprovalStore
+    from tests.conftest import auth_headers, make_user
+
+    store = DbApprovalStore(session_factory=session_factory)
+    runtime, _, _, _ = _runtime(ScriptedProvider([]), store=store)
+    app.dependency_overrides[agent_routes.get_runtime] = lambda: runtime
+    try:
+        user, token = await make_user(session_factory, "risknote@example.com")
+        await store.create(
+            user_id=str(user.id),
+            tool_name="google_workspace.send_email",
+            arguments={"to": "attacker@evil.com", "subject": "s", "body": "b"},
+            reason="needs approval",
+            risk_note="Heads up: this request was shaped by external content.",
+        )
+
+        listed = await client.get("/api/agent/approvals", headers=auth_headers(token))
+        assert listed.status_code == 200
+        rows = listed.json()
+        assert len(rows) == 1
+        assert rows[0]["risk_note"] == (
+            "Heads up: this request was shaped by external content."
+        )
+    finally:
+        app.dependency_overrides.pop(agent_routes.get_runtime, None)
