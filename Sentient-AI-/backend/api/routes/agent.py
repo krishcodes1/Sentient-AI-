@@ -7,6 +7,7 @@ import uuid
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -26,6 +27,8 @@ from services.agent.context_manager import compress_tool_result
 from services.agent.providers import ProviderError
 from services.agent.runtime import AgentRuntime
 from services.agent.tool_registry import ConnectorSpec, build_tools, effective_tier
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
@@ -148,6 +151,9 @@ class PendingApprovalOut(BaseModel):
     reason: str
     expires_at: Optional[str] = None
     conversation_id: Optional[str] = None
+    # Warning surfaced on the approval card when the action's arguments were
+    # shaped by untrusted external content.
+    risk_note: Optional[str] = None
 
 
 class BlockedActionOut(BaseModel):
@@ -479,6 +485,7 @@ async def send_message(
                 reason=pa.reason,
                 expires_at=pa.expires_at,
                 conversation_id=pa.conversation_id,
+                risk_note=pa.risk_note,
             )
             for pa in agent_response.pending_approvals
         ],
@@ -636,9 +643,60 @@ async def list_pending_approvals(
             reason=p.reason,
             expires_at=p.expires_at,
             conversation_id=p.conversation_id,
+            risk_note=p.risk_note,
         )
         for p in pending
     ]
+
+
+async def _resume_after_approval(
+    request: Request,
+    current_user: User,
+    db: AsyncSession,
+    runtime: AgentRuntime,
+    conversation: Conversation,
+) -> Optional[Message]:
+    """Run one more agent turn after an approved action executed.
+
+    The transcript already contains the "[Approved] Executed ... Result:"
+    message, so rebuilding history from Message rows gives the model the
+    tool output it was waiting on. Returns the assistant Message to persist,
+    or None when there is nothing to add.
+
+    Tools are rebuilt exactly as the send path does, so the resumed turn is
+    subject to the same permissions, taint gate, and scanning — an approval
+    unlocks the one action the user approved, not a freer agent.
+    """
+    history_result = await db.execute(
+        select(Message)
+        .where(Message.conversation_id == conversation.id)
+        .order_by(Message.created_at)
+    )
+    history = [
+        {"role": m.role.value, "content": m.content}
+        for m in history_result.scalars().all()
+    ]
+    if not history:
+        return None
+
+    tools, memory_block = await _build_tools_and_memory(request, current_user, db)
+    agent_response = await runtime.chat(
+        messages=history,
+        tools=tools,
+        user_id=str(current_user.id),
+        conversation_id=str(conversation.id),
+        llm_provider=current_user.llm_provider,
+        llm_model=current_user.llm_model,
+        memory_block=memory_block,
+    )
+    if not (agent_response.content or "").strip():
+        return None
+    return Message(
+        conversation_id=conversation.id,
+        role=MessageRole.assistant,
+        content=agent_response.content,
+        tool_calls=agent_response.tool_calls or None,
+    )
 
 
 def _render_decision_message(
@@ -668,6 +726,7 @@ def _render_decision_message(
 async def decide_approval(
     action_id: str,
     body: ApprovalDecisionRequest,
+    request: Request,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     runtime: AgentRuntime = Depends(get_runtime),
@@ -719,6 +778,30 @@ async def decide_approval(
                 )
                 conversation.updated_at = datetime.now(timezone.utc)
                 await db.flush()
+
+                # Resume the task. Without this the agent dead-ends after an
+                # approval — the tool ran, but the user had to send another
+                # message just to get the answer it was fetched for. Run one
+                # more turn over the updated transcript so the assistant
+                # actually uses the result and continues.
+                #
+                # Best effort: the approval already happened and is recorded,
+                # so a resume failure must not turn into a failed request.
+                if body.approved:
+                    try:
+                        resumed = await _resume_after_approval(
+                            request, current_user, db, runtime, conversation
+                        )
+                        if resumed is not None:
+                            db.add(resumed)
+                            conversation.updated_at = datetime.now(timezone.utc)
+                            await db.flush()
+                    except Exception as exc:
+                        logger.warning(
+                            "resume_after_approval_failed",
+                            conversation_id=str(conversation.id),
+                            error=str(exc),
+                        )
 
     return ApprovalDecisionResponse(
         action_id=action_id,

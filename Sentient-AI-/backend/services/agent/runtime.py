@@ -141,6 +141,9 @@ class PendingApproval:
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     expires_at: Optional[str] = None
     conversation_id: Optional[str] = None
+    # Why this action deserves a careful look (e.g. its arguments were
+    # derived from untrusted tool output). Rendered as a warning in the UI.
+    risk_note: Optional[str] = None
 
 
 @dataclass()
@@ -172,6 +175,7 @@ def _stored_to_pending(action: StoredAction) -> PendingApproval:
         created_at=action.created_at,
         expires_at=action.expires_at,
         conversation_id=action.conversation_id,
+        risk_note=action.risk_note,
     )
 
 
@@ -663,21 +667,22 @@ class AgentRuntime:
                 # approval-gated); writes that already require approval are
                 # unaffected. Enforcement is deterministic and cannot be
                 # talked around by the model.
-                if approved_via_tier:
-                    reason = taint.taint_reason(tc.arguments)
-                    if reason is not None:
-                        permission = "requires_approval"
-                        approved_via_tier = False
-                        await self._audit.log(
-                            {
-                                "event": "tool_taint_escalated",
-                                "user_id": user_id,
-                                "tool": tc.name,
-                                "arguments": tc.arguments,
-                                "reason": reason,
-                                "timestamp": datetime.now(timezone.utc).isoformat(),
-                            }
-                        )
+                taint_reason: Optional[str] = None
+                if approved_via_tier or permission == "requires_approval":
+                    taint_reason = taint.taint_reason(tc.arguments)
+                if approved_via_tier and taint_reason is not None:
+                    permission = "requires_approval"
+                    approved_via_tier = False
+                    await self._audit.log(
+                        {
+                            "event": "tool_taint_escalated",
+                            "user_id": user_id,
+                            "tool": tc.name,
+                            "arguments": tc.arguments,
+                            "reason": taint_reason,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        }
+                    )
 
                 if permission == "blocked":
                     reason = await self._permissions.get_block_reason(
@@ -701,6 +706,38 @@ class AgentRuntime:
                     )
                     continue
 
+                # 3b. Scan tool arguments — BEFORE the approval branch, so
+                # actions parked for approval are scanned too. Skipping this
+                # for approval-gated calls was a real bypass: those are the
+                # calls most likely to be attacker-steered (send_email to an
+                # exfil address), and the user would have been shown an
+                # injection-laden action to rubber-stamp. An action whose
+                # arguments trip the guard is refused outright — never
+                # offered for approval.
+                arg_scan = await self._guard.scan_input(str(tc.arguments), user_id)
+                if not arg_scan.get("safe", True):
+                    reason = arg_scan.get("reason", "tool arguments flagged")
+                    blocked_actions.append(
+                        BlockedAction(
+                            tool_name=tc.name,
+                            reason=reason,
+                            policy="prompt_guard",
+                        )
+                    )
+                    await emit({"type": "blocked", "data": {"tool": tc.name, "reason": reason, "policy": "prompt_guard"}})
+                    await self._audit.log(
+                        {
+                            "event": "tool_blocked",
+                            "user_id": user_id,
+                            "tool": tc.name,
+                            "arguments": tc.arguments,
+                            "reason": reason,
+                            "policy": "prompt_guard",
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        }
+                    )
+                    continue
+
                 if permission == "requires_approval":
                     stored = await self._approvals.create(
                         user_id=user_id,
@@ -709,9 +746,17 @@ class AgentRuntime:
                         reason=f"Tool '{tc.name}' requires explicit user approval",
                         conversation_id=conversation_id,
                         ttl_minutes=self._approval_ttl_minutes,
+                        # Tell the human WHY this one deserves scrutiny when
+                        # its arguments came from untrusted content.
+                        risk_note=(
+                            f"Heads up: this request was shaped by external content — {taint_reason}. "
+                            "Check the recipient/target below before approving."
+                            if taint_reason
+                            else None
+                        ),
                     )
                     pending_approvals.append(_stored_to_pending(stored))
-                    await emit({"type": "pending_approval", "data": {"tool": tc.name, "action_id": stored.action_id, "expires_at": stored.expires_at}})
+                    await emit({"type": "pending_approval", "data": {"tool": tc.name, "action_id": stored.action_id, "expires_at": stored.expires_at, "risk_note": stored.risk_note}})
                     await self._audit.log(
                         {
                             "event": "tool_pending_approval",
@@ -719,20 +764,9 @@ class AgentRuntime:
                             "tool": tc.name,
                             "arguments": tc.arguments,
                             "action_id": stored.action_id,
+                            "risk_note": stored.risk_note,
                             "timestamp": datetime.now(timezone.utc).isoformat(),
                         }
-                    )
-                    continue
-
-                # 3b. Scan tool arguments
-                arg_scan = await self._guard.scan_input(str(tc.arguments), user_id)
-                if not arg_scan.get("safe", True):
-                    blocked_actions.append(
-                        BlockedAction(
-                            tool_name=tc.name,
-                            reason=arg_scan.get("reason", "tool arguments flagged"),
-                            policy="prompt_guard",
-                        )
                     )
                     continue
 
@@ -943,6 +977,7 @@ class AgentRuntime:
                         "reason": pa.reason,
                         "expires_at": pa.expires_at,
                         "conversation_id": pa.conversation_id,
+                        "risk_note": pa.risk_note,
                     }
                     for pa in response.pending_approvals
                 ],
@@ -1007,6 +1042,34 @@ class AgentRuntime:
             return {"error": "Action expired before a decision was made"}
         if outcome != "ok" or action is None:
             return {"error": "Action not found or already processed"}
+
+        # Re-scan the STORED arguments at execution time. They were scanned
+        # before parking, but the row lived in the database in between —
+        # this closes the window where a database-write adversary (or a bug)
+        # could swap the arguments of an action the user already saw and
+        # trusted. The scan is cheap; skipping it would make the approval
+        # card's contents non-binding.
+        arg_scan = await self._guard.scan_input(str(action.arguments), user_id)
+        if not arg_scan.get("safe", True):
+            reason = arg_scan.get("reason", "tool arguments flagged")
+            await self._audit.log(
+                {
+                    "event": "tool_blocked",
+                    "user_id": user_id,
+                    "tool": action.tool_name,
+                    "arguments": action.arguments,
+                    "reason": f"stored arguments failed re-scan at approval time: {reason}",
+                    "policy": "prompt_guard",
+                    "action_id": action_id,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            return {
+                "error": (
+                    "This action was blocked by security policy at execution "
+                    "time: its arguments did not pass re-validation."
+                )
+            }
 
         try:
             result = await self._executor.execute(

@@ -42,6 +42,9 @@ class StoredAction:
     created_at: str
     expires_at: str
     conversation_id: Optional[str] = None
+    # Populated when the arguments were derived from untrusted tool data;
+    # rendered as a warning on the approval card.
+    risk_note: Optional[str] = None
 
 
 class ApprovalStore(Protocol):
@@ -54,6 +57,7 @@ class ApprovalStore(Protocol):
         reason: str,
         conversation_id: Optional[str] = None,
         ttl_minutes: int = DEFAULT_TTL_MINUTES,
+        risk_note: Optional[str] = None,
     ) -> StoredAction: ...
 
     async def list_pending(self, user_id: str) -> list[StoredAction]: ...
@@ -102,6 +106,7 @@ class InMemoryApprovalStore:
         reason: str,
         conversation_id: Optional[str] = None,
         ttl_minutes: int = DEFAULT_TTL_MINUTES,
+        risk_note: Optional[str] = None,
     ) -> StoredAction:
         now = _utcnow()
         expires = now + timedelta(minutes=ttl_minutes)
@@ -114,6 +119,7 @@ class InMemoryApprovalStore:
             created_at=now.isoformat(),
             expires_at=expires.isoformat(),
             conversation_id=conversation_id,
+            risk_note=risk_note,
         )
         self._records[action.action_id] = _MemRecord(action=action, expires=expires)
         return action
@@ -174,6 +180,7 @@ class DbApprovalStore:
             created_at=_as_utc(row.created_at).isoformat(),
             expires_at=_as_utc(row.expires_at).isoformat(),
             conversation_id=str(row.conversation_id) if row.conversation_id else None,
+            risk_note=getattr(row, "risk_note", None),
         )
 
     async def create(
@@ -185,6 +192,7 @@ class DbApprovalStore:
         reason: str,
         conversation_id: Optional[str] = None,
         ttl_minutes: int = DEFAULT_TTL_MINUTES,
+        risk_note: Optional[str] = None,
     ) -> StoredAction:
         from models.pending_action import PendingAction
 
@@ -195,6 +203,7 @@ class DbApprovalStore:
             tool_name=tool_name,
             arguments=dict(arguments),
             reason=reason,
+            risk_note=risk_note,
             created_at=now,
             expires_at=now + timedelta(minutes=ttl_minutes),
         )

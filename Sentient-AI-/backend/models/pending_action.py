@@ -59,6 +59,15 @@ class PendingAction(Base):
         nullable=False,
         default="",
     )
+    # Set when the runtime detected that this action's arguments were shaped
+    # by untrusted external content (the taint gate). Surfaced on the
+    # approval card so the human sees WHY this needs a careful look — an
+    # approval prompt without that context is how injection-driven writes
+    # get rubber-stamped.
+    risk_note: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+    )
     status: Mapped[PendingActionStatus] = mapped_column(
         Enum(PendingActionStatus, name="pending_action_status"),
         nullable=False,
