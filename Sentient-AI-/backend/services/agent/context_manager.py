@@ -150,8 +150,15 @@ def summarize_messages(messages: list[dict[str, Any]]) -> dict[str, Any]:
     if tool_actions:
         summary_parts.append(f"Tools used: {', '.join(set(tool_actions))}")
 
+    # Emit the summary as a USER-role message, never system. A second
+    # system message competes with SECURITY_SYSTEM_PROMPT for the single
+    # system slot that Anthropic and Gemini expose (their _convert_messages
+    # keeps only the last system message), which would silently drop the
+    # entire injection-defense / financial / approval contract on any
+    # conversation long enough to trigger summarization. As conversation
+    # history, the summary belongs in the dialogue, not the policy slot.
     return {
-        "role": "system",
+        "role": "user",
         "content": f"[Conversation summary of {len(messages)} earlier messages]\n" + "\n".join(summary_parts),
     }
 

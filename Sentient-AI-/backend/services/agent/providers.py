@@ -106,13 +106,19 @@ class AnthropicProvider(LLMProvider):
 
     @staticmethod
     def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str | None, list[dict[str, Any]]]:
-        system: Optional[str] = None
+        # Concatenate ALL system messages rather than letting a later one
+        # overwrite an earlier one. The first system message is the
+        # security policy; silently dropping it because some other layer
+        # appended a second system message would remove the entire
+        # injection-defense contract. Order is preserved.
+        system_parts: list[str] = []
         rest: list[dict[str, Any]] = []
         for m in messages:
             if m.get("role") == "system":
-                system = m["content"]
+                system_parts.append(m["content"])
             else:
                 rest.append({"role": m["role"], "content": m["content"]})
+        system = "\n\n".join(system_parts) if system_parts else None
         return system, rest
 
     @staticmethod
@@ -327,15 +333,18 @@ class GeminiProvider(LLMProvider):
 
     @staticmethod
     def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str | None, list[dict[str, Any]]]:
-        system_instruction = None
+        # Concatenate all system messages (see AnthropicProvider): the
+        # security policy must never be evicted by a later system message.
+        system_parts: list[str] = []
         contents: list[dict[str, Any]] = []
         for m in messages:
             role = m.get("role", "user")
             if role == "system":
-                system_instruction = m["content"]
+                system_parts.append(m["content"])
                 continue
             gemini_role = "model" if role == "assistant" else "user"
             contents.append({"role": gemini_role, "parts": [{"text": m["content"]}]})
+        system_instruction = "\n\n".join(system_parts) if system_parts else None
         return system_instruction, contents
 
     @staticmethod
