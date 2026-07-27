@@ -72,6 +72,15 @@ class User(Base):
         server_default="claude-sonnet-4-20250514",
         nullable=False,
     )
+    # When enabled, saved memories are injected into the agent's system
+    # prompt and the assistant may propose new ones (gated by approval).
+    # Mirrors ChatGPT/Claude's user-facing memory toggle.
+    memory_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default="true",
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -96,6 +105,11 @@ class User(Base):
     conversations: Mapped[list["Conversation"]] = relationship(  # noqa: F821
         back_populates="user",
         lazy="selectin",
+    )
+    memories: Mapped[list["Memory"]] = relationship(  # noqa: F821
+        back_populates="user",
+        lazy="selectin",
+        cascade="all, delete-orphan",
     )
 
     def __repr__(self) -> str:

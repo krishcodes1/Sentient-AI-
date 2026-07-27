@@ -71,6 +71,11 @@ async def init_db(retries: int = 10, delay: float = 2.0) -> None:
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS rate_limit INTEGER NOT NULL DEFAULT 60",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS llm_provider VARCHAR(32) NOT NULL DEFAULT 'anthropic'",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS llm_model VARCHAR(128) NOT NULL DEFAULT 'claude-sonnet-4-20250514'",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS memory_enabled BOOLEAN NOT NULL DEFAULT true",
+        # The memories table itself is created by create_all; these guard the
+        # case where an older deployment created it before a column existed.
+        "ALTER TABLE memories ADD COLUMN IF NOT EXISTS source VARCHAR(16) NOT NULL DEFAULT 'user'",
+        "ALTER TABLE memories ADD COLUMN IF NOT EXISTS source_conversation_id UUID",
     ]
 
     # Accounts still on the historical hardcoded provider default never chose

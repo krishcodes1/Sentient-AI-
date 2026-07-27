@@ -392,11 +392,27 @@ class AgentRuntime:
         return provider
 
     @staticmethod
-    def _with_system_prompt(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Ensure the security system prompt heads the message list."""
+    def _with_system_prompt(
+        messages: list[dict[str, Any]], memory_block: Optional[str] = None
+    ) -> list[dict[str, Any]]:
+        """Ensure the security system prompt heads the message list.
+
+        An optional ``memory_block`` (the user's saved memories, already
+        screened) is appended to the policy inside the SAME system message,
+        so it is clearly subordinate to the security rules and cannot
+        occupy its own competing system slot.
+        """
+        system_content = SECURITY_SYSTEM_PROMPT
+        if memory_block:
+            system_content = f"{SECURITY_SYSTEM_PROMPT}\n\n{memory_block}"
         if messages and messages[0].get("role") == "system":
+            if memory_block:
+                # Fold the memory block into the caller-provided system msg.
+                head = dict(messages[0])
+                head["content"] = f"{head.get('content', '')}\n\n{memory_block}"
+                return [head, *messages[1:]]
             return messages
-        return [{"role": "system", "content": SECURITY_SYSTEM_PROMPT}, *messages]
+        return [{"role": "system", "content": system_content}, *messages]
 
     @staticmethod
     def _attr_safe(value: Any) -> str:
@@ -494,6 +510,7 @@ class AgentRuntime:
         conversation_id: Optional[str] = None,
         llm_provider: Optional[str] = None,
         llm_model: Optional[str] = None,
+        memory_block: Optional[str] = None,
     ) -> AgentResponse:
         """Process a conversation turn.
 
@@ -502,9 +519,10 @@ class AgentRuntime:
         prompt-guard scanning on user input, tool arguments, tool results,
         and the final model output. ``llm_provider``/``llm_model`` select a
         per-user provider override (Settings page); omitted, the server
-        default is used.
+        default is used. ``memory_block`` is the user's saved-memory context
+        (already screened), folded into the system prompt.
         """
-        messages = self._with_system_prompt(messages)
+        messages = self._with_system_prompt(messages, memory_block)
         provider = self._resolve_provider(llm_provider, llm_model)
 
         # 1. Scan the latest user message for prompt injection

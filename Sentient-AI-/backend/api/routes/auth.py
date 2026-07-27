@@ -54,6 +54,7 @@ class UserResponse(BaseModel):
     rate_limit: int
     llm_provider: str
     llm_model: str
+    memory_enabled: bool = True
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -74,6 +75,7 @@ class SettingsUpdateRequest(BaseModel):
     rate_limit: Optional[int] = Field(default=None, ge=10, le=600)
     llm_provider: Optional[SafeStr] = Field(default=None, max_length=32)
     llm_model: Optional[SafeStr] = Field(default=None, max_length=128)
+    memory_enabled: Optional[bool] = None
 
 
 @router.post(
@@ -209,6 +211,8 @@ async def update_settings(
         current_user.llm_provider = provider
     if body.llm_model is not None:
         current_user.llm_model = body.llm_model
+    if body.memory_enabled is not None:
+        current_user.memory_enabled = body.memory_enabled
 
     await db.flush()
     await db.refresh(current_user)

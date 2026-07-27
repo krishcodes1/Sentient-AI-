@@ -16,9 +16,11 @@ from core.database import get_db
 from core.validation import SafeStr
 from models.connector import ConnectorConfig
 from models.conversation import Conversation, Message, MessageRole
+from models.memory import Memory
 from models.pending_action import PendingAction
 from models.user import User
 from services.auth import get_current_user
+from services.memory import render_memory_block
 from services.agent.context_manager import compress_tool_result
 from services.agent.providers import ProviderError
 from services.agent.runtime import AgentRuntime
@@ -414,6 +416,18 @@ async def send_message(
                 ]
             tools += mcp_tools
 
+    # 3b. Load the user's saved memories (if memory is enabled) and render
+    #     them into a system-prompt block. Memories are trusted user context
+    #     but were injection-screened on write.
+    memory_block: Optional[str] = None
+    if getattr(current_user, "memory_enabled", True):
+        mem_result = await db.execute(
+            select(Memory)
+            .where(Memory.user_id == current_user.id)
+            .order_by(Memory.created_at.desc())
+        )
+        memory_block = render_memory_block(list(mem_result.scalars().all()))
+
     try:
         agent_response = await runtime.chat(
             messages=history,
@@ -422,6 +436,7 @@ async def send_message(
             conversation_id=str(conversation.id),
             llm_provider=current_user.llm_provider,
             llm_model=current_user.llm_model,
+            memory_block=memory_block,
         )
     except ProviderError as exc:
         raise HTTPException(

@@ -18,7 +18,7 @@ from api.middleware.security import (
     RequestIdMiddleware,
     SecurityHeadersMiddleware,
 )
-from api.routes import agent, audit, auth, connectors
+from api.routes import agent, audit, auth, connectors, memory
 from services.agent.approvals import DbApprovalStore
 from services.agent.runtime import AgentRuntime
 from services.agent.tool_registry import (
@@ -101,6 +101,7 @@ app.include_router(auth.router, prefix="/api")
 app.include_router(agent.router, prefix="/api")
 app.include_router(connectors.router, prefix="/api")
 app.include_router(audit.router, prefix="/api")
+app.include_router(memory.router, prefix="/api")
 
 
 @app.get("/")
