@@ -17,6 +17,9 @@ import type {
   AuditLogFilters,
   AuditIntegrityCheck,
   AuditStats,
+  Memory,
+  CreateMemoryRequest,
+  UpdateMemoryRequest,
 } from "@/types";
 
 const API_BASE = "/api";
@@ -338,6 +341,7 @@ export async function updateSettings(data: {
   rate_limit?: number;
   llm_provider?: string;
   llm_model?: string;
+  memory_enabled?: boolean;
 }): Promise<User> {
   const user = await request<User>("/auth/settings", {
     method: "PATCH",
@@ -349,5 +353,33 @@ export async function updateSettings(data: {
 
 export async function deleteAccount(): Promise<void> {
   return request<void>("/auth/account", { method: "DELETE" });
+}
+
+// Memory
+export async function getMemories(): Promise<Memory[]> {
+  return request<Memory[]>("/memories/");
+}
+
+export async function createMemory(
+  body: CreateMemoryRequest,
+): Promise<Memory> {
+  return request<Memory>("/memories/", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function updateMemory(
+  id: string,
+  data: UpdateMemoryRequest,
+): Promise<Memory> {
+  return request<Memory>(`/memories/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteMemory(id: string): Promise<void> {
+  return request<void>(`/memories/${id}`, { method: "DELETE" });
 }
 

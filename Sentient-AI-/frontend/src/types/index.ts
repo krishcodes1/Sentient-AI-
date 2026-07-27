@@ -8,6 +8,29 @@ export interface User {
   rate_limit: number;
   llm_provider?: string;
   llm_model?: string;
+  memory_enabled?: boolean;
+}
+
+export type MemoryCategory = "profile" | "preference" | "project" | "fact";
+export type MemorySource = "user" | "agent";
+
+export interface Memory {
+  id: string;
+  content: string;
+  category: MemoryCategory;
+  source: MemorySource;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateMemoryRequest {
+  content: string;
+  category?: MemoryCategory;
+}
+
+export interface UpdateMemoryRequest {
+  content?: string;
+  category?: MemoryCategory;
 }
 
 export type PermissionTier =

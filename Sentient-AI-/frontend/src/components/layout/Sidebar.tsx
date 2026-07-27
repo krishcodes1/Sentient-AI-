@@ -3,6 +3,7 @@ import { NavLink } from "react-router-dom";
 import {
   LayoutDashboard,
   MessageSquare,
+  Brain,
   Plug,
   Shield,
   Settings as SettingsIcon,
@@ -16,6 +17,7 @@ import Brand, { Wordmark } from "@/components/Brand";
 const navItems = [
   { to: "/", icon: LayoutDashboard, label: "Gateway", end: true },
   { to: "/chat", icon: MessageSquare, label: "Chat" },
+  { to: "/memory", icon: Brain, label: "Memory" },
   { to: "/connectors", icon: Plug, label: "Connectors" },
   { to: "/audit", icon: Shield, label: "Audit logs" },
   { to: "/settings", icon: SettingsIcon, label: "Settings" },

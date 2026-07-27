@@ -5,6 +5,7 @@ import Chat from "./pages/Chat";
 import Connectors from "./pages/Connectors";
 import AuditLogs from "./pages/AuditLogs";
 import Settings from "./pages/Settings";
+import MemoryPage from "./pages/Memory";
 import Login from "./pages/Login";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -26,6 +27,7 @@ export default function App() {
       >
         <Route path="/" element={<Dashboard />} />
         <Route path="/chat" element={<Chat />} />
+        <Route path="/memory" element={<MemoryPage />} />
         <Route path="/connectors" element={<Connectors />} />
         <Route path="/audit" element={<AuditLogs />} />
         <Route path="/settings" element={<Settings />} />
