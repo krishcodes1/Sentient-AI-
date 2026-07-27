@@ -63,6 +63,16 @@ async def init_db(retries: int = 10, delay: float = 2.0) -> None:
     # include a DEFAULT so existing rows backfill cleanly.
     migrations = [
         "ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS previous_hash VARCHAR(64)",
+        # Deterministic per-user chain order key; NULL marks pre-seq (legacy
+        # unkeyed-hash) rows, so no backfill — the verifier treats NULL as
+        # "before every numbered row".
+        "ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS seq BIGINT",
+        # ADD COLUMN does not create the index the model declares (index=True),
+        # and create_all() will not add an index to a pre-existing table — so
+        # an upgraded deployment would do an unindexed scan for the chain head
+        # on every audit append. Name matches SQLAlchemy's default so a fresh
+        # create_all() and an upgrade converge on the same schema.
+        "CREATE INDEX IF NOT EXISTS ix_audit_logs_seq ON audit_logs (seq)",
         # New connector kind for MCP servers (PG 12+ allows ADD VALUE in a
         # transaction as long as the value isn't used in the same one).
         "ALTER TYPE connector_type ADD VALUE IF NOT EXISTS 'mcp'",
@@ -76,6 +86,10 @@ async def init_db(retries: int = 10, delay: float = 2.0) -> None:
         # case where an older deployment created it before a column existed.
         "ALTER TABLE memories ADD COLUMN IF NOT EXISTS source VARCHAR(16) NOT NULL DEFAULT 'user'",
         "ALTER TABLE memories ADD COLUMN IF NOT EXISTS source_conversation_id UUID",
+        # Warning shown on the approval card when an action's arguments were
+        # shaped by untrusted external content. Nullable: rows parked before
+        # this column existed simply carry no note.
+        "ALTER TABLE pending_actions ADD COLUMN IF NOT EXISTS risk_note TEXT",
     ]
 
     # Accounts still on the historical hardcoded provider default never chose

@@ -287,4 +287,7 @@ async def test_audit_logs_scoped_and_verifiable(client, session_factory):
         f"/api/audit/{row_a_id}/verify", headers=auth_headers(token_a)
     )
     assert verify.status_code == 200
-    assert verify.json() == {"id": row_a_id, "valid": True}
+    # ``legacy`` distinguishes a row verified by the keyed HMAC from one that
+    # only matched the pre-upgrade unkeyed digest; a freshly written row is
+    # keyed, so it must be False.
+    assert verify.json() == {"id": row_a_id, "valid": True, "legacy": False}

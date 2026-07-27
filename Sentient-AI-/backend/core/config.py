@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -30,6 +30,44 @@ class Settings(BaseSettings):
         ...,
         description="Base64-encoded 32-byte key for AES-256-GCM credential encryption",
     )
+    # Key for the audit-log integrity HMAC (HMAC-SHA256). Optional: when
+    # unset, a key is derived deterministically from ENCRYPTION_KEY so keyed
+    # hashing works with zero extra configuration. A dedicated key is better:
+    # the audit chain's guarantee is exactly "an attacker with database write
+    # access but WITHOUT this key cannot forge history", so storing it
+    # separately from the DB-encryption key (and DB backups) is the whole
+    # point. An attacker holding the app's ENCRYPTION_KEY can recompute the
+    # derived fallback key and still forge.
+    AUDIT_HMAC_KEY: Optional[str] = Field(
+        default=None,
+        description="Dedicated key for the HMAC-SHA256 audit-log integrity hash",
+    )
+
+    @field_validator("AUDIT_HMAC_KEY")
+    @classmethod
+    def _audit_hmac_key_is_strong(cls, v: Optional[str]) -> Optional[str]:
+        """Reject a weak dedicated audit key at startup.
+
+        The whole guarantee is "a database-write adversary without this key
+        cannot forge history"; a short/guessable key makes that guarantee
+        vacuous, and a silently-accepted one is worse than no key at all
+        because the derived ENCRYPTION_KEY fallback it replaces is strong.
+        The generator in .env.example emits 64 characters.
+        """
+        if v is None:
+            return v
+        v = v.strip()
+        if not v:
+            # Treat an empty/whitespace value as "unset" so a commented-out
+            # style `AUDIT_HMAC_KEY=` in .env falls back to the derived key
+            # rather than keying the HMAC on the empty string.
+            return None
+        if len(v) < 32:
+            raise ValueError(
+                "AUDIT_HMAC_KEY must be at least 32 characters; generate one with "
+                "python3 -c \"import secrets; print(secrets.token_urlsafe(48))\""
+            )
+        return v
 
     # ── CORS ──────────────────────────────────────────────────────────────
     CORS_ORIGINS: list[str] = ["http://localhost:5173"]

@@ -34,6 +34,9 @@ import {
   getConnectors,
   getPendingApprovals,
 } from "@/services/api";
+// Countdown logic lives beside Chat's ApprovalCard so both approval queues
+// expire in lockstep with the server-side TTL.
+import { formatCountdown, useCountdown } from "@/pages/Chat";
 
 const FEED_LIMIT = 6;
 const POLL_INTERVAL_MS = 30_000;
@@ -73,6 +76,10 @@ function ApprovalRow({
 }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const remaining = useCountdown(approval.expires_at);
+  // The server enforces the TTL, so a click after this point would 404 —
+  // disable the buttons instead of letting the user walk into that.
+  const expired = remaining !== null && remaining <= 0;
 
   const decide = async (approved: boolean) => {
     setPending(true);
@@ -85,32 +92,66 @@ function ApprovalRow({
     }
   };
 
-  const expiresLabel = approval.expires_at
-    ? `expires ${formatRelativeFuture(approval.expires_at)}`
-    : null;
-
   return (
     <div
       className="rounded-[10px] p-3"
       style={{
         background: "var(--claw-surface)",
         border: "1px solid var(--claw-border)",
+        opacity: expired ? 0.75 : 1,
       }}
     >
+      {/* Backend-flagged risk: the request was shaped by external/untrusted
+          content. Danger colors, ABOVE the action row — placing it below the
+          buttons meant the reader reached Approve before the warning. */}
+      {approval.risk_note && (
+        <div
+          className="flex items-start gap-2 p-2.5 rounded-[8px] mb-3"
+          style={{
+            background: "var(--fill-danger)",
+            border: "1px solid var(--border-danger)",
+          }}
+        >
+          <AlertTriangle
+            className="w-4 h-4 mt-0.5 shrink-0"
+            style={{ color: "var(--accent-danger)" }}
+          />
+          <div className="min-w-0">
+            <div className="eyebrow" style={{ color: "var(--accent-danger)" }}>
+              Risk warning
+            </div>
+            <p className="text-xs mt-1" style={{ color: "var(--text-secondary)" }}>
+              {approval.risk_note}
+            </p>
+          </div>
+        </div>
+      )}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
           <p className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
             <span className="mono-tag">{approval.tool_name}</span>
+            {remaining !== null && (
+              <span
+                className="mono-tag inline-flex items-center gap-1 ml-2"
+                style={{
+                  color: expired ? "var(--accent-danger)" : "var(--accent-warning)",
+                }}
+              >
+                <Clock className="w-3 h-3" />
+                {expired ? "expired" : `expires in ${formatCountdown(remaining)}`}
+              </span>
+            )}
           </p>
           <p className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>
-            {approval.reason}
-            {expiresLabel ? ` · ${expiresLabel}` : ""}
+            {expired
+              ? "This request expired without a decision. Ask the agent again if the action is still needed."
+              : approval.reason}
           </p>
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <button
             type="button"
-            disabled={pending}
+            disabled={pending || expired}
             onClick={() => void decide(true)}
             className="px-3 py-1.5 rounded-[8px] text-xs font-semibold disabled:opacity-50 inline-flex items-center gap-1.5"
             style={{ background: "var(--accent-success)", color: "#0a0a0b" }}
@@ -120,7 +161,7 @@ function ApprovalRow({
           </button>
           <button
             type="button"
-            disabled={pending}
+            disabled={pending || expired}
             onClick={() => void decide(false)}
             className="px-3 py-1.5 rounded-[8px] text-xs font-medium disabled:opacity-50"
             style={{
@@ -151,17 +192,6 @@ function ApprovalRow({
       )}
     </div>
   );
-}
-
-function formatRelativeFuture(iso: string): string {
-  const target = new Date(iso).getTime();
-  if (Number.isNaN(target)) return "soon";
-  const diffSec = Math.round((target - Date.now()) / 1000);
-  if (diffSec <= 0) return "now";
-  if (diffSec < 60) return `in ${diffSec}s`;
-  const diffMin = Math.round(diffSec / 60);
-  if (diffMin < 60) return `in ${diffMin} min`;
-  return `in ${Math.round(diffMin / 60)}h`;
 }
 
 function StatCard({

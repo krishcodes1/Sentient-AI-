@@ -756,7 +756,25 @@ class AgentRuntime:
                         ),
                     )
                     pending_approvals.append(_stored_to_pending(stored))
-                    await emit({"type": "pending_approval", "data": {"tool": tc.name, "action_id": stored.action_id, "expires_at": stored.expires_at, "risk_note": stored.risk_note}})
+                    # Emit the SAME shape the REST contract uses
+                    # (PendingApprovalOut), so a streamed approval card
+                    # renders complete — tool name, arguments, reason and
+                    # risk note — instead of the client having to refetch
+                    # to learn what it is being asked to approve.
+                    await emit(
+                        {
+                            "type": "pending_approval",
+                            "data": {
+                                "action_id": stored.action_id,
+                                "tool_name": stored.tool_name,
+                                "arguments": stored.arguments,
+                                "reason": stored.reason,
+                                "expires_at": stored.expires_at,
+                                "conversation_id": stored.conversation_id,
+                                "risk_note": stored.risk_note,
+                            },
+                        }
+                    )
                     await self._audit.log(
                         {
                             "event": "tool_pending_approval",

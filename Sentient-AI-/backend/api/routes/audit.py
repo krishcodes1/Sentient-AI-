@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database import get_db
-from core.security import compute_audit_hash
+from core.security import compute_audit_hash, compute_audit_hash_legacy
 from models.audit import AuditLog, AuditStatus
 from models.user import User
 from services.audit import build_hash_payload
@@ -49,6 +49,11 @@ class AuditLogResponse(BaseModel):
 class AuditIntegrityCheck(BaseModel):
     id: uuid.UUID
     valid: bool
+    # True when the row verified only against the pre-upgrade UNKEYED hash.
+    # It is intact, but its integrity rests on a digest anyone with database
+    # write access could recompute — so the UI can say "verified (legacy)"
+    # rather than implying keyed, forgery-resistant protection.
+    legacy: bool = False
 
 
 async def _get_owned_log(
@@ -206,6 +211,13 @@ async def verify_audit_integrity(
     Hashes computed from the row's stored fields (including
     ``previous_hash``) so chain rotation, deletion, or field tampering
     all surface as a hash mismatch.
+
+    Rows written before the keyed-hash upgrade carry an unkeyed SHA-256, so
+    a failed HMAC check falls back to the legacy digest and reports
+    ``legacy: true`` rather than ``valid: false``. Without that fallback
+    every pre-upgrade row would show up in the UI as TAMPERED — a false
+    alarm on the platform's own compliance artifact, which is worse than
+    useless: it teaches the user to ignore the integrity indicator.
     """
     entry = await _get_owned_log(log_id, current_user, db)
 
@@ -224,5 +236,8 @@ async def verify_audit_integrity(
         detection_method=entry.detection_method,
         confidence_score=entry.confidence_score,
     )
-    expected = compute_audit_hash(hash_payload)
-    return {"id": entry.id, "valid": entry.integrity_hash == expected}
+    if entry.integrity_hash == compute_audit_hash(hash_payload):
+        return {"id": entry.id, "valid": True, "legacy": False}
+    if entry.integrity_hash == compute_audit_hash_legacy(hash_payload):
+        return {"id": entry.id, "valid": True, "legacy": True}
+    return {"id": entry.id, "valid": False, "legacy": False}

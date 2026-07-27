@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import {
   Send,
   Plus,
@@ -13,6 +13,7 @@ import {
   Trash2,
   AlertTriangle,
   RefreshCw,
+  Clock,
 } from "lucide-react";
 import clsx from "clsx";
 import type {
@@ -40,6 +41,50 @@ import MarkdownMessage from "@/components/MarkdownMessage";
 const CONV_PAGE_SIZE = 50;
 const DEFAULT_TITLE = "New Conversation";
 const AUTO_TITLE_MAX = 40;
+// Approvals raised on another device/tab must show up here without a reload,
+// but well inside the 15-minute approval TTL — 20s keeps the loop alive
+// without hammering the API.
+const APPROVAL_POLL_MS = 20_000;
+
+// Remaining whole seconds until `iso`, re-computed every second so approval
+// cards can count down toward the server-side TTL instead of silently 404ing
+// when the user clicks after expiry. Returns null when there is no deadline
+// (or it cannot be parsed) so such cards stay fully interactive.
+export function useCountdown(iso: string | null | undefined): number | null {
+  const target = iso ? new Date(iso).getTime() : NaN;
+  const [remaining, setRemaining] = useState<number | null>(() =>
+    Number.isNaN(target) ? null : Math.max(0, Math.ceil((target - Date.now()) / 1000)),
+  );
+  useEffect(() => {
+    if (Number.isNaN(target)) {
+      setRemaining(null);
+      return;
+    }
+    const compute = () => Math.max(0, Math.ceil((target - Date.now()) / 1000));
+    const first = compute();
+    setRemaining(first);
+    // Once expired the value can never change again — don't tick at all.
+    if (first <= 0) return;
+    const id = window.setInterval(() => {
+      const left = compute();
+      setRemaining(left);
+      if (left <= 0) window.clearInterval(id);
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [target]);
+  return remaining;
+}
+
+// mm:ss (or h:mm:ss past an hour) for the approval countdown.
+export function formatCountdown(totalSec: number): string {
+  const sec = totalSec % 60;
+  const min = Math.floor(totalSec / 60);
+  if (min >= 60) {
+    const hr = Math.floor(min / 60);
+    return `${hr}:${String(min % 60).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+  }
+  return `${min}:${String(sec).padStart(2, "0")}`;
+}
 
 function formatRelative(iso: string | undefined): string {
   if (!iso) return "";
@@ -107,6 +152,10 @@ function ApprovalCard({
 }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const remaining = useCountdown(approval.expires_at);
+  // The server enforces the TTL, so a click after this point would 404 —
+  // disable the buttons instead of letting the user walk into that.
+  const expired = remaining !== null && remaining <= 0;
 
   const handle = async (approved: boolean) => {
     setPending(true);
@@ -124,18 +173,33 @@ function ApprovalCard({
     <div
       className="rounded-[10px] p-3 mt-2"
       style={{
-        background: "var(--fill-warning)",
-        border: "1px solid var(--border-warning)",
+        background: expired ? "var(--claw-surface)" : "var(--fill-warning)",
+        border: `1px solid ${expired ? "var(--claw-border)" : "var(--border-warning)"}`,
+        opacity: expired ? 0.75 : 1,
       }}
     >
-      <div className="flex items-center gap-2 mb-2">
-        <Shield className="w-4 h-4" style={{ color: "var(--accent-warning)" }} />
-        <span
-          className="eyebrow"
-          style={{ color: "var(--accent-warning)" }}
-        >
-          Approval required
-        </span>
+      <div className="flex items-center justify-between gap-2 mb-2">
+        <div className="flex items-center gap-2">
+          <Shield
+            className="w-4 h-4"
+            style={{ color: expired ? "var(--text-muted)" : "var(--accent-warning)" }}
+          />
+          <span
+            className="eyebrow"
+            style={{ color: expired ? "var(--text-muted)" : "var(--accent-warning)" }}
+          >
+            {expired ? "Approval expired" : "Approval required"}
+          </span>
+        </div>
+        {remaining !== null && (
+          <span
+            className="mono-tag inline-flex items-center gap-1 shrink-0"
+            style={{ color: expired ? "var(--accent-danger)" : "var(--accent-warning)" }}
+          >
+            <Clock className="w-3 h-3" />
+            {expired ? "expired" : `expires in ${formatCountdown(remaining)}`}
+          </span>
+        )}
       </div>
       <p className="text-xs mb-2" style={{ color: "var(--text-secondary)" }}>
         Tool <strong>{approval.tool_name}</strong> wants to run.
@@ -155,6 +219,37 @@ function ApprovalCard({
       <p className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
         {approval.reason}
       </p>
+      {/* Backend-flagged risk: the request was shaped by external/untrusted
+          content. Rendered in danger colors directly above the buttons so it
+          cannot be missed on the way to Approve. */}
+      {approval.risk_note && (
+        <div
+          className="flex items-start gap-2 p-2.5 rounded-[8px] mb-3"
+          style={{
+            background: "var(--fill-danger)",
+            border: "1px solid var(--border-danger)",
+          }}
+        >
+          <AlertTriangle
+            className="w-4 h-4 mt-0.5 shrink-0"
+            style={{ color: "var(--accent-danger)" }}
+          />
+          <div className="min-w-0">
+            <div className="eyebrow" style={{ color: "var(--accent-danger)" }}>
+              Risk warning
+            </div>
+            <p className="text-xs mt-1" style={{ color: "var(--text-secondary)" }}>
+              {approval.risk_note}
+            </p>
+          </div>
+        </div>
+      )}
+      {expired && (
+        <p className="text-xs mb-2" style={{ color: "var(--text-muted)" }}>
+          This request expired without a decision. Ask the agent again if the
+          action is still needed.
+        </p>
+      )}
       {error && (
         <p className="text-xs mb-2" style={{ color: "var(--accent-danger)" }}>
           {error}
@@ -163,7 +258,7 @@ function ApprovalCard({
       <div className="flex gap-2">
         <button
           type="button"
-          disabled={pending}
+          disabled={pending || expired}
           onClick={() => handle(true)}
           className="px-3 py-1.5 rounded-[8px] text-xs font-semibold disabled:opacity-50 inline-flex items-center gap-1.5"
           style={{ background: "var(--accent-success)", color: "#0a0a0b" }}
@@ -173,7 +268,7 @@ function ApprovalCard({
         </button>
         <button
           type="button"
-          disabled={pending}
+          disabled={pending || expired}
           onClick={() => handle(false)}
           className="px-3 py-1.5 rounded-[8px] text-xs font-medium disabled:opacity-50"
           style={{
@@ -213,6 +308,20 @@ export default function Chat() {
   // Live status line while a turn streams ("Running canvas.get_courses…").
   const [streamStatus, setStreamStatus] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  // action_ids GET /agent/approvals has returned at least once. Lets the
+  // poller drop cards decided elsewhere (absent from the server list) while
+  // never clobbering stream-delivered approvals the server has not yet
+  // exposed through the list endpoint.
+  const serverSeenApprovals = useRef<Set<string>>(new Set());
+  // action_ids this tab has already decided. The server drops them from the
+  // list on the next fetch, but a poll that was already in flight when the
+  // decision landed would otherwise resurrect a card the user just resolved
+  // (and clicking it again 404s). Cleared per conversation with the rest.
+  const decidedApprovals = useRef<Set<string>>(new Set());
+  // Mirrors `activeConv` so an in-flight approvals fetch can tell it was
+  // scoped to a conversation the user has since navigated away from, and
+  // drop its result instead of clobbering the new thread's cards.
+  const activeConvRef = useRef<string | null>(null);
 
   // Load the current user once
   useEffect(() => {
@@ -264,6 +373,8 @@ export default function Chat() {
     setLoadingMessages(true);
     setMessagesError(null);
     setApprovals([]);
+    serverSeenApprovals.current = new Set();
+    decidedApprovals.current = new Set();
     Promise.all([
       getConversation(activeConv),
       // A failed approvals fetch should not block the thread itself.
@@ -273,6 +384,7 @@ export default function Chat() {
         if (cancelled) return;
         setMessages(conv.messages ?? []);
         if (pending) {
+          for (const pa of pending) serverSeenApprovals.current.add(pa.action_id);
           setApprovals(
             pending.filter(
               (pa) => !pa.conversation_id || pa.conversation_id === activeConv,
@@ -293,6 +405,55 @@ export default function Chat() {
       cancelled = true;
     };
   }, [activeConv, messagesRetryKey]);
+
+  useEffect(() => {
+    activeConvRef.current = activeConv;
+  }, [activeConv]);
+
+  // Pull the approvals queue for the open conversation. Merged by action_id:
+  // the server row wins when both exist (it carries the real arguments,
+  // reason, expires_at and risk_note — the SSE frame carries none of those),
+  // and stream-delivered approvals the list endpoint has never returned are
+  // kept. Only cards the server once listed and has since resolved (decided
+  // elsewhere, expired and swept) or that this tab decided are dropped.
+  const refreshApprovals = useCallback(async () => {
+    if (!activeConv) return;
+    let pending: PendingApproval[];
+    try {
+      pending = await getPendingApprovals();
+    } catch {
+      return; // Best-effort; the next tick catches up.
+    }
+    // The user may have switched threads while this was in flight; the
+    // scoping below would then be wrong for what is on screen.
+    if (activeConvRef.current !== activeConv) return;
+    const scoped = pending.filter(
+      (pa) =>
+        // Already resolved from this tab — never re-show it, even if this
+        // response was in flight when the decision landed.
+        !decidedApprovals.current.has(pa.action_id) &&
+        (!pa.conversation_id || pa.conversation_id === activeConv),
+    );
+    for (const pa of pending) serverSeenApprovals.current.add(pa.action_id);
+    setApprovals((prev) => {
+      const fromServer = new Set(scoped.map((pa) => pa.action_id));
+      const streamOnly = prev.filter(
+        (pa) =>
+          !fromServer.has(pa.action_id) &&
+          !decidedApprovals.current.has(pa.action_id) &&
+          !serverSeenApprovals.current.has(pa.action_id),
+      );
+      return [...scoped, ...streamOnly];
+    });
+  }, [activeConv]);
+
+  // Keep the queue live so an approval raised on another device/tab shows up
+  // here without a reload, well inside the server-side TTL.
+  useEffect(() => {
+    if (!activeConv) return;
+    const interval = setInterval(() => void refreshApprovals(), APPROVAL_POLL_MS);
+    return () => clearInterval(interval);
+  }, [activeConv, refreshApprovals]);
 
   // Scroll to bottom on message updates
   useEffect(() => {
@@ -452,11 +613,28 @@ export default function Chat() {
             ),
           );
         },
-        onPendingApproval: (approval) =>
+        onPendingApproval: (approval) => {
+          // The runtime emits the full PendingApprovalOut shape, so this is
+          // normally a straight passthrough. The fallbacks stay because an
+          // approval prompt that renders "Tool undefined wants to run." with
+          // no arguments — showing none of what is being approved — is worse
+          // than a generic label; refreshApprovals() below reconciles against
+          // the list endpoint either way.
+          const raw = approval as PendingApproval & { tool?: string };
+          const normalized: PendingApproval = {
+            ...raw,
+            tool_name: raw.tool_name ?? raw.tool ?? "unknown tool",
+            arguments: raw.arguments ?? {},
+            reason:
+              raw.reason ??
+              "This tool requires your explicit approval before it runs.",
+            conversation_id: raw.conversation_id ?? conv,
+          };
           setApprovals((prev) => {
             const seen = new Set(prev.map((pa) => pa.action_id));
-            return seen.has(approval.action_id) ? prev : [...prev, approval];
-          }),
+            return seen.has(normalized.action_id) ? prev : [...prev, normalized];
+          });
+        },
         onBlocked: (blocked) =>
           patchAssistant({
             blocked_actions: [
@@ -486,6 +664,11 @@ export default function Chat() {
         onError: (reason) => patchAssistant({ content: `Error: ${reason}` }),
       });
       maybeAutoTitle(conv, content);
+      // Any approval raised during this turn arrived over SSE with only
+      // {tool, action_id, expires_at, risk_note}. Pull the full rows now so
+      // the card shows the actual arguments immediately, rather than after
+      // up to APPROVAL_POLL_MS.
+      void refreshApprovals();
     } catch (err) {
       // The whole request failed (auth, network, 4xx). Drop the streaming
       // bubble and surface the error; keep the user's message visible.
@@ -507,6 +690,9 @@ export default function Chat() {
 
   const handleApprovalDecision = async (actionId: string, approved: boolean) => {
     await decideApproval(actionId, approved);
+    // Record before removing: a poll that was already in flight must not
+    // put this card back on screen.
+    decidedApprovals.current.add(actionId);
     setApprovals((prev) => prev.filter((pa) => pa.action_id !== actionId));
     // The backend persists an assistant message with the tool outcome —
     // refetch the thread so the result of the decision is visible.

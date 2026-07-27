@@ -3,8 +3,19 @@ Tamper-evident audit logging service for SentientAI.
 
 Single write path for the ``audit_logs`` table. Every row is chained to
 the previous row in the same user's log via ``previous_hash``, and the
-chain link is bound into the row's own SHA-256 ``integrity_hash``, so
-field tampering, row deletion, and reordering are all detectable.
+chain link is bound into the row's own keyed (HMAC-SHA256)
+``integrity_hash``, so field tampering, row deletion, and reordering are
+all detectable. The hash is keyed because an unkeyed digest is only
+tamper-evident against accidents: a database-write adversary could
+recompute an unkeyed chain and forge history. Rows written before the
+HMAC upgrade carry unkeyed hashes; the verifier still validates them but
+labels them 'legacy' (see ``scripts/verify_audit_log.py``).
+
+Chain order is the per-user monotonic ``seq`` column, assigned here under
+the per-user lock. Timestamps are not a reliable order key (two rows in
+the same millisecond sort ambiguously, weakening verification and causing
+spurious chain failures), so head selection and verification order by
+``seq``.
 
 Three layers live here:
 
@@ -122,6 +133,13 @@ def build_hash_payload(
     can be re-serialised with different precision on read-back, which would
     produce false tamper positives; row ordering is instead protected by the
     ``previous_hash`` chain.
+    ``seq`` is likewise excluded: the read-only verify route reconstructs
+    this payload from stored columns through this same function and predates
+    the column, so adding it here would flag every post-upgrade row as
+    tampered there. Order integrity does not depend on it — each row pins
+    its predecessor's keyed hash, so any reordering breaks a chain link —
+    ``seq`` is only the deterministic order key for head selection and
+    verification, and the verifier separately flags non-increasing seq.
     """
     return {
         "user_id": user_id,
@@ -191,14 +209,21 @@ async def append_audit_log(
 
     lock = await _lock_for_user(str(user_uuid))
     async with lock:
+        # seq is the deterministic order key; timestamp alone is ambiguous
+        # within a millisecond. NULLS LAST keeps legacy (pre-seq) rows from
+        # shadowing a numbered head; timestamp breaks ties for a chain that
+        # is still all-legacy.
         prev_result = await db.execute(
             select(AuditLog)
             .where(AuditLog.user_id == user_uuid)
-            .order_by(AuditLog.timestamp.desc())
+            .order_by(AuditLog.seq.desc().nullslast(), AuditLog.timestamp.desc())
             .limit(1)
         )
         prev = prev_result.scalar_one_or_none()
         previous_hash = prev.integrity_hash if prev is not None else None
+        # max(seq)+1 under the per-user lock; a legacy head (seq NULL)
+        # starts the numbered chain at 1.
+        next_seq = 1 if prev is None or prev.seq is None else prev.seq + 1
 
         payload = build_hash_payload(
             user_id=str(user_uuid),
@@ -231,6 +256,7 @@ async def append_audit_log(
             response_summary=sanitized_summary,
             integrity_hash=integrity_hash,
             previous_hash=previous_hash,
+            seq=next_seq,
             request_id=rid,
         )
         db.add(entry)

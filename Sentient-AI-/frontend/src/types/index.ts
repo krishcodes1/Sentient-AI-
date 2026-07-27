@@ -161,6 +161,10 @@ export interface PendingApproval {
   // Present on GET /agent/approvals so Chat can scope cards to the open
   // conversation; approvals without it are shown everywhere.
   conversation_id?: string | null;
+  // Set by the backend when the request was shaped by external/untrusted
+  // content (prompt-injection heuristics). The UI must surface it as a
+  // warning the user cannot miss before they approve.
+  risk_note?: string | null;
 }
 
 export interface BlockedAction {

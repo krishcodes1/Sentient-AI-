@@ -145,6 +145,20 @@ spotlighting, DeepMind CaMeL, OWASP LLM Top 10):
   model output (including the post-tool completion) are scanned (pattern +
   heuristic layers: role hijack, instruction override, homoglyphs,
   zero-width chars, base64 payloads). `services/agent/prompt_guard.py`.
+- **Normalization pre-pass** — regex guards are bypassed by *encoding*, not
+  novel phrasing, so every layer runs against both the raw text and a
+  canonical form (NFKC, zero-width stripped, homoglyphs folded,
+  separator-spliced words like `i-g-n-o-r-e` collapsed), plus decoded
+  base64/hex payloads. Detections found only after normalization are
+  labeled `:normalized` so evasion attempts stay visible. Held to a 0%
+  false-positive gate on a benign corpus that includes near-misses
+  ("ignore the typo…"), hyphenated prose, and non-Latin script.
+- **Approval-time argument scanning** — arguments are scanned *before* an
+  action is parked for approval (an injection-laden action is refused, never
+  offered for approval) and re-scanned at execution time, so what the
+  approval card showed is binding. Actions whose arguments derive from
+  untrusted content carry a `risk_note` the UI renders as a warning above
+  the Approve button.
 - **Connector-level sanitization** — connector and MCP responses pass through
   a regex scrubber that redacts common injection phrases before the LLM
   layer. `services/connectors/base.py`.
@@ -189,18 +203,32 @@ every connector client (covers redirects too):
 
 - Every tool execution, block, pending approval, approval, denial, and
   expiry is written through one code path (`services/audit.py::append_audit_log`).
-- Rows carry a SHA-256 `integrity_hash` over a canonical payload that
-  includes `previous_hash`, forming a per-user chain: field tampering, row
-  deletion, and reordering all surface as mismatches. The hash covers the
+- Rows carry an **HMAC-SHA256** `integrity_hash` over a canonical payload
+  that includes `previous_hash`, forming a per-user chain: field tampering,
+  row deletion, and reordering all surface as mismatches. The hash covers the
   security-semantic columns — `reasoning_chain` (why an action was blocked),
   `detection_method`, and `confidence_score` — so a database-write adversary
   cannot rewrite a "blocked, critical threat" row into a benign one without
   breaking the hash. (`timestamp` is intentionally excluded because DB
   round-trip precision would cause false positives; ordering is instead
-  protected by the `previous_hash` chain.)
+  protected by the `previous_hash` chain plus a monotonic per-user `seq`.)
+- **The key is the threat model.** The hash is keyed with `AUDIT_HMAC_KEY`
+  (derived from `ENCRYPTION_KEY` when unset). The guarantee is precisely:
+  *an attacker who can write to the database but does not hold the key
+  cannot forge history.* An unkeyed digest gave no such guarantee — anyone
+  with DB write access could recompute the whole chain. Store the key
+  separately from the database and its backups, or the guarantee is void.
+  Set it before the first write: there is no key versioning.
+- **Legacy rows.** Entries written before this upgrade carry the old unkeyed
+  SHA-256. They still verify and are reported as `legacy: true` rather than
+  tampered — a false tamper alarm on the compliance artifact would just
+  teach users to ignore the indicator. Legacy rows are intact but *not*
+  forgery-resistant. Run the whole-table verifier with `--require-hmac` to
+  fail on any row that is not keyed.
 - Verify per-row in the UI (expand a row → integrity check), via
   `GET /api/audit/{id}/verify`, or for the whole table with
-  `python -m scripts.verify_audit_log`.
+  `python -m scripts.verify_audit_log` (add `--require-hmac` once every row
+  post-dates the upgrade).
 - A per-user asyncio lock prevents chain forks under concurrency **within a
   single process** — see deployment caveats below.
 

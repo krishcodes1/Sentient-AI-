@@ -5,7 +5,17 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
 
-from sqlalchemy import JSON, DateTime, Enum, Float, ForeignKey, String, Text, Uuid
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    DateTime,
+    Enum,
+    Float,
+    ForeignKey,
+    String,
+    Text,
+    Uuid,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from core.database import Base
@@ -35,6 +45,17 @@ class AuditLog(Base):
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
         nullable=False,
+        index=True,
+    )
+    # Monotonic per-user sequence number assigned at append time. The hash
+    # chain needs a deterministic order: two rows written in the same
+    # millisecond make ORDER BY timestamp ambiguous, which both weakens
+    # verification and can produce spurious chain failures. Nullable because
+    # rows written before this column existed have no seq (those are also
+    # the rows carrying legacy unkeyed hashes); every new write sets it.
+    seq: Mapped[Optional[int]] = mapped_column(
+        BigInteger,
+        nullable=True,
         index=True,
     )
     connector_name: Mapped[str] = mapped_column(
