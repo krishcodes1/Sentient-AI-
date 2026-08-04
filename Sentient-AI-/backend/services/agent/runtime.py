@@ -9,7 +9,7 @@ import json
 import re
 import secrets
 from collections import OrderedDict
-from collections.abc import AsyncGenerator, Awaitable
+from collections.abc import AsyncGenerator, Awaitable, Coroutine
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
@@ -178,6 +178,41 @@ def _stored_to_pending(action: StoredAction) -> PendingApproval:
         conversation_id=action.conversation_id,
         risk_note=action.risk_note,
     )
+
+
+# The event loop holds only a WEAK reference to a running task, so a task
+# nobody keeps can be garbage-collected mid-await and simply never finish.
+# Detached work is parked here until it completes.
+_BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
+
+
+def _spawn_detached(coro: Coroutine[Any, Any, None]) -> None:
+    """Fire ``coro`` without awaiting it, keeping it alive until it ends."""
+    task = asyncio.create_task(coro)
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+
+
+async def _run_orphaned_callback(
+    on_orphaned: Callable[[AgentResponse], Awaitable[None]],
+    response: AgentResponse,
+) -> None:
+    """Await the orphaned-turn callback with its failures kept visible.
+
+    Two failure modes vanish without this wrapper, and both leave a turn
+    whose side effects ALREADY happened (an email actually sent) missing
+    from the transcript. ``asyncio.create_task`` accepts a coroutine only
+    and raises TypeError on any other awaitable, and the caller below is a
+    done-callback — the loop's exception handler swallows what is raised
+    there, so a callback returning a Future or a custom ``__await__``
+    object would drop the persistence with no traceback tied to a request.
+    An exception raised *inside* the callback is the same story: on a task
+    nobody retrieves, it surfaces only as a GC-time warning, if at all.
+    """
+    try:
+        await on_orphaned(response)
+    except Exception as exc:
+        logger.error("orphaned_turn_persist_failed", error=str(exc))
 
 
 # ---------------------------------------------------------------------------
@@ -1007,7 +1042,9 @@ class AgentRuntime:
         actually sent) still happen. The callback is the caller's chance to
         persist the finished turn so the transcript records those effects;
         without it, a reload would show no reply and the model would happily
-        repeat the side effect on retry.
+        repeat the side effect on retry. Any awaitable return is accepted,
+        and a failure inside the callback is logged rather than discarded —
+        see :func:`_run_orphaned_callback`.
         """
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
@@ -1088,7 +1125,9 @@ class AgentRuntime:
                         )
                         return
                     if on_orphaned is not None:
-                        asyncio.create_task(on_orphaned(t.result()))
+                        _spawn_detached(
+                            _run_orphaned_callback(on_orphaned, t.result())
+                        )
 
                 task.add_done_callback(_observe)
 
