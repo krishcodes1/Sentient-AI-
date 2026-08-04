@@ -178,7 +178,17 @@ class CanvasConnector(BaseConnector):
                 "refresh_token": self._refresh_token,
             },
         )
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            # A refused refresh means the grant is gone (revoked, or the
+            # refresh token itself expired) and only re-authorization fixes
+            # it. Left as a raw HTTPStatusError it would reach
+            # BaseConnector.execute as an unclassified upstream failure and
+            # be reported as "Canvas is broken".
+            raise AuthenticationError(
+                f"Canvas token refresh failed: {exc.response.status_code}"
+            ) from exc
         data = resp.json()
         self._access_token = data["access_token"]
         self._refresh_token = data.get("refresh_token", self._refresh_token)

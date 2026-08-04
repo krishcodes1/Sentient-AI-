@@ -266,14 +266,28 @@ class BaseConnector(ABC):
 
         try:
             raw = await self._execute_action(action, params)
-        except (UserConfirmationRequired, HardBlockError):
+        except (UserConfirmationRequired, HardBlockError, AuthenticationError):
+            # These three carry semantics the executor branches on
+            # (ConnectorToolExecutor._dispatch): approval, permanent block,
+            # and "re-auth needed". Collapsing them into ConnectorError would
+            # strand the caller with an undifferentiated failure — an
+            # AuthenticationError raised inside _execute_action (e.g. a
+            # refresh attempted with no refresh token) must survive too.
             raise
         except httpx.TimeoutException:
             raise ConnectorError(f"Request timed out after {self._timeout}s")
         except httpx.HTTPStatusError as exc:
-            raise ConnectorError(
-                f"HTTP {exc.response.status_code} from {self.name}: {exc.response.text[:300]}"
+            detail = (
+                f"HTTP {exc.response.status_code} from {self.name}: "
+                f"{exc.response.text[:300]}"
             )
+            # 401/403 means the stored credentials are expired, revoked, or
+            # missing a scope — the user has to re-authorize. An upstream
+            # outage is not fixable by the user, so the two must not share an
+            # exception type or the UI can never offer the re-auth prompt.
+            if exc.response.status_code in (401, 403):
+                raise AuthenticationError(detail) from exc
+            raise ConnectorError(detail)
         except Exception as exc:
             self._log.error("connector_execute_error", action=action, error=str(exc))
             raise ConnectorError(str(exc)) from exc

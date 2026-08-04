@@ -173,7 +173,15 @@ class GoogleWorkspaceConnector(BaseConnector):
                 "refresh_token": self._refresh_token,
             },
         )
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            # Google answers a revoked or expired grant with 400
+            # invalid_grant. That is a re-auth prompt, not an outage, so it
+            # must not reach BaseConnector.execute as a bare HTTPStatusError.
+            raise AuthenticationError(
+                f"Google token refresh failed: {exc.response.status_code}"
+            ) from exc
         data = resp.json()
         self._access_token = data["access_token"]
 
@@ -216,6 +224,51 @@ class GoogleWorkspaceConnector(BaseConnector):
             messages.append(detail)
         return messages
 
+    # Order matters: the whole tree is searched for text/plain before
+    # text/html is considered at all, so a plain part buried three levels
+    # deep still wins over a top-level HTML alternative.
+    _BODY_MIME_PREFERENCE: tuple[str, ...] = ("text/plain", "text/html")
+
+    @staticmethod
+    def _decode_part_data(part: dict[str, Any]) -> str:
+        """Decode a MIME part's base64url body, tolerating missing padding."""
+        encoded = part.get("body", {}).get("data", "")
+        if not encoded:
+            return ""
+        return base64.urlsafe_b64decode(encoded + "==").decode("utf-8", errors="replace")
+
+    @classmethod
+    def _find_part(cls, part: dict[str, Any], mime_type: str) -> str:
+        """Depth-first search for the first *mime_type* part carrying data."""
+        if part.get("mimeType") == mime_type:
+            decoded = cls._decode_part_data(part)
+            if decoded:
+                return decoded
+        for child in part.get("parts", []):
+            found = cls._find_part(child, mime_type)
+            if found:
+                return found
+        return ""
+
+    @classmethod
+    def _extract_body(cls, payload: dict[str, Any]) -> str:
+        """Pull the readable text out of a Gmail ``payload`` MIME tree.
+
+        The walk has to recurse: Gmail wraps the text/plain part in a
+        multipart/alternative child as soon as the message carries an
+        attachment or is multipart/mixed, so scanning only the top level of
+        ``payload["parts"]`` returns an empty body for most real mail while
+        subject/from/snippet still populate — a silent truncation the caller
+        cannot detect. text/html is accepted only as a last resort: markup is
+        worse to read than plain text but far better than nothing, and the
+        body is sanitized by PromptGuard either way.
+        """
+        for mime_type in cls._BODY_MIME_PREFERENCE:
+            body = cls._find_part(payload, mime_type)
+            if body:
+                return body
+        return ""
+
     async def get_message(self, message_id: str) -> dict[str, Any]:
         """Fetch a single Gmail message by ID with content sanitization."""
         raw = await self._gapi_get(
@@ -226,17 +279,7 @@ class GoogleWorkspaceConnector(BaseConnector):
         headers_list = raw.get("payload", {}).get("headers", [])
         header_map = {h["name"].lower(): h["value"] for h in headers_list}
 
-        body_data = ""
-        payload = raw.get("payload", {})
-        # Try plain text part first
-        for part in payload.get("parts", [payload]):
-            if part.get("mimeType") == "text/plain":
-                encoded = part.get("body", {}).get("data", "")
-                if encoded:
-                    body_data = base64.urlsafe_b64decode(encoded + "==").decode(
-                        "utf-8", errors="replace"
-                    )
-                    break
+        body_data = self._extract_body(raw.get("payload", {}))
 
         # Sanitize email body before returning
         sanitized_body, _ = PromptGuard.scan(body_data)
@@ -263,29 +306,35 @@ class GoogleWorkspaceConnector(BaseConnector):
     ) -> dict[str, Any]:
         """Send an email, gated behind explicit user confirmation.
 
-        **Requires USER_CONFIRM**. Without confirmation a draft is created
-        so the user can review the exact content, and the call raises
-        ``UserConfirmationRequired``. With confirmation the message is sent
-        directly via ``messages.send`` — no second draft is created.
+        **Requires USER_CONFIRM**. Without confirmation nothing leaves the
+        process: the preview handed to ``UserConfirmationRequired`` is built
+        from the arguments, and the message is only composed and sent once
+        ``user_confirmed`` is set.
+
+        No Gmail draft is staged for the preview, deliberately. The approval
+        flow re-invokes this method with the *same* arguments plus
+        ``user_confirmed=True`` (``ConnectorToolExecutor._dispatch``), so a
+        draft id minted here cannot survive the round-trip and the confirmed
+        send could never adopt it; and on denial nothing calls the connector
+        at all, so there is no point where a staged draft could be cleaned
+        up. Either way the draft would be orphaned in the user's real
+        mailbox — on approval alongside the sent copy, on denial forever.
         """
+        if not user_confirmed:
+            preview = body if len(body) <= 500 else body[:500] + "..."
+            raise UserConfirmationRequired(
+                action="send_email",
+                details=(
+                    f"Send email to '{to}' with subject '{subject}'?\n"
+                    f"Body:\n{preview}\n"
+                    "Nothing has been created or sent yet; confirm to send."
+                ),
+            )
+
         mime = MIMEText(body)
         mime["to"] = to
         mime["subject"] = subject
         raw_msg = base64.urlsafe_b64encode(mime.as_bytes()).decode()
-
-        if not user_confirmed:
-            draft_resp = await self._gapi_post(
-                "https://gmail.googleapis.com/gmail/v1/users/me/drafts",
-                json_body={"message": {"raw": raw_msg}},
-            )
-            raise UserConfirmationRequired(
-                action="send_email",
-                details=(
-                    f"Draft created (id={draft_resp.get('id')}). "
-                    f"Send email to '{to}' with subject '{subject}'? "
-                    "Please confirm to proceed."
-                ),
-            )
 
         send_resp = await self._gapi_post(
             "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
