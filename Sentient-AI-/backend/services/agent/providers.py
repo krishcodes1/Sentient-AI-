@@ -77,6 +77,18 @@ class LLMProvider(abc.ABC):
         tools: list[dict[str, Any]] | None = None,
     ): ...
 
+    async def aclose(self) -> None:
+        """Release owned HTTP resources. Called when the runtime evicts a
+        cached provider instance; default is a no-op for providers that
+        own nothing."""
+
+
+# Outbound request budget for every provider. The SDK defaults are ~10
+# minutes with retries — long enough that one hung provider pins server
+# resources (a DB pool connection, an SSE stream) for the whole stretch.
+_REQUEST_TIMEOUT_SECONDS = 120.0
+_MAX_RETRIES = 2
+
 
 # ---------------------------------------------------------------------------
 # Anthropic Claude
@@ -88,8 +100,15 @@ class AnthropicProvider(LLMProvider):
 
     def __init__(self, api_key: str, model: str = "claude-sonnet-4-20250514"):
         import anthropic
-        self._client = anthropic.AsyncAnthropic(api_key=api_key)
+        self._client = anthropic.AsyncAnthropic(
+            api_key=api_key,
+            timeout=_REQUEST_TIMEOUT_SECONDS,
+            max_retries=_MAX_RETRIES,
+        )
         self._model = model
+
+    async def aclose(self) -> None:
+        await self._client.close()
 
     @staticmethod
     def _convert_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
@@ -186,12 +205,19 @@ class OpenAICompatibleProvider(LLMProvider):
         provider_name: str = "openai",
     ):
         import openai
-        kwargs: dict[str, Any] = {"api_key": api_key}
+        kwargs: dict[str, Any] = {
+            "api_key": api_key,
+            "timeout": _REQUEST_TIMEOUT_SECONDS,
+            "max_retries": _MAX_RETRIES,
+        }
         if base_url:
             kwargs["base_url"] = base_url
         self._client = openai.AsyncOpenAI(**kwargs)
         self._model = model
         self._provider_name = provider_name
+
+    async def aclose(self) -> None:
+        await self._client.close()
 
     @staticmethod
     def _convert_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
@@ -212,6 +238,8 @@ class OpenAICompatibleProvider(LLMProvider):
     @staticmethod
     def _parse_tool_calls(choices: Any) -> list[ToolCall]:
         calls: list[ToolCall] = []
+        if not choices:
+            return calls
         msg = choices[0].message
         if msg.tool_calls:
             for tc in msg.tool_calls:
@@ -235,6 +263,15 @@ class OpenAICompatibleProvider(LLMProvider):
             raise ProviderError(
                 self._provider_name, getattr(exc, "status_code", None), str(exc)[:300]
             ) from None
+        # An empty choices array is a real occurrence during provider
+        # outages/content filtering; without this guard it surfaces as an
+        # IndexError → generic 500 instead of the designed 502.
+        if not resp.choices:
+            raise ProviderError(
+                self._provider_name,
+                None,
+                "Provider returned an empty response (no choices)",
+            )
         choice = resp.choices[0]
         return LLMResponse(
             content=choice.message.content or "",
@@ -325,8 +362,11 @@ class GeminiProvider(LLMProvider):
         # Key travels in a header, never in the URL, so it cannot leak into
         # logs or tracebacks.
         self._client = httpx.AsyncClient(
-            timeout=120.0, headers={"x-goog-api-key": api_key}
+            timeout=_REQUEST_TIMEOUT_SECONDS, headers={"x-goog-api-key": api_key}
         )
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
 
     def _build_url(self, action: str = "generateContent") -> str:
         return f"{self._base_url}/models/{self._model}:{action}"
@@ -447,7 +487,12 @@ class OllamaProvider(LLMProvider):
     def __init__(self, base_url: str = "http://localhost:11434", model: str = "llama3.2"):
         self._base_url = base_url.rstrip("/")
         self._model = model
-        self._client = httpx.AsyncClient(base_url=self._base_url, timeout=120.0)
+        self._client = httpx.AsyncClient(
+            base_url=self._base_url, timeout=_REQUEST_TIMEOUT_SECONDS
+        )
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
 
     @staticmethod
     def _convert_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:

@@ -348,7 +348,6 @@ class ContextManager:
         self.window_size = window_size
         self.summary_trigger = summary_trigger
         self.max_tool_result_chars = max_tool_result_chars
-        self._summaries: dict[str, list[dict[str, Any]]] = {}  # conversation_id -> summaries
         self._cache = SemanticCache()
 
     def get_budget(
@@ -469,16 +468,13 @@ class ContextManager:
         old_msgs = conv_msgs[:-self.window_size]
         recent_msgs = conv_msgs[-self.window_size:]
 
-        # Summarize old messages
+        # Summarize old messages. The summary is returned inline in the
+        # message list — deliberately not accumulated on the instance:
+        # this ContextManager lives on the process-wide runtime, and a
+        # per-turn append (each entry re-covering the whole tail of the
+        # conversation) was an unbounded memory leak.
         if len(old_msgs) >= 4:
             summary = summarize_messages(old_msgs)
-
-            # Store summary for this conversation
-            if conversation_id:
-                if conversation_id not in self._summaries:
-                    self._summaries[conversation_id] = []
-                self._summaries[conversation_id].append(summary)
-
             return system_msgs + [summary] + recent_msgs
 
         return system_msgs + recent_msgs

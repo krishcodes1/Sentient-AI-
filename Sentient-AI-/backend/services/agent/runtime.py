@@ -8,6 +8,7 @@ import asyncio
 import json
 import re
 import secrets
+from collections import OrderedDict
 from collections.abc import AsyncGenerator, Awaitable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -332,10 +333,18 @@ class AgentRuntime:
         self._approvals: ApprovalStore = approval_store or InMemoryApprovalStore()
         self._approval_ttl_minutes: int = getattr(config, "APPROVAL_TTL_MINUTES", 15)
         # Per-user provider overrides (Settings page) are built lazily and
-        # cached per (provider, model) pair.
-        self._provider_cache: dict[tuple[str, str], LLMProvider] = {}
+        # cached per (provider, model) pair. Bounded LRU: the model string
+        # is user-supplied, so an unbounded dict is a slow resource leak
+        # (each Gemini/Ollama provider owns an httpx client) that any
+        # authenticated user could grow by cycling model names.
+        self._provider_cache: "OrderedDict[tuple[str, str], LLMProvider]" = (
+            OrderedDict()
+        )
         # Upper bound on chained tool rounds within a single chat turn.
         self._max_tool_rounds: int = int(getattr(config, "MAX_TOOL_ROUNDS", 5) or 5)
+
+    # Cap on cached per-user provider instances (see _provider_cache).
+    _PROVIDER_CACHE_MAX = 32
 
     # ------------------------------------------------------------------
     # Message / schema helpers
@@ -378,6 +387,7 @@ class AgentRuntime:
         cache_key = (name, model_name)
         cached = self._provider_cache.get(cache_key)
         if cached is not None:
+            self._provider_cache.move_to_end(cache_key)
             return cached
 
         key_attr = _PROVIDER_KEY_MAP.get(name)
@@ -400,6 +410,12 @@ class AgentRuntime:
                 ),
             ) from None
         self._provider_cache[cache_key] = provider
+        while len(self._provider_cache) > self._PROVIDER_CACHE_MAX:
+            _evicted_key, evicted = self._provider_cache.popitem(last=False)
+            try:
+                asyncio.get_running_loop().create_task(evicted.aclose())
+            except RuntimeError:  # no running loop (sync context)
+                pass
         return provider
 
     @staticmethod
@@ -788,9 +804,41 @@ class AgentRuntime:
                     )
                     continue
 
-                # 3c. Execute the tool. ``approved=True`` only when the
-                # user's own connector tier auto-approved this write —
-                # standing consent replaces the per-call approval flow.
+                # 3c. Record intent BEFORE the side effect, fail-closed: if
+                # the audit store cannot write "this tool is about to run",
+                # the tool does not run. Auditing after the fact can't be
+                # fail-closed — the email already went out — so this row is
+                # the one whose failure may refuse execution.
+                try:
+                    await self._audit.log(
+                        {
+                            "event": "tool_executing",
+                            "user_id": user_id,
+                            "tool": tc.name,
+                            "arguments": tc.arguments,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        }
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "audit_unavailable_execution_refused",
+                        tool=tc.name,
+                        error=str(exc),
+                    )
+                    reason = "audit log unavailable; execution refused"
+                    blocked_actions.append(
+                        BlockedAction(
+                            tool_name=tc.name,
+                            reason=reason,
+                            policy="audit_required",
+                        )
+                    )
+                    await emit({"type": "blocked", "data": {"tool": tc.name, "reason": reason, "policy": "audit_required"}})
+                    continue
+
+                # Execute the tool. ``approved=True`` only when the user's
+                # own connector tier auto-approved this write — standing
+                # consent replaces the per-call approval flow.
                 await emit({"type": "tool_call", "data": {"name": tc.name}})
                 try:
                     result = await self._executor.execute(
@@ -805,16 +853,28 @@ class AgentRuntime:
                 if not result_scan.get("safe", True):
                     result = {"redacted": True, "reason": result_scan.get("reason")}
 
-                await self._audit.log(
-                    {
-                        "event": "tool_executed",
-                        "user_id": user_id,
-                        "tool": tc.name,
-                        "arguments": tc.arguments,
-                        "result_summary": self._summarize_result(result),
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                    }
-                )
+                # Best-effort: the side effect already happened, so a failed
+                # result row must not fail the turn — that would drop the
+                # tool output from the transcript and invite a duplicate
+                # send on retry. The intent row above already anchors the
+                # audit chain.
+                try:
+                    await self._audit.log(
+                        {
+                            "event": "tool_executed",
+                            "user_id": user_id,
+                            "tool": tc.name,
+                            "arguments": tc.arguments,
+                            "result_summary": self._summarize_result(result),
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        }
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "audit_write_failed_post_execution",
+                        tool=tc.name,
+                        error=str(exc),
+                    )
 
                 # Fold this result into the taint corpus BEFORE the next
                 # tool call is evaluated, so a write in a later round that
@@ -902,6 +962,10 @@ class AgentRuntime:
     # progressive-render effect, never a security window.
     _CONTENT_CHUNK_CHARS = 24
     _CONTENT_CHUNK_DELAY = 0.02
+    # Emit a ``ping`` event after this much event silence, so intermediaries
+    # (nginx's 60s default proxy_read_timeout) never kill an SSE stream
+    # while a slow model round or long tool call produces no bytes.
+    _HEARTBEAT_SECONDS = 15.0
 
     async def stream_chat(
         self,
@@ -912,6 +976,9 @@ class AgentRuntime:
         llm_provider: Optional[str] = None,
         llm_model: Optional[str] = None,
         memory_block: Optional[str] = None,
+        on_orphaned: Optional[
+            Callable[[AgentResponse], Awaitable[None]]
+        ] = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Streaming variant — yields dicts with ``type`` and ``data`` keys.
 
@@ -932,6 +999,15 @@ class AgentRuntime:
         genuinely live (chat() pushes events through the sink while the loop
         runs); the final answer is scanned in full THEN typewriter-streamed,
         so the client never sees unscanned output.
+
+        ``on_orphaned``: invoked (in a detached task) with the completed
+        ``AgentResponse`` when the CONSUMER of this generator goes away
+        mid-turn — a client disconnect closes the generator chain, but the
+        underlying chat task keeps running and its side effects (an email
+        actually sent) still happen. The callback is the caller's chance to
+        persist the finished turn so the transcript records those effects;
+        without it, a reload would show no reply and the model would happily
+        repeat the side effect on retry.
         """
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
@@ -953,38 +1029,74 @@ class AgentRuntime:
             )
         )
 
-        # Drain real-time progress events until chat() finishes, interleaving
-        # queue items with the task's completion.
-        while not task.done() or not queue.empty():
-            try:
-                event = await asyncio.wait_for(queue.get(), timeout=0.25)
-                yield event
-            except asyncio.TimeoutError:
-                continue
-
+        finished = False  # the consumer received the terminal ``done`` event
         try:
-            response = task.result()
-        except ProviderError as exc:
-            yield {"type": "error", "data": {"reason": str(exc)}}
-            yield {"type": "done", "data": {}}
-            return
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.error("stream_chat_failed", error=str(exc))
-            yield {"type": "error", "data": {"reason": "The assistant failed to respond."}}
-            yield {"type": "done", "data": {}}
-            return
+            # Drain real-time progress events until chat() finishes,
+            # interleaving queue items with the task's completion and
+            # emitting heartbeats through long silent stretches.
+            silent = 0.0
+            while not task.done() or not queue.empty():
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=0.25)
+                    silent = 0.0
+                    yield event
+                except asyncio.TimeoutError:
+                    silent += 0.25
+                    if silent >= self._HEARTBEAT_SECONDS:
+                        silent = 0.0
+                        yield {"type": "ping", "data": {}}
+                    continue
 
-        # The final answer is already fully scanned; typewriter it out.
-        content = response.content or ""
-        for i in range(0, len(content), self._CONTENT_CHUNK_CHARS):
-            yield {"type": "content_delta", "data": {"text": content[i : i + self._CONTENT_CHUNK_CHARS]}}
-            if self._CONTENT_CHUNK_DELAY:
-                await asyncio.sleep(self._CONTENT_CHUNK_DELAY)
+            try:
+                response = task.result()
+            except ProviderError as exc:
+                yield {"type": "error", "data": {"reason": str(exc)}}
+                yield {"type": "done", "data": {}}
+                finished = True
+                return
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.error("stream_chat_failed", error=str(exc))
+                yield {"type": "error", "data": {"reason": "The assistant failed to respond."}}
+                yield {"type": "done", "data": {}}
+                finished = True
+                return
 
-        yield {
+            # The final answer is already fully scanned; typewriter it out.
+            content = response.content or ""
+            for i in range(0, len(content), self._CONTENT_CHUNK_CHARS):
+                yield {"type": "content_delta", "data": {"text": content[i : i + self._CONTENT_CHUNK_CHARS]}}
+                if self._CONTENT_CHUNK_DELAY:
+                    await asyncio.sleep(self._CONTENT_CHUNK_DELAY)
+
+            yield self._done_event(response)
+            finished = True
+            return
+        finally:
+            if not finished:
+                # The consumer disconnected mid-turn. Do NOT cancel the chat
+                # task: side-effectful tools may already have run, and
+                # cancelling now could stop the turn between a side effect
+                # and its transcript/audit record. Observe its completion so
+                # the exception is retrieved and the caller can persist.
+                def _observe(t: "asyncio.Task[AgentResponse]") -> None:
+                    if t.cancelled():
+                        return
+                    exc = t.exception()
+                    if exc is not None:
+                        logger.error(
+                            "orphaned_chat_turn_failed", error=str(exc)
+                        )
+                        return
+                    if on_orphaned is not None:
+                        asyncio.create_task(on_orphaned(t.result()))
+
+                task.add_done_callback(_observe)
+
+    def _done_event(self, response: AgentResponse) -> dict[str, Any]:
+        return {
             "type": "done",
             "data": {
-                "content": content,
+                "content": response.content or "",
                 "usage": response.usage,
                 "tool_calls": response.tool_calls,
                 "pending_approvals": [
@@ -1089,6 +1201,35 @@ class AgentRuntime:
                 )
             }
 
+        # Record the approval BEFORE executing, fail-closed. The approval
+        # row was already consumed, so refusing here costs the user a
+        # re-request — but the alternative (execute, then fail the request
+        # on the audit write) leaves a real side effect recorded nowhere.
+        try:
+            await self._audit.log(
+                {
+                    "event": "tool_approved",
+                    "user_id": user_id,
+                    "tool": action.tool_name,
+                    "arguments": action.arguments,
+                    "action_id": action_id,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        except Exception as exc:
+            logger.error(
+                "audit_unavailable_execution_refused",
+                tool=action.tool_name,
+                action_id=action_id,
+                error=str(exc),
+            )
+            return {
+                "error": (
+                    "The audit log is unavailable, so the approved action was "
+                    "NOT executed. Ask the assistant to try again."
+                )
+            }
+
         try:
             result = await self._executor.execute(
                 action.tool_name, action.arguments, user_id, approved=True
@@ -1096,17 +1237,27 @@ class AgentRuntime:
         except Exception as exc:
             result = {"error": str(exc)}
 
-        await self._audit.log(
-            {
-                "event": "tool_approved_and_executed",
-                "user_id": user_id,
-                "tool": action.tool_name,
-                "arguments": action.arguments,
-                "result_summary": self._summarize_result(result),
-                "action_id": action_id,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
-        )
+        # Best-effort: the tool already ran; failing the request now would
+        # consume the approval, hide the result, and record nothing.
+        try:
+            await self._audit.log(
+                {
+                    "event": "tool_approved_and_executed",
+                    "user_id": user_id,
+                    "tool": action.tool_name,
+                    "arguments": action.arguments,
+                    "result_summary": self._summarize_result(result),
+                    "action_id": action_id,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        except Exception as exc:
+            logger.error(
+                "audit_write_failed_post_execution",
+                tool=action.tool_name,
+                action_id=action_id,
+                error=str(exc),
+            )
 
         return {
             "tool": action.tool_name,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import Any, Dict, List, Optional, Union
 
+import asyncio
 import json
 import time
 import uuid
@@ -14,7 +15,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.database import get_db
+from core.database import async_session, get_db
 from core.validation import SafeStr
 from models.connector import ConnectorConfig
 from models.conversation import Conversation, Message, MessageRole
@@ -436,6 +437,13 @@ async def send_message(
     #    gets an empty list and simply chats with the LLM.
     tools, memory_block = await _build_tools_and_memory(request, current_user, db)
 
+    # Release the pooled connection before the LLM turn: committing ends
+    # the transaction, so the minutes a slow provider can take are not
+    # spent pinning one of the pool's connections (which would let ~30
+    # concurrent chats starve every other endpoint). The user message is
+    # durable from here even if the turn fails.
+    await db.commit()
+
     try:
         agent_response = await runtime.chat(
             messages=history,
@@ -505,6 +513,50 @@ def _sse(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
 
 
+# Session factory for persistence that must outlive the request (client
+# disconnected mid-stream). Module-level so tests can substitute their own
+# factory.
+_detached_session_factory = async_session
+
+
+async def _persist_assistant_detached(
+    conversation_id: uuid.UUID,
+    content: str,
+    tool_calls: Optional[list],
+) -> None:
+    """Persist an assistant turn outside any request session.
+
+    Used when the SSE consumer disconnected before the turn was saved: the
+    turn's side effects (tools that executed) already happened, so the
+    transcript must record them — otherwise the rebuilt history would show
+    no reply and the model would repeat the side effect on retry.
+    """
+    try:
+        async with _detached_session_factory() as session:
+            session.add(
+                Message(
+                    conversation_id=conversation_id,
+                    role=MessageRole.assistant,
+                    content=content,
+                    tool_calls=tool_calls or None,
+                )
+            )
+            conversation = await session.get(Conversation, conversation_id)
+            if conversation is not None:
+                conversation.updated_at = datetime.now(timezone.utc)
+            await session.commit()
+        logger.info(
+            "assistant_turn_persisted_after_disconnect",
+            conversation_id=str(conversation_id),
+        )
+    except Exception as exc:  # pragma: no cover - depends on DB failure
+        logger.error(
+            "assistant_turn_persist_failed_after_disconnect",
+            conversation_id=str(conversation_id),
+            error=str(exc),
+        )
+
+
 @router.post("/conversations/{conversation_id}/messages/stream")
 async def stream_message(
     conversation_id: uuid.UUID,
@@ -568,54 +620,101 @@ async def stream_message(
     user_model = current_user.llm_model
     user_id_str = str(current_user.id)
 
+    # Release the pooled connection for the duration of the stream: the
+    # session object stays usable (persistence below reacquires briefly),
+    # but the minutes-long LLM turn no longer pins a pool slot. Also makes
+    # the user message durable even if the stream dies.
+    await db.commit()
+
+    async def _persist_orphaned(response) -> None:
+        # The client went away before the turn was saved; record it with a
+        # session of our own so the executed tools aren't lost from history.
+        await _persist_assistant_detached(
+            conv_id, response.content or "", response.tool_calls or None
+        )
+
     async def event_stream():
         yield _sse("user_message", {"user_message": user_message_out})
 
         final_content = ""
         tool_calls_payload: list[dict[str, Any]] = []
+        turn_done = False
+        saved_confirmed = False
         try:
-            async for event in runtime.stream_chat(
-                messages=history,
-                tools=tools,
-                user_id=user_id_str,
-                conversation_id=str(conv_id),
-                llm_provider=user_provider,
-                llm_model=user_model,
-                memory_block=memory_block,
-            ):
-                etype = event.get("type", "message")
-                data = event.get("data", {})
-                if etype == "done":
-                    final_content = data.get("content", "")
-                    tool_calls_payload = data.get("tool_calls", []) or []
-                yield _sse(etype, data)
-        except Exception:  # pragma: no cover - defensive
-            yield _sse("error", {"reason": "The assistant failed to respond."})
-            yield _sse("done", {})
-            return
+            try:
+                async for event in runtime.stream_chat(
+                    messages=history,
+                    tools=tools,
+                    user_id=user_id_str,
+                    conversation_id=str(conv_id),
+                    llm_provider=user_provider,
+                    llm_model=user_model,
+                    memory_block=memory_block,
+                    on_orphaned=_persist_orphaned,
+                ):
+                    etype = event.get("type", "message")
+                    data = event.get("data", {})
+                    if etype == "ping":
+                        # SSE comment frame: keeps proxies from timing the
+                        # stream out during silent stretches; ignored by
+                        # spec-compliant parsers (and ours).
+                        yield ": ping\n\n"
+                        continue
+                    if etype == "done":
+                        final_content = data.get("content", "")
+                        tool_calls_payload = data.get("tool_calls", []) or []
+                        turn_done = True
+                    yield _sse(etype, data)
+            except GeneratorExit:
+                raise
+            except Exception:  # pragma: no cover - defensive
+                yield _sse("error", {"reason": "The assistant failed to respond."})
+                yield _sse("done", {})
+                return
 
-        # Persist the assistant message. The request DB session is still
-        # open here — FastAPI finalizes yield-dependencies only after the
-        # streaming response body is exhausted — and using it means the
-        # write respects the same session (and test overrides) as the rest
-        # of the request, committing atomically with the user message.
-        try:
-            assistant = Message(
-                conversation_id=conv_id,
-                role=MessageRole.assistant,
-                content=final_content,
-                tool_calls=tool_calls_payload or None,
-            )
-            db.add(assistant)
-            conversation.updated_at = datetime.now(timezone.utc)
-            await db.flush()
-            await db.refresh(assistant)
-            assistant_out = MessageResponse.model_validate(assistant).model_dump()
-            yield _sse("saved", {"assistant_message": assistant_out})
-        except Exception:  # pragma: no cover - defensive
-            # The content already streamed; a persistence failure just means
-            # the client should refetch the thread on next load.
-            yield _sse("saved", {"assistant_message": None})
+            # Persist the assistant message. The request DB session is still
+            # open here — FastAPI finalizes yield-dependencies only after the
+            # streaming response body is exhausted — and using it means the
+            # write respects the same session (and test overrides) as the
+            # rest of the request.
+            try:
+                assistant = Message(
+                    conversation_id=conv_id,
+                    role=MessageRole.assistant,
+                    content=final_content,
+                    tool_calls=tool_calls_payload or None,
+                )
+                db.add(assistant)
+                conversation.updated_at = datetime.now(timezone.utc)
+                await db.flush()
+                await db.refresh(assistant)
+                assistant_out = MessageResponse.model_validate(assistant).model_dump()
+            except Exception:  # pragma: no cover - defensive
+                # The content already streamed; a persistence failure just
+                # means the client should refetch the thread on next load
+                # (the finally below retries with a detached session). Roll
+                # back so a half-flushed write can't ALSO commit at request
+                # teardown and duplicate the detached retry.
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
+                yield _sse("saved", {"assistant_message": None})
+            else:
+                yield _sse("saved", {"assistant_message": assistant_out})
+                saved_confirmed = True
+        finally:
+            if turn_done and not saved_confirmed:
+                # The consumer disconnected between the turn completing and
+                # the saved frame being delivered. The request session's
+                # write is rolled back with the aborted request, so persist
+                # with a detached session instead. (Disconnects BEFORE the
+                # done event are covered by on_orphaned above.)
+                asyncio.create_task(
+                    _persist_assistant_detached(
+                        conv_id, final_content, tool_calls_payload
+                    )
+                )
 
     return StreamingResponse(
         event_stream(),
@@ -680,6 +779,10 @@ async def _resume_after_approval(
         return None
 
     tools, memory_block = await _build_tools_and_memory(request, current_user, db)
+    # Return the pooled connection before the (potentially minutes-long)
+    # resumed turn; everything written so far — the decision message — is
+    # durable from here.
+    await db.commit()
     agent_response = await runtime.chat(
         messages=history,
         tools=tools,
@@ -740,6 +843,11 @@ async def decide_approval(
     shows the outcome and the LLM's subsequent turns — whose history is
     rebuilt from Message rows — know the action ran.
     """
+    # Release the request's pooled connection before the decision: an
+    # approval executes the real tool (connector/MCP HTTP) and then runs a
+    # resumed agent turn, neither of which needs this session.
+    await db.commit()
+
     if body.approved:
         result = await runtime.approve_action(action_id, str(current_user.id))
     else:
