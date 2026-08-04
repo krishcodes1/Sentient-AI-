@@ -287,9 +287,14 @@ Tracked honestly so nobody mistakes this for finished security work:
   connector classes) is the intended replacement.
 - **Admin role** — `admin_only` actions are blocked for everyone because the
   User model has no role column yet.
-- **Migrations** — schema is created and migrated with inline additive SQL at
-  startup by design (Alembic deferred); Alembic should own this before
-  serious production use.
+- **Migrations** — Alembic owns the schema (`backend/alembic/`). The
+  production container runs `alembic upgrade head` before starting the
+  server, and startup also upgrades so a bare `uvicorn main:app` dev run
+  works unchanged. An EXISTING deployment must be stamped once
+  (`alembic stamp 0001_baseline`) before its first upgrade — see
+  `backend/alembic/README.md`. Remaining gap: the upgrade runs in-process
+  as well as in the container CMD, so a multi-worker deployment could race
+  it; run the migration as its own deploy step if you scale out.
 - **X-Forwarded-For trust** — XFF is honored only when the direct peer is
   inside `TRUSTED_PROXIES` (see "Rate limiting" above), so a directly
   reachable client cannot spoof its way into fresh rate-limit buckets. The

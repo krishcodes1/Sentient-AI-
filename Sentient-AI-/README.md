@@ -112,6 +112,18 @@ Production checklist:
   that proxy should be reachable from the internet.
 - `/docs`, `/redoc`, and `/openapi.json` are disabled automatically when
   `ENVIRONMENT=production`.
+- **Upgrading an existing deployment**: the schema is managed by Alembic
+  now. A database created before this change already has the tables, so
+  stamp it once before the new startup path runs — otherwise the baseline
+  migration tries to `CREATE TABLE users` and fails on every boot:
+
+  ```bash
+  cd Sentient-AI-/backend && alembic stamp 0001_baseline
+  ```
+
+  Fresh databases need nothing: `alembic upgrade head` runs automatically
+  at startup and in the production container's entrypoint. See
+  [backend/alembic/README.md](Sentient-AI-/backend/alembic/README.md).
 
 ---
 

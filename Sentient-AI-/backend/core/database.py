@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator
+from pathlib import Path
 
 import structlog
 from sqlalchemy.ext.asyncio import (
@@ -46,63 +47,55 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             raise
 
 
+def _run_alembic_upgrade() -> None:
+    """Bring the database to the latest revision.
+
+    Synchronous on purpose: alembic's entry point owns an event loop of its
+    own (env.py calls asyncio.run), so this must never be awaited directly
+    from the running loop — callers use asyncio.to_thread.
+    """
+    from alembic import command
+    from alembic.config import Config
+
+    cfg = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+    # The .ini's script_location is relative to the backend directory; make
+    # it absolute so migrations work regardless of the process's cwd.
+    cfg.set_main_option(
+        "script_location",
+        str(Path(__file__).resolve().parents[1] / "alembic"),
+    )
+    # The app's configured database, never a second URL that could drift.
+    cfg.attributes["sqlalchemy_url"] = settings.DATABASE_URL
+    cfg.attributes["configure_logger"] = False
+    command.upgrade(cfg, "head")
+
+
 async def init_db(retries: int = 10, delay: float = 2.0) -> None:
-    """Create all tables that don't yet exist, and run inline additive
-    migrations (development convenience; production should use Alembic).
+    """Wait for the database, migrate it to head, then apply data fixes.
+
+    Schema is owned entirely by Alembic (backend/alembic/versions). Running
+    the upgrade here keeps a single-worker deployment and a bare
+    ``uvicorn main:app`` dev run working with no extra step; the container
+    CMD also runs it before the server starts, which is the path that
+    matters for a multi-worker deploy (two workers racing the same
+    migration is the thing to avoid — see alembic/README.md).
 
     Retries while the database is still coming up. Postgres' ``pg_isready``
     healthcheck can report ready a moment before it accepts password-
     authenticated TCP connections, so a fresh ``docker compose up`` would
     otherwise lose the race and start the API without a database on first boot.
     """
-    from sqlalchemy import text
+    import re
 
-    # SQLAlchemy's create_all() only creates new tables, it does not add
-    # columns to existing ones. ``ADD COLUMN IF NOT EXISTS`` is idempotent on
-    # Postgres so this is safe to run on every startup. NOT NULL columns
-    # include a DEFAULT so existing rows backfill cleanly.
-    migrations = [
-        "ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS previous_hash VARCHAR(64)",
-        # Deterministic per-user chain order key; NULL marks pre-seq (legacy
-        # unkeyed-hash) rows, so no backfill — the verifier treats NULL as
-        # "before every numbered row".
-        "ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS seq BIGINT",
-        # ADD COLUMN does not create the index the model declares (index=True),
-        # and create_all() will not add an index to a pre-existing table — so
-        # an upgraded deployment would do an unindexed scan for the chain head
-        # on every audit append. Name matches SQLAlchemy's default so a fresh
-        # create_all() and an upgrade converge on the same schema.
-        "CREATE INDEX IF NOT EXISTS ix_audit_logs_seq ON audit_logs (seq)",
-        # New connector kind for MCP servers (PG 12+ allows ADD VALUE in a
-        # transaction as long as the value isn't used in the same one).
-        "ALTER TYPE connector_type ADD VALUE IF NOT EXISTS 'mcp'",
-        "ALTER TABLE users ADD COLUMN IF NOT EXISTS name VARCHAR(255)",
-        "ALTER TABLE users ADD COLUMN IF NOT EXISTS default_permission_tier VARCHAR(32) NOT NULL DEFAULT 'user_confirm'",
-        "ALTER TABLE users ADD COLUMN IF NOT EXISTS rate_limit INTEGER NOT NULL DEFAULT 60",
-        "ALTER TABLE users ADD COLUMN IF NOT EXISTS llm_provider VARCHAR(32) NOT NULL DEFAULT 'anthropic'",
-        "ALTER TABLE users ADD COLUMN IF NOT EXISTS llm_model VARCHAR(128) NOT NULL DEFAULT 'claude-sonnet-4-20250514'",
-        "ALTER TABLE users ADD COLUMN IF NOT EXISTS memory_enabled BOOLEAN NOT NULL DEFAULT true",
-        # JWT revocation epoch; pre-upgrade rows backfill to 0, matching the
-        # implicit epoch of tokens minted before the claim existed.
-        "ALTER TABLE users ADD COLUMN IF NOT EXISTS token_epoch INTEGER NOT NULL DEFAULT 0",
-        # The memories table itself is created by create_all; these guard the
-        # case where an older deployment created it before a column existed.
-        "ALTER TABLE memories ADD COLUMN IF NOT EXISTS source VARCHAR(16) NOT NULL DEFAULT 'user'",
-        "ALTER TABLE memories ADD COLUMN IF NOT EXISTS source_conversation_id UUID",
-        # Warning shown on the approval card when an action's arguments were
-        # shaped by untrusted external content. Nullable: rows parked before
-        # this column existed simply carry no note.
-        "ALTER TABLE pending_actions ADD COLUMN IF NOT EXISTS risk_note TEXT",
-    ]
+    from sqlalchemy import text
 
     # Accounts still on the historical hardcoded provider default never chose
     # it (choosing in Settings had no effect until per-user providers were
-    # wired), so move them to the provider this server actually runs. Values
-    # come from admin config; validate anyway since they are inlined into SQL.
-    import re
-
-    from core.config import settings
-
+    # wired), so move them to the provider this server actually runs. This
+    # stays here rather than becoming a migration: the target values come
+    # from runtime settings, so it cannot be expressed as static DDL. Values
+    # come from admin config; validate anyway since they are inlined in SQL.
+    data_fixes: list[str] = []
     if (settings.LLM_PROVIDER, settings.LLM_MODEL) != (
         "anthropic",
         "claude-sonnet-4-20250514",
@@ -110,7 +103,7 @@ async def init_db(retries: int = 10, delay: float = 2.0) -> None:
         re.fullmatch(r"[A-Za-z0-9._:-]+", v)
         for v in (settings.LLM_PROVIDER, settings.LLM_MODEL)
     ):
-        migrations.append(
+        data_fixes.append(
             "UPDATE users SET "
             f"llm_provider = '{settings.LLM_PROVIDER}', "
             f"llm_model = '{settings.LLM_MODEL}' "
@@ -121,22 +114,21 @@ async def init_db(retries: int = 10, delay: float = 2.0) -> None:
     last_exc: Exception | None = None
     for attempt in range(1, retries + 1):
         try:
+            # Connectivity probe first, so a database that is still booting
+            # is retried here rather than surfacing as a migration failure.
             async with engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
-            # The additive migrations use Postgres-specific syntax. Each one
-            # runs in its own transaction and failures are tolerated: on a
-            # fresh database (any backend) create_all already produced the
-            # current schema, so a failed ALTER means there is nothing to do.
-            for statement in migrations:
-                try:
-                    async with engine.begin() as conn:
-                        await conn.execute(text(statement))
-                except Exception as exc:
-                    logger.debug(
-                        "inline_migration_skipped",
-                        statement=statement,
-                        error=str(exc),
-                    )
+                await conn.execute(text("SELECT 1"))
+
+            # Alembic owns the schema. Run in a worker thread: the alembic
+            # env drives its own event loop, which cannot be started from
+            # inside this one.
+            await asyncio.to_thread(_run_alembic_upgrade)
+            logger.info("database_schema_at_head")
+
+            for statement in data_fixes:
+                async with engine.begin() as conn:
+                    await conn.execute(text(statement))
+
             if attempt > 1:
                 logger.info("database_ready_after_retry", attempts=attempt)
             return

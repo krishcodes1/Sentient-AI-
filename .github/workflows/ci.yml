@@ -7,6 +7,59 @@ on:
     branches: [main]
 
 jobs:
+  # Static gates for the backend. Fast and independent of the test jobs, so
+  # a lint or type regression is reported even when the suite is red (and
+  # vice versa). Config lives in Sentient-AI-/backend/pyproject.toml.
+  lint:
+    name: Backend (ruff + mypy)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Sentient-AI-/backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: |
+            Sentient-AI-/backend/requirements.txt
+            Sentient-AI-/backend/requirements-dev.txt
+
+      # Runtime deps too: mypy resolves fastapi/sqlalchemy/pydantic types
+      # from the installed packages, so a lint-only environment would check
+      # strictly less than a developer's does.
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Lint (ruff)
+        run: python -m ruff check --output-format=github .
+
+      # Advisory until the tree has been run through `ruff format` once:
+      # today most files predate the formatter and would be rewritten. This
+      # step makes the drift visible without blocking merges on a
+      # repo-wide reformat.
+      - name: Format check (ruff format)
+        continue-on-error: true
+        run: python -m ruff format --check .
+
+      - name: Type check (mypy)
+        run: python -m mypy .
+
+      # Non-blocking: a CVE disclosed upstream must not stop unrelated work
+      # from merging. Audits the environment that was just installed, so it
+      # covers transitive pins as resolved, not just the direct entries in
+      # requirements.txt.
+      - name: Dependency audit (pip-audit)
+        continue-on-error: true
+        run: |
+          pip install pip-audit
+          pip-audit --progress-spinner off
+
   frontend:
     name: Frontend (build)
     runs-on: ubuntu-latest
@@ -29,6 +82,12 @@ jobs:
       # Runs `tsc -b && vite build` — type check + production build
       - name: Build
         run: npm run build
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm run test
 
   backend:
     name: Backend (pytest)
@@ -97,6 +156,22 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-dev.txt
+
+      # Migrations only ever meet real Postgres here: SQLite renders native
+      # ENUMs as VARCHAR, so the SQLite migration tests cannot prove the enum
+      # types (including connector_type's 'mcp' value) come out right.
+      # `alembic check` then fails if the models have drifted ahead of the
+      # migrations — the silent divergence the old inline-SQL list allowed.
+      - name: Migrate and check for model drift
+        env:
+          DATABASE_URL: postgresql+asyncpg://test:test@localhost:5432/test
+          SECRET_KEY: ci-only-secret-key-long-enough-to-pass-validation
+          # Decodes to exactly 32 bytes, as the settings validator requires.
+          # CI-only throwaway: it encrypts nothing that outlives the job.
+          ENCRYPTION_KEY: Y2ktb25seS1rZXktbm90LWEtcmVhbC1zZWNyZXQtMzI=
+        run: |
+          python -m alembic upgrade head
+          python -m alembic check
 
       - name: Run tests
         run: python -m pytest tests/ -v
