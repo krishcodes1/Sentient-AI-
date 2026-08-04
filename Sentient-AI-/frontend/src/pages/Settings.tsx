@@ -1,10 +1,19 @@
 import { useEffect, useState } from "react";
-import { Save, AlertTriangle, Trash2, Loader2, CheckCircle2, XCircle } from "lucide-react";
+import {
+  Save,
+  AlertTriangle,
+  Trash2,
+  Loader2,
+  CheckCircle2,
+  XCircle,
+  Download,
+} from "lucide-react";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import type { User } from "@/types";
 import {
   changePassword,
   deleteAccount,
+  exportAccount,
   getMe,
   logout,
   updateProfile,
@@ -107,6 +116,8 @@ export default function Settings() {
   const [passwordFeedback, setPasswordFeedback] = useState<Feedback>(null);
   const [securityFeedback, setSecurityFeedback] = useState<Feedback>(null);
   const [llmFeedback, setLlmFeedback] = useState<Feedback>(null);
+  const [exporting, setExporting] = useState(false);
+  const [exportFeedback, setExportFeedback] = useState<Feedback>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -199,6 +210,19 @@ export default function Settings() {
       setLlmFeedback({ ok: false, text: (err as Error).message });
     } finally {
       setSavingLlm(false);
+    }
+  };
+
+  const handleExport = async () => {
+    setExporting(true);
+    setExportFeedback(null);
+    try {
+      await exportAccount();
+      setExportFeedback({ ok: true, text: "Export downloaded" });
+    } catch (err) {
+      setExportFeedback({ ok: false, text: (err as Error).message });
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -430,6 +454,34 @@ export default function Settings() {
             <SaveButton label="Save LLM Settings" onClick={handleSaveLlm} saving={savingLlm} />
             <FeedbackLine feedback={llmFeedback} />
           </div>
+        </div>
+      </section>
+
+      {/* Data export */}
+      <section className="rounded-[14px] p-6" style={panelStyle}>
+        <div className="eyebrow mb-1">Your data</div>
+        <h2 className="mb-1">Export everything</h2>
+        <p className="text-sm mb-4" style={{ color: "var(--text-muted)" }}>
+          Download every conversation, memory, connector setting, and audit
+          record on this account as a single JSON file. Connector credentials
+          are excluded — they stay encrypted on the server.
+        </p>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={handleExport}
+            disabled={exporting}
+            className="flex items-center gap-2 px-4 py-2 rounded-[10px] text-sm font-medium disabled:opacity-50"
+            style={inputStyle}
+          >
+            {exporting ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Download className="w-4 h-4" />
+            )}
+            {exporting ? "Preparing…" : "Export my data"}
+          </button>
+          <FeedbackLine feedback={exportFeedback} />
         </div>
       </section>
 

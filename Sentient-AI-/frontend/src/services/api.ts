@@ -488,6 +488,35 @@ export async function deleteAccount(): Promise<void> {
   return request<void>("/auth/account", { method: "DELETE" });
 }
 
+/**
+ * Download every record this account holds as a JSON file. The response is
+ * streamed and can be large, so it goes straight to a blob rather than
+ * through the JSON-parsing `request` helper.
+ */
+export async function exportAccount(): Promise<void> {
+  const token = localStorage.getItem("auth_token");
+  const response = await fetch(`${API_BASE}/auth/export`, {
+    headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+  });
+  if (!response.ok) {
+    if (response.status === 401) handleUnauthorized();
+    throw new ApiError("Export failed. Please try again.", response.status);
+  }
+
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download =
+    response.headers
+      .get("content-disposition")
+      ?.match(/filename="([^"]+)"/)?.[1] ?? "sentientai-export.json";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
 // Memory
 export async function getMemories(): Promise<Memory[]> {
   return request<Memory[]>("/memories/");

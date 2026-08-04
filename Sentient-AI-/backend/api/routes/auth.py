@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import uuid
 from datetime import datetime, timezone
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,6 +28,10 @@ _KNOWN_PROVIDERS = frozenset(
 )
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+# Rows fetched per query while streaming an account export. Module-level so
+# tests can shrink it and actually exercise the multi-page path.
+_EXPORT_BATCH_SIZE = 500
 
 PermissionTierLiteral = Literal[
     "auto_approve", "user_confirm", "admin_only", "hard_blocked"
@@ -266,6 +272,192 @@ async def update_settings(
     await db.flush()
     await db.refresh(current_user)
     return current_user
+
+
+@router.get("/export")
+async def export_account(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    """Download everything this account holds, as one JSON document.
+
+    Streamed and fetched in batches rather than assembled in memory: an
+    account's transcript and audit chain are the two tables that grow
+    without bound, and a personal-data export is exactly when they are
+    largest.
+
+    Connector credentials are deliberately excluded. They are stored
+    encrypted and are re-enterable secrets belonging to third parties;
+    putting them in a file that lands in the user's Downloads folder would
+    undo the reason they are encrypted at rest.
+    """
+    from models.audit import AuditLog
+    from models.connector import ConnectorConfig
+    from models.conversation import Conversation, Message
+    from models.memory import Memory
+
+    BATCH = _EXPORT_BATCH_SIZE
+
+    def _json(value: object) -> str:
+        return json.dumps(value, default=str)
+
+    async def _stream_table(model, order_col, label: str, to_dict):
+        """Yield one JSON array of rows, paged by primary-key order."""
+        yield f'"{label}":['
+        offset = 0
+        first = True
+        while True:
+            rows = (
+                (
+                    await db.execute(
+                        select(model)
+                        .where(model.user_id == current_user.id)
+                        .order_by(order_col)
+                        .offset(offset)
+                        .limit(BATCH)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if not rows:
+                break
+            for row in rows:
+                yield ("" if first else ",") + _json(to_dict(row))
+                first = False
+            offset += len(rows)
+            if len(rows) < BATCH:
+                break
+        yield "]"
+
+    async def _generate():
+        yield "{"
+        yield '"exported_at":' + _json(datetime.now(timezone.utc).isoformat()) + ","
+        yield '"account":' + _json(
+            {
+                "id": str(current_user.id),
+                "email": current_user.email,
+                "name": current_user.name,
+                "created_at": current_user.created_at,
+                "default_permission_tier": current_user.default_permission_tier,
+                "llm_provider": current_user.llm_provider,
+                "llm_model": current_user.llm_model,
+                "memory_enabled": current_user.memory_enabled,
+            }
+        ) + ","
+
+        # Conversations with their transcripts, paged over messages so a
+        # long thread never lands in memory whole.
+        yield '"conversations":['
+        conversations = (
+            (
+                await db.execute(
+                    select(Conversation)
+                    .where(Conversation.user_id == current_user.id)
+                    .order_by(Conversation.created_at)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for idx, conv in enumerate(conversations):
+            head = {
+                "id": str(conv.id),
+                "title": conv.title,
+                "created_at": conv.created_at,
+                "updated_at": conv.updated_at,
+            }
+            yield ("" if idx == 0 else ",") + _json(head)[:-1] + ',"messages":['
+            offset = 0
+            first_msg = True
+            while True:
+                messages = (
+                    (
+                        await db.execute(
+                            select(Message)
+                            .where(Message.conversation_id == conv.id)
+                            .order_by(Message.created_at)
+                            .offset(offset)
+                            .limit(BATCH)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                if not messages:
+                    break
+                for msg in messages:
+                    yield ("" if first_msg else ",") + _json(
+                        {
+                            "role": msg.role.value,
+                            "content": msg.content,
+                            "tool_calls": msg.tool_calls,
+                            "created_at": msg.created_at,
+                        }
+                    )
+                    first_msg = False
+                offset += len(messages)
+                if len(messages) < BATCH:
+                    break
+            yield "]}"
+        yield "],"
+
+        async for chunk in _stream_table(
+            Memory,
+            Memory.created_at,
+            "memories",
+            lambda m: {
+                "content": m.content,
+                "category": m.category.value,
+                "source": m.source.value,
+                "created_at": m.created_at,
+            },
+        ):
+            yield chunk
+        yield ","
+
+        async for chunk in _stream_table(
+            ConnectorConfig,
+            ConnectorConfig.created_at,
+            "connectors",
+            lambda c: {
+                "display_name": c.display_name,
+                "connector_type": c.connector_type.value,
+                "granted_scopes": c.granted_scopes,
+                "permission_tier": c.permission_tier.value,
+                "is_active": c.is_active,
+                "created_at": c.created_at,
+                # credentials intentionally omitted — see the docstring
+            },
+        ):
+            yield chunk
+        yield ","
+
+        async for chunk in _stream_table(
+            AuditLog,
+            AuditLog.timestamp,
+            "audit_logs",
+            lambda a: {
+                "timestamp": a.timestamp,
+                "connector_name": a.connector_name,
+                "action": a.action,
+                "endpoint": a.endpoint,
+                "scope_used": a.scope_used,
+                "status": a.status.value,
+                "integrity_hash": a.integrity_hash,
+                "previous_hash": a.previous_hash,
+                "request_id": a.request_id,
+            },
+        ):
+            yield chunk
+        yield "}"
+
+    filename = f"sentientai-export-{datetime.now(timezone.utc):%Y%m%d}.json"
+    return StreamingResponse(
+        _generate(),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.delete("/account", status_code=status.HTTP_204_NO_CONTENT)
