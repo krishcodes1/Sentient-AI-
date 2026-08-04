@@ -299,6 +299,13 @@ export async function streamMessage(
   const decoder = new TextDecoder();
   let buffer = "";
 
+  // A well-formed stream always ends with a terminal event (`done`, or
+  // `error` when the backend reports a failure). If the connection closes
+  // without one — e.g. a proxy killed the stream mid-response — the read
+  // loop below still exits normally, and callers would mistake a truncated
+  // reply for a complete one.
+  let sawTerminalEvent = false;
+
   const dispatch = (frame: string) => {
     let event = "message";
     const dataLines: string[] = [];
@@ -333,12 +340,14 @@ export async function streamMessage(
         handlers.onBlocked?.(data as unknown as BlockedAction);
         break;
       case "done":
+        sawTerminalEvent = true;
         handlers.onDone?.(data as Parameters<NonNullable<StreamHandlers["onDone"]>>[0]);
         break;
       case "saved":
         handlers.onSaved?.((data.assistant_message ?? null) as Message | null);
         break;
       case "error":
+        sawTerminalEvent = true;
         handlers.onError?.(String(data.reason ?? "Stream error"));
         break;
     }
@@ -356,6 +365,12 @@ export async function streamMessage(
     }
   }
   if (buffer.trim()) dispatch(buffer);
+
+  if (!sawTerminalEvent) {
+    throw new Error(
+      "The response stream was interrupted — the reply may not have been saved. Reload to see the saved conversation.",
+    );
+  }
 }
 
 export async function getPendingApprovals(): Promise<PendingApproval[]> {

@@ -636,12 +636,20 @@ export default function Chat() {
           });
         },
         onBlocked: (blocked) =>
-          patchAssistant({
-            blocked_actions: [
-              ...(streamingAssistant.blocked_actions ?? []),
-              blocked,
-            ],
-          }),
+          // Append to the message's *current* blocked_actions via a
+          // functional update. Reading `streamingAssistant` here would use
+          // the array captured before streaming began (always []), so a
+          // second blocked event in one turn would overwrite the first.
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === asstTempId
+                ? {
+                    ...m,
+                    blocked_actions: [...(m.blocked_actions ?? []), blocked],
+                  }
+                : m,
+            ),
+          ),
         onDone: (data) =>
           patchAssistant({
             content: data.content ?? "",

@@ -1,6 +1,7 @@
 @import "tailwindcss";
-/* Fonts (Inter + JetBrains Mono) are loaded via <link> in index.html.
-   They can't live here because Tailwind v4 strips @import url() during build. */
+/* Fonts (Inter + JetBrains Mono) are self-hosted via @fontsource and imported
+   in main.tsx. They can't live here because Tailwind v4 strips/mangles
+   @import statements other than its own during build. */
 
 /* ============================================================
    SentientAI Design Tokens
