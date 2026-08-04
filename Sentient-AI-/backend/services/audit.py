@@ -270,10 +270,19 @@ async def append_audit_log(
 # ------------------------------------------------------------------ #
 
 # Maps runtime event names to the audit row status they should record.
+# Anything absent falls back to `blocked` (see the lookup below): an
+# unrecognized event is recorded conservatively rather than as a success.
+# That default makes it essential to register every new event here —
+# `tool_executing`/`tool_approved` record INTENT before a side effect and
+# are the fail-closed half of the audit pair, so filing them as "blocked"
+# would misreport successful actions as refusals in the audit UI.
 _EVENT_STATUS: dict[str, AuditStatus] = {
+    "tool_executing": AuditStatus.pending,
     "tool_executed": AuditStatus.approved,
+    "tool_approved": AuditStatus.pending,
     "tool_approved_and_executed": AuditStatus.approved,
     "tool_pending_approval": AuditStatus.pending,
+    "tool_taint_escalated": AuditStatus.pending,
     "tool_blocked": AuditStatus.blocked,
     "tool_denied": AuditStatus.blocked,
     "tool_expired": AuditStatus.blocked,

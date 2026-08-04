@@ -460,6 +460,12 @@ class GeminiProvider(LLMProvider):
             "POST", self._build_url("streamGenerateContent"), json=payload
         ) as resp:
             try:
+                # The body of a streamed response has not been read yet, so
+                # the error path must read it before touching .text —
+                # otherwise httpx raises ResponseNotRead and the caller sees
+                # that instead of a ProviderError.
+                if resp.is_error:
+                    await resp.aread()
                 resp.raise_for_status()
             except httpx.HTTPStatusError as exc:
                 _raise_provider_error("gemini", exc)
@@ -470,7 +476,14 @@ class GeminiProvider(LLMProvider):
                     chunk = json.loads(line.lstrip("[,"))
                 except json.JSONDecodeError:
                     continue
-                parts = chunk.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+                # Gemini emits trailing chunks that carry only usageMetadata
+                # with an EMPTY candidates list. A dict .get default does not
+                # apply to a present-but-empty value, so indexing [0] here
+                # raised IndexError and killed the stream mid-answer.
+                candidates = chunk.get("candidates") or []
+                if not candidates:
+                    continue
+                parts = candidates[0].get("content", {}).get("parts", []) or []
                 for part in parts:
                     if "text" in part:
                         yield part["text"]
@@ -547,6 +560,11 @@ class OllamaProvider(LLMProvider):
 
         async with self._client.stream("POST", "/api/chat", json=payload) as resp:
             try:
+                # See GeminiProvider.stream: the error body must be read
+                # before raise_for_status, or .text raises ResponseNotRead
+                # and masks the ProviderError.
+                if resp.is_error:
+                    await resp.aread()
                 resp.raise_for_status()
             except httpx.HTTPStatusError as exc:
                 _raise_provider_error("ollama", exc)
