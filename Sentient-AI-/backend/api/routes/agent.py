@@ -14,6 +14,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from core.database import async_session, get_db
 from core.validation import SafeStr
@@ -262,15 +263,22 @@ async def _get_owned_conversation(
     conversation_id: uuid.UUID,
     user: User,
     db: AsyncSession,
+    *,
+    with_messages: bool = False,
 ) -> Conversation:
     """Load a conversation and verify ownership.
 
     Returns 404 (not 403) for conversations owned by someone else so the
     endpoint does not leak which conversation ids exist.
+
+    ``with_messages`` eager-loads the transcript. Conversation.messages is
+    lazy="raise", so only the callers that actually serialize messages pay
+    for loading them.
     """
-    result = await db.execute(
-        select(Conversation).where(Conversation.id == conversation_id)
-    )
+    stmt = select(Conversation).where(Conversation.id == conversation_id)
+    if with_messages:
+        stmt = stmt.options(selectinload(Conversation.messages))
+    result = await db.execute(stmt)
     conversation = result.scalar_one_or_none()
     if conversation is None or conversation.user_id != user.id:
         raise HTTPException(
@@ -308,13 +316,24 @@ async def create_conversation(
     body: CreateConversationRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> Conversation:
+) -> ConversationResponse:
     """Start a new agent conversation for the authenticated user."""
     conversation = Conversation(user_id=current_user.id, title=body.title)
     db.add(conversation)
     await db.flush()
     await db.refresh(conversation)
-    return conversation
+    # Built explicitly rather than validated from the ORM object: a brand
+    # new conversation has no messages, and Conversation.messages is
+    # lazy="raise", so serializing straight from the model would try to
+    # load a collection that is known to be empty.
+    return ConversationResponse(
+        id=conversation.id,
+        user_id=conversation.user_id,
+        title=conversation.title,
+        created_at=conversation.created_at,
+        updated_at=conversation.updated_at,
+        messages=[],
+    )
 
 
 @router.get("/conversations/{conversation_id}", response_model=ConversationResponse)
@@ -324,7 +343,9 @@ async def get_conversation(
     db: AsyncSession = Depends(get_db),
 ) -> Conversation:
     """Retrieve one of the authenticated user's conversations with messages."""
-    return await _get_owned_conversation(conversation_id, current_user, db)
+    return await _get_owned_conversation(
+        conversation_id, current_user, db, with_messages=True
+    )
 
 
 @router.patch("/conversations/{conversation_id}", response_model=ConversationListItem)

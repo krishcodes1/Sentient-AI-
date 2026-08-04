@@ -52,10 +52,16 @@ class Conversation(Base):
     user: Mapped["User"] = relationship(  # noqa: F821
         back_populates="conversations",
     )
+    # lazy="raise": only the conversation-detail endpoint wants the
+    # messages, and it asks for them explicitly with selectinload(). Left
+    # automatic, listing N conversations dragged in every message of all
+    # of them — and, via User.conversations, every message the user has
+    # ever sent on every authenticated request.
     messages: Mapped[list["Message"]] = relationship(
         back_populates="conversation",
-        lazy="selectin",
+        lazy="raise",
         order_by="Message.created_at",
+        passive_deletes=True,
     )
 
     def __repr__(self) -> str:

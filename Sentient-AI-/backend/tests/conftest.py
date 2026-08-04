@@ -43,6 +43,7 @@ os.environ["ALLOW_REGISTRATION"] = "true"
 
 import httpx  # noqa: E402
 import pytest_asyncio  # noqa: E402
+from sqlalchemy import event  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
@@ -69,6 +70,16 @@ async def session_factory():
             connect_args={"check_same_thread": False},
             poolclass=StaticPool,
         )
+
+        # SQLite ignores foreign keys unless asked. Production is Postgres,
+        # where ON DELETE CASCADE is enforced and the ORM relies on it
+        # (passive_deletes=True); without this pragma the SQLite suite
+        # would silently pass on cascade behavior that Postgres enforces.
+        @event.listens_for(engine.sync_engine, "connect")
+        def _enable_sqlite_fks(dbapi_connection, _record):
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
     async with engine.begin() as conn:
         if test_url:
             # Clean slate even after an aborted previous run.

@@ -102,23 +102,40 @@ class User(Base):
         nullable=False,
     )
 
-    # Relationships
+    # Relationships.
+    #
+    # lazy="raise" is deliberate. These were previously lazy="selectin",
+    # which made every authenticated request — get_current_user runs on all
+    # of them — additionally SELECT every audit row, connector,
+    # conversation, and memory belonging to the user (and, through
+    # Conversation.messages, every message ever sent). Nothing reads these
+    # collections: routes query what they need with explicit, filtered,
+    # paginated selects. Raising turns any future accidental use into a
+    # loud error instead of a silent full-history scan on the hot path.
+    #
+    # passive_deletes=True lets the database's ON DELETE CASCADE do the
+    # work on account deletion, so the ORM never has to load the rows it
+    # is about to delete (which lazy="raise" would refuse anyway).
     audit_logs: Mapped[list["AuditLog"]] = relationship(  # noqa: F821
         back_populates="user",
-        lazy="selectin",
+        lazy="raise",
+        passive_deletes=True,
     )
     connectors: Mapped[list["ConnectorConfig"]] = relationship(  # noqa: F821
         back_populates="user",
-        lazy="selectin",
+        lazy="raise",
+        passive_deletes=True,
     )
     conversations: Mapped[list["Conversation"]] = relationship(  # noqa: F821
         back_populates="user",
-        lazy="selectin",
+        lazy="raise",
+        passive_deletes=True,
     )
     memories: Mapped[list["Memory"]] = relationship(  # noqa: F821
         back_populates="user",
-        lazy="selectin",
+        lazy="raise",
         cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
     def __repr__(self) -> str:
