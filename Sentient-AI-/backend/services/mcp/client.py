@@ -30,6 +30,19 @@ class MCPError(Exception):
     """Raised for transport failures or JSON-RPC error responses."""
 
 
+def _format_rpc_error(error: Any) -> str:
+    """Render a JSON-RPC ``error`` member for an ``MCPError`` message.
+
+    The member is attacker-controlled, so it may be an empty object, a
+    bare string, or anything else — never assume the spec shape.
+    """
+    if isinstance(error, dict):
+        return (
+            f"MCP error {error.get('code', '?')}: {error.get('message', 'unknown')}"
+        )
+    return f"MCP error ?: {error}"
+
+
 @dataclass(frozen=True)
 class MCPToolInfo:
     """One tool advertised by an MCP server."""
@@ -111,7 +124,7 @@ class HttpMCPTransport:
                 return message
         raise MCPError("No matching JSON-RPC response in SSE stream")
 
-    async def _post(self, payload: dict[str, Any]) -> Optional[httpx.Response]:
+    async def _post(self, payload: dict[str, Any]) -> httpx.Response:
         client = self._get_client()
         try:
             response = await client.post(
@@ -148,15 +161,42 @@ class HttpMCPTransport:
 
         if not isinstance(message, dict):
             raise MCPError("MCP server returned a non-object response")
-        if message.get("error"):
-            error = message["error"]
+        # JSON-RPC 2.0 requires exactly one of result/error. Neither (or a
+        # present-but-empty error object) is a protocol violation, and it
+        # must not read as success: `.get("result")` would hand back None,
+        # which call_tool turns into an empty ok=True result and list_tools
+        # into an empty catalog — the agent would treat a broken server as
+        # a working one with nothing to say.
+        if "error" in message and message["error"] is not None:
+            raise MCPError(_format_rpc_error(message["error"]))
+        if "result" not in message:
             raise MCPError(
-                f"MCP error {error.get('code', '?')}: {error.get('message', 'unknown')}"
+                f"MCP server returned neither 'result' nor 'error' for '{method}'"
             )
-        return message.get("result")
+        return message["result"]
 
     async def notify(self, method: str, params: dict[str, Any]) -> None:
-        await self._post({"jsonrpc": "2.0", "method": method, "params": params})
+        response = await self._post(
+            {"jsonrpc": "2.0", "method": method, "params": params}
+        )
+        # A discarded response hides handshake failures: a rejected
+        # notifications/initialized would still leave the client marked
+        # initialized, and the real failure would resurface later as a
+        # confusing tools/list error.
+        if response.status_code >= 400:
+            raise MCPError(
+                f"MCP server returned HTTP {response.status_code} "
+                f"for notification '{method}'"
+            )
+        # Servers that answer a notification with 200 + a JSON-RPC error
+        # object instead of a 4xx have still refused it.
+        if response.content:
+            try:
+                message = response.json()
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return
+            if isinstance(message, dict) and message.get("error") is not None:
+                raise MCPError(_format_rpc_error(message["error"]))
 
     async def close(self) -> None:
         if self._client and not self._client.is_closed:
@@ -186,26 +226,55 @@ class MCPClient:
         self._initialized = True
 
     async def list_tools(self) -> list[MCPToolInfo]:
+        """Advertised tools, or ``MCPError`` if the payload is unusable.
+
+        The payload is third-party data, so every shape assumption is a
+        crash the caller cannot handle: a bare JSON array or a string
+        entry used to escape as ``AttributeError`` and leak out of
+        ``POST /connectors/{id}/test`` as "'str' object has no attribute
+        'get'". Individually malformed entries are dropped, but a payload
+        whose entries are *all* unusable raises rather than passing for a
+        server that simply has no tools.
+        """
         await self.initialize()
         result = await self._transport.request("tools/list", {})
-        tools = (result or {}).get("tools", [])
-        return [
-            MCPToolInfo(
-                name=str(t.get("name", "")),
-                description=str(t.get("description", "")),
-                input_schema=t.get("inputSchema")
-                or {"type": "object", "properties": {}},
+        if not isinstance(result, dict):
+            raise MCPError("MCP server returned a malformed tools/list result")
+        raw_tools = result.get("tools", [])
+        if not isinstance(raw_tools, list):
+            raise MCPError("MCP server returned a malformed 'tools' list")
+
+        tools: list[MCPToolInfo] = []
+        for entry in raw_tools:
+            if not isinstance(entry, dict):
+                logger.warning("mcp_tool_entry_malformed", entry=repr(entry)[:200])
+                continue
+            name = entry.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            schema = entry.get("inputSchema")
+            tools.append(
+                MCPToolInfo(
+                    name=name,
+                    description=str(entry.get("description", "")),
+                    input_schema=schema
+                    if isinstance(schema, dict)
+                    else {"type": "object", "properties": {}},
+                )
             )
-            for t in tools
-            if t.get("name")
-        ]
+        if raw_tools and not tools:
+            raise MCPError("MCP server returned no usable entries in tools/list")
+        return tools
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         await self.initialize()
         result = await self._transport.request(
             "tools/call", {"name": name, "arguments": arguments}
         )
-        result = result or {}
+        # Same reasoning as list_tools: a non-object result would otherwise
+        # escape as AttributeError from a third-party server's payload.
+        if not isinstance(result, dict):
+            raise MCPError("MCP server returned a malformed tools/call result")
         content_blocks = result.get("content", [])
         text_parts = [
             block.get("text", "")

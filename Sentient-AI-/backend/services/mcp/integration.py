@@ -13,6 +13,9 @@ most conservative in the platform:
 - Server URLs are SSRF-checked on every request (no private ranges).
 - Tool results are sanitized like any connector response before they
   reach the LLM, and the runtime wraps them in the untrusted envelope.
+- An exposed name is bound to one remote tool at discovery. A server
+  cannot reorder or extend its catalog to make an already-approved name
+  execute a different remote tool.
 """
 
 from __future__ import annotations
@@ -88,13 +91,22 @@ def sanitized_tool_entries(
     resolves back to the same remote tool. Unresolvable names (empty
     after normalization, or no room left in the length budget) are
     rejected here — at discovery — and logged.
+
+    Collision suffixes are assigned in a canonical order (sorted by the
+    *remote* name), never in advertisement order. Order-dependent
+    suffixing was a confused-deputy hole: a server advertising both
+    "my tool" and "my_tool" got ``my_tool``/``my_tool_2`` at discovery
+    and could swap which remote tool the approved ``my_tool`` executed
+    simply by reversing its next tools/list. The returned list stays in
+    advertisement order — only the name assignment is canonical — so a
+    server still controls how its tools are presented, just not which
+    remote tool an already-approved name means.
     """
     # Full name is "mcp.<label>.<component>" and must fit the length cap.
     budget = _MAX_FULL_NAME_LEN - len(MCP_PREFIX) - 2 - len(label)
     budget = min(budget, _MAX_TOOL_COMPONENT_LEN)
 
-    entries: list[tuple[str, MCPToolInfo]] = []
-    used: set[str] = set()
+    resolvable: list[tuple[str, MCPToolInfo]] = []  # (base, info)
     for info in infos:
         base = sanitize_tool_name(info.name)[: max(budget, 0)]
         if not base:
@@ -102,6 +114,16 @@ def sanitized_tool_entries(
                 "mcp_tool_name_unresolvable", server=label, tool=repr(info.name)
             )
             continue
+        resolvable.append((base, info))
+
+    exposed: list[str] = [""] * len(resolvable)
+    used: set[str] = set()
+    # sorted() is stable, so duplicate remote names still fall back to
+    # advertisement order — they are indistinguishable anyway.
+    for index in sorted(
+        range(len(resolvable)), key=lambda i: resolvable[i][1].name
+    ):
+        base = resolvable[index][0]
         candidate = base
         suffix_n = 2
         while candidate in used:
@@ -109,8 +131,75 @@ def sanitized_tool_entries(
             candidate = base[: max(1, budget - len(suffix))] + suffix
             suffix_n += 1
         used.add(candidate)
-        entries.append((candidate, info))
-    return entries
+        exposed[index] = candidate
+
+    return [(exposed[i], resolvable[i][1]) for i in range(len(resolvable))]
+
+
+class MCPNameBindingRegistry:
+    """Remembers which remote tool each exposed name meant at discovery.
+
+    ``sanitized_tool_entries`` makes the mapping independent of the order
+    a server advertises its tools in, but not of the *set*: a server that
+    later adds a tool normalizing onto an already-approved exposed name
+    would still steal it (add "my tool" after the user approved
+    "my_tool"). Recording the binding when the tool list is shown to the
+    user, and replaying it at execution, closes that: an approved name
+    either runs the remote tool the user saw, or fails loudly.
+
+    Bindings are STICKY: an exposed name keeps the remote tool it was
+    first bound to, for the life of the process. Replacing the map on each
+    discovery would reopen the hole it exists to close, because discovery
+    re-runs on every chat send behind a 60s cache — a server only has to
+    add the colliding tool and wait one TTL for the rebind to happen
+    between the user seeing an action and approving it.
+
+    A legitimate server that renames or drops a tool therefore does not
+    get silent re-resolution either: the dispatcher refuses the stale
+    binding rather than guessing, which is the safe direction. Re-adding
+    the connector clears it.
+
+    In-process only, like ``mcp_activity`` — after a restart the
+    dispatcher falls back to the deterministic derivation.
+    """
+
+    def __init__(self) -> None:
+        self._bindings: dict[uuid_module.UUID, dict[str, str]] = {}
+
+    def record(
+        self, connector_id: uuid_module.UUID, entries: list[tuple[str, MCPToolInfo]]
+    ) -> None:
+        bindings = self._bindings.setdefault(connector_id, {})
+        for exposed, info in entries:
+            existing = bindings.get(exposed)
+            if existing is None:
+                bindings[exposed] = info.name
+            elif existing != info.name:
+                # The server is now advertising a different remote tool
+                # under a name the user may already have approved. Keep the
+                # original binding and say so; the dispatcher will refuse
+                # the call if the bound tool is genuinely gone.
+                logger.warning(
+                    "mcp_exposed_name_rebind_refused",
+                    connector_id=str(connector_id),
+                    exposed_name=exposed,
+                    bound_remote=existing,
+                    advertised_remote=info.name,
+                )
+
+    def resolve(
+        self, connector_id: uuid_module.UUID, exposed_name: str
+    ) -> Optional[str]:
+        return self._bindings.get(connector_id, {}).get(exposed_name)
+
+    def reset(self) -> None:
+        """Clear all recorded bindings (test hygiene)."""
+        self._bindings.clear()
+
+
+# Process-wide singleton: the catalog writes it at discovery, the
+# dispatcher reads it at execution (the two are constructed separately).
+mcp_name_bindings = MCPNameBindingRegistry()
 
 
 def _sanitize_schema_value(value: Any, depth: int = 0) -> Any:
@@ -314,7 +403,12 @@ class MCPToolCatalog:
                     "mcp_tool_discovery_failed", server=ref.label, error=str(exc)
                 )
                 continue
-            for exposed_name, info in sanitized_tool_entries(ref.label, infos):
+            entries = sanitized_tool_entries(ref.label, infos)
+            # Pin what each exposed name means *now*, before the user sees
+            # (and approves) it — the dispatcher replays this instead of
+            # re-deriving against a catalog the server may have mutated.
+            mcp_name_bindings.record(ref.connector_id, entries)
+            for exposed_name, info in entries:
                 full_name = f"{MCP_PREFIX}.{ref.label}.{exposed_name}"
                 # Classify on both the exposed and the original remote name
                 # so normalization can never launder a financial tool.
@@ -346,9 +440,10 @@ class MCPDispatcher:
 
     Enforces the connector's ``rate_limit_per_minute`` (sliding window,
     in-process, per server), resolves normalized exposed names back to
-    the server's real tool names, and sanitizes output with the same
-    PromptGuard used for first-party connectors before it returns to the
-    runtime.
+    the server's real tool names — preferring the binding captured at
+    discovery, which is what the user actually approved — and sanitizes
+    output with the same PromptGuard used for first-party connectors
+    before it returns to the runtime.
     """
 
     def __init__(
@@ -406,14 +501,34 @@ class MCPDispatcher:
         client = self._client_factory(ref)
         try:
             # Resolve the exposed (normalized) name back to the server's
-            # real tool name via the same deterministic mapping used at
-            # discovery. Only advertised tools are callable.
+            # real tool name. Only advertised tools are callable.
             infos = await client.list_tools()
-            remote_name: Optional[str] = None
-            for exposed_name, info in sanitized_tool_entries(label, infos):
-                if exposed_name == remote_tool:
-                    remote_name = info.name
-                    break
+            entries = sanitized_tool_entries(label, infos)
+            advertised = {info.name for _, info in entries}
+
+            remote_name = mcp_name_bindings.resolve(ref.connector_id, remote_tool)
+            if remote_name is not None and remote_name not in advertised:
+                # The tool the user approved is gone. Re-deriving here
+                # would silently hand the approval to whichever remote
+                # tool now owns the exposed name.
+                mcp_activity.record_error(
+                    ref.connector_id, f"tool '{remote_tool}' no longer advertised"
+                )
+                return {
+                    "ok": False,
+                    "error": (
+                        f"MCP server '{label}' no longer advertises the tool "
+                        f"approved as '{remote_tool}'."
+                    ),
+                }
+            if remote_name is None:
+                # No discovery in this process (restart, or dispatch
+                # without a preceding tool listing): fall back to the
+                # order-independent derivation.
+                for exposed_name, info in entries:
+                    if exposed_name == remote_tool:
+                        remote_name = info.name
+                        break
             if remote_name is None:
                 mcp_activity.record_error(
                     ref.connector_id, f"tool '{remote_tool}' not advertised"
@@ -449,11 +564,22 @@ class MCPDispatcher:
         finally:
             await client.close()
 
-        mcp_activity.record_success(ref.connector_id)
-
         sanitized, was_modified = PromptGuard.scan(result.get("content"))
         if was_modified:
             logger.warning("mcp_content_sanitized", server=label, tool=remote_tool)
+
+        # A tool-level failure (``isError``) is still a failed call.
+        # Recording it as a success gave /connectors/health a fresh
+        # last_success for a server whose every call fails. The message is
+        # the *sanitized* content: it is third-party text and the health
+        # endpoint renders it back to the user.
+        if result.get("ok"):
+            mcp_activity.record_success(ref.connector_id)
+        else:
+            mcp_activity.record_error(
+                ref.connector_id, str(sanitized) or "tool reported isError"
+            )
+
         return {
             "ok": result.get("ok", False),
             "connector": f"mcp:{label}",
