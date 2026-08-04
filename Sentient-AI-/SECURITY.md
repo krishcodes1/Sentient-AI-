@@ -285,8 +285,10 @@ Tracked honestly so nobody mistakes this for finished security work:
 - **OAuth UX** — Canvas/Google connectors accept pasted tokens; a proper
   redirect-based OAuth flow (the PKCE plumbing already exists in the
   connector classes) is the intended replacement.
-- **Admin role** — `admin_only` actions are blocked for everyone because the
-  User model has no role column yet.
+- **Admin role** — the first account to register owns the deployment
+  (`users.is_admin`). An `admin_only` connector is usable only by that
+  account; for everyone else it contributes no tools at all. There is no UI
+  to transfer or grant the role — change the column directly if you need to.
 - **Migrations** — Alembic owns the schema (`backend/alembic/`). The
   production container runs `alembic upgrade head` before starting the
   server, and startup also upgrades so a bare `uvicorn main:app` dev run

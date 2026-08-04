@@ -385,6 +385,12 @@ still open — lives in **[SECURITY.md](SECURITY.md)**. Highlights:
 - **Rate limiting** — per-IP throttling with a stricter bucket on
   login/register, plus per-connector rate limits
 - **Security headers** — CSP, HSTS, X-Frame-Options, nosniff, etc.
+- **Session revocation** — changing your password invalidates every
+  outstanding token, not just future ones
+- **Admin role** — the first account registered owns the deployment;
+  `admin_only` connectors are usable only by it
+- **Data export** — Settings → Export my data downloads every conversation,
+  memory, connector setting, and audit record as JSON (credentials excluded)
 
 ### Smart Context Management
 
