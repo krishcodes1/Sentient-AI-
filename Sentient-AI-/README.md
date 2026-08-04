@@ -80,12 +80,38 @@ flow for sensitive actions, and eight swappable LLM providers.
 **Production deployment:** the dev compose above runs hot-reload servers
 with the source bind-mounted. For production shape (non-root backend, no
 reload, static frontend served by nginx with an `/api` proxy, internal-only
-Postgres/Redis, container healthchecks) use the production compose file:
+Postgres/Redis and backend, container healthchecks, graceful shutdown,
+log rotation) use the production compose file:
 
 ```bash
 cd docker
-docker compose -f docker-compose.prod.yml up --build -d
+POSTGRES_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')" \
+  docker compose -f docker-compose.prod.yml up --build -d
 ```
+
+Production checklist:
+
+- `POSTGRES_PASSWORD` is **required** (compose refuses to start without
+  it). Put it in `docker/.env` so restarts reuse the same value.
+- Set real keys in `backend/.env` — the app refuses to boot with the
+  `.env.example` placeholders or keys shorter than 32 chars, and with
+  `ENVIRONMENT=production` it fails fast (instead of limping) when the
+  database is unreachable.
+- After registering your own account, set `ALLOW_REGISTRATION=false` —
+  otherwise anyone who finds the URL can create accounts billed to your
+  LLM API keys.
+- Set `CORS_ORIGINS` to your real frontend origin and `ALLOWED_HOSTS`
+  to your hostname. `AUDIT_HMAC_KEY` should be a dedicated key stored
+  away from the database. Startup logs a warning for each of these that
+  is still on its development default.
+- **TLS**: nothing in the stack terminates TLS. Put a TLS-terminating
+  reverse proxy in front of port 3000 before exposing it beyond your
+  LAN — e.g. [Caddy](https://caddyserver.com) with a two-line
+  Caddyfile (`assistant.example.com { reverse_proxy localhost:3000 }`),
+  Traefik, nginx + certbot, or a cloud load balancer. Only port 443 on
+  that proxy should be reachable from the internet.
+- `/docs`, `/redoc`, and `/openapi.json` are disabled automatically when
+  `ENVIRONMENT=production`.
 
 ---
 
@@ -263,6 +289,11 @@ Copy `backend/.env.example` to `backend/.env` and configure:
 | `TOKEN_EXPIRE_MINUTES` | No | JWT lifetime (default 60) |
 | `APPROVAL_TTL_MINUTES` | No | How long a pending tool approval stays actionable (default 15) |
 | `CORS_ORIGINS` | No | Allowed browser origins (default localhost dev ports) |
+| `ALLOW_REGISTRATION` | No | Set `false` after creating your account so strangers can't register (default `true`) |
+| `PASSWORD_MIN_LENGTH` | No | Minimum password length, floor 8 (default 8) |
+| `ALLOWED_HOSTS` | No | Accepted `Host` headers; set your real hostname in production (default `["*"]`) |
+| `LOG_LEVEL` | No | Log verbosity; production emits JSON lines (default `INFO`) |
+| `AUDIT_HMAC_KEY` | Recommended (prod) | Dedicated key for the tamper-evident audit log; see `.env.example` |
 
 **You only need ONE API key** — whichever provider you choose.
 

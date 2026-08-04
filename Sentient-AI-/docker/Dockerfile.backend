@@ -41,4 +41,7 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD ["python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).status == 200 else 1)"]
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Graceful shutdown: stop accepting connections on SIGTERM but give
+# in-flight agent turns (multi-round LLM + tool execution) time to finish
+# and persist. Pairs with stop_grace_period: 60s in docker-compose.prod.yml.
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "55"]

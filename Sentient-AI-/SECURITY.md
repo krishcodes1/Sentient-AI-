@@ -280,22 +280,26 @@ Tracked honestly so nobody mistakes this for finished security work:
 - **Sessions** — no refresh tokens (re-login after expiry), no MFA, no
   password reset flow, and the SPA stores the JWT in `localStorage` (an XSS
   foothold could exfiltrate it; CSP mitigates). Consider httpOnly cookies +
-  CSRF protection.
+  CSRF protection. Changing the password DOES revoke outstanding tokens
+  (each JWT carries a `token_epoch` claim checked against the user row).
 - **OAuth UX** — Canvas/Google connectors accept pasted tokens; a proper
   redirect-based OAuth flow (the PKCE plumbing already exists in the
   connector classes) is the intended replacement.
 - **Admin role** — `admin_only` actions are blocked for everyone because the
   User model has no role column yet.
-- **Streaming** — model responses are returned complete; no token streaming
-  is exposed to the client yet.
 - **Migrations** — schema is created and migrated with inline additive SQL at
   startup by design (Alembic deferred); Alembic should own this before
   serious production use.
-- **X-Forwarded-For trust** — the rate limiter honors XFF; only terminate
-  behind a proxy that overwrites it, otherwise limits are spoofable. The
-  production nginx proxy (`docker/Dockerfile.frontend`) overwrites XFF with
-  the real client address for exactly this reason — do not expose the
-  backend port directly to untrusted networks.
+- **X-Forwarded-For trust** — XFF is honored only when the direct peer is
+  inside `TRUSTED_PROXIES` (see "Rate limiting" above), so a directly
+  reachable client cannot spoof its way into fresh rate-limit buckets. The
+  production nginx proxy (`docker/Dockerfile.frontend`) additionally
+  overwrites XFF with the real client address, and the prod compose does
+  not publish the backend port at all — keep it that way; the nginx proxy
+  is the only intended entry point.
+- **TLS** — nothing in the compose stack terminates TLS. Put a
+  TLS-terminating reverse proxy or load balancer in front of the frontend
+  service before exposing it beyond localhost/LAN.
 
 ## Reporting
 

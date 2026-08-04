@@ -11,17 +11,31 @@
 #   - Postgres and Redis are NOT published to the host (internal only)
 #   - backend has a container healthcheck; frontend waits for it
 #
-# Set POSTGRES_PASSWORD in the environment (or a docker/.env file) to
-# override the default database password before deploying.
+# POSTGRES_PASSWORD is REQUIRED (set it in the environment or a
+# docker/.env file) — compose refuses to start without it rather than
+# silently deploying a publicly-known default password.
+#
+# TLS: nothing in this stack terminates TLS. Do not expose port 3000 to
+# the internet directly — put a TLS-terminating reverse proxy (Caddy,
+# Traefik, nginx with certbot, or a cloud load balancer) in front of the
+# frontend service. See the README's "Production deployment" section.
+
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
 
 services:
   # ── PostgreSQL ──────────────────────────────────────────────────
   db:
     image: postgres:16-alpine
     restart: unless-stopped
+    <<: *logging
     environment:
       POSTGRES_USER: sentientai
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sentientai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the environment or docker/.env before deploying}
       POSTGRES_DB: sentientai
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -35,6 +49,7 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    <<: *logging
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -48,13 +63,21 @@ services:
       dockerfile: ../docker/Dockerfile.backend
       target: prod
     restart: unless-stopped
-    ports:
-      - "8000:8000"
+    <<: *logging
+    # Give in-flight agent turns time to finish and persist on redeploy;
+    # uvicorn runs with --timeout-graceful-shutdown 55 (Dockerfile.backend).
+    stop_grace_period: 60s
+    # NOT published to the host: nginx (frontend service) is the only entry
+    # point. Publishing 8000 directly would bypass the proxy that overwrites
+    # X-Forwarded-For — reopening the rate-limit spoof the trusted-proxy
+    # design exists to close — and expose a second, unmanaged plaintext API.
+    expose:
+      - "8000"
     env_file:
       - ../backend/.env
     environment:
       ENVIRONMENT: production
-      DATABASE_URL: postgresql+asyncpg://sentientai:${POSTGRES_PASSWORD:-sentientai}@db:5432/sentientai
+      DATABASE_URL: postgresql+asyncpg://sentientai:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the environment or docker/.env before deploying}@db:5432/sentientai
       REDIS_URL: redis://redis:6379/0
     depends_on:
       db:
@@ -81,6 +104,7 @@ services:
       dockerfile: ../docker/Dockerfile.frontend
       target: prod
     restart: unless-stopped
+    <<: *logging
     ports:
       - "3000:80"
     depends_on:

@@ -11,9 +11,11 @@ FROM node:20-alpine AS base
 
 WORKDIR /app
 
-# Install dependencies
-COPY package.json package-lock.json* ./
-RUN npm install
+# Install dependencies. `npm ci` against the committed lockfile makes the
+# image reproducible; a plain `npm install` could silently resolve
+# different versions on every build.
+COPY package.json package-lock.json ./
+RUN npm ci
 
 # Copy application code
 COPY . .
@@ -58,6 +60,13 @@ server {
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
+        # SSE agent streams: the backend heartbeats every 15s, but a slow
+        # turn must survive longer gaps than nginx's 60s default, and the
+        # stream must not be buffered (the backend also sends
+        # X-Accel-Buffering: no).
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+        proxy_buffering off;
     }
 }
 EOF
