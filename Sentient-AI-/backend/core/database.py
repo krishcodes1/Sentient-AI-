@@ -82,6 +82,9 @@ async def init_db(retries: int = 10, delay: float = 2.0) -> None:
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS llm_provider VARCHAR(32) NOT NULL DEFAULT 'anthropic'",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS llm_model VARCHAR(128) NOT NULL DEFAULT 'claude-sonnet-4-20250514'",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS memory_enabled BOOLEAN NOT NULL DEFAULT true",
+        # JWT revocation epoch; pre-upgrade rows backfill to 0, matching the
+        # implicit epoch of tokens minted before the claim existed.
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS token_epoch INTEGER NOT NULL DEFAULT 0",
         # The memories table itself is created by create_all; these guard the
         # case where an older deployment created it before a column existed.
         "ALTER TABLE memories ADD COLUMN IF NOT EXISTS source VARCHAR(16) NOT NULL DEFAULT 'user'",

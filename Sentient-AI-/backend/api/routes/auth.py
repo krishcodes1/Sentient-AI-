@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Literal, Optional
@@ -9,6 +11,7 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core.config import settings
 from core.database import get_db
 from core.security import create_access_token, hash_password, verify_password
 from core.validation import SafeStr, normalize_email
@@ -85,6 +88,12 @@ class SettingsUpdateRequest(BaseModel):
 )
 async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)) -> User:
     """Create a new user account."""
+    if not settings.ALLOW_REGISTRATION:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Registration is disabled on this server",
+        )
+
     email = normalize_email(body.email)
     result = await db.execute(select(User).where(User.email == email))
     if result.scalar_one_or_none() is not None:
@@ -93,16 +102,20 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)) ->
             detail="Email already registered",
         )
 
-    if len(body.password) < 8:
+    if len(body.password) < settings.PASSWORD_MIN_LENGTH:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Password must be at least 8 characters",
+            detail=(
+                f"Password must be at least {settings.PASSWORD_MIN_LENGTH} characters"
+            ),
         )
 
     user = User(
         email=email,
         name=body.name,
-        hashed_password=hash_password(body.password),
+        # bcrypt is ~200ms of pure CPU; run it in a worker thread so the
+        # event loop (and every in-flight SSE stream) keeps moving.
+        hashed_password=await asyncio.to_thread(hash_password, body.password),
     )
     db.add(user)
     await db.flush()
@@ -117,7 +130,9 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)) -> dict:
     result = await db.execute(select(User).where(User.email == email))
     user = result.scalar_one_or_none()
 
-    if user is None or not verify_password(body.password, user.hashed_password):
+    if user is None or not await asyncio.to_thread(
+        verify_password, body.password, user.hashed_password
+    ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
@@ -129,7 +144,13 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)) -> dict:
             detail="Account is deactivated",
         )
 
-    token = create_access_token(data={"sub": str(user.id), "email": user.email})
+    token = create_access_token(
+        data={
+            "sub": str(user.id),
+            "email": user.email,
+            "epoch": user.token_epoch,
+        }
+    )
     return {"access_token": token, "token_type": "bearer"}
 
 
@@ -173,13 +194,30 @@ async def change_password(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    """Change the current user's password after verifying the old one."""
-    if not verify_password(body.current_password, current_user.hashed_password):
+    """Change the current user's password after verifying the old one.
+
+    Bumps ``token_epoch`` so every previously issued JWT stops working —
+    without this, a user rotating their password because a token leaked
+    would get no actual eviction until the token expired on its own.
+    """
+    if not await asyncio.to_thread(
+        verify_password, body.current_password, current_user.hashed_password
+    ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Current password is incorrect",
         )
-    current_user.hashed_password = hash_password(body.new_password)
+    if len(body.new_password) < settings.PASSWORD_MIN_LENGTH:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"Password must be at least {settings.PASSWORD_MIN_LENGTH} characters"
+            ),
+        )
+    current_user.hashed_password = await asyncio.to_thread(
+        hash_password, body.new_password
+    )
+    current_user.token_epoch = (current_user.token_epoch or 0) + 1
     await db.flush()
 
 
@@ -210,7 +248,18 @@ async def update_settings(
             )
         current_user.llm_provider = provider
     if body.llm_model is not None:
-        current_user.llm_model = body.llm_model
+        model = body.llm_model.strip()
+        # Model ids are provider catalog names (letters, digits, and a few
+        # separators). Anything else is a typo or probe; rejecting it here
+        # keeps garbage strings out of the runtime's provider cache.
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}", model):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    "Model name may only contain letters, digits, and ./_:-"
+                ),
+            )
+        current_user.llm_model = model
     if body.memory_enabled is not None:
         current_user.memory_enabled = body.memory_enabled
 

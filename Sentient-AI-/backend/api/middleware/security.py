@@ -363,6 +363,14 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
         # Attach to request state so downstream code can access it
         request.state.request_id = request_id
 
-        response = await call_next(request)
+        # Bind into structlog's contextvars so every log line emitted while
+        # handling this request carries the id (merge_contextvars is in the
+        # processor chain), making cross-request log correlation real.
+        structlog.contextvars.clear_contextvars()
+        structlog.contextvars.bind_contextvars(request_id=request_id)
+        try:
+            response = await call_next(request)
+        finally:
+            structlog.contextvars.clear_contextvars()
         response.headers[self.HEADER_NAME] = request_id
         return response

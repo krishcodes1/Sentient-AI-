@@ -7,6 +7,7 @@ from core.security. Single source of truth for JWT and password handling.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Optional
 
 from fastapi import Depends, HTTPException, status
@@ -50,7 +51,7 @@ async def register_user(email: str, password: str, db: AsyncSession) -> User:
 
     user = User(
         email=email,
-        hashed_password=hash_password(password),
+        hashed_password=await asyncio.to_thread(hash_password, password),
     )
     db.add(user)
     await db.flush()
@@ -68,7 +69,7 @@ async def authenticate_user(
 
     if user is None or not user.is_active:
         return None
-    if not verify_password(password, user.hashed_password):
+    if not await asyncio.to_thread(verify_password, password, user.hashed_password):
         return None
     return user
 
@@ -107,6 +108,16 @@ async def get_current_user(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found or inactive.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # Tokens minted before a password change carry a stale epoch and are
+    # rejected — this is the revocation path. Tokens issued before the
+    # claim existed count as epoch 0, matching the column's backfill.
+    if int(payload.get("epoch", 0)) != (user.token_epoch or 0):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token was revoked by a password change. Log in again.",
             headers={"WWW-Authenticate": "Bearer"},
         )
 

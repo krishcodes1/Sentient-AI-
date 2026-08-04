@@ -45,6 +45,15 @@ class User(Base):
         default=True,
         nullable=False,
     )
+    # Incremented on password change to invalidate all outstanding JWTs:
+    # tokens carry this value as a claim and get_current_user rejects a
+    # mismatch. Tokens minted before the claim existed count as epoch 0.
+    token_epoch: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default="0",
+        nullable=False,
+    )
     # Account settings (surfaced and edited on the Settings page)
     default_permission_tier: Mapped[str] = mapped_column(
         String(32),

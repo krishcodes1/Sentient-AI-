@@ -34,6 +34,12 @@ os.environ.setdefault("LLM_MODEL", "claude-sonnet-4-6")
 # Lets AgentRuntime construct its provider in tests; never used for real
 # calls (tests patch the provider with fakes).
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-key-not-real")
+# The developer's local .env may restrict these (they are real Settings
+# fields now); env vars outrank the .env file, so tests always see an
+# unrestricted host list and the stock password policy.
+os.environ["ALLOWED_HOSTS"] = '["*"]'
+os.environ["PASSWORD_MIN_LENGTH"] = "8"
+os.environ["ALLOW_REGISTRATION"] = "true"
 
 import httpx  # noqa: E402
 import pytest_asyncio  # noqa: E402
@@ -43,20 +49,37 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 
 @pytest_asyncio.fixture
 async def session_factory():
-    """In-memory SQLite database with all tables created."""
+    """Test database with all tables created.
+
+    Defaults to in-memory SQLite. Set TEST_DATABASE_URL to an asyncpg URL
+    to run the suite against real Postgres (the backend-postgres CI job
+    does) — otherwise Postgres-only behavior would first execute in
+    production. Each test gets a freshly created schema; Postgres runs
+    drop_all around it for isolation.
+    """
     import models  # noqa: F401 — registers every model on Base.metadata
     from core.database import Base
 
-    engine = create_async_engine(
-        "sqlite+aiosqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
+    test_url = os.environ.get("TEST_DATABASE_URL", "")
+    if test_url:
+        engine = create_async_engine(test_url)
+    else:
+        engine = create_async_engine(
+            "sqlite+aiosqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
     async with engine.begin() as conn:
+        if test_url:
+            # Clean slate even after an aborted previous run.
+            await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
 
     factory = async_sessionmaker(bind=engine, expire_on_commit=False)
     yield factory
+    if test_url:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.drop_all)
     await engine.dispose()
 
 

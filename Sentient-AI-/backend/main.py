@@ -7,12 +7,18 @@ from collections.abc import AsyncGenerator
 
 import structlog
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from core.config import settings
-from core.database import async_session, init_db
+from core.database import async_session, engine, get_db, init_db
+from core.logging_config import configure_logging
+
+configure_logging()
 from api.middleware.security import (
     RateLimitMiddleware,
     RequestIdMiddleware,
@@ -39,11 +45,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         llm_provider=settings.LLM_PROVIDER,
         llm_model=settings.LLM_MODEL,
     )
+    for warning in settings.production_warnings():
+        logger.warning("production_config_warning", detail=warning)
     try:
         await init_db()
         logger.info("database_initialized")
     except Exception as exc:
         logger.error("database_init_failed", error=str(exc))
+        if settings.ENVIRONMENT == "production":
+            # Fail fast: a DB-less API 500s on every real request while
+            # passing a naive healthcheck. Exiting lets the container
+            # restart-loop until the database is reachable.
+            raise
         logger.warning("app_starting_without_database")
 
     try:
@@ -69,16 +82,26 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     yield
     logger.info("shutting_down_sentientai")
+    await engine.dispose()
 
+
+_is_production = settings.ENVIRONMENT == "production"
 
 app = FastAPI(
     title="SentientAI",
     description="Secure-by-Design Agentic AI Platform",
     version="0.1.0",
     lifespan=lifespan,
+    # The interactive docs and schema are developer conveniences; in
+    # production they hand an attacker the full authenticated API surface.
+    docs_url=None if _is_production else "/docs",
+    redoc_url=None if _is_production else "/redoc",
+    openapi_url=None if _is_production else "/openapi.json",
 )
 
 # ── Middleware (applied bottom-to-top) ────────────────────────────────────────
+if settings.ALLOWED_HOSTS and settings.ALLOWED_HOSTS != ["*"]:
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.ALLOWED_HOSTS)
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(RequestIdMiddleware)
 app.add_middleware(
@@ -106,17 +129,40 @@ app.include_router(memory.router, prefix="/api")
 
 @app.get("/")
 async def root() -> dict[str, str]:
-    return {
+    info = {
         "name": "SentientAI",
         "version": "0.1.0",
-        "docs": "/docs",
         "health": "/api/health",
     }
+    if not _is_production:
+        info["docs"] = "/docs"
+    return info
 
 
 @app.get("/api/health")
-async def health_check() -> dict[str, str]:
-    return {"status": "healthy", "version": "0.1.0"}
+async def health_check(db: AsyncSession = Depends(get_db)) -> JSONResponse:
+    """Liveness + database reachability.
+
+    The Docker healthcheck polls this endpoint; returning 503 when the
+    database is unreachable keeps the container (and everything gated on
+    its health, like the frontend's depends_on) honest about whether the
+    API can actually serve requests.
+    """
+    try:
+        await db.execute(text("SELECT 1"))
+    except Exception:
+        logger.warning("health_check_database_unreachable")
+        # Reset the session so get_db's trailing commit doesn't raise a
+        # second time and turn this 503 into a 500.
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unhealthy", "reason": "database unreachable"},
+        )
+    return JSONResponse(content={"status": "healthy", "version": "0.1.0"})
 
 
 @app.exception_handler(Exception)

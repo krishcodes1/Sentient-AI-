@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import base64
 from typing import Optional
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Substrings that mark a copy-pasted example key rather than a generated
+# one. Checked case-insensitively against SECRET_KEY so a .env made from
+# .env.example without running the generator fails at boot instead of
+# signing every session token with a string committed to a public repo.
+_PLACEHOLDER_MARKERS = ("replace_me", "changeme", "change-me", "your-secret")
 
 
 class Settings(BaseSettings):
@@ -30,6 +37,49 @@ class Settings(BaseSettings):
         ...,
         description="Base64-encoded 32-byte key for AES-256-GCM credential encryption",
     )
+
+    @field_validator("SECRET_KEY")
+    @classmethod
+    def _secret_key_is_strong(cls, v: str) -> str:
+        """Reject the .env.example placeholder and short keys at startup.
+
+        SECRET_KEY signs every session token; a placeholder key committed to
+        the public repo (or a short guessable one) lets anyone mint a valid
+        JWT for any user id. Unlike ENCRYPTION_KEY — whose placeholder fails
+        loudly on first use because it doesn't decode to 32 bytes — a bad
+        SECRET_KEY would otherwise never fail at all.
+        """
+        lowered = v.strip().lower()
+        if any(marker in lowered for marker in _PLACEHOLDER_MARKERS):
+            raise ValueError(
+                "SECRET_KEY is still the .env.example placeholder; generate a real "
+                "key with python3 -c \"import secrets; print(secrets.token_urlsafe(48))\""
+            )
+        if len(v.strip()) < 32:
+            raise ValueError(
+                "SECRET_KEY must be at least 32 characters; generate one with "
+                "python3 -c \"import secrets; print(secrets.token_urlsafe(48))\""
+            )
+        return v
+
+    @field_validator("ENCRYPTION_KEY")
+    @classmethod
+    def _encryption_key_decodes(cls, v: str) -> str:
+        """Fail at boot — not on the first connector save — when the key is
+        not base64 of exactly 32 bytes (which also catches the placeholder)."""
+        try:
+            raw = base64.urlsafe_b64decode(v)
+        except Exception:
+            raise ValueError(
+                "ENCRYPTION_KEY must be urlsafe-base64; generate one with python3 -c "
+                "\"import base64, os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())\""
+            )
+        if len(raw) != 32:
+            raise ValueError(
+                "ENCRYPTION_KEY must decode to exactly 32 bytes; generate one with python3 -c "
+                "\"import base64, os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())\""
+            )
+        return v
     # Key for the audit-log integrity HMAC (HMAC-SHA256). Optional: when
     # unset, a key is derived deterministically from ENCRYPTION_KEY so keyed
     # hashing works with zero extra configuration. A dedicated key is better:
@@ -112,6 +162,25 @@ class Settings(BaseSettings):
 
     # ── Auth ──────────────────────────────────────────────────────────────
     TOKEN_EXPIRE_MINUTES: int = 60
+    # Gate on POST /auth/register. Register the owner account, then set
+    # false in production so strangers can't create accounts billed to the
+    # operator's LLM keys.
+    ALLOW_REGISTRATION: bool = True
+    # Minimum password length enforced at register/change. 8 is the floor;
+    # operators can only raise it.
+    PASSWORD_MIN_LENGTH: int = Field(default=8, ge=8, le=128)
+
+    # ── HTTP hardening ────────────────────────────────────────────────────
+    # Host headers accepted by the app (Starlette TrustedHostMiddleware).
+    # ["*"] disables the check; set to your real hostname(s) in production.
+    ALLOWED_HOSTS: list[str] = ["*"]
+
+    # ── Logging ───────────────────────────────────────────────────────────
+    LOG_LEVEL: str = Field(
+        default="INFO",
+        pattern="^(?i:critical|error|warning|info|debug)$",
+        description="Minimum level for structlog output",
+    )
 
     # ── Approvals ─────────────────────────────────────────────────────────
     # How long a pending tool-approval stays actionable before it expires.
@@ -119,6 +188,43 @@ class Settings(BaseSettings):
 
     # ── Environment ───────────────────────────────────────────────────────
     ENVIRONMENT: str = "development"
+
+    def production_warnings(self) -> list[str]:
+        """Return misconfigurations worth surfacing at startup in production.
+
+        These are warnings rather than hard failures: each has a legitimate
+        (if unusual) production use, unlike placeholder keys, which the
+        field validators reject outright in every environment.
+        """
+        if self.ENVIRONMENT != "production":
+            return []
+        warnings: list[str] = []
+        if any(
+            "localhost" in origin or "127.0.0.1" in origin
+            for origin in self.CORS_ORIGINS
+        ):
+            warnings.append(
+                "CORS_ORIGINS contains a localhost origin; set it to the real "
+                "frontend origin for production"
+            )
+        if self.AUDIT_HMAC_KEY is None:
+            warnings.append(
+                "AUDIT_HMAC_KEY is unset; the audit-log HMAC key is derived from "
+                "ENCRYPTION_KEY, so a database adversary who also holds that key "
+                "can forge history — set a dedicated key stored apart from the DB"
+            )
+        if self.ALLOW_REGISTRATION:
+            warnings.append(
+                "registration is open; set ALLOW_REGISTRATION=false once the "
+                "owner account exists, or anyone who finds the URL can create "
+                "accounts billed to this server's LLM keys"
+            )
+        if self.ALLOWED_HOSTS == ["*"]:
+            warnings.append(
+                "ALLOWED_HOSTS is ['*']; set it to the real hostname(s) to "
+                "enable Host-header validation"
+            )
+        return warnings
 
 
 settings = Settings()  # type: ignore[call-arg]
