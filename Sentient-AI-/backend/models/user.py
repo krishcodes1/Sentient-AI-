@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy import Boolean, DateTime, Integer, String, Uuid
+from sqlalchemy import false as sa_false
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from core.database import Base
@@ -52,6 +53,21 @@ class User(Base):
         Integer,
         default=0,
         server_default="0",
+        nullable=False,
+    )
+    # Owner of this deployment. The first account to register becomes the
+    # admin (a self-hosted install's first user is the person who deployed
+    # it); everyone after that is a standard user. This is what gives the
+    # `admin_only` connector tier meaning — see build_tools.
+    is_admin: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        # sa.false(), not the string "false": a string default renders as
+        # the TEXT literal 'false' on SQLite, and rows backfilled with it
+        # read back as the truthy string — every pre-existing account would
+        # silently become an admin. sa.false() renders as `false` on
+        # Postgres and `0` on SQLite, which is correct on both.
+        server_default=sa_false(),
         nullable=False,
     )
     # Account settings (surfaced and edited on the Settings page)

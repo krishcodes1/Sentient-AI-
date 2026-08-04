@@ -26,7 +26,11 @@ import {
 const PERMISSION_TIERS = [
   { value: "auto_approve", label: "Auto Approve", help: "Low-risk read actions run immediately." },
   { value: "user_confirm", label: "User Confirm", help: "Write actions require explicit approval." },
-  { value: "admin_only", label: "Admin Only", help: "Only admins can authorize." },
+  {
+    value: "admin_only",
+    label: "Admin Only",
+    help: "Usable only by this deployment's admin (the first account registered).",
+  },
   { value: "hard_blocked", label: "Hard Blocked", help: "Cannot be enabled by anyone." },
 ];
 

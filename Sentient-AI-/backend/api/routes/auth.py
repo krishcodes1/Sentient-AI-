@@ -59,6 +59,7 @@ class UserResponse(BaseModel):
     email: str
     name: Optional[str] = None
     is_active: bool
+    is_admin: bool = False
     default_permission_tier: str
     rate_limit: int
     llm_provider: str
@@ -116,9 +117,17 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)) ->
             ),
         )
 
+    # The first account on a self-hosted install belongs to whoever deployed
+    # it, so it owns the deployment. This is what makes the `admin_only`
+    # connector tier mean something rather than "disabled for everyone".
+    is_first_account = (
+        await db.execute(select(User.id).limit(1))
+    ).scalar_one_or_none() is None
+
     user = User(
         email=email,
         name=body.name,
+        is_admin=is_first_account,
         # bcrypt is ~200ms of pure CPU; run it in a worker thread so the
         # event loop (and every in-flight SSE stream) keeps moving.
         hashed_password=await asyncio.to_thread(hash_password, body.password),

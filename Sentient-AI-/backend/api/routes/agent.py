@@ -5,7 +5,7 @@ import asyncio
 import json
 import time
 import uuid
-from collections import defaultdict, deque
+from collections import OrderedDict, deque
 from datetime import datetime, timezone
 
 import structlog
@@ -47,21 +47,65 @@ class UserRateLimiter:
     """
 
     _WINDOW_SECONDS = 60.0
+    # How many expired entries a single call may reclaim. Every key is
+    # swept at most once, so the total sweep work is proportional to the
+    # number of keys ever created — amortized O(1) per request — while the
+    # cap keeps one unlucky caller from paying for a whole dictionary of
+    # expired windows in a single hot-path call.
+    _SWEEP_PER_CALL = 8
 
     def __init__(self) -> None:
-        self._events: dict[str, deque[float]] = defaultdict(deque)
+        # An OrderedDict (not defaultdict) because eviction needs an order
+        # to walk: entries sit in least-recently-used order, so the bounded
+        # sweep in allow() finds expired windows without ever scanning
+        # every user. The previous plain dict only ever grew — one key plus
+        # one drained deque per distinct user id the worker had ever
+        # served, held for the life of the process.
+        self._events: OrderedDict[str, deque[float]] = OrderedDict()
 
     def allow(self, user_id: str, limit: int) -> bool:
         if limit <= 0:  # defensive: never lock an account out entirely
             return True
         now = time.monotonic()
-        window = self._events[user_id]
+        self._evict_expired(now)
+
+        window = self._events.get(user_id)
+        if window is None:
+            window = deque()
+            self._events[user_id] = window
+        else:
+            # Refresh recency even when the call is about to be refused, so
+            # a user who is actively being throttled stays at the far end of
+            # the eviction order rather than drifting toward the front.
+            self._events.move_to_end(user_id)
+
         while window and now - window[0] >= self._WINDOW_SECONDS:
             window.popleft()
         if len(window) >= limit:
             return False
         window.append(now)
         return True
+
+    def _evict_expired(self, now: float) -> None:
+        """Drop least-recently-used entries whose window has fully aged out.
+
+        The eviction test is on the NEWEST timestamp: an entry only goes
+        when every event it holds is already outside the window, i.e. when
+        allow() would have trimmed the deque empty anyway. Forgetting such
+        a key is indistinguishable from keeping it, which is what makes
+        eviction safe to run ahead of the limit check — a user who is
+        currently over the limit necessarily has an in-window event, so
+        their window can never be reset out from under them by memory
+        pressure from other users.
+        """
+        for _ in range(self._SWEEP_PER_CALL):
+            entry = next(iter(self._events.items()), None)
+            if entry is None:
+                return
+            evicted_user, window = entry
+            if window and now - window[-1] < self._WINDOW_SECONDS:
+                return
+            del self._events[evicted_user]
 
 
 _user_rate_limiter = UserRateLimiter()
@@ -221,6 +265,7 @@ async def _build_tools_and_memory(
     tools = build_tools(
         connector_specs,
         user_default_tier=current_user.default_permission_tier,
+        is_admin=current_user.is_admin,
     )
 
     if any(spec.connector_type == "mcp" for spec in connector_specs):

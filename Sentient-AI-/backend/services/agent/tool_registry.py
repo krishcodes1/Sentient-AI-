@@ -374,6 +374,7 @@ def build_tools(
     engine: Optional[PermissionEngine] = None,
     user_tier: UserTier = UserTier.STANDARD,
     user_default_tier: str = "user_confirm",
+    is_admin: bool = False,
 ) -> list[Tool]:
     """Produce the runtime ``Tool`` objects for a user's active connectors.
 
@@ -386,8 +387,11 @@ def build_tools(
     Per-connector permission tiers (combined with the user's account
     default — the stricter wins) shape the offer:
 
-    - ``admin_only``: the connector's tools are excluded entirely (no
-      admin role exists yet).
+    - ``admin_only``: the connector is usable only by the deployment's
+      admin. For anyone else it contributes no tools at all. For the admin,
+      the static policy then applies as usual (including the actions the
+      policy itself marks ADMIN_ONLY, which require their confirmation
+      rather than being refused outright).
     - ``auto_approve``: actions the static policy would send to the
       approval flow are offered as ``auto`` instead — EXCEPT financial /
       hard-blocked actions, which remain absolutely blocked at every
@@ -396,14 +400,24 @@ def build_tools(
       write-scope tools require explicit approval.
     """
     engine = engine or PermissionEngine()
+    # The static policy already distinguishes admins (ADMIN_ONLY actions
+    # require their confirmation instead of being refused outright); it had
+    # simply never been handed one.
+    if is_admin:
+        user_tier = UserTier.ADMIN
     tools: list[Tool] = []
     for conn in connectors:
         if not conn.is_active:
             continue
         tier = effective_tier(conn.permission_tier, user_default_tier)
-        if tier in ("admin_only", "hard_blocked"):
-            # No admin role exists yet: admin_only connectors contribute
-            # no tools at all (and hard_blocked never will).
+        if tier == "hard_blocked":
+            continue
+        if tier == "admin_only" and not is_admin:
+            # Only the deployment's admin may use an admin_only connector;
+            # for anyone else it contributes no tools at all. Gating here is
+            # what makes an approval-time admin check unnecessary: a
+            # non-admin can never get such an action parked for approval in
+            # the first place.
             continue
         specs = CONNECTOR_CATALOG.get(conn.connector_type)
         if not specs:
