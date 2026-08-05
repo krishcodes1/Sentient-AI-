@@ -8,22 +8,31 @@ future stdio implementation) can swap it out.
 Security properties:
 - Every outbound request URL is SSRF-checked (private/internal ranges
   refused), including redirect hops, via an httpx request hook.
+- The addresses that check validated are *pinned*: the socket is opened
+  to one of them instead of re-resolving the hostname, so a hostile DNS
+  server cannot answer the check with a public address and the
+  connection with 127.0.0.1 (see ``_PinnedResolutionBackend``).
 - Responses are data, never trusted: callers sanitize tool output before
   it reaches the LLM (see ``MCPDispatcher``).
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field
-from typing import Any, Optional, Protocol
+from typing import Any, Iterable, Optional, Protocol
 
+import httpcore
 import httpx
 import structlog
 
 logger = structlog.get_logger(__name__)
 
 MCP_PROTOCOL_VERSION = "2025-03-26"
+
+# (ascii host, port) -> addresses that passed the SSRF policy for it.
+PinTable = dict[tuple[str, int], tuple[str, ...]]
 
 
 class MCPError(Exception):
@@ -60,6 +69,114 @@ class MCPTransport(Protocol):
     async def close(self) -> None: ...
 
 
+class _PinnedResolutionBackend(httpcore.AsyncNetworkBackend):
+    """Socket layer that may only dial addresses already validated.
+
+    Checking a URL and then handing the *hostname* to httpx leaves a
+    DNS-rebinding TOCTOU: httpcore resolves the origin again inside
+    ``connect_tcp``, and a hostile authoritative server answers the first
+    lookup with a public address and the second with 127.0.0.1. httpx
+    exposes no resolver seam, so the fix is to replace the connect-time
+    lookup entirely — this backend dials the addresses the request hook
+    recorded and never resolves anything itself. An origin with no entry
+    is refused rather than resolved, so the failure mode is closed.
+
+    TLS is deliberately untouched. httpcore derives the ``Host`` header,
+    the TLS SNI, and the certificate hostname from the request origin,
+    not from the argument to ``connect_tcp``, so connecting by IP costs
+    nothing in certificate verification strictness.
+    """
+
+    def __init__(
+        self,
+        pins: PinTable,
+        inner: Optional[httpcore.AsyncNetworkBackend] = None,
+    ) -> None:
+        self._pins = pins
+        # AnyIOBackend is httpcore's default under both asyncio and trio
+        # (its AutoBackend only swaps in the native-trio variant, which
+        # this process never runs on). Injecting *inner* is the test seam
+        # for the socket layer.
+        self._inner = inner if inner is not None else httpcore.AnyIOBackend()
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: Optional[float] = None,
+        local_address: Optional[str] = None,
+        socket_options: Optional[Iterable[Any]] = None,
+    ) -> httpcore.AsyncNetworkStream:
+        addresses = self._pins.get((host.lower(), port))
+        if not addresses:
+            raise httpcore.ConnectError(
+                f"No validated address is pinned for {host}:{port}; "
+                "refusing to resolve it at connect time."
+            )
+
+        last_error: Optional[BaseException] = None
+        for address in addresses:
+            try:
+                return await self._inner.connect_tcp(
+                    address,
+                    port,
+                    timeout=timeout,
+                    local_address=local_address,
+                    socket_options=socket_options,
+                )
+            except (httpcore.ConnectError, httpcore.ConnectTimeout) as exc:
+                # Every pinned address passed the policy, so falling
+                # through to the next one cannot reach anywhere the first
+                # one was not already allowed to reach. Without this, a
+                # multi-record host with one dead record would fail even
+                # though a healthy record was validated alongside it.
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+        raise httpcore.ConnectError(f"No pinned address reachable for {host}:{port}")
+
+    async def connect_unix_socket(
+        self,
+        path: str,
+        timeout: Optional[float] = None,
+        socket_options: Optional[Iterable[Any]] = None,
+    ) -> httpcore.AsyncNetworkStream:
+        # A unix socket has no address to validate and is by definition
+        # local; MCP never uses one over this transport.
+        raise httpcore.ConnectError(
+            "Unix-socket connections are not permitted for MCP servers."
+        )
+
+    async def sleep(self, seconds: float) -> None:
+        await self._inner.sleep(seconds)
+
+
+class _PinnedHTTPTransport(httpx.AsyncHTTPTransport):
+    """``httpx.AsyncHTTPTransport`` whose DNS is replaced by a pin table."""
+
+    def __init__(
+        self,
+        pins: PinTable,
+        network_backend: Optional[httpcore.AsyncNetworkBackend] = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        # httpx builds the httpcore pool itself and forwards no
+        # ``network_backend``, so swapping it afterwards is the only way
+        # in. The pool hands this object to every connection it creates.
+        if not hasattr(self._pool, "_network_backend"):
+            # If a future httpx/httpcore renames this, a plain assignment
+            # would quietly create a dead attribute and leave the real
+            # resolver in place — the pin silently stops applying and the
+            # rebinding window reopens with no signal. Fail loudly at
+            # construction instead.
+            raise MCPError(
+                "Cannot pin MCP DNS resolution: this httpx build exposes no "
+                "httpcore network backend to replace."
+            )
+        self._pool._network_backend = _PinnedResolutionBackend(pins, network_backend)
+
+
 class HttpMCPTransport:
     """Streamable-HTTP transport: JSON-RPC requests POSTed to one URL.
 
@@ -72,6 +189,8 @@ class HttpMCPTransport:
         url: str,
         headers: Optional[dict[str, str]] = None,
         timeout_s: float = 30.0,
+        *,
+        network_backend: Optional[httpcore.AsyncNetworkBackend] = None,
     ) -> None:
         self._url = url
         self._headers = dict(headers or {})
@@ -79,18 +198,56 @@ class HttpMCPTransport:
         self._client: Optional[httpx.AsyncClient] = None
         self._next_id = 0
         self._session_id: Optional[str] = None
+        self._network_backend = network_backend
+        # Keyed by origin, and this transport only ever talks to one
+        # origin (redirects are not followed), so the table holds a
+        # single entry that every request overwrites with the resolution
+        # its own check just validated. It cannot grow unbounded.
+        self._pins: PinTable = {}
 
     async def _check_ssrf(self, request: httpx.Request) -> None:
+        """Validate the destination and pin what was validated.
+
+        Runs on every hop rather than once at construction: httpx fires
+        request hooks inside its redirect loop, so a hop to a new host
+        gets its own check and its own pin instead of inheriting the
+        original host's clearance.
+        """
         from core.network_security import check_ssrf
 
-        result = check_ssrf(str(request.url))
+        # getaddrinfo is a blocking syscall and this hook runs on the event
+        # loop, once per request and again per redirect hop. A slow or
+        # unreachable resolver would stall every other request in the
+        # worker — including in-flight SSE streams — so it goes to a thread.
+        result = await asyncio.to_thread(check_ssrf, str(request.url))
         if not result.safe:
             raise MCPError(f"MCP request blocked (SSRF protection): {result.reason}")
+        self._pin(request, result.resolved_ips)
+
+    def _pin(self, request: httpx.Request, addresses: tuple[str, ...]) -> None:
+        """Record the validated addresses for this request's origin.
+
+        Keyed off ``raw_host`` (ASCII/punycode) and the scheme-defaulted
+        port because that is exactly the origin httpcore will present to
+        ``connect_tcp``; ``URL.host`` would hand back the decoded Unicode
+        form for an IDN and the pin lookup would miss.
+
+        Recording nothing is safe: ``_PinnedResolutionBackend`` refuses
+        an unpinned origin instead of resolving it.
+        """
+        if not addresses:
+            return
+        from core.network_security import default_port_for_scheme
+
+        host = request.url.raw_host.decode("ascii").lower()
+        port = request.url.port or default_port_for_scheme(request.url.scheme)
+        self._pins[(host, port)] = addresses
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient(
                 timeout=httpx.Timeout(self._timeout),
+                transport=_PinnedHTTPTransport(self._pins, self._network_backend),
                 event_hooks={"request": [self._check_ssrf]},
             )
         return self._client

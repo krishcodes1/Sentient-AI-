@@ -32,13 +32,161 @@ _BLOCKED_NETWORKS = [
     ipaddress.ip_network("240.0.0.0/4"),        # Reserved
     ipaddress.ip_network("255.255.255.255/32"), # Broadcast
     # IPv6
+    ipaddress.ip_network("::/128"),             # Unspecified — connect(2) to
+                                                # this reaches loopback
     ipaddress.ip_network("::1/128"),            # Loopback
     ipaddress.ip_network("fc00::/7"),           # Unique local
     ipaddress.ip_network("fe80::/10"),          # Link-local
+    ipaddress.ip_network("ff00::/8"),           # Multicast
     ipaddress.ip_network("::ffff:0:0/96"),      # IPv4-mapped IPv6
+    # Transition mechanisms that tunnel an IPv4 address. Blocked wholesale
+    # rather than unwrapped-and-allowed: nothing here needs to reach the
+    # internet through one, and each is a spelling of an IPv4 address that
+    # an IPv4-shaped blocklist does not recognise.
+    ipaddress.ip_network("64:ff9b::/96"),       # NAT64
+    ipaddress.ip_network("64:ff9b:1::/48"),     # NAT64 (local-use)
+    ipaddress.ip_network("2002::/16"),          # 6to4
+    ipaddress.ip_network("2001::/32"),          # Teredo
 ]
 
+# Checked directly when unwrapping, since ipaddress has no `nat64` helper
+# the way it has `sixtofour` and `teredo`.
+_NAT64_PREFIX = ipaddress.ip_network("64:ff9b::/96")
+
 _ALLOWED_SCHEMES = {"http", "https"}
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def default_port_for_scheme(scheme: str) -> int:
+    """Port a URL of *scheme* connects to when none is spelled out.
+
+    Callers that pin an address key their table by (host, port) and must
+    derive the port the same way httpcore does, or the pin lookup misses
+    and a legitimate request fails closed.
+    """
+    return _DEFAULT_PORTS.get(scheme, 443)
+
+
+class SSRFBlocked(Exception):
+    """Raised when a destination fails the public-only address policy.
+
+    ``str(exc)`` is deliberately generic. Naming the offending address
+    back to the caller turns a connector "test" button into a DNS /
+    internal-network resolution oracle, so the detail goes to the log
+    and only ``resolved_ip`` (already recorded server-side) is carried
+    on the exception for internal use.
+    """
+
+    def __init__(self, reason: str, resolved_ip: Optional[str] = None) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.resolved_ip = resolved_ip
+
+
+def _embedded_ipv4(
+    ip: ipaddress.IPv6Address,
+) -> Optional[ipaddress.IPv4Address]:
+    """The IPv4 address *ip* carries, for the IPv6 forms that embed one.
+
+    Each of these reaches the same host as the IPv4 address inside it, so
+    each must be judged as that address — otherwise ``64:ff9b::7f00:1``
+    and ``2002:7f00:1::`` are just spellings of 127.0.0.1 that walk past a
+    blocklist written in IPv4 terms.
+    """
+    if ip.ipv4_mapped:
+        return ip.ipv4_mapped
+    if ip.sixtofour:  # 2002::/16
+        return ip.sixtofour
+    if ip.teredo:  # 2001::/32 — (server, client); the client is the host
+        return ip.teredo[1]
+    if ip in _NAT64_PREFIX:  # 64:ff9b::/96
+        return ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+    return None
+
+
+def _blocked_network_for(
+    ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> Optional[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+    """The blocked range *ip* falls inside, or ``None`` if it is public."""
+    if isinstance(ip, ipaddress.IPv6Address):
+        embedded = _embedded_ipv4(ip)
+        if embedded is not None:
+            # Judge the tunnelled address, but keep checking the outer one
+            # too: the wrapper prefixes are themselves not routable.
+            inner = _blocked_network_for(embedded)
+            if inner is not None:
+                return inner
+
+    for network in _BLOCKED_NETWORKS:
+        if ip in network:
+            return network
+
+    # Deny by default on routability. The list above states intent and
+    # pins the well-known ranges, but enumerating every non-routable block
+    # by hand is how `::`, NAT64 and 6to4 were missed — each of them
+    # reaches loopback and each passed the list. Anything the stdlib does
+    # not consider globally routable, or marks reserved (NAT64 lives
+    # there), is refused.
+    if not ip.is_global or ip.is_reserved:
+        return ipaddress.ip_network(ip)
+    return None
+
+
+def resolve_public_addresses(
+    hostname: str, port: int, *, url: Optional[str] = None
+) -> tuple[str, ...]:
+    """Resolve *hostname* once and return every address it maps to.
+
+    Raises ``SSRFBlocked`` unless **all** of them are public. One private
+    record among several is a DNS-rebinding vector, not a partial pass:
+    the validator would happen to look at the public record while the
+    connection lands on the private one. Refusing the whole name is the
+    only answer that does not depend on which record gets picked.
+
+    The returned tuple is what callers must connect to. Resolving again
+    at connect time re-opens the TOCTOU window this function exists to
+    close.
+    """
+    try:
+        addrinfo = socket.getaddrinfo(hostname, port)
+    except socket.gaierror as exc:
+        raise SSRFBlocked(f"DNS resolution failed for '{hostname}'") from exc
+
+    addresses: list[str] = []
+    for *_, sockaddr in addrinfo:
+        ip_str = str(sockaddr[0])
+        try:
+            ip = ipaddress.ip_address(ip_str)
+        except ValueError:
+            continue
+
+        blocked = _blocked_network_for(ip)
+        if blocked is not None:
+            # Full detail (which hostname resolved to which internal IP in
+            # which blocked CIDR) is server-log-only; see SSRFBlocked.
+            logger.warning(
+                "ssrf_blocked",
+                url=url or hostname,
+                hostname=hostname,
+                resolved_ip=ip_str,
+                blocked_network=str(blocked),
+            )
+            raise SSRFBlocked(
+                "Destination is not permitted by the network security "
+                "policy (resolves to a private or internal address).",
+                resolved_ip=ip_str,
+            )
+
+        if ip_str not in addresses:
+            addresses.append(ip_str)
+
+    if not addresses:
+        # getaddrinfo succeeded but produced nothing usable (e.g. only
+        # AF_UNIX-ish or unparseable sockaddrs). Treat as unresolvable
+        # rather than as an empty allowlist that silently passes.
+        raise SSRFBlocked(f"DNS resolution failed for '{hostname}'")
+    return tuple(addresses)
 
 
 @dataclass
@@ -103,14 +251,22 @@ class SSRFCheckResult:
     safe: bool
     reason: Optional[str] = None
     resolved_ip: Optional[str] = None
+    # Every address the hostname resolved to during *this* check, all of
+    # which passed the policy. Callers that pin (see ``HttpMCPTransport``)
+    # connect to exactly these instead of resolving a second time.
+    resolved_ips: tuple[str, ...] = ()
 
 
 def check_ssrf(url: str) -> SSRFCheckResult:
     """
     Validate a URL is safe from SSRF attacks.
 
-    Resolves DNS and checks the resulting IP against blocked ranges.
+    Resolves DNS and checks the resulting IPs against blocked ranges.
     Rejects private IPs, loopback, link-local, and IPv4-mapped IPv6.
+
+    The resolution is returned in ``resolved_ips`` so the caller can
+    connect to what was validated. A caller that ignores it and lets the
+    HTTP stack resolve the hostname again is still rebindable.
     """
     try:
         parsed = urlparse(url)
@@ -128,47 +284,22 @@ def check_ssrf(url: str) -> SSRFCheckResult:
     if not hostname:
         return SSRFCheckResult(safe=False, reason="No hostname in URL")
 
-    # DNS resolution
     try:
-        addrinfo = socket.getaddrinfo(hostname, parsed.port or 443)
-    except socket.gaierror:
-        return SSRFCheckResult(safe=False, reason=f"DNS resolution failed for '{hostname}'")
+        port = parsed.port or default_port_for_scheme(parsed.scheme)
+    except ValueError:
+        # urlparse only validates the port lazily, on attribute access.
+        return SSRFCheckResult(safe=False, reason="Malformed URL")
 
-    for family, _, _, _, sockaddr in addrinfo:
-        ip_str = sockaddr[0]
-        try:
-            ip = ipaddress.ip_address(ip_str)
-        except ValueError:
-            continue
+    try:
+        addresses = resolve_public_addresses(hostname, port, url=url)
+    except SSRFBlocked as exc:
+        return SSRFCheckResult(
+            safe=False, reason=exc.reason, resolved_ip=exc.resolved_ip
+        )
 
-        # Handle IPv4-mapped IPv6 addresses (::ffff:192.168.1.1)
-        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
-            ip = ip.ipv4_mapped
-
-        for network in _BLOCKED_NETWORKS:
-            if ip in network:
-                # The full detail (which hostname resolved to which internal IP
-                # in which blocked CIDR) goes to the server log only. Returning
-                # it to the caller would turn a connector "test" into a DNS /
-                # internal-network resolution oracle, so the caller-facing
-                # reason stays generic.
-                logger.warning(
-                    "ssrf_blocked",
-                    url=url,
-                    hostname=hostname,
-                    resolved_ip=ip_str,
-                    blocked_network=str(network),
-                )
-                return SSRFCheckResult(
-                    safe=False,
-                    reason=(
-                        "Destination is not permitted by the network security "
-                        "policy (resolves to a private or internal address)."
-                    ),
-                    resolved_ip=ip_str,
-                )
-
-    return SSRFCheckResult(safe=True, resolved_ip=addrinfo[0][4][0] if addrinfo else None)
+    return SSRFCheckResult(
+        safe=True, resolved_ip=addresses[0], resolved_ips=addresses
+    )
 
 
 def check_network_policy(url: str, connector_type: str) -> SSRFCheckResult:
@@ -226,4 +357,8 @@ def check_network_policy(url: str, connector_type: str) -> SSRFCheckResult:
                 reason=f"Path '{path}' not in allowed paths for {hostname}",
             )
 
-    return SSRFCheckResult(safe=True, resolved_ip=ssrf_result.resolved_ip)
+    return SSRFCheckResult(
+        safe=True,
+        resolved_ip=ssrf_result.resolved_ip,
+        resolved_ips=ssrf_result.resolved_ips,
+    )
