@@ -6,6 +6,7 @@ import {
   streamMessage,
   type StreamHandlers,
 } from "@/services/api";
+import { jsonResponse, mockFetch, stubLocation } from "@/test/http";
 
 /**
  * Tests for the hand-rolled SSE reader in `streamMessage` and the shared
@@ -29,40 +30,6 @@ function sseResponse(chunks: string[]): Response {
     statusText: "OK",
     body,
   } as unknown as Response;
-}
-
-function jsonResponse(status: number, body: unknown): Response {
-  return {
-    ok: status >= 200 && status < 300,
-    status,
-    statusText: `status ${status}`,
-    json: async () => body,
-  } as unknown as Response;
-}
-
-type FetchImpl = (input: string, init?: RequestInit) => Response | Promise<Response>;
-
-function mockFetch(impl: FetchImpl) {
-  const fn = vi.fn(impl);
-  vi.stubGlobal("fetch", fn);
-  return fn;
-}
-
-/**
- * jsdom's real `location` refuses redefinition of `replace`/`reload`, so swap
- * the whole global (vitest maps `window` onto `globalThis`).
- */
-function stubLocation(pathname = "/") {
-  const replace = vi.fn();
-  const reload = vi.fn();
-  vi.stubGlobal("location", {
-    pathname,
-    href: `http://localhost:3000${pathname}`,
-    replace,
-    reload,
-    assign: vi.fn(),
-  });
-  return { replace, reload };
 }
 
 function recordHandlers() {
