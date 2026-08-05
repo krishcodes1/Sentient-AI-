@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import {
   Brain,
   Plus,
@@ -8,6 +8,7 @@ import {
   Check,
   X,
   RefreshCw,
+  Search,
   ShieldCheck,
 } from "lucide-react";
 import clsx from "clsx";
@@ -35,6 +36,16 @@ const CATEGORY_COLORS: Record<MemoryCategory, string> = {
   project: "var(--accent-success)",
   fact: "var(--text-secondary)",
 };
+
+type CategoryFilter = MemoryCategory | "all";
+
+// Long enough that typing does not fire a request per keystroke, short
+// enough that the list still feels live.
+const SEARCH_DEBOUNCE_MS = 250;
+
+// Mirrors MAX_SEARCH_CHARS in backend/services/memory.py. Capping the input
+// means the user can never type their way into a 422.
+const SEARCH_MAX_LENGTH = 200;
 
 const panelStyle = {
   background: "var(--claw-panel)",
@@ -67,8 +78,15 @@ export default function MemoryPage() {
   const [me, setMe] = useState<User | null>(null);
   const [memories, setMemories] = useState<Memory[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [retryKey, setRetryKey] = useState(0);
+
+  // Filters. `search` tracks the input; `debouncedSearch` is what actually
+  // reaches the API, so a fast typist issues one request instead of ten.
+  const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>("all");
 
   // Add form
   const [newContent, setNewContent] = useState("");
@@ -88,10 +106,28 @@ export default function MemoryPage() {
   const [togglingMemory, setTogglingMemory] = useState(false);
 
   useEffect(() => {
+    const timer = setTimeout(
+      () => setDebouncedSearch(search.trim()),
+      SEARCH_DEBOUNCE_MS,
+    );
+    return () => clearTimeout(timer);
+  }, [search]);
+
+  const filtersActive = debouncedSearch !== "" || categoryFilter !== "all";
+
+  useEffect(() => {
     let cancelled = false;
-    setLoading(true);
+    setRefreshing(true);
     setLoadError(null);
-    Promise.all([getMe(), getMemories()])
+    // getMe() is memoized in the api layer, so re-requesting it alongside a
+    // filter change costs nothing and keeps a single error path for both.
+    Promise.all([
+      getMe(),
+      getMemories({
+        q: debouncedSearch || undefined,
+        category: categoryFilter === "all" ? undefined : categoryFilter,
+      }),
+    ])
       .then(([user, mems]) => {
         if (cancelled) return;
         setMe(user);
@@ -101,14 +137,28 @@ export default function MemoryPage() {
         if (!cancelled) setLoadError(err.message);
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (cancelled) return;
+        // `loading` covers the first paint only. Later fetches keep the
+        // current results on screen so the list does not flash empty
+        // between keystrokes.
+        setLoading(false);
+        setRefreshing(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [retryKey]);
+  }, [retryKey, debouncedSearch, categoryFilter]);
+
+  const reload = () => setRetryKey((k) => k + 1);
 
   const memoryEnabled = me?.memory_enabled ?? true;
+
+  const emptyFilterLabel = useMemo(() => {
+    const parts: string[] = [];
+    if (debouncedSearch) parts.push(`"${debouncedSearch}"`);
+    if (categoryFilter !== "all") parts.push(`category "${categoryFilter}"`);
+    return parts.join(" in ");
+  }, [debouncedSearch, categoryFilter]);
 
   const handleToggleMemory = async () => {
     if (!me) return;
@@ -131,7 +181,10 @@ export default function MemoryPage() {
     setAddError(null);
     try {
       const created = await createMemory({ content, category: newCategory });
-      setMemories((prev) => [created, ...prev]);
+      // Whether the new memory belongs in a filtered list is the server's
+      // call (it owns the matching rules), so refetch instead of guessing.
+      if (filtersActive) reload();
+      else setMemories((prev) => [created, ...prev]);
       setNewContent("");
       setNewCategory("fact");
     } catch (err) {
@@ -158,6 +211,9 @@ export default function MemoryPage() {
       const updated = await updateMemory(id, { content });
       setMemories((prev) => prev.map((m) => (m.id === id ? updated : m)));
       setEditingId(null);
+      // An edit can move a memory in or out of the active search, so let
+      // the server re-decide the visible set.
+      if (filtersActive) reload();
     } catch (err) {
       setEditError((err as Error).message);
     }
@@ -287,8 +343,73 @@ export default function MemoryPage() {
             <h2>Your memories</h2>
           </div>
           <span className="mono-tag" style={{ color: "var(--text-muted)" }}>
-            {memories.length} saved
+            {memories.length} {filtersActive ? "matching" : "saved"}
           </span>
+        </div>
+
+        {/* Search + category filter */}
+        <div className="flex items-center gap-2 flex-wrap mb-4">
+          <div className="relative flex-1 min-w-[200px]">
+            <Search
+              className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none"
+              style={{ color: "var(--text-muted)" }}
+            />
+            {/* Deliberately type="text": type="search" would paint the
+                browser's own clear button next to the one below it. */}
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search memories..."
+              aria-label="Search memories"
+              maxLength={SEARCH_MAX_LENGTH}
+              className="w-full pl-9 pr-9 py-2 rounded-[10px] text-sm outline-none"
+              style={inputStyle}
+            />
+            {refreshing && !loading ? (
+              <Loader2
+                className="w-3.5 h-3.5 absolute right-3 top-1/2 -translate-y-1/2 animate-spin"
+                style={{ color: "var(--text-muted)" }}
+              />
+            ) : (
+              search !== "" && (
+                <button
+                  type="button"
+                  aria-label="Clear search"
+                  onClick={() => setSearch("")}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 rounded-[6px]"
+                  style={{ color: "var(--text-muted)" }}
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )
+            )}
+          </div>
+          <div className="flex gap-1.5 flex-wrap">
+            {([{ value: "all" as const, label: "All" }, ...CATEGORIES]).map(
+              (c) => {
+                const active = categoryFilter === c.value;
+                return (
+                  <button
+                    key={c.value}
+                    type="button"
+                    onClick={() => setCategoryFilter(c.value)}
+                    aria-pressed={active}
+                    className="px-2.5 py-1.5 rounded-[8px] text-xs font-medium capitalize transition-colors"
+                    style={{
+                      background: active ? "var(--accent-glow)" : "var(--claw-surface)",
+                      border: active
+                        ? "1px solid rgba(34,211,238,0.35)"
+                        : "1px solid var(--claw-border)",
+                      color: active ? "var(--accent-primary)" : "var(--text-secondary)",
+                    }}
+                  >
+                    {c.label}
+                  </button>
+                );
+              },
+            )}
+          </div>
         </div>
 
         {loading && (
@@ -317,10 +438,31 @@ export default function MemoryPage() {
           </div>
         )}
 
-        {!loading && !loadError && memories.length === 0 && (
+        {!loading && !loadError && memories.length === 0 && !filtersActive && (
           <p className="text-sm text-center py-8" style={{ color: "var(--text-muted)" }}>
             No memories yet. Add one above and SentientAI will remember it.
           </p>
+        )}
+
+        {/* Distinct from "no memories yet" — the user has memories, this
+            filter just does not reach any of them. */}
+        {!loading && !loadError && memories.length === 0 && filtersActive && (
+          <div className="text-center py-8">
+            <p className="text-sm" style={{ color: "var(--text-muted)" }}>
+              No memories match {emptyFilterLabel}.
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                setSearch("");
+                setCategoryFilter("all");
+              }}
+              className="mt-2 text-xs font-semibold"
+              style={{ color: "var(--accent-primary)" }}
+            >
+              Clear filters
+            </button>
+          </div>
         )}
 
         {!loading && !loadError && memories.length > 0 && (

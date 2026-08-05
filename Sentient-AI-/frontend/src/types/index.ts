@@ -33,6 +33,18 @@ export interface UpdateMemoryRequest {
   category?: MemoryCategory;
 }
 
+export interface MemoryFilters {
+  /**
+   * Free text, matched case-insensitively as a substring of memory content.
+   * Blank/whitespace means "no filter"; the backend rejects anything longer
+   * than its search cap (200 chars) with a 422.
+   */
+  q?: string;
+  category?: MemoryCategory;
+  limit?: number;
+  offset?: number;
+}
+
 export type PermissionTier =
   | "auto_approve"
   | "user_confirm"

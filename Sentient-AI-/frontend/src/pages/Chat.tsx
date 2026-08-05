@@ -14,6 +14,8 @@ import {
   AlertTriangle,
   RefreshCw,
   Clock,
+  Search,
+  X,
 } from "lucide-react";
 import clsx from "clsx";
 import type {
@@ -288,6 +290,10 @@ export default function Chat() {
   const [authError, setAuthError] = useState<string | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [convError, setConvError] = useState<string | null>(null);
+  // searchInput is what the user is typing; searchTerm is the debounced
+  // value the query actually runs on.
+  const [searchInput, setSearchInput] = useState("");
+  const [searchTerm, setSearchTerm] = useState("");
   const [convRetryKey, setConvRetryKey] = useState(0);
   const [hasMoreConvs, setHasMoreConvs] = useState(false);
   const [loadingMoreConvs, setLoadingMoreConvs] = useState(false);
@@ -338,17 +344,29 @@ export default function Chat() {
     };
   }, []);
 
-  // Load the first page of conversations when we know the user
+  // Debounce the search box so typing does not fire a query per keystroke.
+  useEffect(() => {
+    const timer = setTimeout(() => setSearchTerm(searchInput), 250);
+    return () => clearTimeout(timer);
+  }, [searchInput]);
+
+  // Load the first page of conversations when we know the user, and again
+  // whenever the (debounced) search term changes.
   useEffect(() => {
     if (!me) return;
     let cancelled = false;
     setConvError(null);
-    getConversations({ limit: CONV_PAGE_SIZE, offset: 0 })
+    getConversations({ limit: CONV_PAGE_SIZE, offset: 0, q: searchTerm })
       .then((convs) => {
         if (cancelled) return;
         setConversations(convs);
         setHasMoreConvs(convs.length === CONV_PAGE_SIZE);
-        if (convs.length > 0) setActiveConv((current) => current ?? convs[0].id);
+        // Only auto-select while browsing: during a search, jumping into
+        // the first hit would yank the reader out of the thread they are
+        // already reading.
+        if (!searchTerm && convs.length > 0) {
+          setActiveConv((current) => current ?? convs[0].id);
+        }
       })
       .catch((err: Error) => {
         if (!cancelled) setConvError(err.message);
@@ -356,7 +374,7 @@ export default function Chat() {
     return () => {
       cancelled = true;
     };
-  }, [me, convRetryKey]);
+  }, [me, convRetryKey, searchTerm]);
 
   // Load messages (and any still-pending approvals) when the active
   // conversation changes. Approvals are persisted server-side, so fetching
@@ -483,6 +501,7 @@ export default function Chat() {
       const next = await getConversations({
         limit: CONV_PAGE_SIZE,
         offset: conversations.length,
+        q: searchTerm,
       });
       setConversations((prev) => {
         const seen = new Set(prev.map((c) => c.id));
@@ -758,8 +777,40 @@ export default function Chat() {
             </p>
           )}
         </div>
-        <div className="px-4 pt-3 pb-1">
-          <div className="eyebrow">Conversations</div>
+        <div className="px-4 pt-3 pb-2">
+          <div className="eyebrow mb-2">Conversations</div>
+          <div
+            className="flex items-center gap-2 rounded-[8px] px-2.5 py-1.5"
+            style={{
+              background: "var(--bg-input)",
+              border: "1px solid var(--claw-border)",
+            }}
+          >
+            <Search
+              className="w-3.5 h-3.5 shrink-0"
+              style={{ color: "var(--text-muted)" }}
+            />
+            <input
+              type="text"
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              placeholder="Search titles and messages"
+              aria-label="Search conversations"
+              className="flex-1 min-w-0 bg-transparent outline-none text-xs"
+              style={{ color: "var(--text-primary)" }}
+            />
+            {searchInput && (
+              <button
+                type="button"
+                onClick={() => setSearchInput("")}
+                aria-label="Clear search"
+                className="shrink-0"
+                style={{ color: "var(--text-muted)" }}
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
         </div>
         <div className="flex-1 overflow-y-auto">
           {convError && (
@@ -789,7 +840,9 @@ export default function Chat() {
               className="text-xs text-center px-4 py-8"
               style={{ color: "var(--text-muted)" }}
             >
-              No conversations yet. Click New Chat to start one.
+              {searchTerm
+                ? `No conversations match “${searchTerm}”.`
+                : "No conversations yet. Click New Chat to start one."}
             </p>
           )}
           {conversations.map((conv) => {

@@ -18,6 +18,7 @@ import type {
   AuditIntegrityCheck,
   AuditStats,
   Memory,
+  MemoryFilters,
   CreateMemoryRequest,
   UpdateMemoryRequest,
   Message,
@@ -60,10 +61,19 @@ function errorDetailToMessage(detail: unknown, fallback: string): string {
           const msg = String((item as { msg: unknown }).msg);
           return loc ? `${loc}: ${msg}` : msg;
         }
-        return String(item);
+        // `String(null)` is the truthy string "null", which survives the
+        // filter below and reaches the user as an error message reading
+        // "null". Drop empties here instead.
+        return item == null ? "" : String(item);
       })
       .filter(Boolean);
     if (messages.length) return messages.join("; ");
+    // An array with nothing usable in it (`[]`, `[""]`) must fall back to
+    // the status line. Dropping through to the object branch below would
+    // JSON.stringify it — an array IS a truthy object — and the UI would
+    // render the literal "[]", which is the unreadable-message problem
+    // this function exists to prevent.
+    return fallback;
   }
   if (detail && typeof detail === "object") {
     try {
@@ -84,10 +94,74 @@ function handleUnauthorized() {
   }
 }
 
+/** Renew the token once it is this close to expiring. */
+const REFRESH_WINDOW_SECONDS = 5 * 60;
+let refreshInFlight: Promise<void> | null = null;
+
+/** Read `exp` out of a JWT without verifying it — the server does that. */
+function tokenExpiry(token: string): number | null {
+  try {
+    const payload = token.split(".")[1];
+    if (!payload) return null;
+    const base64 = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = base64.padEnd(
+      base64.length + ((4 - (base64.length % 4)) % 4),
+      "="
+    );
+    const claims = JSON.parse(atob(padded));
+    return typeof claims.exp === "number" ? claims.exp : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Renew the token before it lapses, so a long working session does not end
+ * abruptly mid-action. Shares one in-flight request: a page that fires five
+ * calls at once must not send five refreshes.
+ *
+ * A refused refresh is deliberately not fatal here — the current token is
+ * still valid until its own expiry, and the existing 401 path handles the
+ * end of a session. Failing loudly at this point would log the user out
+ * *earlier* than doing nothing.
+ */
+export async function ensureFreshToken(): Promise<void> {
+  const token = localStorage.getItem("auth_token");
+  if (!token) return;
+  const exp = tokenExpiry(token);
+  if (exp === null) return;
+
+  const secondsLeft = exp - Date.now() / 1000;
+  // Already expired: nothing to extend, the 401 path owns it from here.
+  if (secondsLeft <= 0 || secondsLeft > REFRESH_WINDOW_SECONDS) return;
+
+  if (!refreshInFlight) {
+    refreshInFlight = fetch(`${API_BASE}/auth/refresh`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then(async (response) => {
+        if (!response.ok) return;
+        const data = await response.json();
+        if (data?.access_token) {
+          localStorage.setItem("auth_token", data.access_token);
+        }
+      })
+      .catch(() => {
+        /* offline or refused — see the docstring */
+      })
+      .finally(() => {
+        refreshInFlight = null;
+      });
+  }
+  await refreshInFlight;
+}
+
 async function request<T>(
   endpoint: string,
   options: RequestInit = {}
 ): Promise<T> {
+  await ensureFreshToken();
   const token = localStorage.getItem("auth_token");
 
   const headers: Record<string, string> = {
@@ -189,10 +263,13 @@ export function logout(): void {
 export async function getConversations(options: {
   limit?: number;
   offset?: number;
+  /** Free text matched against conversation titles and message bodies. */
+  q?: string;
 } = {}): Promise<Conversation[]> {
   const params = new URLSearchParams();
   if (options.limit != null) params.set("limit", String(options.limit));
   if (options.offset != null) params.set("offset", String(options.offset));
+  if (options.q?.trim()) params.set("q", options.q.trim());
   const query = params.toString();
   return request<Conversation[]>(
     `/agent/conversations${query ? `?${query}` : ""}`
@@ -272,6 +349,9 @@ export async function streamMessage(
   handlers: StreamHandlers,
   signal?: AbortSignal,
 ): Promise<void> {
+  // An agent turn can run for minutes; renewing first means a long one
+  // cannot start on a token that lapses halfway through.
+  await ensureFreshToken();
   const token = localStorage.getItem("auth_token");
   const response = await fetch(
     `${API_BASE}/agent/conversations/${conversationId}/messages/stream`,
@@ -518,8 +598,18 @@ export async function exportAccount(): Promise<void> {
 }
 
 // Memory
-export async function getMemories(): Promise<Memory[]> {
-  return request<Memory[]>("/memories/");
+export async function getMemories(
+  filters: MemoryFilters = {},
+): Promise<Memory[]> {
+  const params = new URLSearchParams();
+  // A blank term is omitted rather than sent as q="" so the backend's
+  // "no filter" path and this one agree.
+  if (filters.q?.trim()) params.set("q", filters.q.trim());
+  if (filters.category) params.set("category", filters.category);
+  if (filters.limit != null) params.set("limit", String(filters.limit));
+  if (filters.offset != null) params.set("offset", String(filters.offset));
+  const query = params.toString();
+  return request<Memory[]>(`/memories/${query ? `?${query}` : ""}`);
 }
 
 export async function createMemory(
