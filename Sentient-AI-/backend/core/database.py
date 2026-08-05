@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from sqlalchemy.ext.asyncio import (
@@ -14,7 +15,14 @@ from sqlalchemy.orm import DeclarativeBase
 
 from core.config import settings
 
+if TYPE_CHECKING:
+    from alembic.config import Config
+
 logger = structlog.get_logger(__name__)
+
+# The first revision. A database that predates Alembic is stamped with
+# this so `upgrade head` applies only what came after it.
+_BASELINE_REVISION = "0001_baseline"
 
 engine = create_async_engine(
     settings.DATABASE_URL,
@@ -47,14 +55,7 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             raise
 
 
-def _run_alembic_upgrade() -> None:
-    """Bring the database to the latest revision.
-
-    Synchronous on purpose: alembic's entry point owns an event loop of its
-    own (env.py calls asyncio.run), so this must never be awaited directly
-    from the running loop — callers use asyncio.to_thread.
-    """
-    from alembic import command
+def _alembic_config() -> "Config":
     from alembic.config import Config
 
     cfg = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
@@ -67,7 +68,53 @@ def _run_alembic_upgrade() -> None:
     # The app's configured database, never a second URL that could drift.
     cfg.attributes["sqlalchemy_url"] = settings.DATABASE_URL
     cfg.attributes["configure_logger"] = False
+    return cfg
+
+
+def _needs_baseline_stamp(sync_connection: Any) -> bool:
+    """True when this database predates Alembic and must be stamped first.
+
+    A database created before migrations existed already has every table
+    but no ``alembic_version`` row, so ``upgrade head`` starts at the
+    baseline and immediately fails on ``CREATE TABLE users``. On Postgres
+    that aborts the transaction, so it fails identically on every restart
+    and the app never serves a request — which is the whole database
+    silently unavailable, from the operator's point of view.
+
+    Requiring a human to run ``alembic stamp`` first is a footgun: nothing
+    warns you until the app is down. The condition is trivially
+    detectable, so detect it.
+    """
+    from sqlalchemy import inspect
+
+    inspector = inspect(sync_connection)
+    tables = set(inspector.get_table_names())
+    if "alembic_version" in tables:
+        return False
+    # "users" is the anchor: it exists in the baseline and in every
+    # pre-Alembic database. An empty database is a fresh install and must
+    # run the migrations normally, not be stamped past them.
+    return "users" in tables
+
+
+def _run_alembic_upgrade() -> None:
+    """Bring the database to the latest revision.
+
+    Synchronous on purpose: alembic's entry point owns an event loop of its
+    own (env.py calls asyncio.run), so this must never be awaited directly
+    from the running loop — callers use asyncio.to_thread.
+    """
+    from alembic import command
+
+    cfg = _alembic_config()
     command.upgrade(cfg, "head")
+
+
+def _stamp_baseline() -> None:
+    """Record the baseline as already applied, without running it."""
+    from alembic import command
+
+    command.stamp(_alembic_config(), _BASELINE_REVISION)
 
 
 async def init_db(retries: int = 10, delay: float = 2.0) -> None:
@@ -116,8 +163,15 @@ async def init_db(retries: int = 10, delay: float = 2.0) -> None:
         try:
             # Connectivity probe first, so a database that is still booting
             # is retried here rather than surfacing as a migration failure.
+            # The same connection adopts a pre-Alembic database, which has
+            # to happen before any upgrade is attempted.
             async with engine.begin() as conn:
                 await conn.execute(text("SELECT 1"))
+                needs_stamp = await conn.run_sync(_needs_baseline_stamp)
+
+            if needs_stamp:
+                logger.info("database_predates_alembic_stamping_baseline")
+                await asyncio.to_thread(_stamp_baseline)
 
             # Alembic owns the schema. Run in a worker thread: the alembic
             # env drives its own event loop, which cannot be started from

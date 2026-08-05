@@ -25,7 +25,25 @@ branch_labels = None
 depends_on = None
 
 
+def _has_is_admin() -> bool:
+    """Whether the column is already there.
+
+    This revision has to meet databases in two different states. One that
+    predates Alembic gets stamped at the baseline and then arrives here
+    needing the column. But a database built by the old create_all() from
+    a recent checkout ALREADY has it, and is stamped at the baseline just
+    the same — for that one, adding the column raises DuplicateColumn and,
+    on Postgres, aborts the transaction so startup fails identically on
+    every restart.
+    """
+    inspector = sa.inspect(op.get_bind())
+    return any(c["name"] == "is_admin" for c in inspector.get_columns("users"))
+
+
 def upgrade() -> None:
+    if _has_is_admin():
+        return
+
     op.add_column(
         "users",
         sa.Column(

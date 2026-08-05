@@ -293,11 +293,12 @@ Tracked honestly so nobody mistakes this for finished security work:
 - **Migrations** — Alembic owns the schema (`backend/alembic/`). The
   production container runs `alembic upgrade head` before starting the
   server, and startup also upgrades so a bare `uvicorn main:app` dev run
-  works unchanged. An EXISTING deployment must be stamped once
-  (`alembic stamp 0001_baseline`) before its first upgrade — see
-  `backend/alembic/README.md`. Remaining gap: the upgrade runs in-process
-  as well as in the container CMD, so a multi-worker deployment could race
-  it; run the migration as its own deploy step if you scale out.
+  works unchanged. A database that predates Alembic is detected and
+  stamped automatically on the next boot, so upgrading needs no operator
+  action — see `backend/alembic/README.md`. Remaining gap: the upgrade
+  runs in-process as well as in the container CMD, so a multi-worker
+  deployment could race it; run the migration as its own deploy step if
+  you scale out.
 - **X-Forwarded-For trust** — XFF is honored only when the direct peer is
   inside `TRUSTED_PROXIES` (see "Rate limiting" above), so a directly
   reachable client cannot spoof its way into fresh rate-limit buckets. The
