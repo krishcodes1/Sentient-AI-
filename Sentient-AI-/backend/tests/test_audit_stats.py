@@ -145,3 +145,42 @@ async def test_audit_stats_empty_for_fresh_user(client, session_factory):
         d["approved"] == 0 and d["blocked"] == 0 and d["pending"] == 0
         for d in body["by_day"]
     )
+
+
+@pytest.mark.asyncio
+async def test_by_day_buckets_are_utc_not_server_local(client, session_factory):
+    """Day buckets must be UTC, whatever time zone the database session is in.
+
+    Postgres' date() converts a TIMESTAMPTZ to the session's time zone
+    before truncating. The bucket keys are built in UTC in Python, so on a
+    server that is not UTC the two disagree and today's events silently
+    vanish from the dashboard chart. SQLite never reproduces this (it
+    truncates the stored UTC string), so it only shows up against a real
+    Postgres in a non-UTC zone.
+
+    The row below sits in the window where the two interpretations differ:
+    late-evening UTC is still the previous day in the Americas, and early
+    UTC morning is already the next day in Asia/Oceania.
+    """
+    user, token = await make_user(session_factory)
+    from models.audit import AuditStatus
+
+    now = datetime.now(timezone.utc)
+    # 00:30 UTC today — yesterday in every negative-offset zone.
+    early_utc = datetime(
+        now.year, now.month, now.day, 0, 30, tzinfo=timezone.utc
+    )
+    await _seed_audit(session_factory, user.id, AuditStatus.approved, when=early_utc)
+
+    response = await client.get("/api/audit/stats", headers=auth_headers(token))
+    assert response.status_code == 200
+    by_day = {d["date"]: d for d in response.json()["by_day"]}
+
+    utc_key = early_utc.date().isoformat()
+    assert utc_key in by_day, "today's UTC bucket is missing from the window"
+    assert by_day[utc_key]["approved"] == 1, (
+        "an event at 00:30 UTC was bucketed into a different day — the "
+        "grouping is using the database session's time zone, not UTC"
+    )
+    # And it must appear exactly once across the whole window.
+    assert sum(d["approved"] for d in by_day.values()) == 1

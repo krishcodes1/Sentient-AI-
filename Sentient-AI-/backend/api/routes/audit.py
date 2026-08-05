@@ -160,7 +160,16 @@ async def get_audit_stats(
     window_start = datetime(
         today.year, today.month, today.day, tzinfo=timezone.utc
     ) - timedelta(days=6)
-    day_expr = func.date(AuditLog.timestamp)
+    # Postgres' date() converts a TIMESTAMPTZ to the SESSION's time zone
+    # before truncating, so on a server whose zone is not UTC the rows get
+    # bucketed by local date while the keys below are built in UTC — the
+    # buckets never line up and the dashboard chart silently reads zero for
+    # part of the window. Convert explicitly. SQLite stores the ISO-8601 UTC
+    # string, so plain date() is already UTC there.
+    if db.get_bind().dialect.name == "postgresql":
+        day_expr = func.date(func.timezone("UTC", AuditLog.timestamp))
+    else:
+        day_expr = func.date(AuditLog.timestamp)
     by_day_result = await db.execute(
         select(day_expr, AuditLog.status, func.count(AuditLog.id))
         .where(
