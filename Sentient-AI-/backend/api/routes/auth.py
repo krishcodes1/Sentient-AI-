@@ -4,18 +4,24 @@ import asyncio
 import json
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
 from core.database import get_db
-from core.security import create_access_token, hash_password, verify_password
+from core.security import (
+    create_access_token,
+    hash_password,
+    verify_access_token,
+    verify_password,
+)
 from core.validation import SafeStr, normalize_email
 from models.user import User
 from services.auth import get_current_user
@@ -28,6 +34,11 @@ _KNOWN_PROVIDERS = frozenset(
 )
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+# Reads the same Authorization header get_current_user does; the refresh
+# handler needs the raw token to inspect the session-start claim, which the
+# resolved User object does not carry.
+_bearer_scheme = HTTPBearer()
 
 # Rows fetched per query while streaming an account export. Module-level so
 # tests can shrink it and actually exercise the multi-page path.
@@ -164,6 +175,63 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)) -> dict:
             "sub": str(user.id),
             "email": user.email,
             "epoch": user.token_epoch,
+            # When this SESSION began, as opposed to when this token was
+            # issued. Refreshing carries it forward unchanged, so the
+            # absolute cap is measured from the actual login.
+            "sst": int(datetime.now(timezone.utc).timestamp()),
+        }
+    )
+    return {"access_token": token, "token_type": "bearer"}
+
+
+@router.post("/refresh", response_model=TokenResponse)
+async def refresh_token(
+    credentials: HTTPAuthorizationCredentials = Depends(_bearer_scheme),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """Exchange a still-valid token for one with a fresh expiry.
+
+    Deliberately NOT a refresh-token scheme: there is no second, longer-lived
+    credential to steal or store. You can only extend a session you are
+    already authenticated for, which means the only thing this adds over
+    re-logging-in is convenience.
+
+    Two limits keep that bounded: the session cannot be extended past
+    SESSION_MAX_HOURS from the original login, and a password change still
+    invalidates the token immediately (get_current_user checks token_epoch
+    before this handler runs).
+    """
+    payload = verify_access_token(credentials.credentials)
+
+    session_started = payload.get("sst")
+    if session_started is None:
+        # Issued before sessions were tracked. Treat the token's own issue
+        # time as the session start rather than granting an unbounded one.
+        session_started = payload.get("iat")
+    if session_started is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token cannot be refreshed. Please log in again.",
+        )
+
+    age = datetime.now(timezone.utc) - datetime.fromtimestamp(
+        int(session_started), tz=timezone.utc
+    )
+    if age >= timedelta(hours=settings.SESSION_MAX_HOURS):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=(
+                f"This session reached its {settings.SESSION_MAX_HOURS}-hour "
+                "limit. Please log in again."
+            ),
+        )
+
+    token = create_access_token(
+        data={
+            "sub": str(current_user.id),
+            "email": current_user.email,
+            "epoch": current_user.token_epoch,
+            "sst": int(session_started),
         }
     )
     return {"access_token": token, "token_type": "bearer"}

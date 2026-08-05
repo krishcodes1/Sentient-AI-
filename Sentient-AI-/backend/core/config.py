@@ -162,6 +162,11 @@ class Settings(BaseSettings):
 
     # ── Auth ──────────────────────────────────────────────────────────────
     TOKEN_EXPIRE_MINUTES: int = 60
+    # Hard ceiling on how long a session can be extended by refreshing.
+    # Refresh trades "logged out mid-sentence every hour" for "a stolen
+    # token stays useful a while longer", so the ceiling is what keeps that
+    # trade bounded — past it the user logs in again, no exceptions.
+    SESSION_MAX_HOURS: int = Field(default=12, ge=1, le=720)
     # Gate on POST /auth/register. Register the owner account, then set
     # false in production so strangers can't create accounts billed to the
     # operator's LLM keys.
