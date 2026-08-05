@@ -43,6 +43,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.security import compute_audit_hash
 from models.audit import AuditLog, AuditStatus
+from models.user import User
 
 logger = structlog.get_logger(__name__)
 
@@ -158,11 +159,12 @@ def build_hash_payload(
     }
 
 
-# Serializes chain writes per user within this process so two concurrent
-# tool executions cannot both read the same head and fork the chain.
-# NOTE: this guards a single process only. Multi-worker deployments need a
-# DB-level guard (e.g. SELECT ... FOR UPDATE on the chain head, or a
-# serialized writer); documented in SECURITY.md as a deployment constraint.
+# Fast path only. The asyncio lock keeps concurrent tasks in THIS process
+# from piling onto the same database row lock; it is not what makes the
+# chain correct. It cannot be: the lock is released when this function
+# returns, but the row it wrote is invisible to other sessions until the
+# caller commits, so two sessions could still read the same head and assign
+# the same seq. The real serialization is the row lock taken below.
 _chain_locks: dict[str, asyncio.Lock] = {}
 _chain_locks_guard = asyncio.Lock()
 
@@ -209,6 +211,25 @@ async def append_audit_log(
 
     lock = await _lock_for_user(str(user_uuid))
     async with lock:
+        # Serialize appends for this user AT THE DATABASE, holding the lock
+        # until the caller's transaction commits. Without it, two sessions
+        # read the same head — an in-process asyncio lock cannot help,
+        # because a flushed-but-uncommitted row is invisible to the other
+        # session under READ COMMITTED, so both compute the same next seq
+        # and fork the chain. That corrupts the tamper-evidence signal with
+        # ordinary concurrency, which is worse than useless: the verifier
+        # reports failures that have nothing to do with tampering.
+        #
+        # The USER row is the lock target rather than the chain head: the
+        # head does not exist for a user's first append, so there would be
+        # nothing to lock exactly when two first-appends race. This also
+        # covers multi-worker deployments, which an in-process lock never
+        # could. SQLite has no FOR UPDATE — SQLAlchemy omits it there — but
+        # SQLite serializes writers anyway, so the guarantee holds on both.
+        await db.execute(
+            select(User.id).where(User.id == user_uuid).with_for_update()
+        )
+
         # seq is the deterministic order key; timestamp alone is ambiguous
         # within a millisecond. NULLS LAST keeps legacy (pre-seq) rows from
         # shadowing a numbered head; timestamp breaks ties for a chain that

@@ -168,3 +168,69 @@ async def test_concurrent_appends_keep_chain_intact(session_factory):
     assert len(rows) == 5
     report = verify_rows(rows)
     assert report.ok, report.failures
+
+
+@pytest.mark.asyncio
+async def test_concurrent_appends_assign_unique_sequence_numbers(session_factory):
+    """No two rows in a user's chain may share a seq.
+
+    The in-process asyncio lock cannot provide this on its own: it is
+    released when append_audit_log returns, but the row it wrote stays
+    invisible to other sessions until the caller commits. Two sessions
+    therefore read the same head and compute the same next seq — a fork
+    that makes the verifier report tampering where there was only
+    concurrency. The database row lock is what actually serializes it.
+
+    Sixty writers rather than five: the race is a timing window, and the
+    existing five-writer test only caught it about one run in ten — the
+    difference between a regression net and a coin flip. At sixty it was
+    measured catching the unfixed code 8 times out of 8, and still runs in
+    well under a second. SQLite cannot exhibit this at all (it serializes
+    writers), so this really exercises Postgres; it stays valid on both.
+    """
+    from sqlalchemy import select
+
+    from models.audit import AuditLog
+    from scripts.verify_audit_log import verify_rows
+    from tests.conftest import make_user
+
+    user, _ = await make_user(session_factory)
+    audit_logger = RuntimeAuditLogger(session_factory=session_factory)
+
+    writers = 60
+    await asyncio.gather(
+        *[
+            audit_logger.log(
+                {
+                    "event": "tool_executed",
+                    "user_id": str(user.id),
+                    "tool": f"canvas.action_{i}",
+                }
+            )
+            for i in range(writers)
+        ]
+    )
+
+    async with session_factory() as session:
+        rows = list(
+            (
+                await session.execute(
+                    select(AuditLog)
+                    .where(AuditLog.user_id == user.id)
+                    .order_by(AuditLog.seq.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert len(rows) == writers
+    seqs = [r.seq for r in rows]
+    assert seqs == list(range(1, writers + 1)), (
+        f"sequence numbers are not a gapless 1..{writers} run: {seqs}"
+    )
+    assert len(set(seqs)) == writers, f"duplicate seq assigned: {seqs}"
+
+    # And the chain the verifier walks must still be linear.
+    report = verify_rows(rows)
+    assert report.ok, report.failures
