@@ -21,7 +21,13 @@ from core.validation import SafeStr
 from models.memory import Memory, MemoryCategory, MemorySource
 from models.user import User
 from services.auth import get_current_user
-from services.memory import MemoryRejected, screen_memory_content
+from services.memory import (
+    LIKE_ESCAPE_CHAR,
+    MAX_SEARCH_CHARS,
+    MemoryRejected,
+    build_search_pattern,
+    screen_memory_content,
+)
 
 router = APIRouter(prefix="/memories", tags=["memory"])
 
@@ -62,18 +68,34 @@ async def _get_owned_memory(
 
 @router.get("/", response_model=list[MemoryResponse])
 async def list_memories(
+    q: Optional[SafeStr] = Query(
+        default=None,
+        max_length=MAX_SEARCH_CHARS,
+        description="Case-insensitive substring match on memory content.",
+    ),
+    category: Optional[MemoryCategory] = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[Memory]:
-    """List the authenticated user's saved memories, newest first."""
+    """List the authenticated user's saved memories, newest first.
+
+    Both filters are applied in SQL rather than to a materialized list: a
+    user's memory set is unbounded, so filtering in Python would mean
+    loading every row (and would break the LIMIT/OFFSET window, which must
+    be applied to the *filtered* set for the client's paging to be correct).
+    """
+    stmt = select(Memory).where(Memory.user_id == current_user.id)
+
+    pattern = build_search_pattern(q)
+    if pattern is not None:
+        stmt = stmt.where(Memory.content.ilike(pattern, escape=LIKE_ESCAPE_CHAR))
+    if category is not None:
+        stmt = stmt.where(Memory.category == category)
+
     result = await db.execute(
-        select(Memory)
-        .where(Memory.user_id == current_user.id)
-        .order_by(Memory.created_at.desc())
-        .offset(offset)
-        .limit(limit)
+        stmt.order_by(Memory.created_at.desc()).offset(offset).limit(limit)
     )
     return list(result.scalars().all())
 

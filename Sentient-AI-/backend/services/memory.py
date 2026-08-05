@@ -23,6 +23,18 @@ _GUARD = PromptGuard()
 _MAX_MEMORIES_IN_PROMPT = 40
 _MAX_MEMORY_CHARS = 500
 
+# Cap the free-text search term. A substring search compiles to a
+# leading-wildcard LIKE, which no index can serve — every row is compared
+# against the pattern. Bounding the term keeps that comparison cheap and
+# stops a client pushing megabyte patterns through the database.
+MAX_SEARCH_CHARS = 200
+
+# Backslash is the LIKE escape character we ask the database to use. Neither
+# Postgres nor SQLite applies one by default for the two-argument form, so
+# every ilike() built from build_search_pattern MUST pass
+# ``escape=LIKE_ESCAPE_CHAR`` or the escaping below is silently inert.
+LIKE_ESCAPE_CHAR = "\\"
+
 
 class MemoryRejected(ValueError):
     """Raised when memory content fails the injection screen."""
@@ -53,6 +65,30 @@ def screen_memory_content(content: str) -> str:
             "trusted context, so they must be plain facts."
         )
     return text
+
+
+def build_search_pattern(query: str | None) -> str | None:
+    """Turn a raw search term into a LIKE pattern, or None for "no filter".
+
+    Whitespace-only input means "the user typed nothing", not "match the
+    empty string", so it collapses to None and the caller skips the clause
+    entirely rather than emitting a no-op ``LIKE '%%'``.
+
+    ``%`` and ``_`` are wildcards in LIKE, so an unescaped term turns a
+    search for "100%" into a match-everything query (and "a_b" into a
+    match-any-middle-character one). Both, plus the escape character itself,
+    are escaped here — the caller must pair this with
+    ``escape=LIKE_ESCAPE_CHAR``.
+    """
+    term = (query or "").strip()
+    if not term:
+        return None
+    escaped = (
+        term.replace(LIKE_ESCAPE_CHAR, LIKE_ESCAPE_CHAR * 2)
+        .replace("%", LIKE_ESCAPE_CHAR + "%")
+        .replace("_", LIKE_ESCAPE_CHAR + "_")
+    )
+    return f"%{escaped}%"
 
 
 def render_memory_block(memories: Iterable[Memory]) -> str | None:
@@ -87,7 +123,10 @@ def render_memory_block(memories: Iterable[Memory]) -> str | None:
 
 
 __all__ = [
+    "LIKE_ESCAPE_CHAR",
+    "MAX_SEARCH_CHARS",
     "MemoryRejected",
+    "build_search_pattern",
     "screen_memory_content",
     "render_memory_block",
     "ThreatLevel",
