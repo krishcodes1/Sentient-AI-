@@ -12,7 +12,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -333,21 +333,57 @@ async def _get_owned_conversation(
     return conversation
 
 
+def _like_pattern(term: str) -> str:
+    """Build a contains-pattern, neutralizing LIKE's own wildcards.
+
+    Without this, searching for ``100%`` or ``draft_1`` would be read as a
+    pattern rather than as text — ``%`` matching everything is the worst
+    case, since it silently returns the whole table as if it were a hit.
+    The escape character is declared on the comparison itself below.
+    """
+    escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
 @router.get("/conversations", response_model=list[ConversationListItem])
 async def list_conversations(
+    q: Optional[str] = Query(
+        default=None,
+        max_length=200,
+        description="Filter to conversations whose title or messages contain this text",
+    ),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[Conversation]:
-    """List the authenticated user's conversations, newest first."""
-    query = (
-        select(Conversation)
-        .where(Conversation.user_id == current_user.id)
-        .order_by(Conversation.updated_at.desc())
-        .offset(offset)
-        .limit(limit)
-    )
+    """List the authenticated user's conversations, newest first.
+
+    With ``q``, returns only conversations whose title matches or that
+    contain a matching message. Matching happens in SQL — a transcript is
+    unbounded, so filtering in Python would mean loading every message the
+    user has ever sent to answer one search.
+    """
+    query = select(Conversation).where(Conversation.user_id == current_user.id)
+
+    term = (q or "").strip()
+    if term:
+        pattern = _like_pattern(term)
+        # EXISTS rather than a JOIN: a conversation with twenty matching
+        # messages must come back once, not twenty times.
+        message_match = (
+            select(Message.id)
+            .where(
+                Message.conversation_id == Conversation.id,
+                Message.content.ilike(pattern, escape="\\"),
+            )
+            .exists()
+        )
+        query = query.where(
+            or_(Conversation.title.ilike(pattern, escape="\\"), message_match)
+        )
+
+    query = query.order_by(Conversation.updated_at.desc()).offset(offset).limit(limit)
     result = await db.execute(query)
     return list(result.scalars().all())
 
