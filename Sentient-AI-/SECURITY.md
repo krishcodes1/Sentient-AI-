@@ -269,10 +269,11 @@ Tracked honestly so nobody mistakes this for finished security work:
   credentials is required after an `ENCRYPTION_KEY` change.
 - **Single-process assumptions.** The HTTP rate limiter is now Redis-backed
   (shared across workers, with a per-process in-memory fallback if Redis is
-  down), but the per-connector rate limiters, the MCP tool cache, and the
-  audit chain lock are still in-memory. Behind multiple workers, serialize
-  audit writes at the database (e.g. `SELECT ... FOR UPDATE` on the chain
-  head) before scaling out.
+  down), and audit-chain appends are serialized at the database with
+  `SELECT ... FOR UPDATE` on the user row, so the chain is safe across
+  workers. The per-connector rate limiters and the MCP tool cache are still
+  per-process: behind multiple workers each enforces its own limit, so the
+  effective ceiling is (workers x limit).
 - **MCP SSRF: DNS-rebinding TOCTOU** (deferred) — MCP server URLs are
   SSRF-checked before each request, but a hostile DNS server could pass the
   check and then re-resolve to an internal address for the actual connection.
