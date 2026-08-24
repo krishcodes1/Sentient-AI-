@@ -3,6 +3,9 @@
 **/.env.local
 **/.env.*.local
 !**/.env.example
+**/*.env.save
+**/.env.swp
+**/.env.swo
 
 # Python
 __pycache__/
