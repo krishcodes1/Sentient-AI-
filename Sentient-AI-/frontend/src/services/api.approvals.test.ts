@@ -1,3 +1,12 @@
+/**
+ * Tests for the approval endpoints, error-detail normalisation and conversation CRUD: they prove
+ * decisions post the right verb, action_id and approved flag, and FastAPI error bodies become
+ * readable sentences.
+ *
+ * Why it exists: Guards against a "Deny" click executing the action, or an approval card reading
+ * "[object Object]".
+ */
+
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   createConversation,

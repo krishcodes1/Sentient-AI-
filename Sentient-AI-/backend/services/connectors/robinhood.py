@@ -1,4 +1,10 @@
-"""
+"""Implements the read-only Robinhood Crypto connector with HMAC-SHA256 request
+signing and a permanent block on every trading action.
+
+Why it exists: The factory constructs it for tool execution; keeping the hard-
+block list beside the API code guarantees no trade, transfer or withdrawal can
+be issued whatever the permission engine decides.
+
 Robinhood Crypto connector for Crawler AI.
 
 READ-ONLY access to Robinhood's official Crypto Trading API.

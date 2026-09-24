@@ -1,4 +1,14 @@
-"""The LLM provider layer: request construction, response normalisation,
+"""Tests for the LLM provider layer: request construction, response normalization,
+streaming, vision and image handling, and cache-token accounting are all
+correct for the Anthropic, OpenAI-compatible, Gemini, and Ollama provider
+families, and that every upstream error becomes a clean ProviderError without
+leaking a credential.
+
+Why it exists: Every chat turn crosses this module, so each provider is
+exercised end to end with its SDK or socket replaced by a stub or mock rather
+than trusting each vendor's client library to fail safely.
+
+The LLM provider layer: request construction, response normalisation,
 and the error contract.
 
 Every chat turn crosses this module, so each provider family is exercised

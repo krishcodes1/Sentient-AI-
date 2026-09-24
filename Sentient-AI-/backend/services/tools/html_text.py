@@ -1,4 +1,11 @@
-"""HTML readers for the built-in web tools.
+"""Parses fetched HTML into readable page text and DuckDuckGo result pages into
+result lists, using only the stdlib html.parser.
+
+Why it exists: The web toolkit needs both readers to run on hostile markup
+without adding a scraping dependency to the agent's process, and malformed
+input must degrade to fewer results rather than an exception.
+
+HTML readers for the built-in web tools.
 
 Stdlib ``html.parser`` only. A scraping dependency would buy tidier
 selectors at the cost of another package parsing hostile input inside

@@ -1,7 +1,14 @@
-"""Screenshots of websites: web.screenshot in a hidden browser.
+"""Declares the "site_screenshots" capability behind web.screenshot, available
+only once Chromium is installed.
+
+Why it exists: The registry needs one place that ties the tool to the browser
+install, so the report can show the download and the agent can offer it.
+
+Screenshots of websites: web.screenshot in a hidden browser.
 
 Unavailable until Chromium is installed; install="browser" lets the
-agent offer that install while the Installs capability is on."""
+agent offer that install while the Installs capability is on.
+"""
 
 from __future__ import annotations
 

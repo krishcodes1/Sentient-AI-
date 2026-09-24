@@ -1,4 +1,11 @@
-"""ctypes shims over CoreGraphics for the Screen Recording permission.
+"""Calls CoreGraphics through ctypes to check or request the macOS Screen
+Recording permission and to open its Settings pane.
+
+Why it exists: The screen capability's probe needs a prompt-free permission
+check, and isolating the ctypes calls here lets every function return None off
+macOS instead of crashing.
+
+ctypes shims over CoreGraphics for the Screen Recording permission.
 
 Every function returns None (or False) when not on macOS or when the
 framework cannot be loaded, so callers degrade to "unknown" instead of

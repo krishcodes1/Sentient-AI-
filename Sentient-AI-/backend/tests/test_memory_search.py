@@ -1,4 +1,11 @@
-"""Search and category filtering on GET /api/memories/.
+"""Tests for memory search and category filtering (GET /api/memories/): substring
+search escapes SQL LIKE wildcards in the user's own query and stays owner-
+scoped alongside the category filter.
+
+Why it exists: An unescaped `%` or `_` in the search term, or a filter that
+forgets ownership, would leak search behavior or another account's memories.
+
+Search and category filtering on GET /api/memories/.
 
 Covers the two things a substring search gets wrong by default: LIKE
 wildcards smuggled in through the query term, and a filter that forgets it

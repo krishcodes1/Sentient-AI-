@@ -1,4 +1,14 @@
-"""Streaming resilience and audit-ordering hardening.
+"""Tests for streaming resilience and audit ordering: a client disconnect mid-
+stream still persists the turn's completed side effects, heartbeats are sent
+during silent stretches, intent is audited fail-closed before a tool executes,
+and a post-execution audit failure never fails an already-completed turn.
+
+Why it exists: Guards the production fixes for a dropped SSE connection losing
+a completed turn, a proxy timing out an idle stream, and audit-ordering bugs
+that could let an unaudited tool run or falsely fail a turn that already
+succeeded.
+
+Streaming resilience and audit-ordering hardening.
 
 Covers the production fixes for:
 - Client disconnect mid-SSE: the chat turn's completed side effects must

@@ -1,3 +1,13 @@
+"""Loads the backend's settings from the environment or backend/.env into one
+pydantic-settings object and validates the secrets at boot.
+
+Why it exists: Every module reads configuration through the single ``settings``
+instance built here, so a placeholder SECRET_KEY, a malformed ENCRYPTION_KEY or
+a weak AUDIT_HMAC_KEY fails at startup instead of on first use. It also owns
+the provider list and the provider-to-key map that the runtime, the Settings
+page and the setup wizard all validate against.
+"""
+
 from __future__ import annotations
 
 import base64

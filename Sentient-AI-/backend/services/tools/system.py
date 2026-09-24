@@ -1,4 +1,12 @@
-"""Built-in system tools: report and install optional capabilities.
+"""Implements the system.* built-in tools: report which optional capabilities are
+installed and install one from a fixed allowlist.
+
+Why it exists: The browser behind website screenshots is not shipped with the
+backend; the tool registry, main.py and the capabilities route use this module
+so an install always comes from ALLOWLIST, passes approval and runs under a
+deadline.
+
+Built-in system tools: report and install optional capabilities.
 
 The product runs on the user's own machine (or in their Docker
 container). Some tools need software that is deliberately not shipped

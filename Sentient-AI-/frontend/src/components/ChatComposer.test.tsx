@@ -1,3 +1,12 @@
+/**
+ * Tests for ChatComposer: they prove Enter sends and Shift+Enter inserts a newline, IME
+ * composition and empty or in-flight sends are ignored, Stop replaces Send while streaming, and
+ * images can be attached, capped, refused and removed.
+ *
+ * Why it exists: Guards against a message going out mid-IME candidate, a second send during
+ * streaming, or an attachment that cannot be taken back before it is sent.
+ */
+
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";

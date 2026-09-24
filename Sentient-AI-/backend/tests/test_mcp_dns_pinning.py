@@ -1,4 +1,14 @@
-"""DNS-rebinding (TOCTOU) coverage for the MCP HTTP transport.
+"""Tests for DNS-rebinding protection on the MCP HTTP transport: a hostname whose
+resolution is entirely or partly private is refused, that the socket the
+transport actually connects to is pinned to a validated address, and that a
+rebind on a later request is still caught.
+
+Why it exists: SSRF-checking a URL and then handing httpx the hostname is not a
+control, since httpcore re-resolves DNS inside `connect_tcp`; these tests pin
+the fix at the only place a rebind would actually show up, the address the
+socket opens to.
+
+DNS-rebinding (TOCTOU) coverage for the MCP HTTP transport.
 
 SSRF-checking a URL and then handing the *hostname* to httpx is not a
 control: httpcore resolves the origin again inside ``connect_tcp``, so a

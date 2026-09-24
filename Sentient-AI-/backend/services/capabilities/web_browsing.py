@@ -1,4 +1,11 @@
-"""Browse the web: search the public web and read pages as text."""
+"""Declares the "web_browsing" capability that gates the web.search and
+web.fetch_page tools.
+
+Why it exists: The registry lists it so the owner can switch public-web access
+off in one place; the tool gates and the prompt read the switch by this key.
+
+Browse the web: search the public web and read pages as text.
+"""
 
 from __future__ import annotations
 

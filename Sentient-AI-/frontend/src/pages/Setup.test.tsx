@@ -1,3 +1,12 @@
+/**
+ * Tests for the Setup wizard: they prove the owner step comes first, Save waits for a passing
+ * provider test, an .env key hides the key field, permissions save, the summary finishes setup,
+ * focus moves between steps, and non-owners are turned away.
+ *
+ * Why it exists: Guards against a wizard that can be finished with an untested provider, walked
+ * through by a non-owner, or lost after a reload.
+ */
+
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";

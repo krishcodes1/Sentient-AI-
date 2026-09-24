@@ -1,4 +1,13 @@
-"""Authentication events land in the tamper-evident audit chain.
+"""Tests for authentication events in the audit chain: login, logout,
+password/email changes, lockouts, and refused deletions are all recorded,
+chained, keyed, owner-scoped, and visible through the audit API.
+
+Why it exists: Guards against the compliance audit trail silently omitting
+authentication activity (previously only agent tool actions were recorded) and
+against a rolled-back HTTPException path losing an audit row exactly when it
+matters.
+
+Authentication events land in the tamper-evident audit chain.
 
 Before this, the chain recorded only agent tool activity: an account could
 be signed into, have its password rotated and its email moved, and the

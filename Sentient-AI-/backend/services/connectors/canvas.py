@@ -1,4 +1,10 @@
-"""
+"""Implements the Canvas LMS connector: OAuth 2.0 + PKCE sign-in and course,
+assignment, grade, calendar and submission actions over the Canvas REST API.
+
+Why it exists: The factory constructs it for tool execution and the connector
+routes; Canvas endpoints and parameter encoding live here so nothing else needs
+to know the API.
+
 Canvas LMS connector for Crawler AI.
 
 Implements OAuth 2.0 + PKCE authentication and provides read/write

@@ -1,3 +1,11 @@
+/**
+ * useCountdown (whole seconds left until an ISO deadline, ticking once a second) and
+ * formatCountdown (m:ss or h:mm:ss).
+ *
+ * Why it exists: Chat's approval cards and Dashboard's approval rows share them, and keeping them
+ * out of Chat.tsx stops the Dashboard chunk from importing the whole chat page.
+ */
+
 import { useCallback, useSyncExternalStore } from "react";
 
 // Shared by Chat (approval cards) and Dashboard (approval rows). Lives in

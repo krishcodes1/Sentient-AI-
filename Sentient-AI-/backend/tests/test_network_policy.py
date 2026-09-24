@@ -1,4 +1,13 @@
-"""Network-policy regression tests.
+"""Tests for connector network policy: the Robinhood and Canvas allowlists match
+the URLs the connectors actually request, including self-hosted Canvas hosts,
+and that a configured host never bypasses the underlying SSRF address policy.
+
+Why it exists: The original Robinhood policy allowlisted a host and path prefix
+the connector never used, making it 100% non-functional; these tests drive the
+real connector methods so the allowlist and the real request URLs cannot drift
+apart again.
+
+Network-policy regression tests.
 
 The deny-by-default allowlists must match the URLs the connectors
 actually request — the original Robinhood policy allowlisted a host and

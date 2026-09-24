@@ -1,3 +1,14 @@
+"""Serves the /auth API: registration, login with per-account lockout, session
+refresh and logout, profile, password and per-account LLM settings, a
+streamed account export and account deletion.
+
+Why it exists: Every identity-changing action on an account lives here so the
+auth audit events, the ``token_epoch`` bump that invalidates old JWTs and the
+installation-row lock that makes the first-owner check atomic across workers
+are applied consistently; setup.py reuses ``create_account`` and
+``lock_installation_row`` for the owner step.
+"""
+
 from __future__ import annotations
 
 import asyncio

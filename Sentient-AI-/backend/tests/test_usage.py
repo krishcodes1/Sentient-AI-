@@ -1,4 +1,13 @@
-"""Token usage: every assistant persistence path records what a turn used
+"""Tests for token usage accounting: every assistant-persistence path (blocking,
+streaming, Telegram, and resumed-after-approval) records tokens and model, that
+pricing handles cached, uncached, and unpriced models correctly, and that the
+summary aggregates per account, window, and model without crossing accounts.
+
+Why it exists: Guards the billing data the platform's cost reporting depends
+on, including that summary queries stay a single query and that timezone-
+bucketed "today" windows are correct across a daylight-saving change.
+
+Token usage: every assistant persistence path records what a turn used
 and which model produced it, and the summary adds those rows up per
 account, per window and per model without leaking across accounts.
 

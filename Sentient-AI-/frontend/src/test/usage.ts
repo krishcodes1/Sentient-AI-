@@ -1,3 +1,10 @@
+/**
+ * usageWindow and usageSummary: fixture builders for a GET /usage/summary body.
+ *
+ * Why it exists: UsagePanel and Dashboard tests need a priced, a partly priced and an unpriced
+ * window to exercise each honesty rule, from one shared source.
+ */
+
 import type { UsageSummary, UsageWindow } from "@/types";
 
 /**

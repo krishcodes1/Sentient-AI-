@@ -1,4 +1,12 @@
-"""Let an account's provider/model be NULL: "follow this Crawler's default".
+"""Makes ``users.llm_provider`` and ``llm_model`` nullable and drops their
+server defaults, through a batch operation so it also works on SQLite.
+
+Why it exists: NULL now means an account follows the install's provider, so a
+key the owner saves later reaches every account that never chose one; the
+nullability guard lets the revision run on an adopted database built from the
+models.
+
+Let an account's provider/model be NULL: "follow this Crawler's default".
 
 ``users.llm_provider``/``llm_model`` were NOT NULL with a server default of
 the historical Anthropic pair, and the ORM stamped the server's configured

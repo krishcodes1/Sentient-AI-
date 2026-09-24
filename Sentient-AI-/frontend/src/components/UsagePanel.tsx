@@ -1,3 +1,11 @@
+/**
+ * Dashboard panel showing token totals per time window and a per-model table, with every cost
+ * labelled as an estimate.
+ *
+ * Why it exists: Dashboard delegates usage rendering here so the honesty rules (unpriced turns,
+ * unknown cost, empty and failed states) stay in one component.
+ */
+
 import type { ModelUsage, UsageSummary, UsageWindow } from "@/types";
 import { formatCost, formatTokens } from "@/components/usageFormat";
 

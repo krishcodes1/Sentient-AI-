@@ -1,4 +1,12 @@
-"""Connector tool registry and executor.
+"""Builds the Tool list offered to the model from a user's connectors and the
+built-in toolkits, and dispatches approved calls to them.
+
+Why it exists: The runtime only knows abstract tools, a permission seam and an
+executor; this is the one place that maps a type.action name to its connector
+class, scopes, rate limit and capability gate, so a new call site cannot bypass
+them.
+
+Connector tool registry and executor.
 
 Turns a user's active connectors into runtime ``Tool`` objects, bridges
 the runtime's permission seam to the real permission engine, and

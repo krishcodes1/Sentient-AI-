@@ -1,4 +1,14 @@
-"""Agent-loop security and context tests.
+"""Tests for the agent loop's security and context wiring: PromptGuard scans user
+input, tool arguments, tool results, and the final model output, that multi-
+round tool calls are bounded, and that the context manager's sliding window,
+compression, and per-user provider resolution work end to end.
+
+Why it exists: Guards against the production-audit regressions where guard
+scanning was skipped for tool arguments, tool results, or the final output, the
+tool-call loop lacked a hard stop, and provider resolution silently ignored
+per-user settings.
+
+Agent-loop security and context tests.
 
 Covers the wiring fixes from the production audit:
 

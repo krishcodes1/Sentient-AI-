@@ -1,5 +1,13 @@
-"""Telegram chat and approvals: a channel, not a toolkit, so it claims no
-tools. Unavailable until a bot token is configured."""
+"""Declares the "telegram" capability, a notification channel that claims no tools
+and is available once a bot token is configured.
+
+Why it exists: The owner needs a switch for Telegram chat and approvals like
+any other capability, and the report needs to show it as unavailable until a
+token exists.
+
+Telegram chat and approvals: a channel, not a toolkit, so it claims no
+tools. Unavailable until a bot token is configured.
+"""
 
 from __future__ import annotations
 

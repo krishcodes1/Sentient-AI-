@@ -1,4 +1,12 @@
-"""Route-level security tests: authentication required everywhere,
+"""Tests for route-level security: every route requires authentication, a user can
+never reach another user's conversation or connector, and the forgeable direct
+audit-write endpoint has been removed.
+
+Why it exists: Guards the baseline authorization and cross-user isolation every
+route depends on, plus the removal of an endpoint that let a caller write
+arbitrary audit rows.
+
+Route-level security tests: authentication required everywhere,
 cross-user isolation (anti-IDOR), and the removal of the forgeable
 audit-write endpoint.
 """

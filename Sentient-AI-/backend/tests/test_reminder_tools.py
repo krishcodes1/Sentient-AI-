@@ -1,5 +1,15 @@
-"""Built-in reminder tools: the clock, create/list/cancel, and their wiring
-into the catalog, the permission engine and the executor."""
+"""Tests for the built-in reminder tools: `now`, `create`, `list`, and `cancel`
+are wired correctly into the tool catalog, the permission engine, and the
+executor, and that a reminder is only ever visible to or cancellable by its own
+creator.
+
+Why it exists: Guards the identity boundary so a reminder tool never lists or
+cancels another user's reminder, and that the always-on clock tool works even
+without a database.
+
+Built-in reminder tools: the clock, create/list/cancel, and their wiring
+into the catalog, the permission engine and the executor.
+"""
 
 from __future__ import annotations
 

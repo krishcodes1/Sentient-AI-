@@ -1,3 +1,11 @@
+/**
+ * Tests for ensureFreshToken: they prove a token is renewed only inside the expiry window,
+ * concurrent callers share one request, and a refused or failed renewal keeps the current token.
+ *
+ * Why it exists: Guards against doubling every request with a refresh, or logging the user out
+ * earlier than doing nothing would.
+ */
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { jsonResponse } from "@/test/http";

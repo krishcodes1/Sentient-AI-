@@ -1,4 +1,10 @@
-"""
+"""Fits a conversation, its tool schemas and its tool results into the model's
+context window before each LLM request.
+
+Why it exists: Without a budget the history plus every schema and result
+outgrows the window and fails or silently truncates; the agent runtime calls
+this on every turn, and the agent route reuses its tool-result compression.
+
 Smart Context Manager for Crawler AI.
 
 Solves the OpenClaw token explosion problem by implementing:

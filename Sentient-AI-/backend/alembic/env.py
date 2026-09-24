@@ -1,4 +1,12 @@
-"""Alembic environment for the Crawler AI backend.
+"""Alembic entry point that runs migrations through the app's own async engine
+and settings.
+
+Why it exists: Alembic needs a script that supplies the database URL and
+``Base.metadata``; using ``core.config.settings`` and importing ``models`` here
+means a migration can never target a different database than the API, and
+autogenerate sees every table.
+
+Alembic environment for the Crawler AI backend.
 
 The application runs on an async engine (asyncpg), so migrations connect
 through that same stack instead of maintaining a second sync-driver URL:

@@ -1,4 +1,12 @@
-"""Pending-approval stores for the agent runtime.
+"""Stores tool calls that are waiting for a human approve/deny decision, in memory
+or in the database.
+
+Why it exists: The runtime has to park an approval-gated call somewhere that
+enforces ownership, single use and expiry whatever the backend; the runtime,
+the Telegram poller and main.py go through this store rather than the
+pending_actions table.
+
+Pending-approval stores for the agent runtime.
 
 When the permission engine says a tool call ``requires_approval``, the
 runtime parks it in an approval store and surfaces it to the user. The

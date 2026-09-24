@@ -1,5 +1,13 @@
-"""The <permissions> block the runtime appends to the system prompt so the
-agent explains what is off instead of guessing or claiming it cannot."""
+"""Renders a capability report as the <permissions> block the runtime appends to
+the system prompt.
+
+Why it exists: The agent route builds this block from the owner's report each
+turn so the model can say why a tool is off or blocked, and offer an install,
+instead of guessing.
+
+The <permissions> block the runtime appends to the system prompt so the
+agent explains what is off instead of guessing or claiming it cannot.
+"""
 
 from __future__ import annotations
 

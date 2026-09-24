@@ -1,5 +1,14 @@
-"""The registry is what contributors extend. These invariants make a
-misdeclared capability fail the build instead of silently doing nothing."""
+"""Tests for the capability registry's structural invariants: every capability key
+is unique snake_case, every claimed tool exists and is claimed exactly once,
+install keys are allowlisted, and every built-in tool is claimed by a
+capability or explicitly always-on.
+
+Why it exists: These invariants make a misdeclared capability fail the build
+immediately instead of silently doing nothing when a contributor adds one.
+
+The registry is what contributors extend. These invariants make a
+misdeclared capability fail the build instead of silently doing nothing.
+"""
 from __future__ import annotations
 
 import re

@@ -1,4 +1,11 @@
-"""Minimal MCP client (JSON-RPC 2.0 over Streamable HTTP).
+"""Speaks JSON-RPC 2.0 over Streamable HTTP to one MCP server: initialize,
+tools/list and tools/call.
+
+Why it exists: The official SDK is not a dependency and only three operations
+are needed; owning the transport here is what lets every request be SSRF-
+checked and DNS-pinned, and lets tests swap it out.
+
+Minimal MCP client (JSON-RPC 2.0 over Streamable HTTP).
 
 Self-contained on purpose: the official ``mcp`` SDK is not a project
 dependency, and the platform only needs three operations — initialize,

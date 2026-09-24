@@ -1,4 +1,12 @@
-"""Process-wide structlog configuration.
+"""Configures structlog once for the whole process: JSON lines in production,
+console rendering in development, level from LOG_LEVEL.
+
+Why it exists: main.py calls ``configure_logging()`` before importing the
+routers so every module's logger shares one renderer and the request_id the
+middleware binds; it also silences httpx's per-request INFO lines, which would
+print the Telegram bot token inside Bot API URLs.
+
+Process-wide structlog configuration.
 
 Called once from main.py before the app starts serving. Production emits
 one JSON object per line (machine-parseable, safe for log shippers);

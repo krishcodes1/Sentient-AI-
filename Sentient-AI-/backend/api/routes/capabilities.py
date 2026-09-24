@@ -1,4 +1,14 @@
-"""Capability report and owner controls (/api/capabilities).
+"""Serves /api/capabilities: the capability report any user may read, and the
+owner-only writes that flip switches, request OS access and run a
+capability's installer.
+
+Why it exists: Capability state lives in the InstallationService and installs
+run under a shared SystemToolkit lock; routing every change through this module
+keeps one in-flight install per key, audits each change from its own short
+session, and never serializes the provider keys or bot token stored beside the
+report.
+
+Capability report and owner controls (/api/capabilities).
 
 Any signed-in user may read the report: the chat UI uses it to explain
 why a tool is unavailable. Every write is the owner's (``is_admin``)

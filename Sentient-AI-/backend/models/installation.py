@@ -1,7 +1,16 @@
-"""The one-row installation record: the owner's capability switches, the
+"""Declares the single-row ``installation`` table that holds the owner's
+install-wide settings.
+
+Why it exists: services.installation reads and writes this row for the setup
+wizard and the capability switches, and migration 0008 seeds it, so the column
+defaults here must match that migration for ``create_all`` and the migrated
+schema to stay identical.
+
+The one-row installation record: the owner's capability switches, the
 server-wide AI provider and its encrypted keys, the encrypted Telegram bot
 token, and whether first-run setup has been completed. Values in the
-environment override this row (see services/installation.py)."""
+environment override this row (see services/installation.py).
+"""
 
 from __future__ import annotations
 

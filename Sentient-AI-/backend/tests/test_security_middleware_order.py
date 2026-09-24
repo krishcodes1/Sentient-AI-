@@ -1,4 +1,12 @@
-"""Throttled responses go through the same hardening as every other one.
+"""Tests for security-middleware ordering around the rate limiter: a 429 response
+from the rate limiter still carries the standard security headers and a
+correlation request id.
+
+Why it exists: The rate limiter short-circuits the stack and was added outside
+the header and request-id layers, so the one response class an attacker can
+provoke on demand shipped with no CSP and no way to trace the burst.
+
+Throttled responses go through the same hardening as every other one.
 
 The rate limiter short-circuits: once a bucket is full it returns a 429
 itself and nothing further in the stack runs. It was added outside the

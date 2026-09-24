@@ -1,3 +1,12 @@
+/**
+ * Tests for UsagePanel: they prove each window shows tokens and an estimated cost, unpriced turns
+ * are called out, the by-model table names rows with no recorded model, and empty and failed loads
+ * say so.
+ *
+ * Why it exists: Guards against a partly priced window posing as a total, or a failed load showing
+ * zeros.
+ */
+
 import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import UsagePanel from "@/components/UsagePanel";

@@ -1,3 +1,11 @@
+/**
+ * Chat page: the conversation list with search and paging, the streamed message thread with
+ * tool-call, blocked-action and approval cards, and the composer.
+ *
+ * Why it exists: Streaming a turn, reconciling polled approvals, optimistic bubbles and retrying
+ * failed turns all touch the same message state, so the page owns it.
+ */
+
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Plus,

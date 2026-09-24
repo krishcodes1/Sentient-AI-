@@ -1,3 +1,12 @@
+/**
+ * Tests for streamMessage's SSE parsing and the shared request error path: they prove frames split
+ * across chunks reassemble, heartbeats and unknown events are skipped, a stream without a terminal
+ * event rejects, 422 bodies read as sentences, and 401s redirect to /login.
+ *
+ * Why it exists: Guards against a truncated reply being mistaken for a complete one, or a user
+ * stranded in a 401 loop.
+ */
+
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   deleteAccount,

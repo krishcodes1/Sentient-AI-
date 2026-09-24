@@ -1,3 +1,10 @@
+/**
+ * Three-way Light / System / Dark radiogroup that sets the theme mode through useTheme.
+ *
+ * Why it exists: The sidebar, Login and Setup all offer the same control, and "System" must be an
+ * explicit option so a reader can opt out of following the OS.
+ */
+
 import { Monitor, Moon, Sun } from "lucide-react";
 import { useTheme, type ThemeMode } from "@/hooks/useTheme";
 

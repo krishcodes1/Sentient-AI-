@@ -1,3 +1,11 @@
+/**
+ * The AI provider form: picks a provider and model, asks for a key only when the server lacks one,
+ * and enables Save only after a test against that exact choice passes.
+ *
+ * Why it exists: The setup wizard's provider step and Settings > Server both change this Crawler's
+ * provider, and sharing one form keeps the never-save-untested rule in both places.
+ */
+
 import { useEffect, useId, useState, type ReactNode } from "react";
 import { ArrowRight, CheckCircle2, Loader2 } from "lucide-react";
 import { ErrorAlert, ResultLine } from "@/components/FormFeedback";

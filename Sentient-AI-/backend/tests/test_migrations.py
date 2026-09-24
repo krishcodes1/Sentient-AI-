@@ -1,4 +1,12 @@
-"""Migrations have to stay honest.
+"""Tests for migration and model consistency: the schema `alembic upgrade head`
+builds matches the schema `Base.metadata.create_all()` expects, that there is a
+single migration head, and that Postgres-only behavior like native ENUM types
+and cascading deletes is correct.
+
+Why it exists: A model changed without a matching Alembic revision would
+otherwise only surface as a broken production deploy instead of failing here.
+
+Migrations have to stay honest.
 
 The schema `alembic upgrade head` builds and the schema the ORM expects are
 two independent descriptions of the same thing, and nothing keeps them in

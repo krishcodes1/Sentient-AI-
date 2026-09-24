@@ -1,3 +1,5 @@
+"""Imports every ORM model so Base.metadata is complete, and re-exports them and their enums."""
+
 from models.audit import AuditLog, AuditStatus
 from models.connector import (
     AuthMethod,

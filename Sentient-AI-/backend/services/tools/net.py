@@ -1,4 +1,12 @@
-"""Egress guard for the built-in tools.
+"""Builds the httpx client the built-in tools use, with SSRF validation on every
+hop and DNS-pinned connections.
+
+Why it exists: Built-in tools reach hosts the user names, with no per-connector
+allowlist; the web toolkit gets its client only from here so the policy in
+core.network_security and the pinning in core.http_pinning apply once and are
+never restated.
+
+Egress guard for the built-in tools.
 
 Built-in tools reach hosts the user names (or that a search result
 points at), so they cannot rely on a per-connector allowlist the way

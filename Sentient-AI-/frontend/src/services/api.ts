@@ -1,3 +1,11 @@
+/**
+ * The backend API client: the shared `request` helper with token refresh and 401 handling, the SSE
+ * reader for streamed turns, and one function per endpoint.
+ *
+ * Why it exists: Every page talks to /api through this module, so auth headers, error
+ * normalisation and the redirect-on-401 rule are applied once.
+ */
+
 import type {
   AuthResponse,
   LoginCredentials,

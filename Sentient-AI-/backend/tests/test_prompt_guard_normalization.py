@@ -1,4 +1,14 @@
-"""Evasion-resistance tests for PromptGuard's normalization pre-pass.
+"""Tests for PromptGuard's normalization pre-pass: zero-width splices, homoglyph
+substitution, hyphen and dot letter splicing, fullwidth forms, and base64 or
+hex-wrapped injections are all decoded and still flagged with a layer label,
+while ordinary hyphenated prose and legitimate non-Latin text are not falsely
+flagged.
+
+Why it exists: Regex guards typically fail via such encodings rather than novel
+phrasing (OWASP LLM01), so this pins the de-obfuscation layer against both
+under- and over-blocking.
+
+Evasion-resistance tests for PromptGuard's normalization pre-pass.
 
 Every attack payload here is an ENCODING of an injection the regex
 families already catch in plain form: zero-width splices, whole-word

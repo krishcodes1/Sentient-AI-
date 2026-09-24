@@ -1,4 +1,14 @@
-"""Tests for the double-click bootstrap installer (installer/bootstrap.py).
+"""Tests for installer/bootstrap.py: they prove that key validation and .env writing behave,
+that the loopback API refuses missing tokens, foreign origins and foreign hosts, that
+preflight and port diagnostics use the right tool per OS, that the compose build runner
+reports state correctly, and that both launchers hand off to the bootstrap.
+
+Why it exists: the installer runs unattended on machines nobody tests by hand, so these
+guard against a secret leaking into logs or responses, an API reachable from another
+origin, a launcher that no longer execs bootstrap.py, and line endings that bash or
+cmd.exe cannot run.
+
+Tests for the double-click bootstrap installer (installer/bootstrap.py).
 
 Stdlib + pytest only. Everything runs against temp directories, fake
 subprocesses and an in-process server on an ephemeral loopback port; nothing

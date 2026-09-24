@@ -1,4 +1,14 @@
-"""Built-in system tools: the capability allowlist, the approval gate in
+"""Tests for the built-in system tools: the capability install allowlist runs only
+its fixed argv, an install requires approval and is wired through the
+permission engine, executor, and runtime approval flow, and Chromium/Playwright
+detection correctly reads a manifest's revisions.
+
+Why it exists: Nothing here runs pip or Playwright for real, since the
+subprocess seam is a recorder, so what is pinned is exactly which argv would
+run and when, keeping an install capability from ever running an unreviewed
+command.
+
+Built-in system tools: the capability allowlist, the approval gate in
 front of installing, and their wiring into the catalog, the permission
 engine, the executor and the runtime's approval flow.
 

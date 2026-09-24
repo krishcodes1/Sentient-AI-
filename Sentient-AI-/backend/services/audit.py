@@ -1,4 +1,10 @@
-"""
+"""Writes hash-chained, HMAC-signed rows to the audit_logs table and strips
+sensitive values before they are persisted.
+
+Why it exists: Routes, the installation service and the agent runtime all need
+tamper-evident audit rows built from one canonical hash payload; a second write
+path would break chain verification.
+
 Tamper-evident audit logging service for Crawler AI.
 
 Single write path for the ``audit_logs`` table. Every row is chained to

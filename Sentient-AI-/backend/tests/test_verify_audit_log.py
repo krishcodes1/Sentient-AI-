@@ -1,4 +1,12 @@
-"""Tests for the audit-log verifier.
+"""Tests for the audit-log verifier: per-row hash verification catches field,
+status, and previous-hash tampering, and that chain verification detects
+deletion, reordering, and per-user chain isolation, including on legacy rows
+with a null previous hash.
+
+Why it exists: Pure-Python coverage, no database required, of the verifier
+every tamper-evidence guarantee in the audit chain rests on.
+
+Tests for the audit-log verifier.
 
 Pure-Python tests that build AuditLog-like SimpleNamespace objects and
 exercise the verifier helpers directly. No database is required.

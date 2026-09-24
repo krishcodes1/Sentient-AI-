@@ -1,3 +1,16 @@
+"""Serves the /agent API: conversation CRUD and search, sending a message
+(buffered or as an SSE stream) through the AgentRuntime, listing and
+deciding pending tool approvals, and the appliers that let the Telegram
+poller run the same chat and approval pipelines.
+
+Why it exists: This is where the HTTP layer, the tool registry, memory
+injection and the runtime meet: it builds each turn's tool set and
+<permissions> block from the install's capabilities, enforces the per-user rate
+limit, persists user and assistant messages with their token usage, and resumes
+a paused turn after an approval, so an out-of-band channel reuses this path
+instead of a second copy.
+"""
+
 from __future__ import annotations
 from typing import Any, Dict, List, Literal, Optional, Union, get_args
 

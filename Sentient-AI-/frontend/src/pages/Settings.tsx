@@ -1,3 +1,12 @@
+/**
+ * Settings page: profile, password, permission tier and rate limit, LLM provider choice, Telegram
+ * linking and bot token, capability permissions, data export and account deletion, plus the
+ * owner's Server section.
+ *
+ * Why it exists: Every per-account setting the backend exposes is edited here, each section saving
+ * and reporting on its own.
+ */
+
 import { useEffect, useId, useState } from "react";
 import {
   Save,

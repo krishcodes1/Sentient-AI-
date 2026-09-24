@@ -1,3 +1,11 @@
+/**
+ * Tests for ProviderErrorText: they prove a Settings pointer becomes a /settings link, an
+ * install-level pointer also points at Settings, and any other text renders unchanged.
+ *
+ * Why it exists: Guards against inventing a link when the text lacks the pointer, or sending a
+ * user to /setup once setup is already finished.
+ */
+
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it } from "vitest";

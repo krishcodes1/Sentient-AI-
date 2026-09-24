@@ -1,3 +1,13 @@
+/**
+ * Tests for ThemeProvider and ThemeToggle: they prove the theme follows the OS by default,
+ * persists and restores a chosen mode, migrates the pre-rename storage key, tracks OS changes, and
+ * keeps rendering when localStorage throws.
+ *
+ * Why it exists: The theme is read by the stylesheet and index.html's bootstrap independently of
+ * React, so a wrong attribute or key silently breaks one of them, and a private window would
+ * otherwise blank the app.
+ */
+
 import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";

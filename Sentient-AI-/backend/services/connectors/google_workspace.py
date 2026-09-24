@@ -1,4 +1,10 @@
-"""
+"""Implements the Google Workspace connector: OAuth 2.0 + PKCE with incremental
+scopes, plus Gmail and Google Calendar actions.
+
+Why it exists: The factory constructs it for tool execution; Google endpoints,
+MIME encoding and email-body sanitisation stay here so the rest of the platform
+only sees ConnectorResponse.
+
 Google Workspace connector for Crawler AI.
 
 Provides Gmail and Google Calendar access via OAuth 2.0 + PKCE

@@ -1,3 +1,11 @@
+/**
+ * Audit logs page: a filterable, searchable table of agent actions with expandable rows that
+ * verify each entry's integrity hash.
+ *
+ * Why it exists: This is the user-facing view of the tamper-evident audit trail; server-side
+ * filters (connector, status, paging) and client-side ones (time range, search) meet here.
+ */
+
 import { useEffect, useId, useMemo, useState } from "react";
 import {
   Search,

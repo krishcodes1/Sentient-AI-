@@ -1,4 +1,12 @@
-"""Audit service tests: chained writes, sanitization, the runtime
+"""Tests for the audit service: chained writes, sensitive-data sanitization, the
+runtime adapter's event mapping, and chain integrity all hold when appends race
+concurrently.
+
+Why it exists: Guards against a broken hash chain or a leaked secret in an
+audit row, and against concurrent writes corrupting the sequence numbers or the
+hash chain.
+
+Audit service tests: chained writes, sanitization, the runtime
 adapter's event mapping, and chain integrity under concurrency.
 """
 

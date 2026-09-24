@@ -1,4 +1,12 @@
-"""Account data export.
+"""Tests for the account data export endpoint: the export stays valid JSON across
+streamed batches, covers every account record, and never includes connector
+credentials.
+
+Why it exists: The export is hand-assembled and streamed rather than serialized
+from a model, so a batching bug or a credential leak into the one field that is
+encrypted at rest would otherwise go unnoticed.
+
+Account data export.
 
 The export is streamed and assembled by hand rather than serialized from a
 model, so the two things worth pinning are that it stays valid JSON across

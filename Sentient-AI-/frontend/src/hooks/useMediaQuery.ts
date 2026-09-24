@@ -1,3 +1,11 @@
+/**
+ * useMediaQuery subscribes to a CSS media query through useSyncExternalStore, alongside the
+ * DESKTOP, REDUCED_MOTION and DARK query strings.
+ *
+ * Why it exists: Layout and the theme need a JS answer for the few decisions markup must make,
+ * correct on the first render and safe where matchMedia is absent (jsdom).
+ */
+
 import { useCallback, useSyncExternalStore } from "react";
 
 /**

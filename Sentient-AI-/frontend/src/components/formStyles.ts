@@ -1,6 +1,14 @@
-// Form styling shared by the setup wizard and the forms it lends to
-// Settings (ProviderForm), so the two screens read alike. A plain module
-// rather than a component file, so fast refresh keeps working for both.
+/**
+ * Shared class strings and style objects for the setup wizard's and Settings' forms, plus the
+ * errorText helper that prefers a server message over a fallback.
+ *
+ * Why it exists: ProviderForm, ServerSettings and Setup must read alike, and keeping these in a
+ * non-component module keeps Fast Refresh working for all of them.
+ *
+ * Form styling shared by the setup wizard and the forms it lends to
+ * Settings (ProviderForm), so the two screens read alike. A plain module
+ * rather than a component file, so fast refresh keeps working for both.
+ */
 
 export const panelStyle = {
   background: "var(--claw-panel)",

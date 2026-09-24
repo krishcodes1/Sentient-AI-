@@ -1,4 +1,14 @@
-"""Off-by-default must hold at BOTH gates without any wiring: a caller that
+"""Tests for capability gating at the tool-offer, executor, and adapter
+boundaries: a caller that forgets the enabled set falls back to registry
+defaults, an off capability is refused at both the offer and the executor, and
+gate errors or backstop refusals are always audited as blocked.
+
+Why it exists: Off-by-default must hold without any explicit wiring at either
+gate, and telling "off" (the owner's switch) apart from "blocked" (installed
+but unusable here) is what the executor's refusal message and the audit trail
+both depend on.
+
+Off-by-default must hold at BOTH gates without any wiring: a caller that
 forgets the enabled set gets the registry defaults, and the executor
 refuses a tool whose capability is off.
 

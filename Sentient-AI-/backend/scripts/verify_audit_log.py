@@ -1,4 +1,13 @@
-"""Audit log integrity verifier.
+"""Command-line verifier that recomputes every audit row's keyed hash, checks
+each row's link to the previous one and the per-user ``seq`` order, and
+reports tampered or legacy rows.
+
+Why it exists: The hash chain only proves anything if something independent of
+the API walks it; this script runs offline against the database with the HMAC
+key from the environment and exits non-zero on tampering, so deployments can
+gate on it.
+
+Audit log integrity verifier.
 
 Walks every row of the ``audit_logs`` table (ordered by per-user ``seq``,
 with pre-seq rows first) and runs three checks:

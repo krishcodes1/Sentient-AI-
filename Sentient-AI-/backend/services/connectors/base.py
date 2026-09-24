@@ -1,4 +1,10 @@
-"""
+"""Defines BaseConnector and the response-sanitising, rate-limiting and error
+types every third-party connector builds on.
+
+Why it exists: Canvas, Google Workspace and Robinhood must scan responses,
+throttle requests and honour the network policy the same way; the factory and
+the tool executor rely on this shared contract.
+
 Base connector framework for Crawler AI.
 
 Provides abstract base class with built-in content sanitization,

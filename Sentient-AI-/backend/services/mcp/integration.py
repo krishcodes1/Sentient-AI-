@@ -1,4 +1,12 @@
-"""Wires MCP servers into the agent's tool/permission/audit pipeline.
+"""Loads a user's MCP server connectors, discovers and sanitises their tools, and
+dispatches approved calls through a pooled client.
+
+Why it exists: MCP servers are third-party code, so the tool registry, the
+agent route and the connector routes need one layer that applies the approval-
+always, no-financial-tools and name-binding rules before a remote tool is
+offered or run.
+
+Wires MCP servers into the agent's tool/permission/audit pipeline.
 
 Users register an MCP server as a connector (``connector_type=mcp``)
 whose encrypted credentials hold ``{"url": ..., "headers": {...}}``.

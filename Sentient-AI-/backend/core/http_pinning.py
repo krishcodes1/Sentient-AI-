@@ -1,4 +1,13 @@
-"""Connect-time DNS pinning for outbound HTTP.
+"""Replaces httpx's connect-time DNS lookup with a table of addresses that
+already passed the SSRF policy, and refuses any origin missing from that
+table.
+
+Why it exists: Checking a URL and then letting httpcore resolve the hostname
+again would let a hostile DNS answer rebind the connection to a private
+address; the MCP client and the web tools share this one transport so the
+refusal behaviour cannot drift between them.
+
+Connect-time DNS pinning for outbound HTTP.
 
 ``core.network_security`` decides whether a destination is reachable;
 this module makes the socket land on what that decision looked at.

@@ -1,4 +1,11 @@
-"""Reminder delivery.
+"""Runs the background sweeper that claims due reminders and delivers them over
+the user's linked channel.
+
+Why it exists: Per-reminder timers die with the process; main.py starts this
+poll loop so a reminder survives a restart and is claimed atomically before it
+is sent.
+
+Reminder delivery.
 
 A single background sweeper claims due reminders and pushes them through
 whatever out-of-band channel the user has linked (Telegram today). It is

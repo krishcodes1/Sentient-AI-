@@ -1,3 +1,11 @@
+/**
+ * Modal confirmation dialog that runs an async confirm action with a pending state and shows a
+ * failure inline instead of closing.
+ *
+ * Why it exists: Deleting a conversation, memory, connector or account needs one branded
+ * replacement for window.confirm() that cannot be double-submitted or dismissed mid-request.
+ */
+
 import { useCallback, useId, useRef, useState, type ReactNode } from "react";
 import { AlertTriangle, Loader2 } from "lucide-react";
 import { useFocusTrap } from "@/hooks/useFocusTrap";

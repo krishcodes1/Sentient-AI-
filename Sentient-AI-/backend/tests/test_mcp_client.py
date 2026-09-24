@@ -1,4 +1,13 @@
-"""Protocol-level MCP tests: the HTTP transport's JSON-RPC framing, the
+"""Tests for the MCP protocol layer: the HTTP transport's JSON-RPC framing, the
+client handshake, catalog caching and isolation, dispatcher name resolution,
+and the activity registry all behave correctly against a real transport over
+`httpx.MockTransport`.
+
+Why it exists: Complements the route- and policy-level `test_mcp.py` by driving
+the real wire protocol, so a framing or name-resolution bug that only appears
+at the transport level is still caught.
+
+Protocol-level MCP tests: the HTTP transport's JSON-RPC framing, the
 client handshake, catalog caching/isolation, dispatcher name resolution,
 and the activity registry.
 

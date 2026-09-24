@@ -1,3 +1,11 @@
+/**
+ * App shell: the skip link, the mobile header with the navigation button, the sidebar as a drawer
+ * below 1024px, and the routed page inside <main>.
+ *
+ * Why it exists: Drawer state is derived from the viewport and closed on every navigation here, so
+ * no page has to know whether the sidebar is an overlay or a static column.
+ */
+
 import { useCallback, useEffect, useState } from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import { Menu } from "lucide-react";

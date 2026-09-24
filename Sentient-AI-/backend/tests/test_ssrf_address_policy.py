@@ -1,4 +1,13 @@
-"""Address-level SSRF policy.
+"""Tests for address-level SSRF policy: IPv4 and IPv6 private and reserved ranges
+are blocked, including the unspecified `::`, NAT64, and 6to4 spellings of
+loopback or internal addresses, while ordinary public addresses remain
+reachable.
+
+Why it exists: The blocklist was previously enumerated by hand and missed three
+spellings of localhost that were driven to a real socket; the policy is now
+deny-by-default on routability and these tests pin both halves.
+
+Address-level SSRF policy.
 
 The blocklist was written in IPv4 terms and enumerated IPv6 ranges by
 hand, which let three spellings of "localhost" through: the unspecified

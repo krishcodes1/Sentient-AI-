@@ -1,4 +1,14 @@
-"""Conversation lifecycle + per-user settings route tests.
+"""Tests for conversation lifecycle and per-user settings routes: rename and
+delete are owner-scoped, `updated_at` bumps whenever a new message is
+persisted, per-user rate limits and unconfigured providers return the right 429
+or 503, and approving or denying an action persists the resulting assistant
+message.
+
+Why it exists: Guards the audit-fix set for these routes so a foreign user's
+rename or delete 404s correctly and a resumed approval always leaves a
+persisted, correctly ordered conversation.
+
+Conversation lifecycle + per-user settings route tests.
 
 Covers the audit fixes:
 

@@ -1,4 +1,10 @@
-"""List prices used to ESTIMATE what a turn cost.
+"""Holds list prices per (provider, model) and estimates the cost of a turn from
+its token counts.
+
+Why it exists: The usage summary needs one price table with exact matches only,
+so a model that is not listed shows no cost rather than a wrong one.
+
+List prices used to ESTIMATE what a turn cost.
 
 These are estimates, not a bill. Provider prices change, and the numbers
 below ignore much of what makes a real invoice differ from tokens x list

@@ -1,3 +1,10 @@
+/**
+ * ThemeContext, the useTheme hook, and the ThemeMode type.
+ *
+ * Why it exists: Kept apart from ThemeProvider in src/theme.tsx so that file exports only a
+ * component and keeps Fast Refresh; consumers import both through the "@/" alias.
+ */
+
 import { createContext, useContext } from "react";
 
 export type ThemeMode = "light" | "dark" | "system";

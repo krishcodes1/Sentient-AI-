@@ -1,3 +1,14 @@
+"""Serves the /connectors API: create, list, read, update, delete and test a
+user's connector configurations, plus a per-connector health summary derived
+from the audit log.
+
+Why it exists: Credentials must be validated against the connector's own
+service and stored AES-encrypted, requested scopes checked against the
+first-party catalog, and MCP state forgotten on delete; owning those steps here
+keeps every connector mutation behind the same ownership check and the same 422
+rules.
+"""
+
 from __future__ import annotations
 from typing import Dict, List, Literal, Optional
 

@@ -1,8 +1,16 @@
-"""See my screen: desktop.screenshot.
+"""Declares the "screen" capability behind desktop.screenshot, with its
+availability rule and its macOS permission probe.
+
+Why it exists: Reading the display is high risk and only works natively on
+macOS and Windows; declaring the rule and the probe here lets the registry and
+the desktop toolkit refuse or explain instead of failing mid-capture.
+
+See my screen: desktop.screenshot.
 
 Unavailable in a container and on Linux. On macOS the probe checks the
 Screen Recording permission of the running binary (via macos.py);
-Windows needs no grant. Off by default because it is high risk."""
+Windows needs no grant. Off by default because it is high risk.
+"""
 
 from __future__ import annotations
 

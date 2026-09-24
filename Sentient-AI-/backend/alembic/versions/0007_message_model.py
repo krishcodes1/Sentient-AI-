@@ -1,4 +1,11 @@
-"""Record which provider/model produced each assistant message, and how
+"""Adds ``messages.llm_provider``, ``llm_model``, ``cache_read_tokens`` and
+``cache_write_tokens``, each guarded against the column already existing.
+
+Why it exists: Token counts cannot be priced without knowing which model
+produced the turn and how much of the prompt was cached, so the usage summary
+needs these recorded per row.
+
+Record which provider/model produced each assistant message, and how
 much of its prompt was served from or written to the prompt cache.
 
 Token counts alone cannot be priced: the same thousand tokens cost two

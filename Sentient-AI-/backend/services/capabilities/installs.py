@@ -1,6 +1,14 @@
-"""Install optional software: lets the agent offer, and after approval run,
+"""Declares the "installs" capability that gates the system.install_capability
+tool.
+
+Why it exists: The registry lists it so the owner can switch software installs
+off entirely; when it is on, every install still passes through the approval
+card.
+
+Install optional software: lets the agent offer, and after approval run,
 an install from the fixed ALLOWLIST in services/tools/system.py (such as
-the hidden browser). Every install still goes through the approval card."""
+the hidden browser). Every install still goes through the approval card.
+"""
 
 from __future__ import annotations
 

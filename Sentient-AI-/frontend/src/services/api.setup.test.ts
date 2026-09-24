@@ -1,3 +1,12 @@
+/**
+ * Tests for the setup API calls: they prove createOwner stores the returned token (and none on
+ * failure), getSetupStatus sends no Authorization header, and the provider, complete and
+ * registration calls hit the right endpoints.
+ *
+ * Why it exists: Guards against a wizard that continues signed out after creating the owner, or a
+ * stale token breaking the public status check.
+ */
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { jsonResponse, mockFetch } from "@/test/http";

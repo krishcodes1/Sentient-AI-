@@ -1,3 +1,12 @@
+/**
+ * Vitest configuration: the jsdom environment, the "@" alias, the setup file and the test-file
+ * glob.
+ *
+ * Why it exists: Unit tests need jsdom, the alias and src/test/setup.ts but not the dev-server
+ * proxy or the Tailwind plugin, so the test run has its own config; `restoreMocks` and
+ * `unstubGlobals` keep one test's fetch/location stubs from leaking into the next.
+ */
+
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import path from "path";

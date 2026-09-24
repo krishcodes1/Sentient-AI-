@@ -1,4 +1,11 @@
 #!/bin/bash
+# Checks this Mac for a Python 3.9+ (prompting for Apple's Command Line Tools if there is
+# none) and execs installer/bootstrap.py with any arguments passed through.
+#
+# Why it exists: Finder can double-click a .command but not a .py, and a fresh Mac has only
+# a python3 stub until the Command Line Tools are installed, so this is the smallest step
+# between a download and the bootstrap's own web page. Kept LF-only (see .gitattributes).
+#
 # Crawler AI installer for macOS. Double-click this file in Finder: it opens a
 # local page in your browser that checks Docker, creates your security keys,
 # builds Crawler AI and opens it. Nothing to type.

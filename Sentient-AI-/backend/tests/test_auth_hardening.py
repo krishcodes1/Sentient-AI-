@@ -1,4 +1,13 @@
-"""Auth-route and rate-limit-attribution hardening tests.
+"""Tests for auth-route and rate-limit-attribution hardening: X-Forwarded-For is
+honored only from a trusted proxy, failed logins lock the account itself and
+not just an address, destructive account changes re-require the current
+password, and email normalization, registration, and login behave correctly.
+
+Why it exists: Guards gaps that had no coverage before: a spoofable rate-limit
+bucket, an address-only lockout an attacker could route around, and a stolen
+bearer token taking over or destroying an account without re-authentication.
+
+Auth-route and rate-limit-attribution hardening tests.
 
 Covers gaps that had no coverage before:
 - X-Forwarded-For is trusted only from a trusted proxy peer, so a directly

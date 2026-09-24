@@ -1,3 +1,11 @@
+/**
+ * Shared fetch and location doubles for the api-layer suites: jsonResponse, nonJsonResponse,
+ * mockFetch and stubLocation.
+ *
+ * Why it exists: Several suites need the same 401-redirect scaffolding, and a second copy that
+ * forgot to stub `replace` would stop exercising the redirect while still passing.
+ */
+
 import { vi } from "vitest";
 
 /**

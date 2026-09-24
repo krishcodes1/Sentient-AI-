@@ -1,4 +1,14 @@
-"""Behavioral tests for the connector implementations.
+"""Tests for the connector implementations' request and response plumbing: each
+connector (Canvas, Google Workspace, Robinhood) builds authorized requests
+correctly, parses upstream payloads into the shape the agent expects, and maps
+upstream failures to the right connector-error types.
+
+Why it exists: Existing connector tests only pinned security policy (SSRF,
+credentials, scopes); nothing exercised the plumbing itself, so a parsing or
+error-mapping regression here would otherwise only surface as a confusing
+runtime failure.
+
+Behavioral tests for the connector implementations.
 
 The existing connector tests (``test_executor_security``,
 ``test_network_policy``, ``test_connectors_policy``) pin *security policy*:

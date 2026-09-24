@@ -1,3 +1,11 @@
+/**
+ * Browser entry point: mounts <App> under the error boundary, theme, React Query and router
+ * providers, and loads the self-hosted fonts and global CSS.
+ *
+ * Why it exists: Something has to create the React root and assemble the provider tree exactly
+ * once; index.html's module script points here.
+ */
+
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";

@@ -1,4 +1,12 @@
-"""CaMeL-lite taint tracking tests.
+"""Tests for CaMeL-lite taint tracking: a side-effectful tool call normally auto-
+approved by standing consent is re-escalated to human approval when its
+arguments are derived from untrusted tool-result data.
+
+Why it exists: Closes the indirect-injection-driven-write hole
+deterministically: a tainted argument must force approval regardless of what
+the model claims, without relying on the model to police itself.
+
+CaMeL-lite taint tracking tests.
 
 A side-effectful tool call auto-approved by the user's standing consent must
 be re-escalated to human approval when its arguments are derived from

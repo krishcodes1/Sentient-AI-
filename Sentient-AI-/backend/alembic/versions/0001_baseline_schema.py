@@ -1,4 +1,13 @@
-"""Baseline schema.
+"""Creates the baseline schema (users, audit_logs, connector_configs,
+conversations, memories, messages, pending_actions) and their enum types,
+exactly as the pre-Alembic ``create_all`` built them.
+
+Why it exists: Migration history needs a first revision that matches what
+existing deployments already run, so they can be stamped here and take only
+later revisions; the operator notes below say when to ``upgrade`` and when to
+``stamp``.
+
+Baseline schema.
 
 Revision ID: 0001_baseline
 Revises:

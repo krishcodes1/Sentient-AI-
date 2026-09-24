@@ -1,4 +1,12 @@
-"""Approval-flow tests: DB persistence, ownership, single-use, expiry,
+"""Tests for the approval flow: DB persistence, ownership, single-use enforcement,
+and expiry hold, and that the runtime's approve/deny path hands off to the
+executor correctly.
+
+Why it exists: Guards the owner-only, single-use approval contract and the
+concurrency-safe double-execute race that a broken persistence layer or runtime
+handoff would otherwise allow.
+
+Approval-flow tests: DB persistence, ownership, single-use, expiry,
 concurrency (double-execute race), and the runtime's approve/deny
 behavior including the ``approved=True`` hand-off to the executor.
 """

@@ -1,4 +1,12 @@
-"""Shared Pydantic validators for user-supplied text.
+"""Defines the shared request validators: a NUL-free ``SafeStr`` type, email
+normalization and the model-id shape check.
+
+Why it exists: Request models across the auth, memory, reminder, connector and
+setup routes import these so a NUL byte is refused as a 422 instead of an
+asyncpg 500, emails are keyed on one canonical form, and a model name that
+could act as a request-path segment is rejected before it is stored.
+
+Shared Pydantic validators for user-supplied text.
 
 Postgres ``text``/``varchar`` columns cannot store the U+0000 NUL byte, and
 the asyncpg driver raises deep inside the request when one slips through —

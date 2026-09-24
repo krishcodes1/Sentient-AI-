@@ -1,3 +1,11 @@
+/**
+ * Tests for useCountdown and formatCountdown: they prove the label format, whole-second ticking,
+ * clamping at zero, stopping the timer, and restarting on a new deadline.
+ *
+ * Why it exists: Guards against a countdown that never reaches zero (every late click 404s) or
+ * reaches it early (a valid approval becomes un-actionable).
+ */
+
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { formatCountdown, useCountdown } from "@/pages/approvalCountdown";

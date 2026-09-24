@@ -1,4 +1,13 @@
-"""Resume-after-approval.
+"""Tests for resume-after-approval: approving an action runs one more agent turn
+over the updated transcript so the assistant actually uses the tool result, and
+that a resume failure never fails the approval itself.
+
+Why it exists: Approving an action used to dead-end: the tool ran but the user
+had to send another message to get the answer it was fetched for; the resume is
+best-effort so it must never turn an already-recorded approval into a failed
+request.
+
+Resume-after-approval.
 
 Approving an action used to dead-end: the tool ran and its result was
 written to the transcript, but the user had to send another message just to

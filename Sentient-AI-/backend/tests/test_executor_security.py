@@ -1,4 +1,12 @@
-"""Executor security tests: credential decryption, scope enforcement,
+"""Tests for the connector executor's security controls: credentials are decrypted
+correctly per connector row, granted scopes are enforced, an LLM cannot smuggle
+a fake `user_confirmed` argument, and rate limiting and network-policy arming
+happen before dispatch.
+
+Why it exists: Guards the executor's core trust boundary between an approved
+tool call and the credentialed HTTP request it triggers.
+
+Executor security tests: credential decryption, scope enforcement,
 confirmation injection, rate limiting, and network-policy arming.
 """
 

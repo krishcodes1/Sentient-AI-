@@ -1,4 +1,13 @@
-"""The agent loop with image attachments, and what the request prefix
+"""Tests for the agent loop with image attachments: the prompt guard screens only
+the text of a multimodal turn and never the base64 image bytes, that a non-
+vision provider refuses rather than silently drops an image, and that the
+offered tool array and system prompt stay stable turn to turn.
+
+Why it exists: An attached image is untrusted input, so a screening regression
+here would scan raw binary as prose, and an unstable tool array would defeat
+the prompt caching the whole context pipeline is built around.
+
+The agent loop with image attachments, and what the request prefix
 looks like turn to turn.
 
 An attached image is untrusted input like any other, so the question these

@@ -1,4 +1,12 @@
-"""Persistent per-user memory.
+"""Declares the ``memories`` table: one dated fact per row, with a category, a
+provenance source and the owning user.
+
+Why it exists: The memory routes, ``services.memory`` and the agent's
+system-prompt rendering all read this mapping; the ``source`` and
+``source_conversation_id`` columns are what let the UI show where an
+agent-proposed memory came from.
+
+Persistent per-user memory.
 
 A memory is a durable fact the user wants the assistant to know across all
 conversations (a name, a preference, an ongoing project, a deadline). This

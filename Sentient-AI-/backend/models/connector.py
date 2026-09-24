@@ -1,3 +1,12 @@
+"""Declares the ``connector_configs`` table and its enums: connector type, auth
+method and permission tier, with credentials stored as an AES-encrypted
+blob.
+
+Why it exists: The connector routes, the tool registry's tier gating and the
+MCP loader all key off the same ``ConnectorType`` and ``PermissionTier``
+values, so they are defined once beside the row that carries them.
+"""
+
 from __future__ import annotations
 
 import enum

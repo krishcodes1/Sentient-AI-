@@ -1,4 +1,12 @@
-"""
+"""Implements the three pure-ASGI middlewares main.py installs: security
+headers, per-IP rate limiting (Redis-backed with an in-memory fallback) and
+a request id on every request and response.
+
+Why it exists: These wrap every route, including the SSE chat stream, so they
+work on the raw ASGI messages rather than BaseHTTPMiddleware to avoid buffering
+streamed bodies; the rate limiter also decides which peers' X-Forwarded-For to
+trust, which is what keeps the login throttle from being bypassed.
+
 Security middleware stack for Crawler AI FastAPI application.
 
 Provides:

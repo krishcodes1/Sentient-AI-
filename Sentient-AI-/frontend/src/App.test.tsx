@@ -1,3 +1,11 @@
+/**
+ * Tests for SetupGate in App: they prove pages redirect to /setup while the server needs setup,
+ * /login stays reachable once an owner exists, and a failed status check lets the app through.
+ *
+ * Why it exists: Guards against locking every page behind a spinner when the status check fails,
+ * or locking out an owner whose session ended mid-setup.
+ */
+
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";

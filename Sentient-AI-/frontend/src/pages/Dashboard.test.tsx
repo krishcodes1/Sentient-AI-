@@ -1,3 +1,11 @@
+/**
+ * Tests for Dashboard's token usage: they prove today's tokens appear as a stat card with an
+ * estimated cost, the usage panel renders the by-model table, and a failed summary is named in the
+ * load-error banner.
+ *
+ * Why it exists: Guards against a usage failure blanking the page or going unreported.
+ */
+
 import { render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { usageSummary } from "@/test/usage";

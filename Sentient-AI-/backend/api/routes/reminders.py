@@ -1,4 +1,12 @@
-"""Reminder CRUD.
+"""Serves the /reminders API: create a reminder, list the scheduled (or all)
+ones, and cancel one.
+
+Why it exists: The web UI needs a way to add and cancel the rows the delivery
+sweeper (services.notifications.reminders) acts on; the request model here
+normalizes naive datetimes to UTC and rejects due dates more than a decade out,
+so the sweeper never holds a typo.
+
+Reminder CRUD.
 
 Reminders are owner-scoped like every other resource here: identity comes
 from the JWT and a foreign id returns 404 rather than 403, so the API never

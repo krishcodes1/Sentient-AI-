@@ -1,3 +1,14 @@
+"""Declares the ``users`` table: credentials, the admin flag, account settings
+(permission tier, rate limit, optional LLM override, memory toggle),
+Telegram link fields, and raise-on-lazy-load relationships to the user's
+rows.
+
+Why it exists: ``get_current_user`` loads this row on every authenticated
+request, so the relationships refuse implicit loading instead of pulling in
+every audit row and message; ``token_epoch`` and ``is_admin`` here are what
+make JWT invalidation and the ``admin_only`` tier work.
+"""
+
 from __future__ import annotations
 
 import uuid

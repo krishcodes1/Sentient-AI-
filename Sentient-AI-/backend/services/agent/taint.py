@@ -1,4 +1,11 @@
-"""CaMeL-lite taint tracking for the agent loop.
+"""Tracks values that entered the conversation from untrusted tool results and
+flags tool arguments that reuse them.
+
+Why it exists: A write whose arguments were derived from fetched content must
+not run on standing consent; the runtime asks TaintTracker before auto-
+approving so such calls reach a human instead.
+
+CaMeL-lite taint tracking for the agent loop.
 
 Deterministic, server-side defense against indirect prompt injection that
 drives a *side-effectful* action. The model-facing envelope (spotlighting)

@@ -1,4 +1,11 @@
-"""Per-message token accounting and image attachment metadata.
+"""Adds ``messages.attachments``, ``input_tokens`` and ``output_tokens``, each
+guarded against the column already existing.
+
+Why it exists: Per-conversation cost has to be a SUM over stored per-turn usage
+rather than a number that only existed in a log line, and image sends need
+their metadata recorded without the bytes.
+
+Per-message token accounting and image attachment metadata.
 
 ``input_tokens``/``output_tokens`` record what the provider billed for an
 assistant turn, so cost per conversation is a SUM over ``messages`` rather

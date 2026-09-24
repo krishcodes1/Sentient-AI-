@@ -1,3 +1,12 @@
+/**
+ * Brand mark and wordmark components: the logo image (or a Shield fallback tile) and the "Crawler
+ * AI" text mark.
+ *
+ * Why it exists: Login, Layout, Sidebar and Setup all show the brand, and only this file knows
+ * which legacy asset is safe to use and which are replaced by styled text until new artwork
+ * exists.
+ */
+
 import { Shield } from "lucide-react";
 
 type Variant = "emblem" | "animated" | "shield";

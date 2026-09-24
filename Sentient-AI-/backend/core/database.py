@@ -1,3 +1,13 @@
+"""Creates the async SQLAlchemy engine and session factory, declares the ORM
+base, and brings the schema to head at startup.
+
+Why it exists: Every request and service opens sessions through ``get_db`` or
+``async_session`` from here, and ``init_db`` is the one startup path that waits
+for the database, stamps a pre-Alembic database at the baseline, runs the
+migrations and applies the provider/model backfill, so no caller has to know
+those steps.
+"""
+
 from __future__ import annotations
 
 import asyncio

@@ -1,4 +1,13 @@
-"""
+"""Checks outbound URLs against the SSRF blocklist and each connector's
+deny-by-default host and path allowlist, resolving hostnames to public
+addresses first.
+
+Why it exists: The connectors, the MCP client and the built-in web tools all
+fetch user- or content-supplied URLs; one module with ``check_ssrf`` and
+``check_network_policy`` keeps the private-range list, the IPv6
+transition-prefix handling and the per-connector allowlists from being
+reimplemented differently at each call site.
+
 Network security module inspired by NVIDIA NemoClaw.
 
 Provides:

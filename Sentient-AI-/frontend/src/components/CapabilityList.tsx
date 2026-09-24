@@ -1,3 +1,12 @@
+/**
+ * Renders the capabilities list: one row per capability with a risk badge, an on/off switch, an
+ * effective-status line and Grant access / Install actions, plus the panel shown when the list
+ * fails to load.
+ *
+ * Why it exists: Settings and the setup wizard's Permissions step show the same list, so the row
+ * layout and the read-only-for-non-owners behaviour live in one component.
+ */
+
 import { useId } from "react";
 import { Download, Loader2, ShieldAlert } from "lucide-react";
 import type { CapabilityEffective, CapabilityStatus } from "@/types";

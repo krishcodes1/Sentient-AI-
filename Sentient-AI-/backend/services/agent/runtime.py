@@ -1,4 +1,11 @@
-"""Agent runtime — orchestrates LLM calls, tool execution, permission
+"""Runs the agent loop: assembles the prompt, calls the LLM, executes tool calls
+through permission, injection and taint checks, and records the outcome.
+
+Why it exists: The chat route, the approval endpoints and the Telegram poller
+all need the same loop with the same ordering of checks; one AgentRuntime means
+no caller can execute a tool without them.
+
+Agent runtime — orchestrates LLM calls, tool execution, permission
 checks, prompt scanning, approval flow, and audit logging.
 """
 

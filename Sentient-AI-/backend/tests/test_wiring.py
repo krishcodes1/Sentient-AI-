@@ -1,4 +1,13 @@
-"""App wiring: the installation service, capability gates, permissions
+"""Tests for app wiring: `main.wire_services` correctly hangs the installation
+service, capability gates, the permissions prompt, and the Telegram manager
+onto the app, and that a runtime construction error is surfaced rather than
+swallowed.
+
+Why it exists: The `client` fixture never runs the app lifespan, so these tests
+call `wire_services` directly to guard the one place all of these services are
+actually connected together in production.
+
+App wiring: the installation service, capability gates, permissions
 prompt and Telegram manager as main.wire_services hangs them on the app.
 
 The `client` fixture never runs the lifespan, so these tests call

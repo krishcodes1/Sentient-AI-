@@ -1,5 +1,13 @@
-"""Regression: everyday text and encoded payloads must not trip the
-jailbreak pattern; the DAN token still must."""
+"""Tests for a PromptGuard false-positive regression: everyday text and a
+base64-encoded ordinary payload containing the substring "dan" are not flagged
+as a jailbreak, while the actual DAN jailbreak token still is.
+
+Why it exists: Guards against the jailbreak pattern over-matching on innocuous
+text that happens to contain "dan".
+
+Regression: everyday text and encoded payloads must not trip the
+jailbreak pattern; the DAN token still must.
+"""
 
 from services.agent.prompt_guard import PromptGuard
 

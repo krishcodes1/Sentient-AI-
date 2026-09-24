@@ -1,4 +1,13 @@
-"""Prompt-injection red-team evaluation suite.
+"""Tests for the prompt-injection red-team evaluation suite: a labelled attack
+corpus is detected above a minimum rate per attack class, a benign corpus
+including near-miss phrasings stays under a false-positive ceiling, and the
+untrusted-tool-output envelope cannot be broken out of.
+
+Why it exists: A CI-friendly, deterministic, no-network harness so a regression
+in detection rate or an over-blocking guard fails the build instead of only
+being noticed after a real attack or a support complaint.
+
+Prompt-injection red-team evaluation suite.
 
 A CI-friendly, deterministic adversarial harness for the platform's
 injection defenses. There is **no network and no LLM API call anywhere in

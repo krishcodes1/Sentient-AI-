@@ -1,3 +1,11 @@
+/**
+ * Memory page: the memory on/off switch, an add form, a debounced search with category filters,
+ * inline editing and confirmed deletion.
+ *
+ * Why it exists: Users need to see and correct what the assistant is told about them; load state
+ * is derived from the last settled query so filtering never flashes the list empty.
+ */
+
 import { useEffect, useId, useMemo, useState, type FormEvent } from "react";
 import {
   Brain,

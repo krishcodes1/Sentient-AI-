@@ -1,4 +1,12 @@
 # syntax=docker/dockerfile:1
+# Builds the frontend image: node:20-alpine after `npm ci`, split into a `dev` stage (Vite
+# dev server with an entrypoint that resyncs the node_modules volume), a `build` stage
+# (`npm run build`) and a `prod` stage (nginx serving dist/ with an /api reverse proxy).
+#
+# Why it exists: dev and prod share one dependency install so they cannot drift, and the
+# nginx config with its security headers and the sync-node-modules script are inlined
+# here because the build context is ../frontend, which cannot COPY files from docker/.
+#
 # Multi-stage frontend image.
 #   dev  — Vite dev server, source bind-mounted by docker-compose.yml
 #   prod — `npm run build` output served by nginx with an /api reverse

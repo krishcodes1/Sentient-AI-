@@ -1,4 +1,15 @@
-"""Concurrency and failure-mode tests for the approval flow and runtime.
+"""Tests for concurrency and failure modes in the approval flow and runtime: a
+double-clicked approval executes its tool exactly once, a raced approve/deny
+has exactly one winner, an expired or foreign action never executes, the rate
+limiter counts exactly under overlap, and one failing tool never breaks a
+concurrent turn.
+
+Why it exists: Guards against incidents that would be silent in production,
+such as a double-sent email or a rejected action that ran anyway, by driving
+genuine `asyncio.gather` races against the real approval store rather than a
+sequence of calls dressed up as one.
+
+Concurrency and failure-mode tests for the approval flow and runtime.
 
 These cover the incidents that would be SILENT in production: a
 double-clicked approval sending two emails, a raced approve/deny that runs

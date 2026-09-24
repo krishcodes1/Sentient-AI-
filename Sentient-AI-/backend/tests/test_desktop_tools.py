@@ -1,5 +1,16 @@
-"""desktop.screenshot. Nothing here touches the real display: every test
-injects a grabber, a fake ``mss`` module, or patches the macOS preflight."""
+"""Tests for the desktop.screenshot tool: the screenshot is downscaled to a
+bounded JPEG, that grabber and permission-probe failures are reported
+generically to the model but in detail in the log, and that oversize or
+malformed capture data is refused rather than raised.
+
+Why it exists: Nothing here touches a real display: every failure mode of the
+injected grabber, the macOS permission preflight, and the multi-monitor `mss`
+indexing is exercised so a capture bug fails a test instead of leaking a raw
+stack trace to the model.
+
+desktop.screenshot. Nothing here touches the real display: every test
+injects a grabber, a fake ``mss`` module, or patches the macOS preflight.
+"""
 
 from __future__ import annotations
 

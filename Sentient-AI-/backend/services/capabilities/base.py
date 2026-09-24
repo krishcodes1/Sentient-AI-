@@ -1,4 +1,11 @@
-"""Capability declarations.
+"""Defines the frozen dataclasses a capability is declared with and the status
+record a report produces.
+
+Why it exists: Every capability module, the registry, the tool registry and the
+capabilities route share these types; keeping them free of OS and database
+access is what lets availability rules be tested without a display.
+
+Capability declarations.
 
 A capability is the unit the owner switches on or off. One declaration
 drives four things at once: the Permissions page and setup wizard, the

@@ -1,4 +1,11 @@
-"""Built-in reminder tools: read the clock, set, list and cancel reminders.
+"""Implements the reminders.* built-in tools: read the clock, and create, list and
+cancel the caller's reminders.
+
+Why it exists: The tool registry dispatches reminders.* here with the caller's
+identity, so the model can never address another user's reminders and the time
+validation stops it scheduling one in the past.
+
+Built-in reminder tools: read the clock, set, list and cancel reminders.
 
 The agent sets reminders on the user's behalf from chat ("remind me
 tomorrow at 9am to submit the report"). Rows land in the same

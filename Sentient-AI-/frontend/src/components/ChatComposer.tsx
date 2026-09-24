@@ -1,3 +1,12 @@
+/**
+ * The chat input form: an auto-growing textarea that sends on Enter, image attachments by button,
+ * paste or drop, and a Stop button while a turn is streaming.
+ *
+ * Why it exists: Attachment validation (image-only, size and count caps) and the Enter /
+ * Shift+Enter / IME rules are self-contained here, so Chat.tsx only receives the final text and
+ * data URLs.
+ */
+
 import {
   useCallback,
   useEffect,

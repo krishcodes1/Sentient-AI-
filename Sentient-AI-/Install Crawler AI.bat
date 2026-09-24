@@ -1,4 +1,12 @@
 @echo off
+:: Checks this PC for a Python 3.9+ (the py launcher first, then python on PATH) and runs
+:: installer\bootstrap.py with any arguments passed through.
+::
+:: Why it exists: Explorer can double-click a .bat but a .py may open in an editor or the
+:: Store instead, so this wrapper picks a working interpreter, explains how to install one
+:: when there is none, and keeps the window open on errors. Kept CRLF and plain ASCII (see
+:: .gitattributes) because cmd.exe mis-parses labels in LF-only files.
+::
 rem Crawler AI installer for Windows. Double-click this file in File Explorer:
 rem it opens a local page in your browser that checks Docker Desktop, creates
 rem your security keys, builds Crawler AI and opens it. Nothing to type.

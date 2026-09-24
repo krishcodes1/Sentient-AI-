@@ -1,3 +1,11 @@
+/**
+ * ErrorAlert and ResultLine: the blocking error banner at the top of a form and the pass/fail line
+ * next to a Test or Save button.
+ *
+ * Why it exists: ProviderForm, ServerSettings and the setup wizard report outcomes the same way,
+ * and the ARIA role (alert for a failure, status for a success) is chosen once here.
+ */
+
 import type { ReactNode } from "react";
 import { CheckCircle2, XCircle } from "lucide-react";
 

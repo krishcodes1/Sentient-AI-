@@ -1,3 +1,12 @@
+/**
+ * Tests for MarkdownMessage: they prove raw HTML never becomes live elements, image URLs never
+ * reach a fetching attribute, javascript: and data: links render as text, real links show their
+ * host, and ordinary markdown still renders.
+ *
+ * Why it exists: Guards against a regression that swaps the inert image placeholder for a real
+ * <img>, which would silently leak the conversation to the URL's host on render.
+ */
+
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";

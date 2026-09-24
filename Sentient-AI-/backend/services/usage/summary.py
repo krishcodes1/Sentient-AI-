@@ -1,4 +1,11 @@
-"""Aggregate one account's token usage across time windows and models.
+"""Sums one account's token usage per time window and model in SQL and formats the
+result for the API and the Telegram bot.
+
+Why it exists: The usage route and the Telegram usage reply need a result whose
+cost does not grow with the transcript, so aggregation is one GROUP BY here and
+pricing is applied to those rows.
+
+Aggregate one account's token usage across time windows and models.
 
 Everything is summed in SQL: a transcript is unbounded, and loading every
 assistant row a user has ever produced to add up four integers would make

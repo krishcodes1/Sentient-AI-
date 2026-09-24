@@ -1,4 +1,13 @@
-"""Approval-flow argument scanning and risk annotation.
+"""Tests for approval-flow argument scanning: attacker-controlled tool arguments
+are refused before an action is ever parked for approval, that tainted-but-
+clean-looking arguments still park with a risk note, and that stored arguments
+are re-scanned at approve time.
+
+Why it exists: The argument scan used to run only after an action had already
+been parked, so a user could be shown an injection-laden action to rubber-
+stamp; this guards against that ordering regressing.
+
+Approval-flow argument scanning and risk annotation.
 
 Approval-gated calls are the category most likely to be attacker-steered
 (send_email to an exfil address), yet the argument scan used to run only

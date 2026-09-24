@@ -1,4 +1,13 @@
-"""Token usage for the signed-in account.
+"""Serves GET /usage/summary: the signed-in user's token counts over today, 7
+days, 30 days and all time, with a per-model breakdown and an estimated
+cost.
+
+Why it exists: The frontend's usage panel needs the aggregation in the caller's
+own timezone, so this route validates the IANA zone name (refusing unknown ones
+instead of silently using UTC) before delegating to
+``services.usage.usage_summary``.
+
+Token usage for the signed-in account.
 
 Owner-scoped like every other resource: the user comes from the JWT, and
 the aggregation joins through conversations.user_id, so there is no

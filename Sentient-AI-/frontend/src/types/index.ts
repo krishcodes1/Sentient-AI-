@@ -1,3 +1,10 @@
+/**
+ * TypeScript interfaces and unions mirroring the backend's request and response shapes.
+ *
+ * Why it exists: The api client and every page share these, so a backend field change is made in
+ * one place; the comments record which backend models each shape mirrors.
+ */
+
 export interface User {
   id: string;
   email: string;

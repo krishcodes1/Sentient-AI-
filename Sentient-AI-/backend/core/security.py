@@ -1,3 +1,13 @@
+"""Provides the secret-handling primitives: bcrypt password hashing, session
+JWT creation and verification, AES-256-GCM credential encryption, the HMAC
+audit-log hash and a sanitizer that masks sensitive keys before logging.
+
+Why it exists: The auth routes, the connector routes, the installation service
+and the audit chain all need the same primitives keyed on ``settings``; keeping
+them in one module gives the AES key decoding and the audit HMAC key derivation
+a single definition to get right.
+"""
+
 from __future__ import annotations
 
 import base64

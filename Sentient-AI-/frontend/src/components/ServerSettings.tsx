@@ -1,3 +1,11 @@
+/**
+ * The owner-only Settings > Server section: this Crawler's AI provider (via ProviderForm) and the
+ * switch for whether new accounts may be created.
+ *
+ * Why it exists: What the setup wizard decided for the whole install has to be changeable
+ * afterwards without re-running it; Settings renders this only for is_admin accounts.
+ */
+
 import { useEffect, useId, useState } from "react";
 import { Loader2, Lock } from "lucide-react";
 import { ErrorAlert, ResultLine } from "@/components/FormFeedback";

@@ -1,4 +1,13 @@
-"""Production-hardening tests.
+"""Tests for production hardening: SECRET_KEY and ENCRYPTION_KEY are validated at
+startup, `production_warnings()` flags risky defaults, `/api/health` reflects
+real database reachability, registration can be disabled, and a password change
+revokes outstanding JWTs via `token_epoch`.
+
+Why it exists: Guards the launch-readiness fixes so the committed
+`.env.example` placeholder keys, or any other weak key, fail loudly at startup
+instead of silently signing every session with a public secret.
+
+Production-hardening tests.
 
 Covers the launch-readiness fixes:
 - SECRET_KEY / ENCRYPTION_KEY are validated at startup, so the committed

@@ -1,3 +1,12 @@
+/**
+ * Tests for Layout: they prove the drawer opens as a modal dialog that locks page scroll, closes
+ * on the button, Escape and navigation, returns focus to the opener, and is a plain landmark with
+ * every link reachable on desktop.
+ *
+ * Why it exists: Guards against an overlay that is only visually modal, where Tab walks into the
+ * page behind it or focus is lost on close.
+ */
+
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";

@@ -1,4 +1,13 @@
-"""The admin role and the `admin_only` connector tier.
+"""Tests for the admin role and the `admin_only` connector tier: the first
+registered account becomes admin, the admin flag cannot be self-granted, and
+`admin_only` widens access only for that admin without loosening any other tier
+or hard block.
+
+Why it exists: `admin_only` was offered in the UI with no role to check
+against, so it silently disabled the connector for everyone; these tests also
+guard against admin status ever widening access for a non-admin.
+
+The admin role and the `admin_only` connector tier.
 
 `admin_only` was offered in the UI but had no role to check against, so it
 silently meant "this connector is disabled for everyone" — a control that

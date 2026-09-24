@@ -1,4 +1,10 @@
-"""
+"""Scans text for prompt-injection patterns, on the raw bytes and on a de-
+obfuscated form, and reports a threat level.
+
+Why it exists: The runtime scans user input, tool output and model output, and
+the memory service screens saved facts; keeping the patterns and the
+normalisation in one place means every path sees the same defenses.
+
 Multi-layer prompt injection defense for Crawler AI.
 
 Provides pattern matching, heuristic analysis, and output validation

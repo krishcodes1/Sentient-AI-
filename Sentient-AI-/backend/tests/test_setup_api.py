@@ -1,4 +1,14 @@
-"""The first-run setup API (/api/setup/*).
+"""Tests for the first-run setup API (/api/setup/*): owner claiming, provider and
+Telegram testing and saving, registration-lock transitions, and rate limiting
+all work without ever making a real LLM or Telegram network call, and that no
+response or log ever echoes a secret.
+
+Why it exists: An autouse guard fails any test whose httpx request is not the
+test client's own ASGI call, so this suite cannot accidentally reach the
+network while it pins the wizard's owner-claim, key-storage, and registration-
+lock behavior.
+
+The first-run setup API (/api/setup/*).
 
 No real LLM or Telegram traffic: ``services.agent.providers.create_provider``
 is replaced with a fake and ``httpx.AsyncClient.get`` answers Telegram's

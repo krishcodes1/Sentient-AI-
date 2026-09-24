@@ -1,6 +1,14 @@
-"""Copy this file to services/capabilities/<key>.py, fill it in, and add
+"""Annotated example of a capability module for contributors to copy; it is never
+registered.
+
+Why it exists: A new capability needs every field explained once, next to
+working code; the registry test imports it to prove a copy was edited rather
+than registered as-is.
+
+Copy this file to services/capabilities/<key>.py, fill it in, and add
 CAPABILITY to REGISTRY in __init__.py. Every field is explained here.
-This file is NOT registered; the registry test checks that."""
+This file is NOT registered; the registry test checks that.
+"""
 
 from __future__ import annotations
 

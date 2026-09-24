@@ -1,3 +1,11 @@
+/**
+ * First-run setup wizard: owner account, AI provider, Telegram, permissions and summary steps,
+ * resuming at the right step after a reload.
+ *
+ * Why it exists: The app routes everything here while the server reports needs_setup, so it must
+ * work with no session at all, and only the owner may finish it.
+ */
+
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Link, Navigate } from "react-router-dom";
 import { ArrowLeft, ArrowRight, Loader2 } from "lucide-react";

@@ -1,4 +1,12 @@
-"""Scheduled reminders the assistant can set on the user's behalf.
+"""Declares the ``reminders`` table: a due timestamp, title, note, status,
+source and delivery record per row, plus the enums for status and source.
+
+Why it exists: The reminder routes, the agent's reminder tool and the delivery
+sweeper share this mapping; the ``status``/``due_at`` index and the NULL
+``delivered_at`` guard are what let the sweeper find due rows cheaply and never
+double-send.
+
+Scheduled reminders the assistant can set on the user's behalf.
 
 The motivating case: the agent completes (or proposes) a purchase and the
 user wants to be told when delivery is expected, without having to hold the

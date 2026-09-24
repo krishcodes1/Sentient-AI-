@@ -1,4 +1,14 @@
-"""Tests for the connector tool registry, permission adapter, and executor.
+"""Tests for the connector tool registry, permission adapter, and executor: tools
+are built correctly from ConnectorSpec inputs, where reads auto-approve, writes
+require approval, and financial actions are hard blocked, that same-type
+connectors get disambiguated names, and that tool resolution round-trips both
+plain and slugged name forms.
+
+Why it exists: Pure-Python coverage, no database required, of the tool-naming
+and permission-tier logic every connector and account-tier combination depends
+on, including that auto-approve never resurrects a financial or blocked tool.
+
+Tests for the connector tool registry, permission adapter, and executor.
 
 Pure-Python: builds tools from plain ConnectorSpec inputs and exercises
 the adapter/executor directly. No database required.

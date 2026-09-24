@@ -1,3 +1,11 @@
+/**
+ * Vitest setup file: jest-dom matchers, a matchMedia double for jsdom, and cleanup plus
+ * localStorage.clear() after each test.
+ *
+ * Why it exists: jsdom ships no matchMedia and RTL does not auto-clean with globals on, so every
+ * suite would otherwise throw on mount or leak DOM and storage between tests.
+ */
+
 import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
 import { afterEach, vi } from "vitest";

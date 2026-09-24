@@ -1,4 +1,12 @@
-"""Memory CRUD API.
+"""Serves the /memories API: list with SQL-side search and category filters,
+create, edit and delete the signed-in user's saved memories.
+
+Why it exists: Saved memories are replayed into the agent's system prompt on
+every turn, so this is where each write passes ``screen_memory_content`` before
+storage and where ownership is enforced with a 404 that never confirms another
+user's memory exists.
+
+Memory CRUD API.
 
 Owner-scoped, JWT-only identity (like every other route). Content is
 injection-screened on write because saved memories are replayed into the

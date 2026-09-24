@@ -1,3 +1,12 @@
+/**
+ * Tests for TokenUsage and formatCost: they prove captions show separators, the cached share and
+ * the model, render nothing without usage or on user and failed turns, totals sum only counted
+ * assistant turns, and sub-cent costs never round to free.
+ *
+ * Why it exists: Guards against presenting an unknown as a measurement ("0 in · 0 out") or a real
+ * cost as "$0.00".
+ */
+
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { ConversationTokenTotal, MessageTokenCaption } from "@/components/TokenUsage";

@@ -1,3 +1,13 @@
+"""Declares the ``conversations`` and ``messages`` tables: a user's chat
+threads and each turn's role, content, tool calls, image-attachment
+metadata, token usage and the provider/model that produced it.
+
+Why it exists: The agent routes rebuild history from these rows on every turn
+and the usage summary prices past turns from them, so the per-message token and
+model columns, and the raise-on-lazy-load relationships that keep list
+endpoints from dragging in every message, are defined here.
+"""
+
 from __future__ import annotations
 
 import enum

@@ -1,4 +1,15 @@
-"""Lazy provider resolution, leases, ``ProviderNotConfigured`` and the
+"""Tests for lazy provider resolution: the runtime builds no LLM provider at
+startup, resolves and caches one per (provider, model) only when a turn needs
+it, keeps a lease alive until an in-flight turn finishes even across
+invalidation, and returns the correct setup_url- or settings_url-pointing
+sentence when no key is configured.
+
+Why it exists: A fresh install has no key yet, and the owner adds one through
+/setup or Settings while the server keeps running; guards against a stale
+cached provider surviving a key change or a turn in flight losing its provider
+mid-call.
+
+Lazy provider resolution, leases, ``ProviderNotConfigured`` and the
 ``<permissions>`` block.
 
 The runtime no longer builds its LLM provider at startup: a fresh install

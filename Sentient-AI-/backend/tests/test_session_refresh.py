@@ -1,4 +1,12 @@
-"""POST /auth/refresh — extending a session without a second credential.
+"""Tests for POST /auth/refresh: refresh requires an already-valid token, extends
+expiry while carrying the original session start forward, is refused past the
+absolute session cap, and stops immediately after a password change.
+
+Why it exists: Refresh trades a hard 60-minute expiry for a longer-lived but
+still bounded session on a possibly-stolen token, so these pin the limits on
+that trade.
+
+POST /auth/refresh — extending a session without a second credential.
 
 A hard 60-minute expiry logs the user out mid-conversation. Refresh trades
 that for a longer useful life on a stolen token, so the properties worth

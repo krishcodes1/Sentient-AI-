@@ -1,3 +1,13 @@
+"""Declares the ``audit_logs`` table: one row per audited connector or tool
+action with its status, reasoning, request data and the hash-chain fields
+(``seq``, ``integrity_hash``, ``previous_hash``).
+
+Why it exists: The audit chain's tamper evidence depends on these exact
+columns, a monotonic per-user ``seq`` for deterministic order and a keyed hash
+linked to the previous row, so services.audit, the audit routes and
+scripts/verify_audit_log all read and write the same mapping.
+"""
+
 from __future__ import annotations
 
 import enum

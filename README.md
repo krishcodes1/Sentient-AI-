@@ -15,22 +15,21 @@ LMS, Google Workspace, Robinhood Crypto (read-only), and external MCP servers.
 [`Sentient-AI-/SECURITY.md`](Sentient-AI-/SECURITY.md) for the security
 model.**
 
-## Quick start
+## Quick start (no commands to type)
 
-```bash
-git clone https://github.com/krishcodes1/Sentient-AI-.git
-cd Sentient-AI-
+1. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) and open it.
+2. Download this repository (green **Code** button → **Download ZIP**, or `git clone`).
+3. Open the `Sentient-AI-` folder inside it and double-click
+   **`Install Crawler AI.command`** (Mac) or **`Install Crawler AI.bat`** (Windows).
+   A local page opens in your browser and walks you through four steps:
+   check → keys → build → open. macOS may ask you once to allow the file
+   (right-click → Open).
+4. Crawler AI opens at http://localhost:3000 and its setup wizard takes it
+   from there: owner account, AI provider, Telegram, permissions.
 
-# Configure environment (add your LLM API key + generated secrets)
-cp Sentient-AI-/backend/.env.example Sentient-AI-/backend/.env
-
-# Start everything (dev stack)
-cd Sentient-AI-/docker
-docker compose up --build
-```
-
-Then open http://localhost:3000 (frontend) — API docs at
-http://localhost:8000/docs.
+Manual and production setups are in [`Sentient-AI-/README.md`](Sentient-AI-/README.md).
+Contributors: start with [`Sentient-AI-/docs/team-handoff-2026-09-23.md`](Sentient-AI-/docs/team-handoff-2026-09-23.md)
+and pick an item from [`Sentient-AI-/docs/BACKLOG.md`](Sentient-AI-/docs/BACKLOG.md).
 
 For production, use the production compose file instead:
 

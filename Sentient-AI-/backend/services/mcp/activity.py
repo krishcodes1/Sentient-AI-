@@ -1,4 +1,11 @@
-"""In-process activity record for MCP servers.
+"""Keeps an in-process record of the last success and last error per MCP connector
+id.
+
+Why it exists: Audit rows file every MCP call under one connector name, so the
+health endpoint could not otherwise say which server failed; the catalog,
+dispatcher and connection tests write here and GET /connectors/health reads it.
+
+In-process activity record for MCP servers.
 
 The runtime audit logger stores every MCP row under
 ``connector_name="mcp"`` (derived from the ``mcp.<label>.<tool>`` name),

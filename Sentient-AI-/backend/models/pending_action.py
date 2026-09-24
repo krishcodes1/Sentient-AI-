@@ -1,3 +1,13 @@
+"""Declares the ``pending_actions`` table: a tool call waiting for the user's
+approve/deny decision, with its arguments, reason, taint ``risk_note``,
+status and expiry.
+
+Why it exists: Approvals must survive restarts and be visible to every worker
+and to the Telegram poller, so the DbApprovalStore persists them here instead
+of in process memory; the composite user/status index serves the approvals poll
+every open chat makes.
+"""
+
 from __future__ import annotations
 
 import enum

@@ -1,4 +1,13 @@
-"""Telegram delivery for the human-approval flow.
+"""Runs the Telegram bot: long-polls updates, links accounts by one-time code,
+pushes approval cards, and applies Approve/Deny presses through the shared
+decision pipeline.
+
+Why it exists: Approvals must be decidable away from a computer and without a
+public webhook URL; the Telegram manager starts this service, and
+NotifyingApprovalStore wraps the approval store so every pending action is
+pushed.
+
+Telegram delivery for the human-approval flow.
 
 When a pending action is created, the linked user gets a Telegram message
 with Approve/Deny buttons; pressing one applies the SAME decision pipeline

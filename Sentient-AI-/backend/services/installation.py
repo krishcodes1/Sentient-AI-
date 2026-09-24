@@ -1,4 +1,11 @@
-"""Owner-level configuration of this Crawler install.
+"""Reads and updates the single installation row: capability switches, default LLM
+provider and keys, Telegram token, registration and setup state.
+
+Why it exists: Routes, the runtime and main.py need one cached, locked and
+audited view of owner configuration with env-over-database precedence; its
+change events are what restart the Telegram poller and drop cached providers.
+
+Owner-level configuration of this Crawler install.
 
 One row (models.installation) holds the capability switches, the default
 AI provider/model, encrypted provider keys and the encrypted Telegram bot

@@ -1,4 +1,10 @@
-"""
+"""Registers and authenticates users, resolves the current user from a bearer JWT,
+and counts failed sign-ins per account.
+
+Why it exists: Every protected route depends on get_current_user, and the per-
+account lockout bounds brute force in a way the per-IP limiter cannot; both are
+defined once so the auth routes and the dependencies agree.
+
 Authentication service for Crawler AI.
 
 Uses the canonical User model from models.user and security utilities

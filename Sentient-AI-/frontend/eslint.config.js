@@ -1,3 +1,12 @@
+/**
+ * ESLint flat config for the frontend: the recommended JS and TypeScript rules, the React Hooks
+ * and React Refresh plugins, and per-path overrides.
+ *
+ * Why it exists: `npm run lint` (run in CI with --max-warnings 0) is the gate for correctness
+ * rules; the ignore list keeps nested agent worktrees and built bundles out of the run, and the
+ * overrides give config files Node globals and let tests use `any`.
+ */
+
 import js from "@eslint/js";
 import globals from "globals";
 import tseslint from "typescript-eslint";

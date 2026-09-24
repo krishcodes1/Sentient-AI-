@@ -1,4 +1,12 @@
-"""Telegram approval linking columns on users.
+"""Adds the Telegram link columns to ``users`` (``telegram_chat_id``,
+``telegram_link_code``, ``telegram_link_expires_at``) and the unique index
+on the link code, all guarded.
+
+Why it exists: Approval push over Telegram needs a per-user chat and a one-time
+code that proves control of both accounts; the guards let the revision run on
+an adopted database that already has them from the models.
+
+Telegram approval linking columns on users.
 
 ``telegram_chat_id`` is the chat approvals are pushed to (NULL = feature
 not linked for this user). ``telegram_link_code`` / ``telegram_link_

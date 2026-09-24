@@ -1,3 +1,11 @@
+/**
+ * useResolvedColors turns design-token names into concrete color strings by reading them back from
+ * a probe element, re-resolving when the theme changes.
+ *
+ * Why it exists: recharts writes colors to SVG presentation attributes, which never substitute
+ * var(), so Dashboard's chart needs real values.
+ */
+
 import { useEffect, useState } from "react";
 import { useTheme } from "@/hooks/useTheme";
 

@@ -1,4 +1,13 @@
-"""Adopting a database that predates Alembic.
+"""Tests for adopting a database that predates Alembic: startup detects a schema-
+complete database with no `alembic_version` row, stamps it at baseline without
+touching data, and that adoption is idempotent and safe on a database Alembic
+already manages.
+
+Why it exists: Running `alembic upgrade head` against a pre-existing schema
+previously died on `CREATE TABLE users` and aborted the transaction on every
+restart, which from the outside looked like the whole product being down.
+
+Adopting a database that predates Alembic.
 
 Migrations landed after this app had already been run, so real databases
 exist with the full schema and no ``alembic_version`` row. ``upgrade head``

@@ -1,4 +1,12 @@
-"""The capabilities HTTP API (/api/capabilities).
+"""Tests for the capabilities HTTP API (/api/capabilities): reading the report is
+open to any signed-in user while every write (enable, disable, install,
+request-access) is owner-only, and that responses never leak secrets.
+
+Why it exists: Guards the read/write authorization split and the app.state
+wiring the routes depend on, since httpx's ASGI test transport never runs the
+application's lifespan.
+
+The capabilities HTTP API (/api/capabilities).
 
 Reading the report is open to every signed-in user (the chat UI explains
 why a tool is unavailable); every write is the owner's alone. The routes

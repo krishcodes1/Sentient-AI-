@@ -1,3 +1,11 @@
+/**
+ * Connectors page: a card per connector with test, toggle, edit and delete, plus the Add and Edit
+ * modals with per-service credential fields, scopes and permission tier.
+ *
+ * Why it exists: Adding a connector means collecting credentials, scopes and a tier for a specific
+ * service; the service definitions and both modals live with the page that uses them.
+ */
+
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   GraduationCap,

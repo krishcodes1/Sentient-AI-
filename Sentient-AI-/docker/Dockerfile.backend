@@ -1,4 +1,12 @@
 # syntax=docker/dockerfile:1
+# Builds the backend image: python:3.12-slim with the pip requirements and a headless
+# Chromium, split into a `dev` stage (uvicorn --reload) and a `prod` stage that runs as a
+# non-root user, carries a Host-aware healthcheck and migrates before serving.
+#
+# Why it exists: both compose files build from this one base so dev and prod cannot drift
+# in their dependencies, and the healthcheck script and migrate-then-serve command are
+# inlined here because the build context is ../backend, which cannot COPY from docker/.
+#
 # Multi-stage backend image.
 #   dev  — hot-reload uvicorn, source bind-mounted by docker-compose.yml
 #   prod — non-root user, no reload, container healthcheck

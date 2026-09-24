@@ -1,3 +1,11 @@
+/**
+ * CAPS: a fixture GET /capabilities body covering on, blocked by the OS, blocked until installed,
+ * and off.
+ *
+ * Why it exists: CapabilityList tests need the four states rendered distinctly, and one shared
+ * fixture keeps them from drifting between suites.
+ */
+
 import type { CapabilityStatus } from "@/types";
 
 /**

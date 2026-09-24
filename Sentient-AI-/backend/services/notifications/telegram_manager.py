@@ -1,4 +1,11 @@
-"""Starts, restarts and stops the Telegram poller at runtime.
+"""Starts, restarts or stops the TelegramService when the owner saves or clears
+the bot token.
+
+Why it exists: main.py wires the approval store and the reminder sweeper to one
+stable object while the poller behind it changes at runtime; the proxies are
+no-ops while stopped so callers never have to check.
+
+Starts, restarts and stops the Telegram poller at runtime.
 
 main.py wires the approval store and the reminder sweeper to this manager
 once; whether a poller exists behind it can change whenever the owner

@@ -1,3 +1,12 @@
+/**
+ * ThemeProvider: reads the saved light/dark/system choice, resolves it against the OS preference,
+ * and applies it via the data-theme attribute and the theme-color meta.
+ *
+ * Why it exists: The stylesheet and the inline bootstrap in index.html both key off the stored
+ * choice and data-theme, so one component owns persisting and applying it; main.tsx mounts it
+ * above every consumer of useTheme.
+ */
+
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { DARK_QUERY, useMediaQuery } from "@/hooks/useMediaQuery";
 // The context and its hook live beside the other hooks so this module

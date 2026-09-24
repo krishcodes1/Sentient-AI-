@@ -1,4 +1,14 @@
-"""Context manager: what goes into the cached prefix, and what it costs.
+"""Tests for the context manager: the offered tool array stays identical across
+turns for a given connector set, that model context-window budgets resolve by
+exact id, then family, then a safe default, and that the turn-replay cache is
+scoped and bounded correctly.
+
+Why it exists: A tool array that reorders between turns defeats prompt caching
+on every turn of every conversation, and a mis-sized context window forces
+needless summarization; both regressions are invisible until someone reads the
+bill.
+
+Context manager: what goes into the cached prefix, and what it costs.
 
 The expensive properties here are not functional ones. A tool array that
 reorders between turns costs a full-price prompt on every turn of every

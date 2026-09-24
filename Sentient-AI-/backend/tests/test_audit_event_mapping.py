@@ -1,4 +1,13 @@
-"""Every runtime audit event must map to a deliberate row status.
+"""Tests for the runtime-to-audit event status mapping: every event name the
+runtime actually emits has an explicit status registered instead of falling
+through to the default.
+
+Why it exists: The default `blocked` fallback for an unmapped event previously
+mis-filed a successful `tool_approved` event as a refusal in the audit UI; this
+guards against a new runtime event being added without its status ever being
+registered.
+
+Every runtime audit event must map to a deliberate row status.
 
 ``_EVENT_STATUS`` falls back to ``blocked`` for unknown event names. That
 default is right for safety but wrong for reporting: an event that is

@@ -1,4 +1,12 @@
-"""Composite indexes for the hot per-user query paths.
+"""Adds the composite indexes behind the per-user hot queries (audit chain head
+and listing, message fetch, approvals poll, conversation and memory lists),
+each with ``if_not_exists``.
+
+Why it exists: Without them every audit append and approvals poll scans the
+user's whole history; the guards let the revision run on an adopted database
+whose ``create_all`` already made the indexes.
+
+Composite indexes for the hot per-user query paths.
 
 Every index targets a confirmed query shape: the audit chain-head lookup
 (services/audit.py, runs on every audited tool event), audit listing

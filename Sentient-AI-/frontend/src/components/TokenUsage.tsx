@@ -1,3 +1,11 @@
+/**
+ * MessageTokenCaption ("1,234 in · 56 out" under a reply) and ConversationTokenTotal (the running
+ * total for the open thread).
+ *
+ * Why it exists: Chat shows token counts in two places, and both must render nothing rather than
+ * "0 in · 0 out" when a turn reported no usage.
+ */
+
 import type { Message } from "@/types";
 import { conversationTotals, formatTokens, hasUsage } from "@/components/usageFormat";
 

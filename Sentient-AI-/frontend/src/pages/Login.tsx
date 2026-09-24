@@ -1,3 +1,11 @@
+/**
+ * Sign-in / create-account page, with a password reveal and a link to /setup while setup is still
+ * in progress.
+ *
+ * Why it exists: It is the only app route reachable without a session; it asks the setup status so
+ * it never offers a "Create one" link that would 403.
+ */
+
 import { useEffect, useId, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ArrowRight, Eye, EyeOff, HardDrive, Server } from "lucide-react";

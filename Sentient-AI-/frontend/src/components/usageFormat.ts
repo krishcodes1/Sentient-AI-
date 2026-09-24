@@ -1,3 +1,10 @@
+/**
+ * Token and cost formatting helpers: formatTokens, formatCost, hasUsage and conversationTotals.
+ *
+ * Why it exists: TokenUsage, UsagePanel and Dashboard must show the same numbers the same way,
+ * with a fixed locale and "<$0.01" rather than "$0.00" for sub-cent spend.
+ */
+
 import type { Message } from "@/types";
 
 // Fixed locale: token counts are read side by side with the Telegram /usage

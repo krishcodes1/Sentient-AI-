@@ -1,4 +1,12 @@
-"""Validation tests for the Settings/account request models.
+"""Tests for the Settings and account request models: the tier enum, rate-limit
+range, password-length, and email-format validation rules on these Pydantic
+models reject invalid input and accept every valid combination.
+
+Why it exists: These rules run before any database or provider call, so a
+regression here would let invalid settings reach code that assumes they were
+already checked.
+
+Validation tests for the Settings/account request models.
 
 These exercise the Pydantic request models directly (no DB), which is
 where the tier-enum, rate-limit-range, and password-length rules live.

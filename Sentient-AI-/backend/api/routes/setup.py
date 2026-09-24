@@ -1,4 +1,14 @@
-"""First-run setup: the owner account, the AI provider, Telegram, finish.
+"""Serves the /setup wizard API: setup status, the first owner account,
+provider listing/test/save, Telegram token test/save/clear, secret clearing,
+the open-registration switch and marking setup complete.
+
+Why it exists: A native install has no .env to edit, so the wizard writes
+provider keys and the bot token into the installation record through these
+endpoints; this module is where each secret is validated against its provider,
+scrubbed out of error messages, refused when the environment already supplies
+it, and rate-limited per admin.
+
+First-run setup: the owner account, the AI provider, Telegram, finish.
 
 A native install has no .env to edit, so the /setup wizard writes the
 same settings into the installation record instead (services.installation,

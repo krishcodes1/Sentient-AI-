@@ -1,3 +1,11 @@
+/**
+ * Dashboard page: stat cards, the pending-approval queue, the security-events chart, the recent
+ * activity feed, token usage and connector health, polled every 30s.
+ *
+ * Why it exists: It is the first page after sign-in and the one place every source is loaded
+ * together, with each fetch failing independently so one dead source does not blank the others.
+ */
+
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Plug,

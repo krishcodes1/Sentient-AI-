@@ -1,4 +1,12 @@
-"""HMAC audit-hash upgrade tests.
+"""Tests for the HMAC audit-hash upgrade: a forged row that recomputes the old
+unkeyed hash is rejected, HMAC rows verify cleanly, legacy unkeyed rows still
+verify and are labeled legacy, and `seq` reordering or duplication is detected.
+
+Why it exists: Guards the fix for a forgeable ~20-line unkeyed SHA-256 chain
+and the migration path that must keep pre-upgrade audit rows verifiable instead
+of tripping a false tamper alarm.
+
+HMAC audit-hash upgrade tests.
 
 Covers the properties the keyed upgrade must provide:
 

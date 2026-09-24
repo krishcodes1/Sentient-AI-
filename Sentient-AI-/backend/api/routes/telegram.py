@@ -1,4 +1,12 @@
-"""Telegram approval-channel linking endpoints.
+"""Serves the /telegram API: whether a bot is configured and linked for the
+signed-in user, minting a one-time deep link, and removing the link.
+
+Why it exists: Approvals are pushed to a Telegram chat only once the user
+proves control of it via the /start code, and these routes read the live
+TelegramService from the manager so a token saved in the wizard takes effect
+without a restart; the token itself never leaves the server.
+
+Telegram approval-channel linking endpoints.
 
 The bot token itself is owner configuration (TELEGRAM_BOT_TOKEN, or the
 one saved in the setup wizard) and is never exposed here; these routes

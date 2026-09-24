@@ -1,4 +1,12 @@
-"""MCP integration tests: client protocol handling, tool discovery,
+"""Tests for MCP integration: client protocol handling, tool discovery with
+financial-tool suppression, permission classification, and dispatch are all
+enforced correctly over a fake transport with no real network.
+
+Why it exists: Guards the security boundary between an untrusted MCP server's
+advertised tools and what the agent is actually allowed to call, including
+name-collision and credential-misconfiguration handling.
+
+MCP integration tests: client protocol handling, tool discovery,
 permission classification, and secured dispatch — all over a fake
 transport (no network).
 """

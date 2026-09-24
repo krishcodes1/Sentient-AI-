@@ -1,3 +1,15 @@
+"""Tests for the installation service: owner-set values and env-sourced defaults
+resolve with the documented precedence, secrets are encrypted at rest and never
+appear in an audit row, on-change listeners fire correctly, setup and
+registration-lock state transitions follow the documented rules, and migration
+0008 seeds and upgrades the installation row correctly.
+
+Why it exists: This service is the single source of truth for provider keys,
+capability switches, and the setup and registration lock, so a precedence bug
+or a secret leaking into an audit row here would compromise every account on
+the install.
+"""
+
 from __future__ import annotations
 
 import asyncio

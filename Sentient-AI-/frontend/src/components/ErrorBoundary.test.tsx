@@ -1,3 +1,12 @@
+/**
+ * Tests for ErrorBoundary: they prove children render normally, a throwing child yields the
+ * fallback panel with the error message, Reload calls location.reload, and the error is logged
+ * with its component stack.
+ *
+ * Why it exists: Guards against the boundary silently not catching, which would leave a blank
+ * white page.
+ */
+
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";

@@ -1,3 +1,12 @@
+/**
+ * Tests for Settings: they prove the LLM provider choice sends nulls to follow the install
+ * default, deletion requires the password and signs out, the Telegram bot token is admin-only, and
+ * the Server section is owner-only with Test-then-Save and sign-up controls.
+ *
+ * Why it exists: Guards against saving a provider the user never tested, deleting an account
+ * without its password, or showing a non-owner controls the server would refuse.
+ */
+
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SetupProviders, SetupStatus, User } from "@/types";

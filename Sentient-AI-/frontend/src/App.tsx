@@ -1,3 +1,12 @@
+/**
+ * The route table: lazy-loaded pages, the ProtectedRoute wrapper, and the SetupGate that sends
+ * every page to /setup until first-run setup is finished.
+ *
+ * Why it exists: Pages are code-split here so the initial bundle stays small, and the gate lives
+ * above the routes so no page has to check the setup status itself; main.tsx renders it inside the
+ * router.
+ */
+
 import { lazy, Suspense, useEffect, useState } from "react";
 import { Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { Loader2 } from "lucide-react";

@@ -1,4 +1,10 @@
-"""GET /api/audit/stats — owner-scoped SQL aggregates for the dashboard.
+"""Tests for GET /api/audit/stats: the owner-scoped aggregate counts and the
+seven-day `by_day` buckets match the shape the dashboard frontend expects.
+
+Why it exists: Guards the frontend contract for the audit dashboard, including
+that daily buckets are computed in UTC rather than server-local time.
+
+GET /api/audit/stats — owner-scoped SQL aggregates for the dashboard.
 
 The response shape is a frontend contract:
 {total_actions_24h, blocked_24h, pending_approvals, approved_24h,

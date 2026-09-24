@@ -1,3 +1,11 @@
+# Runs the production stack: Postgres and Redis reachable only inside the compose network,
+# the backend `prod` image behind its container healthcheck, and nginx serving the built
+# frontend with the /api proxy on host port 3000.
+#
+# Why it exists: it keeps every setting that must differ from the dev compose (no reload,
+# no bind mounts, unpublished datastores, a required POSTGRES_PASSWORD, graceful stop,
+# log rotation) in a separate file so the hardening cannot be lost by editing the dev one.
+#
 # Production deployment.
 #
 #   cd docker

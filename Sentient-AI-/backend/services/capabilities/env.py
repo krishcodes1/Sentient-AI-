@@ -1,4 +1,12 @@
-"""Where is Crawler running? Read once per report, never per tool call."""
+"""Reports whether Crawler runs in a container, on which platform, and from which
+real executable.
+
+Why it exists: Availability rules and the macOS permission probe need these
+facts, and the registry gathers them once per report instead of on every tool
+call.
+
+Where is Crawler running? Read once per report, never per tool call.
+"""
 
 from __future__ import annotations
 

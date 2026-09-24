@@ -1,4 +1,11 @@
-"""SSE streaming chat: the runtime streaming adapter and the HTTP endpoint.
+"""Tests for SSE streaming chat: the streaming adapter over `runtime.chat`
+preserves every security guarantee, emits tool-progress events in real time,
+and persists the final scanned assistant message.
+
+Why it exists: The streaming path must not become a second, weaker code path
+around the same security guarantees the blocking chat endpoint enforces.
+
+SSE streaming chat: the runtime streaming adapter and the HTTP endpoint.
 
 The streaming path must preserve every security guarantee (it is an adapter
 over the same runtime.chat), emit tool progress in real time, typewriter the

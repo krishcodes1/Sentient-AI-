@@ -1,3 +1,13 @@
+"""Serves the read-only /audit API: the signed-in user's audit rows, dashboard
+aggregates, a single row, and a per-row integrity check against the keyed
+hash chain.
+
+Why it exists: Audit rows are written only server-side by services.audit, so a
+client-facing create endpoint would let anyone forge validly chained history;
+this module exposes just the owner-scoped reads and the verify step that
+recomputes a row's HMAC (or legacy unkeyed hash) from its stored fields.
+"""
+
 from __future__ import annotations
 from typing import Dict, List, Optional, Union
 

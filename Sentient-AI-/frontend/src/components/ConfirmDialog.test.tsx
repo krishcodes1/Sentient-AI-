@@ -1,3 +1,12 @@
+/**
+ * Tests for ConfirmDialog: they prove it renders nothing while closed, runs the confirm once even
+ * on a double click, keeps Cancel, Escape and the backdrop inert while in flight, shows a failed
+ * confirm inline, and forgets that error on reopen.
+ *
+ * Why it exists: Guards against executing a destructive action twice, or closing the dialog on a
+ * rejected confirm and telling the user it succeeded.
+ */
+
 import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";

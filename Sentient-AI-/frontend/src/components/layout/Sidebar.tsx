@@ -1,3 +1,11 @@
+/**
+ * Navigation sidebar: the brand, the nav links, the theme toggle, and the signed-in user with a
+ * sign-out button.
+ *
+ * Why it exists: It becomes a focus-trapped dialog only while it overlays the page, and only an
+ * actual 401/403 from getMe signs the user out; Layout renders it in both modes.
+ */
+
 import { useEffect, useRef, useState } from "react";
 import { NavLink } from "react-router-dom";
 import {

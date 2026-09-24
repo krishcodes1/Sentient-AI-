@@ -1,4 +1,11 @@
-"""Add users.is_admin, promoting the first account.
+"""Adds ``users.is_admin`` (default false, guarded against the column already
+existing) and promotes the oldest account.
+
+Why it exists: The ``admin_only`` permission tier had no role to check against
+until this column existed; the inspector guard lets the revision run on both a
+stamped pre-Alembic database and one already built by ``create_all``.
+
+Add users.is_admin, promoting the first account.
 
 Revision ID: 0002_user_is_admin
 Revises: 0001_baseline

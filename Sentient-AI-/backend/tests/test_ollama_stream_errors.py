@@ -1,4 +1,13 @@
-"""Ollama streaming error path.
+"""Tests for the Ollama streaming error path: an HTTP error on a streamed Ollama
+response becomes a clean ProviderError instead of an unhandled
+`httpx.ResponseNotRead`, and that content chunks still stream correctly on
+success.
+
+Why it exists: Reading `.text` on a streamed response before it is read raises
+`httpx.ResponseNotRead`, which previously reached the caller instead of the 502
+the route is supposed to map errors to.
+
+Ollama streaming error path.
 
 Companion to the Gemini regressions in test_providers.py: both providers
 hand-roll their streaming HTTP, and both read the error body only after

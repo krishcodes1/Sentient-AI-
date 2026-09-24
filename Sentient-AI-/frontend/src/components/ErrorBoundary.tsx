@@ -1,3 +1,11 @@
+/**
+ * Top-level React error boundary that logs an uncaught render error and shows a Reload panel
+ * instead of a blank page.
+ *
+ * Why it exists: React unmounts the whole tree on an uncaught render error; main.tsx wraps the app
+ * in this so the user gets a message and a way back.
+ */
+
 import { Component, type ErrorInfo, type ReactNode } from "react";
 
 interface ErrorBoundaryProps {

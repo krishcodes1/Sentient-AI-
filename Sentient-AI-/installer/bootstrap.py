@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Crawler AI bootstrap installer.
+"""Runs the double-click installer: a loopback-only HTTP server that serves
+installer/page.html and the small JSON API its buttons call to check Docker, write the
+two secret keys into backend/.env, run ``docker compose up --build`` and open the app.
+
+Why it exists: a new owner should reach a running Crawler AI without typing a command,
+so the two launchers only locate a Python 3.9+ and exec this one stdlib-only file, which
+keeps every platform difference, the token/Origin checks and the compose build state
+machine in one place; installer/tests import it directly.
+
+Crawler AI bootstrap installer.
 
 Double-clicking ``Install Crawler AI.command`` (macOS) or ``Install Crawler
 AI.bat`` (Windows) runs this script. It serves one local page

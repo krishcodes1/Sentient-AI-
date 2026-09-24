@@ -1,4 +1,14 @@
-"""Image attachments and token accounting on the chat routes.
+"""Tests for image attachments and token accounting on the chat routes: attached
+images are validated for type, size, and count, reach the provider as
+multimodal content while only metadata is persisted, and every send records the
+tokens billed on both the blocking and streaming paths.
+
+Why it exists: A cost study needed per-conversation billing to be a query
+rather than log-scraping, and an unvalidated image attachment would be a
+straightforward way to smuggle oversized or wrong-typed data into a provider
+call.
+
+Image attachments and token accounting on the chat routes.
 
 Two things a cost study asked for and the platform could not answer:
 

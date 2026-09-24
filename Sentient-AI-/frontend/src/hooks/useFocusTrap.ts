@@ -1,3 +1,12 @@
+/**
+ * useFocusTrap keeps Tab focus inside an open overlay, calls back on Escape, and returns focus to
+ * the opener on close.
+ *
+ * Why it exists: ConfirmDialog, the sidebar drawer and the connector modals are only usable from a
+ * keyboard or screen reader with this; each would otherwise let focus escape into the page behind
+ * it.
+ */
+
 import { useEffect, useRef, type RefObject } from "react";
 
 const FOCUSABLE = [

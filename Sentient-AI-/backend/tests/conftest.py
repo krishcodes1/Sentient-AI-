@@ -1,4 +1,12 @@
-"""Test setup. Sets dummy env vars before any project modules import,
+"""Tests for the shared pytest fixtures: the required env vars are set before any
+project module imports settings, and that the in-memory database, HTTP client,
+and user/JWT helpers every other test module relies on are built correctly.
+
+Why it exists: Guards against a fixture regression breaking every test file at
+once, and keeps the SECRET_KEY, ENCRYPTION_KEY, and DATABASE_URL setup used
+across the whole suite in one place.
+
+Test setup. Sets dummy env vars before any project modules import,
 because core.config.Settings is instantiated at import time and requires
 SECRET_KEY and ENCRYPTION_KEY.
 

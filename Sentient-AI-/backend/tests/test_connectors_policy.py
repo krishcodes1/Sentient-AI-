@@ -1,5 +1,14 @@
-"""Connectors-route policy tests: 'custom' type rejection and
-MCP-aware health reporting."""
+"""Tests for the connectors route's policy checks: the retired 'custom' connector
+type is rejected while its enum value is kept for compatibility, and that MCP
+connector health reporting reflects real observed activity.
+
+Why it exists: Guards against a removed connector type quietly becoming
+creatable again and against health status reporting constants instead of
+measured outcomes.
+
+Connectors-route policy tests: 'custom' type rejection and
+MCP-aware health reporting.
+"""
 
 from __future__ import annotations
 

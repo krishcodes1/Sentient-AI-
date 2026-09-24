@@ -1,4 +1,11 @@
-"""One-row installation record for owner switches, provider and secrets.
+"""Creates the single-row ``installation`` table and seeds row 1, both guarded
+against already existing.
+
+Why it exists: A native install configured from the setup wizard needs
+somewhere other than .env to keep the owner's switches, provider and encrypted
+secrets; seeding the row lets every reader assume it exists.
+
+One-row installation record for owner switches, provider and secrets.
 
 The capability switches, the server-wide AI provider/model, the encrypted
 provider keys and the encrypted Telegram bot token live in a single row

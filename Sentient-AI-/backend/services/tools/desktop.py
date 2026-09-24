@@ -1,4 +1,11 @@
-"""desktop.* built-in tools: what is on this computer's display.
+"""Implements the desktop.screenshot built-in tool: captures a display, downscales
+it and returns it as a JPEG data URL.
+
+Why it exists: The tool registry dispatches desktop.* here; an injectable
+grabber and permission probe keep the capture path testable without a display,
+and every failure comes back as a result instead of an exception.
+
+desktop.* built-in tools: what is on this computer's display.
 
 Capability "screen": off by default, and only available on macOS and
 Windows outside a container. The grabber and the permission probe are

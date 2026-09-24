@@ -1,4 +1,13 @@
-"""Tests for the built-in web tools.
+"""Tests for the built-in web tools: search parsing and truncation, page-fetch
+text extraction and redirect handling, and screenshot capture all work over a
+mocked transport while the real SSRF address-validation policy still runs in
+front of it.
+
+Why it exists: The egress policy is deliberately not mocked, so a tool that
+bypasses `validated_addresses` and reaches an internal address would still be
+caught here.
+
+Tests for the built-in web tools.
 
 Every HTTP call is served by an ``httpx.MockTransport``, so parsing and
 truncation are exercised without touching the network. The egress policy

@@ -1,4 +1,13 @@
-"""Telegram approval-channel tests: linking security, decision
+"""Tests for the Telegram approval channel: link-code linking is single-use and
+expires, only a linked chat's decisions are authorized, and the notifying
+approval-store decorator, message splitting, and poller-conflict backoff all
+behave correctly.
+
+Why it exists: Guards the identity boundary between a Telegram chat and the
+account it can approve actions for; the Bot API is faked at the transport level
+so this exercises the service's real request and response code.
+
+Telegram approval-channel tests: linking security, decision
 authorization, and the notifying approval-store decorator.
 
 The Telegram Bot API is faked at the httpx-transport level so the service

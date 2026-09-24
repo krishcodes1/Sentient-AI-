@@ -1,4 +1,12 @@
-"""Conversation search (GET /agent/conversations?q=).
+"""Tests for conversation search (GET /agent/conversations?q=): the search spans
+titles and message bodies, never crosses accounts, treats `%` and `_` literally
+rather than as SQL LIKE wildcards, and returns a multi-match conversation only
+once.
+
+Why it exists: An unescaped wildcard in the user's own search term or a filter
+that forgets ownership would leak search behavior or another account's data.
+
+Conversation search (GET /agent/conversations?q=).
 
 The search spans titles and message bodies, which makes three things worth
 pinning: it must never cross accounts, it must not treat a user's text as a

@@ -1,4 +1,11 @@
-"""Reminders the assistant can set on the user's behalf.
+"""Creates the ``reminders`` table with its status and source enums and its
+three indexes, each guarded against already existing.
+
+Why it exists: The reminder feature needs a durable row the sweeper can query
+by status and due date; the guards let the revision run on an adopted database
+that was built from the models.
+
+Reminders the assistant can set on the user's behalf.
 
 Guarded with inspector checks and ``if_not_exists`` for the same reason as
 0003/0004: an adopted pre-Alembic database is built from model metadata

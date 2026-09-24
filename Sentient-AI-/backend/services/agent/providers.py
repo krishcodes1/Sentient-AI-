@@ -1,4 +1,11 @@
-"""LLM provider abstraction layer.
+"""Implements one LLMProvider class per supported backend and normalises their
+replies into a common LLMResponse.
+
+Why it exists: The runtime needs a single interface for completion, streaming,
+tool calls and images no matter which vendor is configured; wire formats,
+retries and error mapping are provider-specific and live only here.
+
+LLM provider abstraction layer.
 
 Supports Anthropic Claude, OpenAI, Google Gemini, xAI Grok, Deepseek,
 Mistral, Groq, and Ollama (local) backends. Every provider normalises

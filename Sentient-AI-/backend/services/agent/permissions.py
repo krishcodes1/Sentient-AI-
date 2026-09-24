@@ -1,4 +1,10 @@
-"""
+"""Decides which permission tier (auto-approve, user confirm, admin only or hard
+blocked) applies to a connector action.
+
+Why it exists: Every tool call needs one policy table so financial actions stay
+blocked and writes need consent no matter which connector runs them; the tool
+registry's permission adapter calls check_permission before any dispatch.
+
 Permission engine for Crawler AI agent actions.
 
 Enforces a tiered permission model across all connector types,

@@ -1,4 +1,12 @@
-"""Persistent memory: CRUD routes, injection screening, ownership scoping,
+"""Tests for persistent memory: the CRUD routes, injection screening on new facts,
+owner scoping, and the system-prompt injection that folds memory into an agent
+turn all work correctly.
+
+Why it exists: Guards against a malicious or oversized memory fact reaching
+another user's account or being folded unscreened into the prompt sent to the
+model.
+
+Persistent memory: CRUD routes, injection screening, ownership scoping,
 and system-prompt injection into the agent loop.
 """
 

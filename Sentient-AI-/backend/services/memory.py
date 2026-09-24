@@ -1,4 +1,11 @@
-"""Memory service — render saved memories into the agent's system prompt
+"""Screens memory content before it is stored and renders saved memories into a
+system-prompt block.
+
+Why it exists: A memory is replayed into every future prompt, so a poisoned one
+is a persistent injection; the memory route screens through this module and the
+agent route renders through it, so both apply the same rules.
+
+Memory service — render saved memories into the agent's system prompt
 and screen memory content on write.
 
 Memories are user-owned durable facts injected as trusted context. Because

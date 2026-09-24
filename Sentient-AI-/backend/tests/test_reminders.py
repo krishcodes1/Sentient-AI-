@@ -1,4 +1,12 @@
-"""Reminder CRUD ownership and sweeper delivery semantics."""
+"""Tests for reminder CRUD and the delivery sweeper: reminders are owner-scoped,
+an absurd due date is rejected, and the sweeper delivers a due reminder exactly
+once without resurrecting one whose delivery failed.
+
+Why it exists: Guards against a reminder being delivered twice, delivered to
+the wrong user, or silently retried forever after a delivery failure.
+
+Reminder CRUD ownership and sweeper delivery semantics.
+"""
 
 from __future__ import annotations
 

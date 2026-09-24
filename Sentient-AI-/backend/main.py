@@ -1,4 +1,15 @@
-"""Crawler AI — Secure-by-Design Agentic AI Platform."""
+"""Builds the FastAPI application: configures logging, migrates the database,
+wires the runtime services onto ``app.state``, installs the middleware stack
+in its required order, mounts every router under /api and defines the health
+and error handlers.
+
+Why it exists: This is the process entry point uvicorn and the tests load;
+keeping the wiring in ``wire_services`` and the middleware order in one file
+lets tests build an app against their own session factory and keeps the rate
+limiter from serving responses without security headers or a request id.
+
+Crawler AI — Secure-by-Design Agentic AI Platform.
+"""
 
 from __future__ import annotations
 

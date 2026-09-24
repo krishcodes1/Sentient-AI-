@@ -1,4 +1,14 @@
-"""A per-user provider of NULL means "follow this Crawler's default".
+"""Tests for the per-user provider/model "follow the install default" contract:
+new accounts start with a NULL provider that tracks the install default, that
+pinning then clearing a provider returns to following the install, and that the
+startup backfill converts only inherited legacy rows.
+
+Why it exists: Accounts used to be stamped with whatever provider ran at
+registration time, so a key the owner later saved for a different provider
+never reached them; NULL is now the steady state and this guards the backfill
+from ever touching a row the user deliberately pinned.
+
+A per-user provider of NULL means "follow this Crawler's default".
 
 Accounts used to be stamped with whatever provider/model the server ran
 when they registered, so a key the owner later saved for a different

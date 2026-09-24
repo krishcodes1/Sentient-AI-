@@ -1,4 +1,13 @@
-"""Hot-path query-efficiency regression tests.
+"""Tests for hot-path query efficiency: authenticating a request no longer loads a
+user's entire audit, connector, conversation, and message history, and that
+listing conversations does not eagerly load their messages.
+
+Why it exists: A `lazy="selectin"` relationship previously made
+`get_current_user` load a user's whole history on every request, a cost that
+grows with account age; these tests count the actual SQL emitted so that shape
+of bug cannot pass here and die in production.
+
+Hot-path query-efficiency regression tests.
 
 ``get_current_user`` runs on every authenticated request. When the User
 relationships were lazy="selectin", authenticating additionally SELECTed

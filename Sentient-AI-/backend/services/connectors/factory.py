@@ -1,4 +1,11 @@
-"""Connector instantiation from stored credentials.
+"""Builds a connector instance from a stored connector type and its decrypted
+credentials, and arms its network policy.
+
+Why it exists: The tool executor, the MCP integration and the connector routes
+must construct connectors the same way; one constructor means the deny-by-
+default policy cannot be skipped by a new call site.
+
+Connector instantiation from stored credentials.
 
 Maps a ``ConnectorConfig.connector_type`` to its connector class, builds
 the instance from decrypted credentials, and arms the deny-by-default

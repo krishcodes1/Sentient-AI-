@@ -1,3 +1,14 @@
+"""Tests for the capability report builder: the off switch and container/platform
+blocks win over an enabled capability, that macOS and Windows permission probes
+are cached and mapped to on, blocked, or unknown correctly, and that
+`render_permissions_block`, `to_dict`, and `open_settings` produce the shapes
+and guardrails the UI and settings deep link depend on.
+
+Why it exists: Guards the layered off/blocked/on decision the whole
+capabilities system rests on, including the probe cache's TTL and per-context
+keying and `open_settings`'s refusal to run anything but a settings deep link.
+"""
+
 from __future__ import annotations
 
 from types import SimpleNamespace

@@ -1,3 +1,14 @@
+"""Tests for TelegramManager: `apply()` starts, restarts, stops, and no-ops
+idempotently, that proxied calls (`notify_pending`, `send_text`,
+`bot_username`) no-op while stopped and forward while running, and that
+concurrent `apply()` calls serialize to exactly one running service with no
+orphaned instances left behind.
+
+Why it exists: Guards against a failed start or restart leaving an orphaned
+service running alongside the new one, or concurrent `apply()` calls racing to
+leave two Telegram pollers active at once.
+"""
+
 from __future__ import annotations
 
 import asyncio

@@ -1,3 +1,11 @@
+# Runs the development stack: Postgres, Redis, the backend `dev` image (uvicorn --reload
+# over a bind-mounted ../backend) and the frontend `dev` image (Vite over ../frontend),
+# with all four ports published on the host.
+#
+# Why it exists: it is the one stack that `docker compose up` and the double-click
+# installer (installer/bootstrap.py) both build, so contributors and new owners run the
+# same containers; docker-compose.prod.yml is the separate hardened variant.
+
 services:
   # ── PostgreSQL ──────────────────────────────────────────────────
   db:

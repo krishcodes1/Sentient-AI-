@@ -1,3 +1,12 @@
+/**
+ * Renders assistant markdown with images replaced by an inert placeholder, raw HTML left unparsed,
+ * and links limited to http, https and mailto.
+ *
+ * Why it exists: Assistant text can be shaped by untrusted tool results, so this is the chat's
+ * exfiltration and XSS boundary; Chat renders every assistant bubble through it, memoized so
+ * streaming does not re-parse older messages.
+ */
+
 import { memo, useState, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";

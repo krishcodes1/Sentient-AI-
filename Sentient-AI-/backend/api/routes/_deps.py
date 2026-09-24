@@ -1,4 +1,14 @@
-"""Dependencies shared by the owner-facing routes (setup, capabilities)."""
+"""Provides the FastAPI dependencies the setup and capabilities routes share:
+the InstallationService from ``app.state`` and an owner-only (``is_admin``)
+guard.
+
+Why it exists: Both routers gate install-wide changes on the same two checks;
+defining them once keeps the 503 for a not-yet-wired service and the 403 for a
+non-owner identical across every endpoint that changes settings for every
+account.
+
+Dependencies shared by the owner-facing routes (setup, capabilities).
+"""
 
 from __future__ import annotations
 

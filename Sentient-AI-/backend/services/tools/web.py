@@ -1,4 +1,11 @@
-"""Built-in web tools: search, page fetch, screenshot.
+"""Implements the web.* built-in tools: DuckDuckGo search, page fetch as text, and
+a Playwright screenshot.
+
+Why it exists: These are the only tools every user gets without credentials, so
+the tool registry dispatches web.* here, where every request goes through the
+egress guard and every returned field is capped.
+
+Built-in web tools: search, page fetch, screenshot.
 
 These are the only tools every user gets without configuring anything —
 they need no credentials, no OAuth and no connector row, because they

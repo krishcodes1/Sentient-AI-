@@ -1,3 +1,12 @@
+/**
+ * Tests for CapabilityList: they prove each row shows label, risk and status, the switch calls
+ * onToggle with the new value, Grant access and Install appear only when applicable, and
+ * non-owners get every control disabled.
+ *
+ * Why it exists: Guards against showing an Install or Grant access button that does nothing, or
+ * letting a non-owner change capabilities the server would refuse.
+ */
+
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";

@@ -1,3 +1,11 @@
+/**
+ * Renders a failed turn's text, turning the fix pointer the api layer appended to a provider
+ * failure into a link to Settings.
+ *
+ * Why it exists: Chat shows provider failures as bubbles, and only this component knows how to
+ * find the exact sentence withFixPointer added so the link replaces just that.
+ */
+
 import { Link } from "react-router-dom";
 import { withFixPointer, type ProviderErrorInfo } from "@/services/api";
 
