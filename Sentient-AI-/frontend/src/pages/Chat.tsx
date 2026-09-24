@@ -59,10 +59,18 @@ const APPROVAL_POLL_MS = 20_000;
 const NEAR_BOTTOM_PX = 120;
 
 // Countdown helpers live in their own module (shared with Dashboard) so the
-// Dashboard chunk doesn't drag in this whole page; re-exported here for
-// existing importers.
+// Dashboard chunk doesn't drag in this whole page. Not re-exported from
+// here: a page module that exports non-components loses Fast Refresh.
 import { formatCountdown, useCountdown } from "./approvalCountdown";
-export { formatCountdown, useCountdown } from "./approvalCountdown";
+
+// Ids for optimistic bubbles, replaced by the server's ids once the turn is
+// saved. They only have to be unique within this tab, so a counter does the
+// job without reading the clock inside the component.
+let tempIdSeq = 0;
+function nextTempId(role: "user" | "asst"): string {
+  tempIdSeq += 1;
+  return `temp-${role}-${tempIdSeq}`;
+}
 
 function formatRelative(iso: string | undefined): string {
   if (!iso) return "";
@@ -306,12 +314,19 @@ export default function Chat() {
   const [me, setMe] = useState<User | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [convError, setConvError] = useState<string | null>(null);
   // searchInput is what the user is typing; searchTerm is the debounced
   // value the query actually runs on.
   const [searchInput, setSearchInput] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
   const [convRetryKey, setConvRetryKey] = useState(0);
+  // A list failure belongs to the query that produced it, so a retry or a
+  // new search starts without one — derived here rather than reset by the
+  // fetch effect in an extra render.
+  const convQuery = `${convRetryKey}\u0000${searchTerm}`;
+  const [convFailure, setConvFailure] = useState<{ query: string; message: string } | null>(
+    null,
+  );
+  const convError = convFailure?.query === convQuery ? convFailure.message : null;
   const [hasMoreConvs, setHasMoreConvs] = useState(false);
   const [loadingMoreConvs, setLoadingMoreConvs] = useState(false);
   const [activeConv, setActiveConv] = useState<string | null>(null);
@@ -387,7 +402,6 @@ export default function Chat() {
   useEffect(() => {
     if (!me) return;
     let cancelled = false;
-    setConvError(null);
     getConversations({ limit: CONV_PAGE_SIZE, offset: 0, q: searchTerm })
       .then((convs) => {
         if (cancelled) return;
@@ -401,12 +415,33 @@ export default function Chat() {
         }
       })
       .catch((err: Error) => {
-        if (!cancelled) setConvError(err.message);
+        if (!cancelled) setConvFailure({ query: convQuery, message: err.message });
       });
     return () => {
       cancelled = true;
     };
-  }, [me, convRetryKey, searchTerm]);
+    // convQuery already encodes convRetryKey; it is the Retry button's
+    // only way of re-running this effect.
+  }, [me, convQuery, searchTerm]);
+
+  // Switching threads (or retrying a failed load) starts the thread UI from a
+  // clean slate. This is adjusted during render — React's "reset state when
+  // a prop changes" pattern — so the previous thread's cards and errors are
+  // never committed under the new conversation; the effect below does only
+  // the external work (abort the old stream, fetch the new thread).
+  const [threadShown, setThreadShown] = useState({
+    conv: activeConv,
+    retry: messagesRetryKey,
+  });
+  if (threadShown.conv !== activeConv || threadShown.retry !== messagesRetryKey) {
+    setThreadShown({ conv: activeConv, retry: messagesRetryKey });
+    setFailedTurn(null);
+    setAtBottom(true);
+    setApprovals([]);
+    setMessagesError(null);
+    if (activeConv) setLoadingMessages(true);
+    else setMessages([]);
+  }
 
   // Load messages (and any still-pending approvals) when the active
   // conversation changes. Approvals are persisted server-side, so fetching
@@ -417,18 +452,8 @@ export default function Chat() {
     // tokens into the new one's state.
     abortRef.current?.abort();
     abortRef.current = null;
-    setFailedTurn(null);
-    setAtBottom(true);
-    if (!activeConv) {
-      setMessages([]);
-      setApprovals([]);
-      setMessagesError(null);
-      return;
-    }
+    if (!activeConv) return;
     let cancelled = false;
-    setLoadingMessages(true);
-    setMessagesError(null);
-    setApprovals([]);
     serverSeenApprovals.current = new Set();
     decidedApprovals.current = new Set();
     Promise.all([
@@ -568,7 +593,7 @@ export default function Chat() {
       });
       setHasMoreConvs(next.length === CONV_PAGE_SIZE);
     } catch (err) {
-      setConvError((err as Error).message);
+      setConvFailure({ query: convQuery, message: (err as Error).message });
     } finally {
       setLoadingMoreConvs(false);
     }
@@ -665,8 +690,8 @@ export default function Chat() {
 
     // Optimistically render the user message + an empty assistant bubble
     // that fills in as content_delta events arrive.
-    const userTempId = `temp-user-${Date.now()}`;
-    const asstTempId = `temp-asst-${Date.now()}`;
+    const userTempId = nextTempId("user");
+    const asstTempId = nextTempId("asst");
     const optimisticUser: Message = {
       id: userTempId,
       conversation_id: conv,

@@ -2,7 +2,8 @@ import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import ThemeToggle from "@/components/ThemeToggle";
-import { THEME_STORAGE_KEY, ThemeProvider, useTheme } from "@/theme";
+import { THEME_STORAGE_KEY, ThemeProvider } from "@/theme";
+import { useTheme } from "@/hooks/useTheme";
 
 /**
  * The theme is the one preference this app persists on the device, and it is

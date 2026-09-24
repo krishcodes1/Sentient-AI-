@@ -1,24 +1,8 @@
-import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useCallback, useId, useRef, useState, type ReactNode } from "react";
 import { AlertTriangle, Loader2 } from "lucide-react";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
 
-/**
- * Branded replacement for window.confirm(). Renders a modal with the
- * platform's visual language, runs an async confirm action with a
- * loading state, and surfaces failures inline instead of silently
- * closing.
- */
-export default function ConfirmDialog({
-  open,
-  title,
-  message,
-  confirmLabel = "Confirm",
-  cancelLabel = "Cancel",
-  danger = false,
-  children,
-  onConfirm,
-  onCancel,
-}: {
+interface ConfirmDialogProps {
   open: boolean;
   title: string;
   message: string;
@@ -32,18 +16,37 @@ export default function ConfirmDialog({
   children?: ReactNode;
   onConfirm: () => Promise<void> | void;
   onCancel: () => void;
-}) {
+}
+
+/**
+ * Branded replacement for window.confirm(). Renders a modal with the
+ * platform's visual language, runs an async confirm action with a
+ * loading state, and surfaces failures inline instead of silently
+ * closing.
+ */
+export default function ConfirmDialog({ open, ...panel }: ConfirmDialogProps) {
+  // The panel unmounts while closed, so its pending/error state goes with
+  // it: a reopened dialog never shows the last attempt's error or a stuck
+  // spinner, and nothing has to reset them after the fact.
+  if (!open) return null;
+  return <ConfirmDialogPanel {...panel} />;
+}
+
+function ConfirmDialogPanel({
+  title,
+  message,
+  confirmLabel = "Confirm",
+  cancelLabel = "Cancel",
+  danger = false,
+  children,
+  onConfirm,
+  onCancel,
+}: Omit<ConfirmDialogProps, "open">) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
   const messageId = useId();
-
-  useEffect(() => {
-    if (open) return;
-    setPending(false);
-    setError(null);
-  }, [open]);
 
   // Escape is suppressed while the destructive action is in flight, for the
   // same reason the buttons are: the request cannot be taken back, so
@@ -52,9 +55,9 @@ export default function ConfirmDialog({
     if (!pending) onCancel();
   }, [pending, onCancel]);
 
-  useFocusTrap(open, panelRef, escape);
-
-  if (!open) return null;
+  // Mounted only while open, so the trap holds for the panel's whole
+  // lifetime and hands focus back when it unmounts.
+  useFocusTrap(true, panelRef, escape);
 
   const handleConfirm = async () => {
     setPending(true);

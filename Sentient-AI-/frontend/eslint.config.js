@@ -51,9 +51,8 @@ export default tseslint.config(
         "error",
         { argsIgnorePattern: "^_", varsIgnorePattern: "^_" },
       ],
-      // Two pre-existing benign uses (a `catch (err: any)` and a lucide icon
-      // prop). Reported so they stay visible without turning the first lint
-      // run into a red build.
+      // A warning, like the react-hooks rules above; CI runs with
+      // --max-warnings 0, so a new `any` in app code still fails the build.
       "@typescript-eslint/no-explicit-any": "warn",
     },
   },

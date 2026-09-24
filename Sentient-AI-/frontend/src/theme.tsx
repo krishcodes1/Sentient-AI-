@@ -1,15 +1,9 @@
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useMemo,
-  useState,
-  type ReactNode,
-} from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { DARK_QUERY, useMediaQuery } from "@/hooks/useMediaQuery";
-
-export type ThemeMode = "light" | "dark" | "system";
+// The context and its hook live beside the other hooks so this module
+// exports only the provider component (plus a constant), which keeps
+// Fast Refresh working here. Consumers import useTheme from there.
+import { ThemeContext, type ThemeMode } from "@/hooks/useTheme";
 
 /** Also read by the inline bootstrap in index.html — keep the two in step. */
 export const THEME_STORAGE_KEY = "crawler.theme";
@@ -36,7 +30,7 @@ function isMode(value: unknown): value is ThemeMode {
  * and returns nothing useful when it has been cleared. Neither is a reason
  * to fail to render, so both fall back to following the OS.
  */
-export function readStoredMode(): ThemeMode {
+function readStoredMode(): ThemeMode {
   try {
     const stored = localStorage.getItem(THEME_STORAGE_KEY);
     if (isMode(stored)) return stored;
@@ -67,16 +61,6 @@ function persistMode(mode: ThemeMode): void {
     /* the choice still applies to this tab; it just won't outlive it */
   }
 }
-
-interface ThemeContextValue {
-  /** What the user picked, including "follow the OS". */
-  mode: ThemeMode;
-  /** What that currently resolves to — what is actually on screen. */
-  resolved: "light" | "dark";
-  setMode: (mode: ThemeMode) => void;
-}
-
-const ThemeContext = createContext<ThemeContextValue | null>(null);
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [mode, setModeState] = useState<ThemeMode>(readStoredMode);
@@ -116,12 +100,4 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   );
 
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
-}
-
-export function useTheme(): ThemeContextValue {
-  const ctx = useContext(ThemeContext);
-  if (!ctx) {
-    throw new Error("useTheme must be used inside <ThemeProvider>");
-  }
-  return ctx;
 }

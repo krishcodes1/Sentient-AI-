@@ -94,13 +94,13 @@ jobs:
       - name: Build
         run: npm run build
 
-      # --max-warnings is a ratchet, not a clean-tree claim: the 13 warnings
-      # below this line already existed (8 of them react-hooks correctness
-      # flags worth fixing). Pinning the count fails the build on the 14th
-      # without demanding a cleanup sprint first. Lower the number as the
-      # backlog shrinks; never raise it.
+      # The warning backlog (react-hooks set-state-in-effect / purity, Fast
+      # Refresh exports, stray `any`s) has been cleared, so any warning now
+      # fails the build. Fix a new one rather than raising this budget; a
+      # genuine false positive gets a single-line
+      # `eslint-disable-next-line <rule> -- <reason>`.
       - name: Lint
-        run: npx eslint . --max-warnings 13
+        run: npx eslint . --max-warnings 0
 
       - name: Unit tests with coverage
         run: |

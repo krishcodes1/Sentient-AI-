@@ -54,8 +54,8 @@ export default function Login() {
         await login({ email, password });
       }
       navigate("/");
-    } catch (err: any) {
-      setError(err.message || "Authentication failed");
+    } catch (err) {
+      setError((err as Error).message || "Authentication failed");
     } finally {
       setLoading(false);
     }

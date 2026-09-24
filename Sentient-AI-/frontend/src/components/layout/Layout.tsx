@@ -18,10 +18,16 @@ export default function Layout() {
   const closeNav = useCallback(() => setDrawerRequested(false), []);
 
   // Navigating is the whole point of the drawer, so it closes behind the
-  // reader rather than covering the page they just asked for.
-  useEffect(() => {
+  // reader rather than covering the page they just asked for. Adjusted
+  // during render (React's "reset state when a prop changes" pattern) so the
+  // new page never paints under a still-open drawer first. Any navigation
+  // counts — a link, the back button, a redirect — so this cannot live in
+  // the links' click handlers alone.
+  const [drawerPath, setDrawerPath] = useState(location.pathname);
+  if (drawerPath !== location.pathname) {
+    setDrawerPath(location.pathname);
     setDrawerRequested(false);
-  }, [location.pathname]);
+  }
 
   // The page behind an open drawer must not scroll under it.
   useEffect(() => {

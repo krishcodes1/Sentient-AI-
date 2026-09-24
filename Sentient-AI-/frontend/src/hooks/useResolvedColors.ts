@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useTheme } from "@/theme";
+import { useTheme } from "@/hooks/useTheme";
 
 /**
  * Resolve design tokens to concrete color strings.

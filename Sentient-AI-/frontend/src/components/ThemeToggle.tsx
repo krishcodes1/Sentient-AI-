@@ -1,5 +1,5 @@
 import { Monitor, Moon, Sun } from "lucide-react";
-import { useTheme, type ThemeMode } from "@/theme";
+import { useTheme, type ThemeMode } from "@/hooks/useTheme";
 
 const OPTIONS: { value: ThemeMode; label: string; icon: typeof Sun }[] = [
   { value: "light", label: "Light", icon: Sun },

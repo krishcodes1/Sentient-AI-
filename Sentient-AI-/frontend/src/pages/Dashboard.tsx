@@ -11,6 +11,7 @@ import {
   Loader2,
   RefreshCw,
   Coins,
+  type LucideIcon,
 } from "lucide-react";
 import {
   AreaChart,
@@ -245,7 +246,7 @@ function StatCard({
 }: {
   label: string;
   value: number | string;
-  icon: any;
+  icon: LucideIcon;
   tone: Tone;
   eyebrow: string;
 }) {
@@ -298,10 +299,11 @@ export default function Dashboard() {
   const [loadError, setLoadError] = useState<string | null>(null);
 
   // `background` refreshes (polling, post-approval) skip the loading state
-  // so the page does not flicker every 30 seconds.
+  // so the page does not flicker every 30 seconds. A foreground refresh is
+  // started by `reload` below, which raises the loading state in the click;
+  // on mount it already starts out true. Nothing here touches state before
+  // the first await, so the mount effect does not render twice.
   const load = useCallback(async (background = false) => {
-    if (!background) setLoading(true);
-    setLoadError(null);
     const failures: string[] = [];
     const fallback = <T,>(label: string, empty: T) => (err: Error): T => {
       failures.push(label);
@@ -338,13 +340,26 @@ export default function Dashboard() {
       setConnectors(connResult);
       setHealth(healthResult);
       setApprovals(approvalResult);
-      if (failures.length > 0) {
-        setLoadError(`Some data could not be loaded (${failures.join(", ")}).`);
-      }
+      // Replaces the previous run's banner once this run has an answer, so a
+      // background poll against a still-failing source does not blink it off
+      // and back on.
+      setLoadError(
+        failures.length > 0
+          ? `Some data could not be loaded (${failures.join(", ")}).`
+          : null,
+      );
     } finally {
       if (!background) setLoading(false);
     }
   }, []);
+
+  // Refresh and Retry: an explicit reload clears the banner and shows the
+  // loading state straight away, as the reader asked for it.
+  const reload = () => {
+    setLoading(true);
+    setLoadError(null);
+    void load();
+  };
 
   useEffect(() => {
     void load();
@@ -411,7 +426,7 @@ export default function Dashboard() {
         </div>
         <button
           type="button"
-          onClick={() => void load()}
+          onClick={reload}
           disabled={loading}
           className="inline-flex items-center justify-center gap-2 px-3.5 rounded-[10px] text-sm font-medium disabled:opacity-50 shrink-0 self-start"
           style={{
@@ -447,7 +462,7 @@ export default function Dashboard() {
           </div>
           <button
             type="button"
-            onClick={() => void load()}
+            onClick={reload}
             className="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-[8px] shrink-0"
             style={{
               border: "1px solid var(--border-warning)",

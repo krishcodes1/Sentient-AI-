@@ -976,15 +976,17 @@ function EditConnectorModal({
   useFocusTrap(true, panelRef, onClose);
 
   // Chips show the service presets plus anything already granted (covers
-  // scopes granted before a preset change).
-  const scopeOptions = useMemo(() => {
-    const set = new Set<string>([
+  // scopes granted before a preset change). A handful of strings, only ever
+  // mapped straight into JSX, so it is not worth a useMemo — whose
+  // dependency on the looked-up `service` object the React Compiler could
+  // not prove stable, which made it skip this whole component.
+  const scopeOptions = Array.from(
+    new Set<string>([
       ...(service?.readScopes ?? []),
       ...(service?.writeScopes ?? []),
       ...connector.granted_scopes,
-    ]);
-    return Array.from(set);
-  }, [service, connector.granted_scopes]);
+    ]),
+  );
 
   // TIER_OPTIONS omits hard_blocked; keep the current tier selectable if it
   // is outside the normal choices.
@@ -1360,10 +1362,16 @@ export default function Connectors() {
   const [showAdd, setShowAdd] = useState(false);
   const [editTarget, setEditTarget] = useState<Connector | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
+  // The only way to re-run the fetch below after mount, so the loading state
+  // flips here, in the click, rather than in an extra render from the effect.
+  const refresh = () => {
     setLoading(true);
     setError(null);
+    setRefreshKey((k) => k + 1);
+  };
+
+  useEffect(() => {
+    let cancelled = false;
     getConnectors()
       .then((data) => {
         if (!cancelled) setConnectors(data);
@@ -1418,7 +1426,7 @@ export default function Connectors() {
         <div className="flex items-center gap-2 shrink-0">
           <button
             type="button"
-            onClick={() => setRefreshKey((k) => k + 1)}
+            onClick={refresh}
             disabled={loading}
             className="inline-flex items-center justify-center gap-2 px-3.5 rounded-[10px] text-sm font-medium disabled:opacity-50"
             style={{ ...inputStyle, minHeight: 44 }}
@@ -1464,7 +1472,7 @@ export default function Connectors() {
           </p>
           <button
             type="button"
-            onClick={() => setRefreshKey((k) => k + 1)}
+            onClick={refresh}
             className="inline-flex items-center gap-2 px-3.5 rounded-[10px] text-sm font-medium"
             style={{ ...inputStyle, minHeight: 44 }}
           >

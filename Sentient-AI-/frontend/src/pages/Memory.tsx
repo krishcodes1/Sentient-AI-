@@ -79,9 +79,6 @@ export default function MemoryPage() {
   const newMemoryId = useId();
   const [me, setMe] = useState<User | null>(null);
   const [memories, setMemories] = useState<Memory[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
   const [retryKey, setRetryKey] = useState(0);
 
   // Filters. `search` tracks the input; `debouncedSearch` is what actually
@@ -117,10 +114,22 @@ export default function MemoryPage() {
 
   const filtersActive = debouncedSearch !== "" || categoryFilter !== "all";
 
+  // Load state is derived from which query last settled rather than flipped
+  // by the fetch effect: a new query (retry, reload, search, category) reads
+  // as refreshing — with the old query's error gone — in the very render
+  // that asks for it.
+  const query = `${retryKey}\u0000${debouncedSearch}\u0000${categoryFilter}`;
+  const [settled, setSettled] = useState<{ query: string; error: string | null } | null>(
+    null,
+  );
+  // `loading` covers the first paint only. Later fetches keep the current
+  // results on screen so the list does not flash empty between keystrokes.
+  const loading = settled === null;
+  const refreshing = settled?.query !== query;
+  const loadError = settled?.query === query ? settled.error : null;
+
   useEffect(() => {
     let cancelled = false;
-    setRefreshing(true);
-    setLoadError(null);
     // getMe() is memoized in the api layer, so re-requesting it alongside a
     // filter change costs nothing and keeps a single error path for both.
     Promise.all([
@@ -134,22 +143,16 @@ export default function MemoryPage() {
         if (cancelled) return;
         setMe(user);
         setMemories(mems);
+        setSettled({ query, error: null });
       })
       .catch((err: Error) => {
-        if (!cancelled) setLoadError(err.message);
-      })
-      .finally(() => {
-        if (cancelled) return;
-        // `loading` covers the first paint only. Later fetches keep the
-        // current results on screen so the list does not flash empty
-        // between keystrokes.
-        setLoading(false);
-        setRefreshing(false);
+        if (!cancelled) setSettled({ query, error: err.message });
       });
     return () => {
       cancelled = true;
     };
-  }, [retryKey, debouncedSearch, categoryFilter]);
+    // `query` already encodes retryKey; it is how reload() re-runs this.
+  }, [query, debouncedSearch, categoryFilter]);
 
   const reload = () => setRetryKey((k) => k + 1);
 

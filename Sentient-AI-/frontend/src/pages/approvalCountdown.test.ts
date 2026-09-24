@@ -1,8 +1,6 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-// Only the two exported countdown helpers are under test here; the Chat page
-// component itself is not rendered.
-import { formatCountdown, useCountdown } from "@/pages/Chat";
+import { formatCountdown, useCountdown } from "@/pages/approvalCountdown";
 
 /**
  * These two helpers drive the "expires in m:ss" label *and* the `expired`

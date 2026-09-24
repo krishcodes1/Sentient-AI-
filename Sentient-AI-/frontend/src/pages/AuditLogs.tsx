@@ -105,22 +105,28 @@ function LogRow({ log }: { log: AuditLog }) {
   const StatusIcon = cfg.icon;
   const ts = new Date(log.timestamp);
 
-  useEffect(() => {
-    if (!expanded || valid !== null || verifying) return;
+  // Verification starts from the click that expands the row — the first
+  // expand, or a later one after an attempt that failed — rather than from
+  // an effect watching `expanded`. The effect version also re-fired every
+  // time a failed attempt cleared `verifying`, retrying without end.
+  const toggleExpanded = () => {
+    const next = !expanded;
+    setExpanded(next);
+    if (!next || valid !== null || verifying) return;
     setVerifying(true);
     setVerifyError(null);
     verifyAuditLog(log.id)
       .then((res) => setValid(res.valid))
       .catch((err: Error) => setVerifyError(err.message))
       .finally(() => setVerifying(false));
-  }, [expanded, log.id, valid, verifying]);
+  };
 
   return (
     <>
       <tr
         className="cursor-pointer transition-colors"
         style={{ borderBottom: "1px solid var(--border-subtle)" }}
-        onClick={() => setExpanded(!expanded)}
+        onClick={toggleExpanded}
         onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "var(--claw-surface)")}
         onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
       >
@@ -131,7 +137,7 @@ function LogRow({ log }: { log: AuditLog }) {
             type="button"
             onClick={(e) => {
               e.stopPropagation();
-              setExpanded(!expanded);
+              toggleExpanded();
             }}
             aria-expanded={expanded}
             aria-label={`${expanded ? "Hide" : "Show"} details for ${log.action} on ${log.connector_name}`}
@@ -297,6 +303,34 @@ export default function AuditLogs() {
   const [searchQuery, setSearchQuery] = useState("");
   const [refreshKey, setRefreshKey] = useState(0);
   const [connectorNames, setConnectorNames] = useState<string[]>([]);
+  // The time-range window is anchored to when rows arrived or the range was
+  // picked. Reading the clock inside the render-time filter would make it
+  // impure (a different answer for the same inputs).
+  const [now, setNow] = useState(() => Date.now());
+
+  // Every change that re-runs the fetch effect below comes through one of
+  // these handlers, so the loading state flips in the same event rather than
+  // in an extra render the effect would trigger.
+  const beginReload = () => {
+    setLoading(true);
+    setError(null);
+  };
+  const changeConnectorFilter = (value: ConnectorFilter) => {
+    setConnectorFilter(value);
+    beginReload();
+  };
+  const changeStatusFilter = (value: StatusFilter) => {
+    setStatusFilter(value);
+    beginReload();
+  };
+  const refresh = () => {
+    setRefreshKey((k) => k + 1);
+    beginReload();
+  };
+  const changeTimeRange = (value: TimeRangeFilter) => {
+    setTimeRange(value);
+    setNow(Date.now());
+  };
 
   // The filter dropdown lists every configured connector, not just the ones
   // present in the currently loaded (already-filtered) page of logs.
@@ -326,8 +360,6 @@ export default function AuditLogs() {
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    setError(null);
     getAuditLogs({
       connector_name: connectorFilter === "all" ? undefined : connectorFilter,
       status: statusFilter === "all" ? undefined : statusFilter,
@@ -337,6 +369,7 @@ export default function AuditLogs() {
         if (cancelled) return;
         setLogs(data);
         setHasMore(data.length === PAGE_SIZE);
+        setNow(Date.now());
       })
       .catch((err: Error) => {
         if (!cancelled) setError(err.message);
@@ -361,6 +394,7 @@ export default function AuditLogs() {
       });
       setLogs((prev) => [...prev, ...next]);
       setHasMore(next.length === PAGE_SIZE);
+      setNow(Date.now());
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -379,7 +413,6 @@ export default function AuditLogs() {
   }, [connectorNames, logs, connectorFilter]);
 
   const filtered = useMemo(() => {
-    const now = Date.now();
     const cutoff = timeRange === "all" ? 0 : now - timeRangeMs[timeRange];
     const q = searchQuery.trim().toLowerCase();
     return logs.filter((log) => {
@@ -398,7 +431,7 @@ export default function AuditLogs() {
         .toLowerCase();
       return haystack.includes(q);
     });
-  }, [logs, timeRange, searchQuery]);
+  }, [logs, timeRange, searchQuery, now]);
 
   return (
     <div className="space-y-6">
@@ -413,7 +446,7 @@ export default function AuditLogs() {
         </div>
         <button
           type="button"
-          onClick={() => setRefreshKey((k) => k + 1)}
+          onClick={refresh}
           disabled={loading}
           className="inline-flex items-center justify-center gap-2 px-3.5 rounded-[10px] text-sm font-medium disabled:opacity-50 transition-colors shrink-0 self-start"
           style={{ ...inputStyle, minHeight: 44 }}
@@ -453,7 +486,7 @@ export default function AuditLogs() {
         <select
           id={ids.connector}
           value={connectorFilter}
-          onChange={(e) => setConnectorFilter(e.target.value)}
+          onChange={(e) => changeConnectorFilter(e.target.value)}
           className="flex-1 sm:flex-none px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
           style={inputStyle}
         >
@@ -471,7 +504,7 @@ export default function AuditLogs() {
         <select
           id={ids.status}
           value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
+          onChange={(e) => changeStatusFilter(e.target.value as StatusFilter)}
           className="flex-1 sm:flex-none px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
           style={inputStyle}
         >
@@ -487,7 +520,7 @@ export default function AuditLogs() {
         <select
           id={ids.range}
           value={timeRange}
-          onChange={(e) => setTimeRange(e.target.value as TimeRangeFilter)}
+          onChange={(e) => changeTimeRange(e.target.value as TimeRangeFilter)}
           className="flex-1 sm:flex-none px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
           style={inputStyle}
         >
