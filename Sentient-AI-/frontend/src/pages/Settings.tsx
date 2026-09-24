@@ -10,17 +10,22 @@ import {
   Send,
 } from "lucide-react";
 import ConfirmDialog from "@/components/ConfirmDialog";
-import type { User } from "@/types";
+import CapabilityList from "@/components/CapabilityList";
+import type { CapabilityStatus, User } from "@/types";
 import {
   changePassword,
   createTelegramLink,
   deleteAccount,
   exportAccount,
+  getCapabilities,
   getMe,
   getTelegramStatus,
+  installCapability,
   login,
   logout,
+  requestCapabilityAccess,
   unlinkTelegram,
+  updateCapabilities,
   updateProfile,
   updateSettings,
   type TelegramLink,
@@ -131,7 +136,7 @@ export default function Settings() {
     model: useId(),
     modelHelp: useId(),
   };
-  const [, setMe] = useState<User | null>(null);
+  const [me, setMe] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -168,6 +173,11 @@ export default function Settings() {
   const [tgLink, setTgLink] = useState<TelegramLink | null>(null);
   const [tgBusy, setTgBusy] = useState(false);
   const [tgFeedback, setTgFeedback] = useState<Feedback>(null);
+
+  // Permissions (capabilities)
+  const [capabilities, setCapabilities] = useState<CapabilityStatus[] | null>(null);
+  const [capabilitiesBusyKey, setCapabilitiesBusyKey] = useState<string | null>(null);
+  const [capabilitiesFeedback, setCapabilitiesFeedback] = useState<Feedback>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -300,6 +310,68 @@ export default function Settings() {
       setTgFeedback({ ok: false, text: (err as Error).message });
     } finally {
       setTgBusy(false);
+    }
+  };
+
+  // Load the capability list once; every account can see it (read-only for
+  // a non-admin), so this does not wait on `me` — the section itself gates
+  // editability once `me` resolves.
+  useEffect(() => {
+    let cancelled = false;
+    getCapabilities()
+      .then((caps) => {
+        if (!cancelled) setCapabilities(caps);
+      })
+      .catch((err: Error) => {
+        if (!cancelled) setCapabilitiesFeedback({ ok: false, text: err.message });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleToggleCapability = async (key: string, enabled: boolean) => {
+    setCapabilitiesBusyKey(key);
+    setCapabilitiesFeedback(null);
+    try {
+      const updated = await updateCapabilities({ [key]: enabled });
+      setCapabilities(updated);
+    } catch (err) {
+      setCapabilitiesFeedback({ ok: false, text: (err as Error).message });
+    } finally {
+      setCapabilitiesBusyKey(null);
+    }
+  };
+
+  const handleRequestCapabilityAccess = async (key: string) => {
+    setCapabilitiesBusyKey(key);
+    setCapabilitiesFeedback(null);
+    try {
+      const status = await requestCapabilityAccess(key);
+      setCapabilities((prev) =>
+        prev ? prev.map((c) => (c.key === key ? status : c)) : prev
+      );
+    } catch (err) {
+      setCapabilitiesFeedback({ ok: false, text: (err as Error).message });
+    } finally {
+      setCapabilitiesBusyKey(null);
+    }
+  };
+
+  const handleInstallCapability = async (key: string) => {
+    setCapabilitiesBusyKey(key);
+    setCapabilitiesFeedback(null);
+    try {
+      const result = await installCapability(key);
+      if (!result.ok && result.error) {
+        setCapabilitiesFeedback({ ok: false, text: result.error });
+      }
+      const refreshed = await getCapabilities();
+      setCapabilities(refreshed);
+    } catch (err) {
+      setCapabilitiesFeedback({ ok: false, text: (err as Error).message });
+    } finally {
+      setCapabilitiesBusyKey(null);
     }
   };
 
@@ -520,6 +592,44 @@ export default function Settings() {
             <FeedbackLine feedback={securityFeedback} />
           </div>
         </div>
+      </section>
+
+      {/* Permissions */}
+      <section className="rounded-[14px] p-6" style={panelStyle}>
+        <div className="eyebrow mb-1">Policy</div>
+        <h2 className="mb-1">Permissions</h2>
+        <p className="text-sm mb-4" style={{ color: "var(--text-secondary)" }}>
+          Control what the agent is allowed to do. Some capabilities also
+          depend on OS permission or a one-time install — those are shown
+          even when they can't be turned on yet.
+        </p>
+        {capabilitiesFeedback && !capabilitiesFeedback.ok && (
+          <div
+            className="rounded-[10px] p-3 text-sm mb-4"
+            role="alert"
+            style={{
+              background: "var(--fill-danger)",
+              border: "1px solid var(--border-danger)",
+              color: "var(--accent-danger)",
+            }}
+          >
+            {capabilitiesFeedback.text}
+          </div>
+        )}
+        {capabilities === null ? (
+          <p className="text-sm" style={{ color: "var(--text-muted)" }}>
+            Loading permissions…
+          </p>
+        ) : (
+          <CapabilityList
+            items={capabilities}
+            editable={!!me?.is_admin}
+            onToggle={(key, enabled) => void handleToggleCapability(key, enabled)}
+            onRequestAccess={(key) => void handleRequestCapabilityAccess(key)}
+            onInstall={(key) => void handleInstallCapability(key)}
+            busyKey={capabilitiesBusyKey}
+          />
+        )}
       </section>
 
       {/* Telegram approvals */}

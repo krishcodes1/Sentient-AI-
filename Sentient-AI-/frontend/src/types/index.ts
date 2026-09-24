@@ -3,6 +3,7 @@ export interface User {
   email: string;
   name: string | null;
   is_active?: boolean;
+  is_admin?: boolean;
   created_at: string;
   default_permission_tier: PermissionTier;
   rate_limit: number;
@@ -309,4 +310,32 @@ export interface RegisterData {
 export interface AuthResponse {
   access_token: string;
   token_type: string;
+}
+
+// Capabilities / permissions (GET|PUT /capabilities, POST .../request-access,
+// POST .../install). `enabled` is the user's stored preference; `effective`
+// is what actually happens right now once availability and the OS probe are
+// folded in — a capability can be enabled and still be "blocked".
+export type CapabilityEffective = "on" | "off" | "blocked";
+export type ProbeState = "granted" | "denied" | "not_required" | "unknown";
+
+export interface CapabilityStatus {
+  key: string;
+  label: string;
+  description: string;
+  risk: "low" | "medium" | "high";
+  enabled: boolean;
+  default_enabled: boolean;
+  available: boolean;
+  availability_reason: string;
+  probe_state: ProbeState;
+  probe_detail: string;
+  fix_url: string | null;
+  fix_steps: string[];
+  effective: CapabilityEffective;
+  reason: string;
+  can_request_access: boolean;
+  install: string | null;
+  when_denied: string;
+  tools: string[];
 }
