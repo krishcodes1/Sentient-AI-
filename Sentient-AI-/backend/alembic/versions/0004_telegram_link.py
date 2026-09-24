@@ -3,7 +3,7 @@
 ``telegram_chat_id`` is the chat approvals are pushed to (NULL = feature
 not linked for this user). ``telegram_link_code`` / ``telegram_link_
 expires_at`` hold the short-lived one-time code that proves the person
-tapping the bot's /start deep link is the logged-in SentientAI user.
+tapping the bot's /start deep link is the logged-in Crawler AI user.
 
 Column adds are guarded and the index uses ``if_not_exists`` for the same
 reason as 0003: adopted legacy databases are created from model metadata

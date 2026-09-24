@@ -1,5 +1,5 @@
 """
-Base connector framework for SentientAI.
+Base connector framework for Crawler AI.
 
 Provides abstract base class with built-in content sanitization,
 rate limiting, and timeout enforcement for all third-party connectors.
@@ -170,7 +170,7 @@ class ConnectorResponse:
 # ---------------------------------------------------------------------------
 
 class BaseConnector(ABC):
-    """Abstract base class for all SentientAI connectors.
+    """Abstract base class for all Crawler AI connectors.
 
     Subclasses MUST implement the abstract properties/methods.  The base
     class provides automatic content sanitization via ``PromptGuard``,

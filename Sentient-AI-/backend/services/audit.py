@@ -1,5 +1,5 @@
 """
-Tamper-evident audit logging service for SentientAI.
+Tamper-evident audit logging service for Crawler AI.
 
 Single write path for the ``audit_logs`` table. Every row is chained to
 the previous row in the same user's log via ``previous_hash``, and the

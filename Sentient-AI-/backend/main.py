@@ -1,4 +1,4 @@
-"""SentientAI — Secure-by-Design Agentic AI Platform."""
+"""Crawler AI — Secure-by-Design Agentic AI Platform."""
 
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ logger = structlog.get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info(
-        "starting_sentientai",
+        "starting_crawler_ai",
         environment=settings.ENVIRONMENT,
         llm_provider=settings.LLM_PROVIDER,
         llm_model=settings.LLM_MODEL,
@@ -129,7 +129,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await reminder_service.start()
 
     yield
-    logger.info("shutting_down_sentientai")
+    logger.info("shutting_down_crawler_ai")
     await reminder_service.stop()
     if telegram_service is not None:
         await telegram_service.stop()
@@ -139,7 +139,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 _is_production = settings.ENVIRONMENT == "production"
 
 app = FastAPI(
-    title="SentientAI",
+    title="Crawler AI",
     description="Secure-by-Design Agentic AI Platform",
     version="0.1.0",
     lifespan=lifespan,
@@ -191,7 +191,7 @@ app.include_router(usage.router, prefix="/api")
 @app.get("/")
 async def root() -> dict[str, str]:
     info = {
-        "name": "SentientAI",
+        "name": "Crawler AI",
         "version": "0.1.0",
         "health": "/api/health",
     }

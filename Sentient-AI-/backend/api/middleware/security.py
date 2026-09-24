@@ -1,5 +1,5 @@
 """
-Security middleware stack for SentientAI FastAPI application.
+Security middleware stack for Crawler AI FastAPI application.
 
 Provides:
 - SecurityHeadersMiddleware — defense-in-depth HTTP headers

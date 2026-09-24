@@ -12,7 +12,14 @@ import { DARK_QUERY, useMediaQuery } from "@/hooks/useMediaQuery";
 export type ThemeMode = "light" | "dark" | "system";
 
 /** Also read by the inline bootstrap in index.html — keep the two in step. */
-export const THEME_STORAGE_KEY = "sentientai_theme";
+export const THEME_STORAGE_KEY = "crawler.theme";
+
+/**
+ * Pre-rename key. Read once as a fallback so a choice saved before the
+ * Crawler AI rename is not silently dropped, then migrated onto
+ * THEME_STORAGE_KEY so every later read only has one key to consider.
+ */
+const LEGACY_THEME_STORAGE_KEY = "sentientai_theme";
 
 /** Matches the `theme-color` meta the document ships with. */
 const META_COLORS: Record<"light" | "dark", string> = {
@@ -32,7 +39,21 @@ function isMode(value: unknown): value is ThemeMode {
 export function readStoredMode(): ThemeMode {
   try {
     const stored = localStorage.getItem(THEME_STORAGE_KEY);
-    return isMode(stored) ? stored : "system";
+    if (isMode(stored)) return stored;
+
+    // One-time migration: a choice saved under the pre-rename key still
+    // applies. Move it onto the new key so this branch is never hit again.
+    const legacy = localStorage.getItem(LEGACY_THEME_STORAGE_KEY);
+    if (isMode(legacy)) {
+      try {
+        localStorage.setItem(THEME_STORAGE_KEY, legacy);
+        localStorage.removeItem(LEGACY_THEME_STORAGE_KEY);
+      } catch {
+        /* best-effort migration; the resolved mode below is still correct */
+      }
+      return legacy;
+    }
+    return "system";
   } catch {
     return "system";
   }

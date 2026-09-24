@@ -1,5 +1,5 @@
 """
-Robinhood Crypto connector for SentientAI.
+Robinhood Crypto connector for Crawler AI.
 
 READ-ONLY access to Robinhood's official Crypto Trading API.
 All financial actions (trades, transfers, withdrawals) are

@@ -1,5 +1,5 @@
 """
-Multi-layer prompt injection defense for SentientAI.
+Multi-layer prompt injection defense for Crawler AI.
 
 Provides pattern matching, heuristic analysis, and output validation
 to detect and block prompt injection attacks across all agent interactions.

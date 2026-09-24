@@ -448,7 +448,7 @@ async def test_client_handshake_order_over_http(offline_ssrf):
         "tools/call",
     ]
     assert handler.payloads[0]["params"]["protocolVersion"] == MCP_PROTOCOL_VERSION
-    assert handler.payloads[0]["params"]["clientInfo"]["name"] == "sentientai"
+    assert handler.payloads[0]["params"]["clientInfo"]["name"] == "crawler-ai"
 
 
 @pytest.mark.asyncio

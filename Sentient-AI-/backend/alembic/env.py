@@ -1,4 +1,4 @@
-"""Alembic environment for the SentientAI backend.
+"""Alembic environment for the Crawler AI backend.
 
 The application runs on an async engine (asyncpg), so migrations connect
 through that same stack instead of maintaining a second sync-driver URL:

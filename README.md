@@ -1,4 +1,4 @@
-# SentientAI
+# Crawler AI
 
 [![CI](https://github.com/krishcodes1/Sentient-AI-/actions/workflows/ci.yml/badge.svg)](https://github.com/krishcodes1/Sentient-AI-/actions/workflows/ci.yml)
 

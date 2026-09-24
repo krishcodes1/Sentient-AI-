@@ -1,10 +1,10 @@
-# SentientAI
+# Crawler AI
 
 [![CI](https://github.com/krishcodes1/Sentient-AI-/actions/workflows/ci.yml/badge.svg)](https://github.com/krishcodes1/Sentient-AI-/actions/workflows/ci.yml)
 
 **Secure-by-Design Agentic AI Platform**
 
-A self-hosted AI assistant platform with security, user control, and auditability built into every layer. SentientAI integrates with Canvas LMS, Google Workspace, Robinhood Crypto, and more — with fine-grained permission scoping, multi-layer prompt injection defense, and tamper-evident audit logging.
+A self-hosted AI assistant platform with security, user control, and auditability built into every layer. Crawler AI integrates with Canvas LMS, Google Workspace, Robinhood Crypto, and more — with fine-grained permission scoping, multi-layer prompt injection defense, and tamper-evident audit logging.
 
 **Assistant features:** streaming chat with live tool-progress and rendered
 markdown, persistent per-user memory (saved facts injected into every
@@ -373,7 +373,7 @@ Copy those two lines into your `backend/.env` file, replacing the `REPLACE_ME` p
 ## Architecture
 
 ```
-sentientai/
+crawler-ai/
 ├── backend/                    # Python / FastAPI
 │   ├── core/                   # Config, database, security, network policy
 │   ├── models/                 # SQLAlchemy ORM models (incl. pending_actions)
@@ -437,7 +437,7 @@ still open — lives in **[SECURITY.md](SECURITY.md)**. Highlights:
 
 ### Smart Context Management
 
-SentientAI solves the token explosion problem seen in platforms like OpenClaw:
+Crawler AI solves the token explosion problem seen in platforms like OpenClaw:
 
 - **Sliding window** — keeps last 12 messages in full, summarizes older ones
 - **Tool result compression** — truncates large API responses to 2000 chars

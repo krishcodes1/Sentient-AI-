@@ -1478,7 +1478,7 @@ export default function Chat() {
           disabled={!activeConv}
           sending={sending}
           placeholder={
-            activeConv ? "Ask SentientAI anything..." : "Start a conversation first"
+            activeConv ? "Ask Crawler AI anything..." : "Start a conversation first"
           }
           onSend={(content, images) => void sendContent(content, images)}
           onStop={handleStop}

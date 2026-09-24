@@ -1,5 +1,5 @@
 """
-Google Workspace connector for SentientAI.
+Google Workspace connector for Crawler AI.
 
 Provides Gmail and Google Calendar access via OAuth 2.0 + PKCE
 with incremental authorization.  All email body content is

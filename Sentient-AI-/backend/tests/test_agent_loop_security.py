@@ -386,7 +386,7 @@ async def test_sliding_window_compresses_long_history():
     # message and it must be the security policy.
     system_msgs = [m for m in sent if m.get("role") == "system"]
     assert len(system_msgs) == 1
-    assert "SentientAI" in system_msgs[0]["content"]
+    assert "Crawler AI" in system_msgs[0]["content"]
     summary_msg = next(m for m in sent if "[Conversation summary" in m.get("content", ""))
     assert summary_msg["role"] != "system"
 

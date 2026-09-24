@@ -59,10 +59,7 @@ SEARCH_ENDPOINT = "https://html.duckduckgo.com/html/"
 # policy) answers a browser UA coming from a non-browser TLS stack with
 # 403, and serves this one; a spoofed Chrome string buys nothing that a
 # truthful one does not, on any host tried.
-_USER_AGENT = (
-    "SentientAI/1.0 (self-hosted personal agent; "
-    "+https://github.com/krishcodes1/Sentient-AI-)"
-)
+_USER_AGENT = "CrawlerAI/0.1 (+https://github.com/krishcodes1/Sentient-AI-)"
 
 _MAX_RESULTS = 10
 _DEFAULT_RESULTS = 5
