@@ -1,0 +1,50 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Crawler AI",
+  "version": "../package.json",
+  "identifier": "ai.crawler.desktop",
+  "build": {
+    "beforeDevCommand": "npm run stage-stack && npm run dev:ui",
+    "devUrl": "http://localhost:5174",
+    "beforeBuildCommand": "npm run build:ui && npm run stage-stack",
+    "frontendDist": "../ui/dist"
+  },
+  "app": {
+    "windows": [],
+    "withGlobalTauri": false,
+    "security": {
+      "csp": "default-src 'self' ipc: http://ipc.localhost; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      "capabilities": ["setup"]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg", "nsis"],
+    "publisher": "Crawler AI",
+    "homepage": "https://github.com/krishcodes1/Sentient-AI-",
+    "category": "Productivity",
+    "shortDescription": "Your self-hosted AI agent",
+    "longDescription": "Installs, starts and opens Crawler AI on this computer using Docker Desktop.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": {
+      "../stack/": "stack/"
+    },
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "signingIdentity": "-",
+      "hardenedRuntime": true,
+      "entitlements": "./Entitlements.plist"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  }
+}

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Hardened-runtime entitlements for the signed macOS build: only what v1 needs.
+  network.client  - outbound connections (localhost health checks, the GitHub Releases
+                    update check). Running `docker` as a child process needs no entitlement.
+  disable-library-validation = false - spelled out so nobody flips it by accident: the app
+                    must only load code signed by the same team (or Apple).
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.network.client</key>
+  <true/>
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <false/>
+</dict>
+</plist>

@@ -1,0 +1,62 @@
+# The Crawler AI desktop app's Rust process (Tauri 2): windows, tray, single instance, and
+# the preflight / keys / stack commands the bundled setup window calls.
+#
+# Why it exists: end users should install and start Crawler AI by double-clicking an app,
+# not by running a Python bootstrap in a browser tab. The core logic and the windows live in
+# the `crawler_ai_desktop` library so `cargo test` exercises them without a UI build; the
+# binary (src/main.rs) adds the tray and the event loop.
+#
+# The app version is NOT set here: tauri.conf.json reads it from ../package.json, the one
+# place a release bumps it. Code reads it at runtime from `app.package_info().version`.
+
+[package]
+name = "crawler-ai"
+description = "Crawler AI desktop app: checks Docker, writes the keys, starts and opens Crawler AI"
+edition = "2021"
+# The newest dependencies (image, plist, time) need 1.88.
+rust-version = "1.88"
+publish = false
+
+[lib]
+name = "crawler_ai_desktop"
+path = "src/lib.rs"
+
+[[bin]]
+name = "crawler-ai"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+semver = "1"
+# OS CSPRNG for SECRET_KEY / ENCRYPTION_KEY.
+getrandom = "0.4"
+base64 = "0.23"
+# Per-OS data directories (Application Support / %LOCALAPPDATA%).
+dirs = "6"
+# Two uses: the health probe of the loopback backend (plain HTTP to 127.0.0.1, never through
+# a proxy: no proxy-from-env feature) and "Check for updates", which asks the GitHub Releases
+# API over HTTPS (rustls; no OpenSSL).
+ureq = { version = "2", default-features = false, features = ["tls"] }
+# Free disk space (statvfs / GetDiskFreeSpaceExW) without hand-written FFI.
+fs4 = "0.13"
+
+[dev-dependencies]
+tempfile = "3"
+# Mock runtime for the IPC/ACL tests (src/acl_tests.rs).
+tauri = { version = "2", features = ["test"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "unwind"
+strip = true

@@ -1,0 +1,245 @@
+name: Desktop app
+
+# Builds the Crawler AI desktop app (Sentient-AI-/desktop, Tauri 2) for Mac and Windows and
+# uploads the installers to a DRAFT pre-release, which the owner reviews and publishes.
+#
+# Runs by hand (Actions → Desktop app → Run workflow) or on a `desktop-v<version>` tag; the
+# tag must match desktop/package.json's version, the app's single version source. It is not
+# run on every push: two release builds take ~20 minutes of macOS/Windows runner time.
+#
+# Signing: the Mac build is signed and notarized only when the owner has added the Apple
+# secrets below (Settings → Secrets and variables → Actions); otherwise it is ad-hoc signed
+# and testers allow it once (System Settings → Privacy & Security → Open Anyway). Windows
+# builds are unsigned for now (SmartScreen → More info → Run anyway). Secrets are only
+# exposed to the macOS job's build step (never to $GITHUB_ENV, never echoed).
+#
+#   APPLE_CERTIFICATE            base64 of the Developer ID Application .p12
+#   APPLE_CERTIFICATE_PASSWORD   its export password
+#   APPLE_SIGNING_IDENTITY       e.g. "Developer ID Application: Name (TEAMID)"
+#   notarization, either an App Store Connect API key:
+#     APPLE_API_ISSUER, APPLE_API_KEY (key id), APPLE_API_KEY_P8 (contents of AuthKey_<id>.p8)
+#   or an Apple ID:
+#     APPLE_ID, APPLE_PASSWORD (app-specific password), APPLE_TEAM_ID
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["desktop-v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+    working-directory: Sentient-AI-/desktop
+
+jobs:
+  mac:
+    name: macOS (universal .dmg)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches the app version
+        if: startsWith(github.ref, 'refs/tags/desktop-v')
+        run: |
+          version=$(node -p "require('./package.json').version")
+          [ "${GITHUB_REF_NAME#desktop-v}" = "$version" ] || {
+            echo "::error::tag $GITHUB_REF_NAME does not match desktop/package.json version $version"
+            exit 1
+          }
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: Sentient-AI-/desktop/**/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: Sentient-AI-/desktop/src-tauri -> target
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          if [ -f ui/package-lock.json ]; then npm --prefix ui ci; else npm --prefix ui install; fi
+
+      # Tests gate the build: a red suite never produces an installer.
+      - name: UI tests
+        run: npm --prefix ui test
+
+      - name: Script tests (stage-stack)
+        run: npm test
+
+      - name: Rust tests
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+
+      # Signs with Developer ID (and notarizes) only when the owner's Apple secrets exist;
+      # otherwise the build is ad-hoc signed. The secrets live in this one step's environment:
+      # they are never written to $GITHUB_ENV (so later steps and the post-job hooks of
+      # third-party actions never see them) and never echoed. Empty variables are unset,
+      # because tauri treats a present-but-empty APPLE_CERTIFICATE as a certificate to import
+      # and fails. beforeBuildCommand (tauri.conf.json) builds ui/ and stages the stack source.
+      - name: Build (universal)
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          apple_vars="APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_API_ISSUER APPLE_API_KEY APPLE_API_KEY_P8 APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID"
+          for name in $apple_vars; do
+            [ -n "${!name}" ] || unset "$name"
+          done
+          key_path=""
+          trap '[ -z "$key_path" ] || rm -f "$key_path"' EXIT
+          if [ -z "${APPLE_CERTIFICATE:-}" ] || [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            unset $apple_vars
+            echo "::notice::No Apple signing secrets: building an ad-hoc signed app (not notarized)."
+          else
+            # A certificate saved with line breaks (GNU base64 wraps at 76) is still valid.
+            APPLE_CERTIFICATE=$(printf '%s' "$APPLE_CERTIFICATE" | tr -d ' \r\n')
+            export APPLE_CERTIFICATE
+            if [ -n "${APPLE_API_ISSUER:-}" ] && [ -n "${APPLE_API_KEY:-}" ] && [ -n "${APPLE_API_KEY_P8:-}" ]; then
+              key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
+              (umask 077 && printf '%s\n' "$APPLE_API_KEY_P8" > "$key_path")
+              export APPLE_API_KEY_PATH="$key_path"
+              unset APPLE_API_KEY_P8 APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
+              echo "Signing with Developer ID; notarizing with the App Store Connect API key."
+            elif [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
+              unset APPLE_API_ISSUER APPLE_API_KEY APPLE_API_KEY_P8
+              echo "Signing with Developer ID; notarizing with the Apple ID."
+            else
+              unset APPLE_API_ISSUER APPLE_API_KEY APPLE_API_KEY_P8 APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
+              echo "::warning::Signed with Developer ID but NOT notarized: add the notarization secrets."
+            fi
+          fi
+          npm run tauri -- build --ci --target universal-apple-darwin --bundles app,dmg
+
+      - name: Collect installer
+        run: |
+          version=$(node -p "require('./package.json').version")
+          mkdir -p out
+          cp src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg "out/Crawler-AI-${version}-mac.dmg"
+          ls -l out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-mac
+          path: Sentient-AI-/desktop/out/*
+          if-no-files-found: error
+
+  windows:
+    name: Windows (.exe installer)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: Sentient-AI-/desktop/**/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: Sentient-AI-/desktop/src-tauri -> target
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          if [ -f ui/package-lock.json ]; then npm --prefix ui ci; else npm --prefix ui install; fi
+
+      - name: UI tests
+        run: npm --prefix ui test
+
+      - name: Script tests (stage-stack)
+        run: npm test
+
+      - name: Rust tests
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+
+      # Unsigned per-user NSIS installer (no admin rights needed to install).
+      - name: Build
+        run: npm run tauri -- build --ci --bundles nsis
+
+      - name: Collect installer
+        run: |
+          version=$(node -p "require('./package.json').version")
+          mkdir -p out
+          cp src-tauri/target/release/bundle/nsis/*-setup.exe "out/Crawler-AI-${version}-windows-setup.exe"
+          ls -l out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-windows
+          path: Sentient-AI-/desktop/out/*
+          if-no-files-found: error
+
+  release:
+    name: Draft pre-release
+    needs: [mac, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: desktop-*
+          merge-multiple: true
+          path: Sentient-AI-/desktop/out
+
+      # Creates the draft on the first run for a version and replaces its files on re-runs.
+      # A release that has already been published is never modified: bump the version.
+      - name: Upload to the draft pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(node -p "require('./package.json').version")
+          tag="desktop-v${version}"
+          cd out
+          sha256sum -- Crawler-AI-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          if gh release view "$tag" >/dev/null 2>&1; then
+            if [ "$(gh release view "$tag" --json isDraft -q .isDraft)" != "true" ]; then
+              echo "::error::$tag is already published; bump the version in desktop/package.json"
+              exit 1
+            fi
+            gh release upload "$tag" ./* --clobber
+          else
+            cat > "$RUNNER_TEMP/notes.md" <<EOF
+          Crawler AI desktop ${version} (beta).
+
+          - **Mac:** open \`Crawler-AI-${version}-mac.dmg\` and drag Crawler AI to Applications.
+            Unsigned beta builds: open it once, then System Settings → Privacy & Security → Open Anyway.
+          - **Windows:** run \`Crawler-AI-${version}-windows-setup.exe\` (no admin needed).
+            SmartScreen may warn on unsigned builds: More info → Run anyway.
+
+          Both need Docker Desktop. \`SHA256SUMS.txt\` lists the file checksums.
+          EOF
+            gh release create "$tag" ./* \
+              --draft --prerelease \
+              --target "$GITHUB_SHA" \
+              --title "Crawler AI ${version} (beta)" \
+              --notes-file "$RUNNER_TEMP/notes.md"
+          fi

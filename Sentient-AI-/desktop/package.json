@@ -1,0 +1,22 @@
+{
+  "name": "crawler-ai-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Crawler AI desktop app (Tauri 2): installs, starts and opens Crawler AI on Mac and Windows.",
+  "type": "module",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "dev:ui": "npm --prefix ui run dev -- --port 5174 --strictPort",
+    "build:ui": "npm --prefix ui run build",
+    "stage-stack": "node scripts/stage-stack.mjs",
+    "test": "node --test scripts/stage-stack.test.mjs"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.5"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

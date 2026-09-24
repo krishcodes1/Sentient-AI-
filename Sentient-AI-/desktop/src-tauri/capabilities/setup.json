@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "setup",
+  "description": "The bundled setup/status window (label \"setup\"): Tauri core, events, and every app command (the \"app-commands\" set that build.rs generates from src/commands.rs). The Crawler AI window (label \"crawler\", http://localhost:3000) is deliberately in no capability, so a page in the web app cannot start or stop the stack or read files.",
+  "windows": ["setup"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "app-commands"
+  ]
+}

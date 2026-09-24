@@ -1,0 +1,3 @@
+# Cargo build output and the ACL schemas tauri-build regenerates on every build.
+/target/
+/gen/schemas

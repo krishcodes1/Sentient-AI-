@@ -1,0 +1,72 @@
+name: Desktop core
+
+# Unit tests, clippy and rustfmt for the desktop app's Rust core
+# (Sentient-AI-/desktop/src-tauri): preflight parsing, key generation and .env writing,
+# the compose stack phases and path selection, all against fakes, so no Docker is
+# needed. It runs on the two systems the app ships for; Linux is left out because the
+# app does not ship there and Tauri would need WebKitGTK on the runner. Packaging and
+# releases are a separate workflow.
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "Sentient-AI-/desktop/src-tauri/**"
+      # commands.rs checks its command list against the UI's bridge.
+      - "Sentient-AI-/desktop/ui/src/bridge.ts"
+      - ".github/workflows/desktop-core.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "Sentient-AI-/desktop/src-tauri/**"
+      # commands.rs checks its command list against the UI's bridge.
+      - "Sentient-AI-/desktop/ui/src/bridge.ts"
+      - ".github/workflows/desktop-core.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Desktop core (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: Sentient-AI-/desktop/src-tauri
+    steps:
+      - uses: actions/checkout@v4
+
+      # rustup is preinstalled on GitHub's macOS and Windows images.
+      - name: Set up Rust (stable, clippy, rustfmt)
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+          rustc --version
+
+      - name: Cache cargo registry and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            Sentient-AI-/desktop/src-tauri/target
+          key: desktop-core-${{ runner.os }}-${{ hashFiles('Sentient-AI-/desktop/src-tauri/Cargo.lock') }}
+          restore-keys: desktop-core-${{ runner.os }}-
+
+      - name: Format check (rustfmt)
+        run: cargo fmt --check
+
+      - name: Lint (clippy)
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Unit tests
+        run: cargo test --locked

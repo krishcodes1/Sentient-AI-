@@ -133,6 +133,47 @@ jobs:
         continue-on-error: true
         run: npm audit --audit-level=high
 
+  # The desktop app's setup window (Tauri 2 frontend). Pure web tooling, so
+  # it runs on Linux; the Rust side and the .dmg/.exe builds have their own
+  # jobs. `npm run build` also runs scripts/check-dist.mjs, which fails if
+  # the bundle would break the app's strict CSP (inline scripts, remote or
+  # data: resources, the browser-preview fake left in).
+  desktop-ui:
+    name: Desktop UI (types, lint, tests, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Sentient-AI-/desktop/ui
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: Sentient-AI-/desktop/ui/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npx vitest run
+
+      - name: Build (+ CSP check)
+        run: npm run build
+
+      # What the installers bundle: .env files, key backups and private keys must never
+      # ship (desktop/scripts/stage-stack.mjs). Plain Node, no dependencies.
+      - name: Stack staging tests (no secrets in the bundle)
+        run: node --test ../scripts/stage-stack.test.mjs
+
   backend:
     name: Backend (pytest)
     runs-on: ubuntu-latest
