@@ -312,4 +312,70 @@ describe("Setup wizard", () => {
     expect(api.completeSetup).toHaveBeenCalledWith({ allow_registration: false });
     await waitFor(() => expect(assign).toHaveBeenCalledWith("/"));
   });
+
+  it("(f) focuses the owner step's first field on initial mount", async () => {
+    renderSetup();
+
+    const name = await screen.findByLabelText("Your name");
+    await waitFor(() => expect(document.activeElement).toBe(name));
+  });
+
+  it("(g) moves focus into the next step's card when advancing from the owner step", async () => {
+    const user = userEvent.setup();
+    renderSetup();
+
+    await screen.findByRole("heading", { name: "Create the owner account" });
+    await user.type(screen.getByLabelText("Your name"), "Krish");
+    await user.type(screen.getByLabelText("Email"), "krish@example.com");
+    await user.type(screen.getByLabelText("Password"), "correct-horse-9");
+    await user.click(screen.getByRole("button", { name: "Create owner account" }));
+
+    const heading = await screen.findByRole("heading", { name: "AI provider" });
+    await waitFor(() => {
+      expect(heading === document.activeElement || heading.contains(document.activeElement)).toBe(true);
+    });
+  });
+
+  it("(h) shows a disabled Back button on the provider step, since the owner account can't be re-created", async () => {
+    asSignedInOwner();
+    renderSetup();
+    await providerListLoaded();
+
+    const back = screen.getByRole("button", { name: "Back" });
+    expect(back).toBeDisabled();
+    expect(back).toHaveAttribute("title", "The owner account is already created");
+  });
+
+  it("(i) marks a failed provider test as an alert and a passed one as a status", async () => {
+    asSignedInOwner();
+    vi.mocked(api.testProvider)
+      .mockResolvedValueOnce({ ok: false, error: "API key not valid." })
+      .mockResolvedValueOnce({ ok: true, reply: "OK" });
+    const user = userEvent.setup();
+    renderSetup();
+
+    await providerListLoaded();
+    await user.type(screen.getByLabelText("API key"), "bad-key");
+    await user.click(screen.getByRole("button", { name: "Test" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("API key not valid.");
+
+    await user.clear(screen.getByLabelText("API key"));
+    await user.type(screen.getByLabelText("API key"), "good-key");
+    await user.click(screen.getByRole("button", { name: "Test" }));
+    expect(await screen.findByRole("status")).toHaveTextContent(/replied/i);
+  });
+
+  it("(j) toggles the registration checkbox by clicking its description text", async () => {
+    asSignedInOwner();
+    const user = userEvent.setup();
+    await goToPermissions(user);
+    await screen.findByRole("switch", { name: "Browse the web" });
+    await user.click(screen.getByRole("button", { name: "Next" }));
+    await screen.findByRole("heading", { name: "Summary" });
+
+    const checkbox = screen.getByRole("checkbox", { name: /allow other people to create accounts/i });
+    expect(checkbox).not.toBeChecked();
+    await user.click(screen.getByText(/leave this off unless someone else/i));
+    expect(checkbox).toBeChecked();
+  });
 });
