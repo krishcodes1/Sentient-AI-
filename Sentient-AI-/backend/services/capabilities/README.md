@@ -7,23 +7,44 @@ and the agent's `<permissions>` block tells it (and the user) why.
 
 ## Five steps
 
-1. **Toolkit.** Write `services/tools/<family>.py` with
-   `async def execute(self, action, params, ...) -> dict` returning
-   `{"ok": True, ...}` or `{"ok": False, "error": "..."}`. Fail closed.
+1. **Toolkit.** Write `services/tools/<family>.py`. New toolkits take the
+   shape `async def execute(self, action, params, *, user_id, approved) -> dict`,
+   returning `{"ok": True, ...}` or `{"ok": False, "error": "..."}`. Fail closed.
 2. **Catalog and policy.** In `services/agent/tool_registry.py` add the
    `ToolSpec`s under `CONNECTOR_CATALOG["<family>"]`, add `<family>` to
    `BUILTIN_CONNECTOR_TYPES` and `_BUILTIN_STANCE`, and register the toolkit
-   in `ConnectorToolExecutor._builtins`. In `services/agent/permissions.py`
-   add one policy row per `ActionCategory` (hard-block what you don't use).
+   in the built-in toolkit map in the executor (being introduced in the
+   wiring task). In `services/agent/permissions.py` add one policy row per
+   `ActionCategory` (hard-block what you don't use).
 3. **Capability file.** Copy `_template.py` to `services/capabilities/<key>.py`,
-   fill it in, and append `CAPABILITY` to `REGISTRY` in `__init__.py`.
+   fill it in (your own `label` and `when_denied`, not the template's), and
+   append `CAPABILITY` to `REGISTRY` in `__init__.py`.
 4. **Tests.** Toolkit behaviour with fakes (no display, no network), and one
    report test for your `availability`/`probe`.
 5. **Run** `python3 -m pytest tests/test_capabilities_registry.py tests/test_capabilities_report.py -q`.
-   It fails if a claimed tool does not exist, a tool is claimed twice, a
-   built-in tool is unclaimed, or `when_denied` is empty.
+   It fails if a key is not unique snake_case, a claimed tool does not exist
+   or is not a built-in toolkit's, a tool is claimed twice, a built-in tool
+   is unclaimed, `install` is not an `ALLOWLIST` key, the template's label or
+   `when_denied` was left in, or `when_denied` is empty.
 
 Nothing in the wizard, Settings, the gates or the prompt needs changing.
+
+## Adding an environment fact
+
+`availability()` reads only the `ReportContext` it is given; it never calls
+the OS. When it needs a fact the context lacks (is a program installed? is
+a token configured?), add a field with a default to `ReportContext` in
+`base.py` and fill it in `default_context()` in `__init__.py`, which is the
+one place that gathers them. Keep the field hashable: the context is part
+of the probe-cache key. A probe, by contrast, may ask the OS; it runs only
+when the capability is on and available, and is cached for 10 s.
+
+## Tools that stay on
+
+A tool in `ALWAYS_ON_TOOLS` (`__init__.py`) is never gated, even when a
+capability's family prefix covers it: `reminders.now` is the model's clock
+and stays available with Reminders off. Never name one of these in a
+capability's `tools`.
 
 ## Rules
 
@@ -33,4 +54,6 @@ Nothing in the wizard, Settings, the gates or the prompt needs changing.
 - Never ask the user for a password in chat; credentials go through the
   Connectors UI and are filled in by the toolkit.
 - OS permission grants attach to the running binary on macOS; say which
-  one in `probe()` (`ctx.executable`).
+  one in `probe()` (`ctx.executable`, already resolved past symlinks).
+- A broken check fails closed: an `availability()` or `probe()` that
+  raises reports the capability as blocked, never as on.

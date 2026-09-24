@@ -1,3 +1,10 @@
+"""Screenshots of websites: web.screenshot in a hidden browser.
+
+Unavailable until Chromium is installed; install="browser" lets the
+agent offer that install while the Installs capability is on."""
+
+from __future__ import annotations
+
 from services.capabilities.base import Availability, Capability, ReportContext
 
 

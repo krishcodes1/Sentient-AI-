@@ -1,3 +1,8 @@
+"""Telegram chat and approvals: a channel, not a toolkit, so it claims no
+tools. Unavailable until a bot token is configured."""
+
+from __future__ import annotations
+
 from services.capabilities.base import Availability, Capability, ReportContext
 
 

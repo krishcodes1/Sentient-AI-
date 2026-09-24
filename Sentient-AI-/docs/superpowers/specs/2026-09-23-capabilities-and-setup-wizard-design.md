@@ -100,29 +100,29 @@ class Capability:
     default_enabled: bool
     risk: Literal["low", "medium", "high"]
     when_denied: str         # what the agent says if asked while the capability is off
-    availability: Callable[[], Availability] = always_available
-    probe: Callable[[], ProbeResult] | None = None      # OS permission check, native only
+    availability: Callable[[ReportContext], Availability] = always_available  # reads ctx only, never the OS
+    probe: Callable[[ReportContext], ProbeResult] | None = None      # OS permission check, native only; may call the OS
     request_access: Callable[[], None] | None = None    # trigger the OS prompt / open settings
     install: str | None = None   # key in services.tools.system.ALLOWLIST that makes it available
 ```
 
 - `Availability(available: bool, reason: str)`. Examples: `screen` is unavailable inside a container or on Linux; `site_screenshots` is unavailable until Chromium is installed.
 - `ProbeResult(state: "granted" | "denied" | "not_required" | "unknown", detail: str, fix_url: str | None, fix_steps: tuple[str, ...])`.
-- `system.capabilities` is claimed by no capability and is therefore always offered. Any tool not claimed by a capability is always on; the registry test lists the allowed exceptions explicitly so a forgotten claim fails the build.
+- `system.capabilities` and `reminders.now` (the model's clock) are in `ALWAYS_ON_TOOLS` and always offered; that list wins over a family prefix, so `reminders.` does not gate `reminders.now`. Any tool not claimed by a capability is always on; the registry test lists the allowed exceptions explicitly so a forgotten claim fails the build.
 
 ### 4.3 `report()` and effective state
 
 For each capability, `report(switches: dict[str, bool])` returns a `CapabilityStatus`:
 
 ```
-enabled       owner switch (missing key → default_enabled)
+enabled       owner switch (missing or null → default_enabled; anything but a literal true → off)
 availability  from availability()
-probe         from probe() if available and enabled; cached 10 s per process
+probe         from probe() if available and enabled (else "unknown", not checked); cached 10 s per context
 effective     "on" | "off" | "blocked"
 reason, fix_url, fix_steps
 ```
 
-Rule: `off` if not enabled; else `blocked` if unavailable or probe is `denied`; else `on`. `unknown` and `not_required` count as on.
+Rule: `off` if not enabled; else `blocked` if unavailable or probe is `denied`; else `on`. `unknown` and `not_required` count as on. Fail closed: an `availability()` that raises reads as unavailable and a `probe()` that raises reads as `denied`, so a broken check blocks instead of turning a capability on.
 
 `enabled_keys()` returns the keys whose effective state is `on`. This is the only set the tool gates use.
 
@@ -133,13 +133,13 @@ Rule: `off` if not enabled; else `blocked` if unavailable or probe is `denied`; 
 | `web_browsing` | Browse the web | `web.search`, `web.fetch_page` | on | low | always |
 | `site_screenshots` | Screenshots of websites | `web.screenshot` | on | low | Chromium installed (`system.browser_installed()`); `install="browser"` |
 | `screen` | See my screen | `desktop.screenshot` | **off** | high | not in a container; macOS: `CGPreflightScreenCaptureAccess`; Windows: `not_required`; Linux: `unknown` |
-| `reminders` | Reminders | `reminders.` | on | low | always |
+| `reminders` | Reminders | `reminders.` (except `reminders.now`, always on) | on | low | always |
 | `installs` | Install software (asks first) | `system.install_capability` | on | medium | always |
 | `telegram` | Telegram chat and approvals | none | on | medium | blocked until a bot token is configured |
 
 ### 4.5 Environment detection
 
-`in_container()` is true when `/.dockerenv` exists or `CRAWLER_CONTAINER=1` is set. `docker/docker-compose.yml` and `docker-compose.prod.yml` set the variable. The macOS probe uses `ctypes` on `/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics` (`CGPreflightScreenCaptureAccess`, `CGRequestScreenCaptureAccess`); no new dependency. The deep link is `x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture`, opened with `open` because the backend runs on the user's Mac. The report also names the process that holds the grant (`sys.executable`), because macOS attaches the grant to the binary.
+`in_container()` is true when `/.dockerenv` exists or `CRAWLER_CONTAINER=1` is set. `docker/docker-compose.yml` and `docker-compose.prod.yml` set the variable. The macOS probe uses `ctypes` on `/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics` (`CGPreflightScreenCaptureAccess`, `CGRequestScreenCaptureAccess`); no new dependency. The deep link is `x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture`, opened with `/usr/bin/open` (only `x-apple.systempreferences:` URLs are accepted) because the backend runs on the user's Mac. The report also names the process that holds the grant (`sys.executable` resolved past symlinks), because macOS attaches the grant to the binary.
 
 ## 5. Storage: the `installation` record
 

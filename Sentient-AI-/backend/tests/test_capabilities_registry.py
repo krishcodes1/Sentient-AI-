@@ -7,9 +7,10 @@ import re
 import pytest
 
 from services import capabilities
+from services.agent.tool_registry import BUILTIN_CONNECTOR_TYPES, CONNECTOR_CATALOG
 from services.capabilities import _template
 from services.capabilities.base import Capability
-from services.agent.tool_registry import BUILTIN_CONNECTOR_TYPES, CONNECTOR_CATALOG
+from services.tools.system import ALLOWLIST
 
 
 def _catalog_tool_names() -> set[str]:
@@ -43,6 +44,37 @@ def test_no_tool_is_claimed_twice():
     assert seen  # sanity: something is claimed
 
 
+def test_every_claimed_tool_belongs_to_a_builtin_connector_type():
+    # Capabilities gate built-in toolkits only. A claim on a user connector
+    # type (gmail., canvas.) would switch off tools the owner connected
+    # deliberately, and those already have their own per-connector policy.
+    for cap in capabilities.REGISTRY:
+        for pattern in cap.tools:
+            ctype = pattern.split(".", 1)[0]
+            assert ctype in BUILTIN_CONNECTOR_TYPES, (cap.key, pattern)
+
+
+def test_install_keys_are_in_the_system_allowlist():
+    for cap in capabilities.REGISTRY:
+        assert cap.install is None or cap.install in ALLOWLIST, (cap.key, cap.install)
+
+
+def test_always_on_tools_exist_in_the_catalog():
+    names = _catalog_tool_names()
+    assert capabilities.ALWAYS_ON_TOOLS <= names, capabilities.ALWAYS_ON_TOOLS - names
+
+
+def test_no_always_on_tool_is_claimed_by_a_capability():
+    # Naming an always-on tool exactly in a capability is a contradiction.
+    # A family prefix may cover one ("reminders." covers reminders.now):
+    # always-on wins there, and capability_for_tool must say so.
+    for cap in capabilities.REGISTRY:
+        for pattern in cap.tools:
+            assert pattern not in capabilities.ALWAYS_ON_TOOLS, (cap.key, pattern)
+    for name in capabilities.ALWAYS_ON_TOOLS:
+        assert capabilities.capability_for_tool(name) is None, name
+
+
 def test_every_builtin_tool_is_claimed_or_explicitly_always_on():
     for ctype in BUILTIN_CONNECTOR_TYPES:
         for spec in CONNECTOR_CATALOG[ctype]:
@@ -65,12 +97,28 @@ def test_template_is_not_registered():
     assert all(c.key != "example" for c in capabilities.REGISTRY)
 
 
+def test_no_capability_keeps_the_template_copy():
+    # A copied template with only the key changed would show the owner
+    # "Example capability" and tell the user "Example is turned off".
+    for cap in capabilities.REGISTRY:
+        assert cap.label != _template.CAPABILITY.label, cap.key
+        assert cap.when_denied != _template.CAPABILITY.when_denied, cap.key
+
+
 def test_capability_for_tool_matches_exact_and_prefix():
     assert capabilities.capability_for_tool("web.search").key == "web_browsing"
     assert capabilities.capability_for_tool("reminders.create").key == "reminders"
     assert capabilities.capability_for_tool("desktop.screenshot").key == "screen"
     assert capabilities.capability_for_tool("system.capabilities") is None
     assert capabilities.capability_for_tool("gmail.send_email") is None
+
+
+def test_reminders_now_is_the_clock_and_stays_on():
+    # The model reads the time from reminders.now for everything it does,
+    # not only reminders, so turning Reminders off must not take it away.
+    assert "reminders.now" in capabilities.ALWAYS_ON_TOOLS
+    assert capabilities.capability_for_tool("reminders.now") is None
+    assert capabilities.capability_for_tool("reminders.create").key == "reminders"
 
 
 def test_get_unknown_key_raises():

@@ -1,3 +1,7 @@
+"""Browse the web: search the public web and read pages as text."""
+
+from __future__ import annotations
+
 from services.capabilities.base import Capability
 
 CAPABILITY = Capability(

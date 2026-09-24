@@ -1,3 +1,9 @@
+"""Install optional software: lets the agent offer, and after approval run,
+an install from the fixed ALLOWLIST in services/tools/system.py (such as
+the hidden browser). Every install still goes through the approval card."""
+
+from __future__ import annotations
+
 from services.capabilities.base import Capability
 
 CAPABILITY = Capability(

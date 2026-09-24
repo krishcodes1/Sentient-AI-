@@ -8,13 +8,16 @@ from services.capabilities.base import Availability, Capability, ProbeResult, Re
 
 
 def availability(ctx: ReportContext) -> Availability:
-    """Can this environment do it at all? Read ctx only — no OS calls here."""
+    """Can this environment do it at all? Read ctx only — no OS calls here.
+    Need a fact ctx does not have? Add it to ReportContext (see README.md)."""
     return Availability(True)
 
 
 def probe(ctx: ReportContext) -> ProbeResult:
-    """OS permission check (native installs only). Return "denied" with a
-    fix_url and fix_steps when the user has to flip a switch themselves."""
+    """OS permission check (native installs only). May call the OS; the
+    answer is cached for 10 s. Return "denied" with a fix_url and fix_steps
+    when the user has to flip a switch themselves, "unknown" when the OS
+    cannot be asked. Raising reads as "denied"."""
     return ProbeResult("not_required")
 
 
@@ -24,14 +27,18 @@ def request_access() -> None:
 
 CAPABILITY = Capability(
     key="example",                      # snake_case, stable: used in storage and the API
-    label="Example capability",         # shown in the wizard and Settings
+    label="Example capability",         # shown in the wizard and Settings; must be your own
     description="One sentence: what the agent can do when this is on.",
-    tools=("example.read", "example."), # exact names or a family prefix ending in "."
+    tools=("example.read",),            # exact names, or a family prefix ending in "." ("example.")
     default_enabled=False,              # high-risk capabilities start off
     risk="medium",                      # low | medium | high — shown as a badge
     when_denied="Example is turned off. The owner can turn it on in Settings → Permissions.",
     availability=availability,
-    probe=probe,                        # omit when nothing to check
-    request_access=request_access,      # omit when nothing to request
+    # Wire these only when there is a real OS permission to check and a real
+    # prompt or settings pane to open. A probe that can answer "denied" plus
+    # a request_access that does nothing gives the owner a "Grant access"
+    # button that does nothing.
+    # probe=probe,
+    # request_access=request_access,
     install=None,                       # or an ALLOWLIST key from services/tools/system.py
 )
