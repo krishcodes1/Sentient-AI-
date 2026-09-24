@@ -11,7 +11,9 @@ Secrets travel in one direction only. Provider keys and the bot token
 arrive in request bodies and are stored encrypted; no response, log line
 or error message carries them back. Errors from the outside world are
 reduced to a status or an exception type, and a provider message that
-happens to quote the key is scrubbed before it is returned.
+happens to quote the key is scrubbed before it is returned. A secret the
+environment already provides cannot be replaced here (409): the
+environment always wins, so a stored copy would never be used.
 """
 
 from __future__ import annotations
@@ -30,14 +32,23 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.routes.auth import RegisterRequest, UserResponse, create_account
+from api.routes.auth import (
+    RegisterRequest,
+    UserResponse,
+    create_account,
+    lock_installation_row,
+)
 from core.config import PROVIDER_KEY_FIELDS, settings
 from core.database import get_db
 from core.security import create_access_token
+from core.validation import MODEL_ID_RULES, is_valid_model_id
+from models.audit import AuditStatus
 from models.user import User
 from services.agent import providers as llm_providers
 from services.agent.providers import ProviderError
+from services.audit import append_auth_event
 from services.auth import get_current_user
+from services.installation import UNREADABLE_KEYS_MESSAGE
 
 logger = structlog.get_logger(__name__)
 
@@ -59,10 +70,10 @@ SUGGESTED_MODELS: dict[str, list[str]] = {
 
 _PROVIDER_NAMES: tuple[str, ...] = (*PROVIDER_KEY_FIELDS, "ollama")
 
-# Same shape auth.update_settings accepts for a per-user model choice.
-_MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}")
 # BotFather tokens: numeric bot id, colon, 35-ish url-safe characters.
-_TELEGRAM_TOKEN_RE = re.compile(r"^\d+:[A-Za-z0-9_-]{30,}$")
+# [0-9] rather than \d, which also matches non-ASCII digits.
+_TELEGRAM_TOKEN_RE = re.compile(r"^[0-9]{1,20}:[A-Za-z0-9_-]{30,64}$")
+_ENV_MANAGED = "Provided by server configuration; remove it from .env to manage it here."
 _MAX_API_KEY_LENGTH = 512
 # Starlette renamed the 422 constant; the number is stable across versions.
 _UNPROCESSABLE = 422
@@ -153,14 +164,15 @@ def _validated_choice(body: ProviderChoice) -> tuple[str, str, Optional[str]]:
             detail=f"Unknown provider. Choose one of: {', '.join(sorted(_PROVIDER_NAMES))}",
         )
     model = body.model.strip()
-    if not _MODEL_RE.fullmatch(model):
-        raise HTTPException(
-            status_code=_UNPROCESSABLE,
-            detail="Model name may only contain letters, digits, and ./_:-",
-        )
+    # Same rule auth.update_settings applies to a per-user model choice.
+    if not is_valid_model_id(model):
+        raise HTTPException(status_code=_UNPROCESSABLE, detail=MODEL_ID_RULES)
     api_key = (body.api_key or "").strip() or None
     if api_key is not None and (
-        len(api_key) > _MAX_API_KEY_LENGTH or not api_key.isprintable() or " " in api_key
+        len(api_key) > _MAX_API_KEY_LENGTH
+        or not api_key.isascii()
+        or not api_key.isprintable()
+        or " " in api_key
     ):
         raise HTTPException(
             status_code=_UNPROCESSABLE,
@@ -177,6 +189,26 @@ def _validated_telegram_token(body: TelegramTokenBody) -> str:
             detail="That does not look like a bot token. BotFather gives one like 123456:ABC-DEF…",
         )
     return token
+
+
+def _env_provider_key(provider: str) -> bool:
+    """Whether the environment supplies this provider's key (it then wins
+    over anything stored, see services.installation)."""
+    attr = PROVIDER_KEY_FIELDS.get(provider)
+    return bool(attr and (getattr(settings, attr, "") or "").strip())
+
+
+def _env_telegram_token() -> bool:
+    return bool((getattr(settings, "TELEGRAM_BOT_TOKEN", "") or "").strip())
+
+
+def _refuse_env_managed(env_provides: bool, supplied: Optional[str]) -> None:
+    """A secret typed in while the environment provides one is refused:
+    storing it would do nothing (the environment wins) while the wizard
+    reported success, and testing it would vouch for a key the server will
+    never use."""
+    if env_provides and supplied:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=_ENV_MANAGED)
 
 
 def _scrub(message: str, secret: Optional[str]) -> str:
@@ -201,6 +233,17 @@ async def _try_provider(provider: str, model: str, api_key: Optional[str]) -> di
         )
     except (ValueError, ImportError) as exc:
         return {"ok": False, "error": _scrub(str(exc), api_key)}
+    except Exception as exc:
+        # A vendor client that refused to construct. Its message can quote
+        # the configuration it was handed, key included, so only the type
+        # is reported or logged.
+        logger.warning(
+            "setup_provider_init_failed", provider=provider, error_type=type(exc).__name__
+        )
+        return {
+            "ok": False,
+            "error": f"Could not initialise the {provider} provider ({type(exc).__name__}).",
+        }
     try:
         resp = await asyncio.wait_for(
             llm.complete([{"role": "user", "content": "Reply with the single word OK."}]),
@@ -257,17 +300,18 @@ async def _telegram_get_me(token: str) -> dict[str, Any]:
     return {"ok": False, "error": f"Telegram answered with HTTP {resp.status_code}."}
 
 
-async def _apply_telegram(request: Request, installation: Any) -> None:
-    """Start, restart or stop the poller to match what was just saved, so the
-    wizard never needs a server restart. The effective token is asked for
-    again rather than reusing the request's: an environment token still wins
-    over the stored one, and the manager must follow the same rule."""
+def _poller_running(request: Request) -> bool:
+    """Whether a Telegram poller runs now.
+
+    The routes never start or stop it themselves: saving or clearing the
+    token fires the installation's change listener (main.wire_services),
+    which re-applies the manager with the effective token (an environment
+    token still wins) and swallows a start failure after logging its type.
+    So by the time the save returns, this reflects the outcome, and a
+    poller that could not start shows as not running rather than as a 500
+    for a token that was in fact saved and audited."""
     manager = getattr(request.app.state, "telegram_manager", None)
-    if manager is None:
-        return
-    enabled = (await installation.capabilities()).get("telegram", True)
-    state = await manager.apply(await installation.telegram_token(), enabled)
-    logger.info("setup_telegram_applied", state=state)
+    return bool(manager is not None and manager.is_running)
 
 
 # ── routes ────────────────────────────────────────────────────────────────
@@ -284,6 +328,9 @@ async def setup_status(request: Request) -> dict[str, bool]:
         "has_owner": has_owner,
         "provider_configured": await installation.provider_configured(),
         "setup_completed": setup_completed,
+        # Stored secrets exist that the current ENCRYPTION_KEY cannot open;
+        # DELETE /setup/secrets is the way out.
+        "secrets_unreadable": await installation.secrets_unreadable(),
     }
 
 
@@ -298,6 +345,9 @@ async def create_owner(body: RegisterRequest, db: AsyncSession = Depends(get_db)
     account exists: after that, accounts come from /auth/register, which the
     owner controls."""
     async with _owner_lock:
+        # The asyncio lock covers this process; the row lock covers another
+        # worker or replica racing through the same step.
+        await lock_installation_row(db)
         existing = (await db.execute(select(User.id).limit(1))).scalar_one_or_none()
         if existing is not None:
             raise HTTPException(
@@ -309,6 +359,15 @@ async def create_owner(body: RegisterRequest, db: AsyncSession = Depends(get_db)
             email=body.email,
             password=body.password,
             name=body.name,
+            endpoint="/api/setup/owner",
+        )
+        # The owner leaves this step signed in, so the chain records a
+        # login exactly as /auth/login would.
+        await append_auth_event(
+            db,
+            user_id=user.id,
+            action="login",
+            status=AuditStatus.approved,
             endpoint="/api/setup/owner",
         )
         # Committed before the lock is released, so the next request in the
@@ -338,11 +397,10 @@ async def list_providers(
     stored = await installation.stored_provider_keys()
     providers = []
     for name in _PROVIDER_NAMES:
-        attr = PROVIDER_KEY_FIELDS.get(name)
         providers.append(
             {
                 "name": name,
-                "key_from_env": bool(attr and (getattr(settings, attr, "") or "").strip()),
+                "key_from_env": _env_provider_key(name),
                 "key_stored": name in stored,
                 "models": list(SUGGESTED_MODELS.get(name, [])),
             }
@@ -357,6 +415,7 @@ async def test_provider(
 ) -> dict[str, Any]:
     installation = _installation(request)
     provider, model, supplied = _validated_choice(body)
+    _refuse_env_managed(_env_provider_key(provider), supplied)
     _check_rate_limit("provider", admin.id)
     key = await _resolve_key(installation, provider, supplied)
     if not key and provider != "ollama":
@@ -372,6 +431,7 @@ async def save_provider(
     prompt would otherwise become the default every chat fails against."""
     installation = _installation(request)
     provider, model, supplied = _validated_choice(body)
+    _refuse_env_managed(_env_provider_key(provider), supplied)
     _check_rate_limit("provider", admin.id)
     key = await _resolve_key(installation, provider, supplied)
     if not key and provider != "ollama":
@@ -381,7 +441,18 @@ async def save_provider(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["error"])
     # Only a key typed into the request is stored; an environment key stays
     # in the environment and a previously stored one is kept as it is.
-    await installation.set_llm(provider, model, supplied, actor_id=admin.id)
+    try:
+        await installation.set_llm(provider, model, supplied, actor_id=admin.id)
+    except RuntimeError as exc:
+        # The stored keys no longer decrypt, and saving would silently
+        # replace all of them with this one; DELETE /setup/secrets is the
+        # owner's explicit way out. Any other RuntimeError is a bug.
+        if str(exc) != UNREADABLE_KEYS_MESSAGE:
+            raise
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=UNREADABLE_KEYS_MESSAGE)
+    except ValueError as exc:
+        # The service's own messages never quote the input.
+        raise HTTPException(status_code=_UNPROCESSABLE, detail=str(exc))
     return {"ok": True}
 
 
@@ -391,6 +462,7 @@ async def test_telegram(
 ) -> dict[str, Any]:
     _installation(request)
     token = _validated_telegram_token(body)
+    _refuse_env_managed(_env_telegram_token(), token)
     _check_rate_limit("telegram", admin.id)
     return await _telegram_get_me(token)
 
@@ -401,20 +473,38 @@ async def save_telegram(
 ) -> dict[str, Any]:
     installation = _installation(request)
     token = _validated_telegram_token(body)
+    _refuse_env_managed(_env_telegram_token(), token)
     _check_rate_limit("telegram", admin.id)
     result = await _telegram_get_me(token)
     if not result["ok"]:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["error"])
+    # Saving fires the change listener, which (re)starts the poller.
     await installation.set_telegram_token(token, actor_id=admin.id)
-    await _apply_telegram(request, installation)
-    return {"ok": True, "bot_username": result["bot_username"]}
+    return {
+        "ok": True,
+        "bot_username": result["bot_username"],
+        "running": _poller_running(request),
+    }
 
 
 @router.delete("/telegram", status_code=status.HTTP_204_NO_CONTENT)
 async def clear_telegram(request: Request, admin: User = Depends(_require_admin)) -> Response:
     installation = _installation(request)
+    # Clearing fires the change listener, which stops the poller.
     await installation.set_telegram_token(None, actor_id=admin.id)
-    await _apply_telegram(request, installation)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.delete("/secrets", status_code=status.HTTP_204_NO_CONTENT)
+async def clear_secrets(request: Request, admin: User = Depends(_require_admin)) -> Response:
+    """Discard every stored provider key and the stored bot token.
+
+    The documented way out after ENCRYPTION_KEY was rotated or lost: the
+    old blobs can no longer be read, and the service refuses to overwrite
+    them implicitly. Keys in the environment are untouched, and a cleared
+    bot token stops the poller through the change listener."""
+    installation = _installation(request)
+    await installation.clear_stored_secrets(actor_id=admin.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

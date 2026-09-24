@@ -365,6 +365,9 @@ async def test_name_change_still_needs_no_password(client: httpx.AsyncClient):
 async def test_account_deletion_requires_the_current_password(
     client: httpx.AsyncClient,
 ):
+    # The first account owns the install and may not delete itself (see
+    # test_admin_role), so the account under test is the second one.
+    await _register(client, "owner@example.com")
     headers = await _logged_in(client, "deleteme@example.com")
 
     bare = await client.request("DELETE", "/api/auth/account", headers=headers)
