@@ -20,6 +20,8 @@ function status(needsSetup: boolean, hasOwner: boolean): SetupStatus {
     provider_configured: !needsSetup,
     setup_completed: !needsSetup,
     secrets_unreadable: false,
+    registration_open: false,
+    registration_env_locked: false,
   };
 }
 

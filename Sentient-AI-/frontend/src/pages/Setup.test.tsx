@@ -2,9 +2,11 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { CapabilityStatus, SetupProviders } from "@/types";
+import type { CapabilityStatus, SetupProviders, SetupStatus, User } from "@/types";
 
 vi.mock("@/services/api", () => ({
+  getMe: vi.fn(),
+  logout: vi.fn(),
   getSetupStatus: vi.fn(),
   createOwner: vi.fn(),
   getSetupProviders: vi.fn(),
@@ -41,6 +43,7 @@ function cap(overrides: Partial<CapabilityStatus> & Pick<CapabilityStatus, "key"
     reason: "",
     can_request_access: false,
     install: null,
+    install_size_hint: null,
     when_denied: "",
     tools: [],
     ...overrides,
@@ -78,6 +81,33 @@ function providers(overrides: Partial<Record<"gemini" | "anthropic", boolean>> =
   };
 }
 
+/** GET /setup/status for an install part-way through setup. */
+function status(overrides: Partial<SetupStatus> = {}): SetupStatus {
+  return {
+    needs_setup: true,
+    has_owner: false,
+    provider_configured: false,
+    setup_completed: false,
+    secrets_unreadable: false,
+    registration_open: false,
+    registration_env_locked: false,
+    ...overrides,
+  };
+}
+
+function account(overrides: Partial<User> = {}): User {
+  return {
+    id: "u1",
+    email: "owner@example.com",
+    name: "Owner",
+    is_admin: true,
+    created_at: "2026-09-23T00:00:00Z",
+    default_permission_tier: "user_confirm",
+    rate_limit: 60,
+    ...overrides,
+  };
+}
+
 function renderSetup() {
   return render(
     <ThemeProvider>
@@ -101,6 +131,8 @@ function asSignedInOwner() {
     provider_configured: false,
     setup_completed: false,
     secrets_unreadable: false,
+    registration_open: false,
+    registration_env_locked: false,
   });
 }
 
@@ -143,6 +175,8 @@ describe("Setup wizard", () => {
       provider_configured: false,
       setup_completed: false,
       secrets_unreadable: false,
+      registration_open: false,
+      registration_env_locked: false,
     });
     vi.mocked(api.createOwner).mockResolvedValue({ access_token: "t", token_type: "bearer" });
     vi.mocked(api.getSetupProviders).mockResolvedValue(providers());
@@ -154,6 +188,7 @@ describe("Setup wizard", () => {
     );
     vi.mocked(api.completeSetup).mockResolvedValue(undefined);
     vi.mocked(api.clearStoredSecrets).mockResolvedValue(undefined);
+    vi.mocked(api.getMe).mockResolvedValue(account());
   });
 
   it("(a) creates the owner account first, then moves on to the AI provider", async () => {
@@ -196,6 +231,8 @@ describe("Setup wizard", () => {
       provider_configured: false,
       setup_completed: false,
       secrets_unreadable: false,
+      registration_open: false,
+      registration_env_locked: false,
     });
     renderSetup();
 
@@ -210,6 +247,8 @@ describe("Setup wizard", () => {
       provider_configured: true,
       setup_completed: true,
       secrets_unreadable: false,
+      registration_open: false,
+      registration_env_locked: false,
     });
     renderSetup();
 
@@ -430,6 +469,8 @@ describe("Setup wizard", () => {
         provider_configured: false,
         setup_completed: false,
         secrets_unreadable: true,
+        registration_open: false,
+        registration_env_locked: false,
       })
       .mockResolvedValueOnce({
         needs_setup: true,
@@ -437,6 +478,8 @@ describe("Setup wizard", () => {
         provider_configured: false,
         setup_completed: false,
         secrets_unreadable: false,
+        registration_open: false,
+        registration_env_locked: false,
       });
     const user = userEvent.setup();
     renderSetup();
@@ -461,6 +504,8 @@ describe("Setup wizard", () => {
       provider_configured: false,
       setup_completed: false,
       secrets_unreadable: true,
+      registration_open: false,
+      registration_env_locked: false,
     });
     vi.mocked(api.clearStoredSecrets).mockRejectedValue(new Error("The server refused."));
     const user = userEvent.setup();
@@ -472,5 +517,59 @@ describe("Setup wizard", () => {
     expect(await screen.findByText("The server refused.")).toBeInTheDocument();
     // The notice itself is still up — clearing did not silently succeed.
     expect(screen.getByRole("button", { name: "Clear stored keys" })).toBeInTheDocument();
+  });
+
+  it("(o) tells a signed-in non-owner that setup is in progress instead of showing steps that would 403", async () => {
+    localStorage.setItem("auth_token", "member-token");
+    vi.mocked(api.getSetupStatus).mockResolvedValue(status({ has_owner: true }));
+    vi.mocked(api.getMe).mockResolvedValue(account({ is_admin: false, email: "member@example.com" }));
+    const user = userEvent.setup();
+    renderSetup();
+
+    expect(await screen.findByRole("heading", { name: "Setup is in progress" })).toBeInTheDocument();
+    expect(
+      screen.getByText("The owner is still setting up this Crawler. Ask them to finish, then sign in again."),
+    ).toBeInTheDocument();
+    // None of the owner-only steps render, so none of their calls go out.
+    expect(screen.queryByRole("list", { name: "Setup progress" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "AI provider" })).not.toBeInTheDocument();
+    expect(api.getSetupProviders).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    expect(api.logout).toHaveBeenCalledTimes(1);
+  });
+
+  it("(p) still resumes at the provider step when the account lookup fails", async () => {
+    asSignedInOwner();
+    vi.mocked(api.getMe).mockRejectedValue(new Error("Network down"));
+    renderSetup();
+
+    await providerListLoaded();
+    expect(screen.queryByRole("heading", { name: "Setup is in progress" })).not.toBeInTheDocument();
+  });
+
+  it("(q) shows a provider save 409 verbatim and offers to clear keys the server cannot decrypt", async () => {
+    asSignedInOwner();
+    vi.mocked(api.getSetupProviders).mockResolvedValue(providers({ gemini: true }));
+    vi.mocked(api.saveProvider).mockRejectedValue(
+      Object.assign(new Error("Stored provider keys cannot be decrypted with the current ENCRYPTION_KEY."), {
+        status: 409,
+      }),
+    );
+    const user = userEvent.setup();
+    renderSetup();
+
+    await providerListLoaded();
+    expect(screen.queryByRole("button", { name: "Clear stored keys" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Test" }));
+    const save = screen.getByRole("button", { name: "Save & continue" });
+    await waitFor(() => expect(save).toBeEnabled());
+    await user.click(save);
+
+    expect(
+      await screen.findByText("Stored provider keys cannot be decrypted with the current ENCRYPTION_KEY."),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Clear stored keys" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "AI provider" })).toBeInTheDocument();
   });
 });

@@ -7,6 +7,7 @@ import {
   getSetupStatus,
   saveProvider,
   testProvider,
+  updateRegistration,
 } from "./api";
 
 /**
@@ -84,5 +85,29 @@ describe("setup api", () => {
       ["/api/setup/provider", "PUT", { provider: "gemini", model: "gemini-2.5-flash", api_key: "k" }],
       ["/api/setup/complete", "POST", { allow_registration: false }],
     ]);
+  });
+
+  it("updateRegistration PUTs the switch's new value", async () => {
+    localStorage.setItem("auth_token", "owner-token");
+    const fetchFn = mockFetch(() => jsonResponse(200, { ok: true }));
+
+    await updateRegistration(true);
+
+    const [url, init] = fetchFn.mock.calls[0];
+    expect(url).toBe("/api/setup/registration");
+    expect(init?.method).toBe("PUT");
+    expect(JSON.parse(String(init?.body))).toEqual({ allow_registration: true });
+    expect((init?.headers as Record<string, string>).Authorization).toBe("Bearer owner-token");
+  });
+
+  it("updateRegistration surfaces the env-lock 409 verbatim", async () => {
+    mockFetch(() =>
+      jsonResponse(409, { detail: "ALLOW_REGISTRATION=false in .env keeps registration closed." }),
+    );
+
+    await expect(updateRegistration(true)).rejects.toMatchObject({
+      status: 409,
+      message: "ALLOW_REGISTRATION=false in .env keeps registration closed.",
+    });
   });
 });

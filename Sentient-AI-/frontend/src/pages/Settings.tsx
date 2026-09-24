@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import CapabilityList, { CapabilityListError } from "@/components/CapabilityList";
+import ServerSettings from "@/components/ServerSettings";
 import type { CapabilityStatus, User } from "@/types";
 import {
   ApiError,
@@ -747,6 +748,10 @@ export default function Settings() {
           />
         )}
       </section>
+
+      {/* Server (owner only): the install-wide AI provider and sign-ups,
+          as set up by the wizard. Not rendered at all for anyone else. */}
+      {me?.is_admin && <ServerSettings />}
 
       {/* Telegram approvals */}
       <section className="rounded-[14px] p-6" style={panelStyle}>

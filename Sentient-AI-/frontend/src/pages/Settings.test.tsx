@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { User } from "@/types";
+import type { SetupProviders, SetupStatus, User } from "@/types";
 
 vi.mock("@/services/api", () => {
   class ApiError extends Error {
@@ -31,21 +31,59 @@ vi.mock("@/services/api", () => {
     updateCapabilities: vi.fn(),
     updateProfile: vi.fn(),
     updateSettings: vi.fn(),
+    // Owner-only Server section. Defaults describe a finished install on
+    // gemini with sign-ups closed; tests override per case.
+    getSetupStatus: vi.fn(async () => ({
+      needs_setup: false,
+      has_owner: true,
+      provider_configured: true,
+      setup_completed: true,
+      secrets_unreadable: false,
+      registration_open: false,
+      registration_env_locked: false,
+    })),
+    getSetupProviders: vi.fn(async () => ({
+      providers: [
+        { name: "anthropic", key_from_env: false, key_stored: false, models: ["claude-sonnet-5"] },
+        { name: "gemini", key_from_env: false, key_stored: true, models: ["gemini-3.5-flash-lite"] },
+      ],
+      current: { provider: "gemini", model: "gemini-3.5-flash-lite" },
+    })),
+    testProvider: vi.fn(),
+    saveProvider: vi.fn(),
+    clearStoredSecrets: vi.fn(),
+    updateRegistration: vi.fn(),
   };
 });
 
 import Settings from "@/pages/Settings";
 import {
   ApiError,
+  clearStoredSecrets,
   deleteAccount,
   getMe,
+  getSetupProviders,
+  getSetupStatus,
   getTelegramStatus,
   logout,
   removeTelegramToken,
+  saveProvider,
   saveTelegram,
+  testProvider,
   testTelegram,
+  updateRegistration,
   updateSettings,
 } from "@/services/api";
+
+const SERVER_STATUS: SetupStatus = {
+  needs_setup: false,
+  has_owner: true,
+  provider_configured: true,
+  setup_completed: true,
+  secrets_unreadable: false,
+  registration_open: false,
+  registration_env_locked: false,
+};
 
 function user(overrides: Partial<User> = {}): User {
   return {
@@ -262,5 +300,161 @@ describe("Settings Telegram bot token", () => {
 
     expect(await screen.findByText("Bot token removed.")).toBeInTheDocument();
     expect(removeTelegramToken).toHaveBeenCalled();
+  });
+});
+
+describe("Settings Server section", () => {
+  afterEach(() => {
+    vi.mocked(getMe).mockReset();
+  });
+
+  /** The owner-only section; a <section> with a heading is a named region. */
+  const serverSection = async () => within(await screen.findByRole("region", { name: "Server" }));
+
+  it("shows the owner this Crawler's current provider and who can create accounts", async () => {
+    vi.mocked(getMe).mockResolvedValue(user({ is_admin: true }));
+    render(<Settings />);
+
+    const server = await serverSection();
+    expect(await server.findByText(/current default/i)).toHaveTextContent(
+      "gemini · gemini-3.5-flash-lite",
+    );
+    const signups = await server.findByRole("switch", { name: /allow other people to create accounts/i });
+    expect(signups).toHaveAttribute("aria-checked", "false");
+    expect(signups).toBeEnabled();
+  });
+
+  it("never shows the section, or asks for its data, for an account that is not the owner", async () => {
+    vi.mocked(getMe).mockResolvedValue(user({ is_admin: false }));
+    render(<Settings />);
+
+    // Wait for the account itself, so the check below is not just racing it.
+    await waitFor(() => expect(screen.getByLabelText("Name")).toHaveValue("Me"));
+    expect(screen.queryByRole("region", { name: "Server" })).not.toBeInTheDocument();
+    expect(screen.queryByText("AI provider for this Crawler")).not.toBeInTheDocument();
+    expect(getSetupStatus).not.toHaveBeenCalled();
+    expect(getSetupProviders).not.toHaveBeenCalled();
+  });
+
+  it("opens sign-ups through updateRegistration", async () => {
+    vi.mocked(getMe).mockResolvedValue(user({ is_admin: true }));
+    vi.mocked(updateRegistration).mockResolvedValue(undefined);
+    render(<Settings />);
+
+    const server = await serverSection();
+    const signups = await server.findByRole("switch", { name: /allow other people to create accounts/i });
+    fireEvent.click(signups);
+
+    await waitFor(() => expect(updateRegistration).toHaveBeenCalledWith(true));
+    await waitFor(() => expect(signups).toHaveAttribute("aria-checked", "true"));
+  });
+
+  it("renders the switch disabled when ALLOW_REGISTRATION=false in .env locks it", async () => {
+    vi.mocked(getMe).mockResolvedValue(user({ is_admin: true }));
+    vi.mocked(getSetupStatus).mockResolvedValue({ ...SERVER_STATUS, registration_env_locked: true });
+    render(<Settings />);
+
+    const server = await serverSection();
+    const signups = await server.findByRole("switch", { name: /allow other people to create accounts/i });
+    expect(signups).toBeDisabled();
+    expect(signups).toHaveAttribute("aria-checked", "false");
+    expect(server.getByText("Locked closed by ALLOW_REGISTRATION=false in .env")).toBeInTheDocument();
+    fireEvent.click(signups);
+    expect(updateRegistration).not.toHaveBeenCalled();
+  });
+
+  it("shows the server's lock message verbatim and locks the switch when the PUT is refused", async () => {
+    vi.mocked(getMe).mockResolvedValue(user({ is_admin: true }));
+    vi.mocked(updateRegistration).mockRejectedValue(
+      new ApiError("ALLOW_REGISTRATION=false in .env keeps registration closed.", 409),
+    );
+    render(<Settings />);
+
+    const server = await serverSection();
+    const signups = await server.findByRole("switch", { name: /allow other people to create accounts/i });
+    fireEvent.click(signups);
+
+    expect(
+      await server.findByText("ALLOW_REGISTRATION=false in .env keeps registration closed."),
+    ).toBeInTheDocument();
+    expect(signups).toHaveAttribute("aria-checked", "false");
+    expect(signups).toBeDisabled();
+  });
+
+  it("reuses the wizard's Test-then-Save flow to change this Crawler's provider", async () => {
+    vi.mocked(getMe).mockResolvedValue(user({ is_admin: true }));
+    vi.mocked(testProvider).mockResolvedValue({ ok: true, reply: "OK" });
+    vi.mocked(saveProvider).mockResolvedValue(undefined);
+    render(<Settings />);
+
+    const server = await serverSection();
+    fireEvent.click(await server.findByRole("radio", { name: /anthropic/i }));
+    const save = server.getByRole("button", { name: "Save provider" });
+    fireEvent.change(server.getByLabelText("API key"), { target: { value: "sk-ant-test" } });
+    expect(save).toBeDisabled();
+
+    fireEvent.click(server.getByRole("button", { name: "Test provider" }));
+    await waitFor(() => expect(save).toBeEnabled());
+    expect(testProvider).toHaveBeenCalledWith({
+      provider: "anthropic",
+      model: "claude-sonnet-5",
+      api_key: "sk-ant-test",
+    });
+
+    fireEvent.click(save);
+    await waitFor(() =>
+      expect(saveProvider).toHaveBeenCalledWith({
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        api_key: "sk-ant-test",
+      }),
+    );
+    expect(await server.findByText(/current default/i)).toHaveTextContent("anthropic · claude-sonnet-5");
+    // The key went to the server; nothing of it stays in the form.
+    expect(server.getByLabelText("API key")).toHaveValue("");
+  });
+
+  it("hides the key field for an .env key and shows a save 409 verbatim", async () => {
+    vi.mocked(getMe).mockResolvedValue(user({ is_admin: true }));
+    vi.mocked(getSetupProviders).mockResolvedValue({
+      providers: [{ name: "gemini", key_from_env: true, key_stored: false, models: ["gemini-3.5-flash-lite"] }],
+      current: { provider: "gemini", model: "gemini-3.5-flash-lite" },
+    } satisfies SetupProviders);
+    vi.mocked(testProvider).mockResolvedValue({ ok: true, reply: "OK" });
+    vi.mocked(saveProvider).mockRejectedValue(
+      new ApiError("The gemini key comes from the server's .env and cannot be changed here.", 409),
+    );
+    render(<Settings />);
+
+    const server = await serverSection();
+    expect(await server.findByText("Provided by server configuration")).toBeInTheDocument();
+    expect(server.queryByLabelText("API key")).not.toBeInTheDocument();
+
+    fireEvent.click(server.getByRole("button", { name: "Test provider" }));
+    const save = server.getByRole("button", { name: "Save provider" });
+    await waitFor(() => expect(save).toBeEnabled());
+    fireEvent.click(save);
+
+    expect(
+      await server.findByText("The gemini key comes from the server's .env and cannot be changed here."),
+    ).toBeInTheDocument();
+  });
+
+  it("offers to clear stored keys the server can no longer decrypt, then re-reads the status", async () => {
+    vi.mocked(getMe).mockResolvedValue(user({ is_admin: true }));
+    vi.mocked(getSetupStatus)
+      .mockResolvedValueOnce({ ...SERVER_STATUS, secrets_unreadable: true })
+      .mockResolvedValueOnce(SERVER_STATUS);
+    vi.mocked(clearStoredSecrets).mockResolvedValue(undefined);
+    render(<Settings />);
+
+    const server = await serverSection();
+    fireEvent.click(await server.findByRole("button", { name: "Clear stored keys" }));
+
+    await waitFor(() => expect(clearStoredSecrets).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(getSetupStatus).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(server.queryByRole("button", { name: "Clear stored keys" })).not.toBeInTheDocument(),
+    );
   });
 });

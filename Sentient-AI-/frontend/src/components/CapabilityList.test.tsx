@@ -27,6 +27,17 @@ describe("CapabilityList", () => {
     expect(screen.getAllByRole("button", { name: /grant access|install/i })).toHaveLength(2);
   });
 
+  it("puts the download size on the Install button when the server gives one", () => {
+    render(<CapabilityList items={CAPS} editable onToggle={vi.fn()} onRequestAccess={vi.fn()} onInstall={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "Install (~150-300 MB download)" })).toBeInTheDocument();
+  });
+
+  it("labels the button plain Install when there is no size hint", () => {
+    const items = CAPS.map((c) => (c.install ? { ...c, install_size_hint: null } : c));
+    render(<CapabilityList items={items} editable onToggle={vi.fn()} onRequestAccess={vi.fn()} onInstall={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "Install" })).toBeInTheDocument();
+  });
+
   it("is read-only for non-owners", () => {
     render(<CapabilityList items={CAPS} editable={false} onToggle={vi.fn()} onRequestAccess={vi.fn()} onInstall={vi.fn()} />);
     for (const sw of screen.getAllByRole("switch")) expect(sw).toBeDisabled();
