@@ -25,6 +25,7 @@ import type {
   ToolCall,
   BlockedAction,
   UsageSummary,
+  CapabilityStatus,
 } from "@/types";
 
 const API_BASE = "/api";
@@ -629,6 +630,40 @@ export async function updateSettings(data: {
 
 export async function deleteAccount(): Promise<void> {
   return request<void>("/auth/account", { method: "DELETE" });
+}
+
+// Capabilities / permissions
+export async function getCapabilities(): Promise<CapabilityStatus[]> {
+  const data = await request<{ capabilities: CapabilityStatus[] }>(
+    "/capabilities",
+  );
+  return data.capabilities;
+}
+
+export async function updateCapabilities(
+  patch: Record<string, boolean>,
+): Promise<CapabilityStatus[]> {
+  const data = await request<{ capabilities: CapabilityStatus[] }>(
+    "/capabilities",
+    { method: "PUT", body: JSON.stringify({ capabilities: patch }) },
+  );
+  return data.capabilities;
+}
+
+export async function requestCapabilityAccess(
+  key: string,
+): Promise<CapabilityStatus> {
+  const data = await request<{ ok: boolean; status: CapabilityStatus }>(
+    `/capabilities/${key}/request-access`,
+    { method: "POST" },
+  );
+  return data.status;
+}
+
+export async function installCapability(
+  key: string,
+): Promise<{ ok: boolean; error?: string }> {
+  return request(`/capabilities/${key}/install`, { method: "POST" });
 }
 
 /**
