@@ -2,6 +2,20 @@
 
 [![CI](https://github.com/krishcodes1/Sentient-AI-/actions/workflows/ci.yml/badge.svg)](https://github.com/krishcodes1/Sentient-AI-/actions/workflows/ci.yml)
 
+## Easiest install (Mac and Windows)
+
+1. Download the repo (**Code › Download ZIP**, then unzip it) or `git clone` it.
+2. In this `Sentient-AI-` folder, double-click **`Install Crawler AI.command`**
+   on a Mac or **`Install Crawler AI.bat`** on Windows.
+3. A page opens in your browser. Click through **Check → Keys → Build → Open**.
+
+The installer checks Docker Desktop, writes `backend/.env` with fresh
+security keys, runs `docker compose up --build -d` and opens the app, whose
+setup wizard does the rest. Seeing a first-run security warning
+(Gatekeeper or SmartScreen)? [installer/README.md](installer/README.md) says
+what to click and how the installer works. The Docker and manual setups
+below still work as before.
+
 **Secure-by-Design Agentic AI Platform**
 
 A self-hosted AI assistant platform with security, user control, and auditability built into every layer. Crawler AI integrates with Canvas LMS, Google Workspace, Robinhood Crypto, and more — with fine-grained permission scoping, multi-layer prompt injection defense, and tamper-evident audit logging.
