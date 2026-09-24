@@ -137,8 +137,9 @@ class RateLimitMiddleware:
     """
 
     # Credential endpoints get a separate, much smaller bucket so login
-    # brute-forcing is throttled long before the general API limit.
-    AUTH_PATHS = ("/api/auth/login", "/api/auth/register")
+    # brute-forcing is throttled long before the general API limit. The
+    # wizard's owner step creates an account too, so it shares the bucket.
+    AUTH_PATHS = ("/api/auth/login", "/api/auth/register", "/api/setup/owner")
 
     # After a Redis failure, wait this long before trying to reconnect.
     REDIS_RETRY_SECONDS = 30.0
