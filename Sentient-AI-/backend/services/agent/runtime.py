@@ -282,32 +282,56 @@ def _stored_to_pending(action: StoredAction) -> PendingApproval:
     )
 
 
-# Policy recorded when a tool is refused because the owner has not got its
-# capability (services/capabilities) on. The permission adapter blocks with
-# it before execution; the executor's dispatch gate is the backstop, and a
-# refusal from there is recorded under the same name (_capability_refusal).
+# Policies recorded when a tool is refused by its capability
+# (services/capabilities). The permission adapter blocks with them before
+# execution; the executor's dispatch gate is the backstop, and a refusal
+# from there is recorded under the same names (_capability_refusal).
+#
+# The owner switched the capability off.
 CAPABILITY_OFF_POLICY = "capability_off"
+# Switched on, but unusable here (not installed, no OS permission).
+CAPABILITY_BLOCKED_POLICY = "capability_blocked"
+# The owner's settings could not be read, so the gate refused (fail closed).
+CAPABILITY_GATE_ERROR_POLICY = "capability_gate_error"
+# What the model, the user and the audit row see for that last case. Fixed
+# text: the gate's exception can quote a connection string or a path.
+CAPABILITY_GATE_ERROR_REASON = (
+    "Could not read the owner's permission settings; refusing the tool."
+)
+
+# The executor's refusal "state" -> the policy it is recorded under.
+_CAPABILITY_POLICY_BY_STATE = {
+    "off": CAPABILITY_OFF_POLICY,
+    "blocked": CAPABILITY_BLOCKED_POLICY,
+    "error": CAPABILITY_GATE_ERROR_POLICY,
+}
 
 
-def _capability_refusal(tool_name: str, result: Any) -> Optional[str]:
-    """The refusal text when *result* is the executor's capability gate
+def _capability_refusal(tool_name: str, result: Any) -> Optional[tuple[str, str]]:
+    """``(reason, policy)`` when *result* is the executor's capability gate
     turning *tool_name* away, else None.
 
-    Honoured only when the key in the result is the capability that
-    actually gates *tool_name*: a third-party tool returning the same
-    shape must not get its output filed as a capability refusal.
+    The tool name is resolved first and its capability looked up by the
+    canonical ``type.action``, as every gate does. The refusal is honoured
+    only when the key in the result is that capability: a third-party tool
+    returning the same shape must not get its output filed as a capability
+    refusal.
     """
     if not isinstance(result, dict) or result.get("ok") is not False:
         return None
     key = result.get("capability")
     if not isinstance(key, str) or not key:
         return None
-    from services import capabilities as capability_registry
+    # Deferred: tool_registry imports this module.
+    from services.agent.tool_registry import capability_of_tool
 
-    cap = capability_registry.capability_for_tool(tool_name)
+    cap = capability_of_tool(tool_name)
     if cap is None or cap.key != key:
         return None
-    return str(result.get("error") or cap.when_denied)
+    policy = _CAPABILITY_POLICY_BY_STATE.get(result.get("state"), CAPABILITY_OFF_POLICY)
+    if policy == CAPABILITY_GATE_ERROR_POLICY:
+        return CAPABILITY_GATE_ERROR_REASON, policy
+    return str(result.get("error") or cap.when_denied), policy
 
 
 # The event loop holds only a WEAK reference to a running task, so a task
@@ -1337,17 +1361,18 @@ class AgentRuntime:
                 if refusal is not None:
                     # Backstop: the permission adapter blocks these before
                     # the intent row; one that got past it (the switch
-                    # flipped mid-turn) is recorded and shown the same way.
-                    # Nothing ran, so the refusal stands whether or not the
-                    # audit write succeeds.
+                    # flipped mid-turn, the gate failed at dispatch) is
+                    # recorded and shown the same way. Nothing ran, so the
+                    # refusal stands whether or not the audit write succeeds.
+                    refusal_reason, refusal_policy = refusal
                     blocked_actions.append(
                         BlockedAction(
                             tool_name=tc.name,
-                            reason=refusal,
-                            policy=CAPABILITY_OFF_POLICY,
+                            reason=refusal_reason,
+                            policy=refusal_policy,
                         )
                     )
-                    await emit({"type": "blocked", "data": {"tool": tc.name, "reason": refusal, "policy": CAPABILITY_OFF_POLICY}})
+                    await emit({"type": "blocked", "data": {"tool": tc.name, "reason": refusal_reason, "policy": refusal_policy}})
                     try:
                         await self._audit.log(
                             {
@@ -1355,8 +1380,8 @@ class AgentRuntime:
                                 "user_id": user_id,
                                 "tool": tc.name,
                                 "arguments": tc.arguments,
-                                "reason": refusal,
-                                "policy": CAPABILITY_OFF_POLICY,
+                                "reason": refusal_reason,
+                                "policy": refusal_policy,
                                 "timestamp": datetime.now(timezone.utc).isoformat(),
                             }
                         )
@@ -1816,17 +1841,19 @@ class AgentRuntime:
             result = {"error": str(exc)}
 
         # The owner may have switched the tool's capability off while the
-        # card waited; the executor then refused it, and the audit row must
+        # card waited (or it became unusable, or the gate could not read the
+        # switches); the executor then refused it, and the audit row must
         # say so rather than record an approved action as executed.
         refusal = _capability_refusal(action.tool_name, result)
         if refusal is not None:
+            refusal_reason, refusal_policy = refusal
             entry: dict[str, Any] = {
                 "event": "tool_blocked",
                 "user_id": user_id,
                 "tool": action.tool_name,
                 "arguments": action.arguments,
-                "reason": refusal,
-                "policy": CAPABILITY_OFF_POLICY,
+                "reason": refusal_reason,
+                "policy": refusal_policy,
                 "action_id": action_id,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }

@@ -374,6 +374,31 @@ async def test_install_runs_allowlisted_install_and_audits(
 
 
 @pytest.mark.asyncio
+async def test_a_successful_install_shows_up_in_the_next_report(client, owner, monkeypatch):
+    """The report is cached for a few seconds; a browser the owner just
+    installed must not read as missing until that runs out."""
+    import services.tools.system as system_module
+
+    headers, _ = owner
+    installed = {"value": False}
+    monkeypatch.setattr(system_module, "browser_installed", lambda: installed["value"])
+
+    before = _by_key((await client.get("/api/capabilities", headers=headers)).json())
+    assert before["site_screenshots"]["effective"] == "blocked"
+
+    async def fake_install(self, name: str) -> dict[str, Any]:
+        installed["value"] = True
+        return {"ok": True, "name": name, "installed_now": True}
+
+    monkeypatch.setattr(SystemToolkit, "install_capability", fake_install)
+    resp = await client.post("/api/capabilities/site_screenshots/install", headers=headers)
+    assert resp.status_code == 200, resp.text
+
+    after = _by_key((await client.get("/api/capabilities", headers=headers)).json())
+    assert after["site_screenshots"]["effective"] == "on"
+
+
+@pytest.mark.asyncio
 async def test_install_failure_is_passed_through_and_audited(
     client, owner, session_factory, monkeypatch
 ):
