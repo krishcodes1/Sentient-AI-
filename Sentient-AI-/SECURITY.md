@@ -125,12 +125,18 @@ tiers and scopes above.
 - Only the owner (`users.is_admin`) can change them (`PUT /api/capabilities`);
   every other user gets a read-only view.
 - Enforced at three independent points: **offer** (`build_tools` drops every
-  tool whose capability is off), **dispatch** (the executor re-checks
-  `enabled_keys()` and refuses an off capability even if somehow requested,
-  audited as `tool_blocked` / `reason=capability_off`), and the **prompt**
-  (a `<permissions>` block, derived from the same report, tells the model
-  which switches are on/off/blocked so it explains rather than guesses or
-  retries).
+  tool whose capability is not effectively on), **dispatch** (the permission
+  adapter, and the executor as a backstop, re-read the owner's report by key
+  — `InstallationService.capability_statuses()` — on every call and refuse
+  anything short of `on`, even if somehow requested), and the **prompt** (a
+  `<permissions>` block, derived from the same report, tells the model which
+  switches are on/off/blocked so it explains rather than guesses or
+  retries). A dispatch refusal is audited as `tool_blocked` with one of
+  three policies: `capability_off` (the owner switched it off),
+  `capability_blocked` (switched on but unusable here — not installed, or
+  no OS permission), or `capability_gate_error` (the owner's settings could
+  not be read, so the tool is refused — fail closed; the recorded reason is
+  fixed text, never the underlying error).
 - `screen` (screen capture) is off by default, high risk, and additionally
   gated on the OS having granted screen-recording to the backend process;
   it reports "unavailable" rather than attempting capture inside a
@@ -142,8 +148,12 @@ tiers and scopes above.
   (a provider key, `TELEGRAM_BOT_TOKEN`) always overrides whatever the
   wizard has stored, so a compromised database cannot be used to redirect
   traffic to an attacker-controlled key when the environment pins one.
-- Every capability, provider, and Telegram change is audited with the
-  acting user.
+- Every capability, provider, Telegram and registration change is audited
+  with the acting user.
+- Open registration is the owner's switch (setup wizard, then
+  `PUT /api/setup/registration` from Settings), closed by default. An
+  explicit `ALLOW_REGISTRATION=false` in the environment locks it closed
+  whatever the switch says, and the switch then cannot be changed (409).
 
 ## Approval flow
 

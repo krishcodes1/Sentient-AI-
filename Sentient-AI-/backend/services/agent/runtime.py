@@ -17,7 +17,7 @@ from typing import Any, Callable, Optional, Protocol
 
 import structlog
 
-from core.config import Settings
+from core.config import PROVIDER_KEY_FIELDS, Settings
 from services.agent.approvals import (
     ApprovalStore,
     InMemoryApprovalStore,
@@ -35,9 +35,6 @@ from services.agent.providers import (
     content_text,
     create_provider,
 )
-
-# Map provider names to their API key config attribute
-from core.config import PROVIDER_KEY_FIELDS as _PROVIDER_KEY_MAP
 
 logger = structlog.get_logger(__name__)
 
@@ -72,7 +69,7 @@ class _ConfigSettingsSource:
     async def llm_api_key(self, provider: str) -> Optional[str]:
         if provider == "ollama":
             return ""
-        attr = _PROVIDER_KEY_MAP.get(provider)
+        attr = PROVIDER_KEY_FIELDS.get(provider)
         value = (getattr(self._config, attr, None) or "").strip() if attr else ""
         return value or None
 
@@ -519,6 +516,8 @@ class AgentRuntime:
         self._source: ProviderSettingsSource = (
             settings_source or _ConfigSettingsSource(config)
         )
+        # Shared by every turn; each turn passes the model it resolved to
+        # (see _run_turn), so config.LLM_MODEL is only the fallback.
         self._context_manager = ContextManager(model=config.LLM_MODEL)
         self._permissions = permission_engine or PermissionEngine()
         # Default to the REAL multi-layer injection scanner. Callers may
@@ -1024,6 +1023,7 @@ class AgentRuntime:
             response = await self._run_turn(
                 provider,
                 turn_provider,
+                turn_model,
                 messages,
                 tools,
                 user_id,
@@ -1037,6 +1037,7 @@ class AgentRuntime:
         self,
         provider: LLMProvider,
         turn_provider: str,
+        turn_model: str,
         messages: list[dict[str, Any]],
         tools: list[Tool],
         user_id: str,
@@ -1106,6 +1107,9 @@ class AgentRuntime:
                 system_prompt=SECURITY_SYSTEM_PROMPT,
                 conversation_id=conversation_id or "",
                 active_connectors=active_connectors,
+                # The window of the model this turn runs on, not the
+                # install default's: a user's own pick can differ 15x.
+                model=turn_model,
             )
         except Exception as exc:
             logger.warning("context_prepare_failed", error=str(exc))

@@ -28,17 +28,18 @@ from typing import Any, Optional
 import httpx
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api.routes._deps import installation_service, require_admin
 from api.routes.auth import (
     RegisterRequest,
     UserResponse,
     create_account,
     lock_installation_row,
 )
-from core.config import PROVIDER_KEY_FIELDS, settings
+from core.config import LLM_PROVIDERS, PROVIDER_KEY_FIELDS, settings
 from core.database import get_db
 from core.security import create_access_token
 from core.validation import MODEL_ID_RULES, is_valid_model_id
@@ -47,8 +48,7 @@ from models.user import User
 from services.agent import providers as llm_providers
 from services.agent.providers import ProviderError
 from services.audit import append_auth_event
-from services.auth import get_current_user
-from services.installation import UNREADABLE_KEYS_MESSAGE
+from services.installation import UNREADABLE_KEYS_MESSAGE, RegistrationLocked
 
 logger = structlog.get_logger(__name__)
 
@@ -67,8 +67,6 @@ SUGGESTED_MODELS: dict[str, list[str]] = {
     "mistral": ["mistral-large-latest"],
     "ollama": ["llama3.2"],
 }
-
-_PROVIDER_NAMES: tuple[str, ...] = (*PROVIDER_KEY_FIELDS, "ollama")
 
 # BotFather tokens: numeric bot id, colon, 35-ish url-safe characters.
 # [0-9] rather than \d, which also matches non-ASCII digits.
@@ -113,28 +111,6 @@ def _check_rate_limit(kind: str, user_id: Any) -> None:
     bucket.append(now)
 
 
-# ── dependencies ──────────────────────────────────────────────────────────
-
-
-def _installation(request: Request) -> Any:
-    service = getattr(request.app.state, "installation", None)
-    if service is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Setup is not available while the server is starting. Try again shortly.",
-        )
-    return service
-
-
-async def _require_admin(current_user: User = Depends(get_current_user)) -> User:
-    if not current_user.is_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only the owner of this install can change its setup.",
-        )
-    return current_user
-
-
 # ── request bodies ────────────────────────────────────────────────────────
 #
 # Secret fields are plain `str` with no declared constraints on purpose: a
@@ -156,12 +132,17 @@ class CompleteBody(BaseModel):
     allow_registration: bool = False
 
 
+class RegistrationBody(BaseModel):
+    # Strict: opening sign-up must be a real boolean, not "yes" or 1.
+    allow_registration: StrictBool
+
+
 def _validated_choice(body: ProviderChoice) -> tuple[str, str, Optional[str]]:
     provider = body.provider.strip().lower()
-    if provider not in _PROVIDER_NAMES:
+    if provider not in LLM_PROVIDERS:
         raise HTTPException(
             status_code=_UNPROCESSABLE,
-            detail=f"Unknown provider. Choose one of: {', '.join(sorted(_PROVIDER_NAMES))}",
+            detail=f"Unknown provider. Choose one of: {', '.join(sorted(LLM_PROVIDERS))}",
         )
     model = body.model.strip()
     # Same rule auth.update_settings applies to a per-user model choice.
@@ -320,17 +301,20 @@ def _poller_running(request: Request) -> bool:
 @router.get("/status")
 async def setup_status(request: Request) -> dict[str, bool]:
     """Public and cheap: the app asks this before anyone has signed in."""
-    installation = _installation(request)
-    has_owner = await installation.has_users()
-    setup_completed = await installation.setup_completed()
+    installation = installation_service(request)
     return {
-        "needs_setup": not has_owner or not setup_completed,
-        "has_owner": has_owner,
+        "needs_setup": await installation.needs_setup(),
+        "has_owner": await installation.has_users(),
         "provider_configured": await installation.provider_configured(),
-        "setup_completed": setup_completed,
+        "setup_completed": await installation.setup_completed(),
         # Stored secrets exist that the current ENCRYPTION_KEY cannot open;
         # DELETE /setup/secrets is the way out.
         "secrets_unreadable": await installation.secrets_unreadable(),
+        # Whether /auth/register accepts a new account right now, and
+        # whether ALLOW_REGISTRATION=false locks it closed (the switch in
+        # Settings is then read-only).
+        "registration_open": await installation.registration_allowed(),
+        "registration_env_locked": installation.registration_env_locked(),
     }
 
 
@@ -391,12 +375,12 @@ async def create_owner(body: RegisterRequest, db: AsyncSession = Depends(get_db)
 
 @router.get("/providers")
 async def list_providers(
-    request: Request, _admin: User = Depends(_require_admin)
+    request: Request, _admin: User = Depends(require_admin)
 ) -> dict[str, Any]:
-    installation = _installation(request)
+    installation = installation_service(request)
     stored = await installation.stored_provider_keys()
     providers = []
-    for name in _PROVIDER_NAMES:
+    for name in LLM_PROVIDERS:
         providers.append(
             {
                 "name": name,
@@ -411,9 +395,9 @@ async def list_providers(
 
 @router.post("/provider/test")
 async def test_provider(
-    body: ProviderChoice, request: Request, admin: User = Depends(_require_admin)
+    body: ProviderChoice, request: Request, admin: User = Depends(require_admin)
 ) -> dict[str, Any]:
-    installation = _installation(request)
+    installation = installation_service(request)
     provider, model, supplied = _validated_choice(body)
     _refuse_env_managed(_env_provider_key(provider), supplied)
     _check_rate_limit("provider", admin.id)
@@ -425,11 +409,11 @@ async def test_provider(
 
 @router.put("/provider")
 async def save_provider(
-    body: ProviderChoice, request: Request, admin: User = Depends(_require_admin)
+    body: ProviderChoice, request: Request, admin: User = Depends(require_admin)
 ) -> dict[str, bool]:
     """Test first, store only on success: a key that cannot answer one
     prompt would otherwise become the default every chat fails against."""
-    installation = _installation(request)
+    installation = installation_service(request)
     provider, model, supplied = _validated_choice(body)
     _refuse_env_managed(_env_provider_key(provider), supplied)
     _check_rate_limit("provider", admin.id)
@@ -458,9 +442,9 @@ async def save_provider(
 
 @router.post("/telegram/test")
 async def test_telegram(
-    body: TelegramTokenBody, request: Request, admin: User = Depends(_require_admin)
+    body: TelegramTokenBody, request: Request, admin: User = Depends(require_admin)
 ) -> dict[str, Any]:
-    _installation(request)
+    installation_service(request)
     token = _validated_telegram_token(body)
     _refuse_env_managed(_env_telegram_token(), token)
     _check_rate_limit("telegram", admin.id)
@@ -469,9 +453,9 @@ async def test_telegram(
 
 @router.put("/telegram")
 async def save_telegram(
-    body: TelegramTokenBody, request: Request, admin: User = Depends(_require_admin)
+    body: TelegramTokenBody, request: Request, admin: User = Depends(require_admin)
 ) -> dict[str, Any]:
-    installation = _installation(request)
+    installation = installation_service(request)
     token = _validated_telegram_token(body)
     _refuse_env_managed(_env_telegram_token(), token)
     _check_rate_limit("telegram", admin.id)
@@ -488,32 +472,56 @@ async def save_telegram(
 
 
 @router.delete("/telegram", status_code=status.HTTP_204_NO_CONTENT)
-async def clear_telegram(request: Request, admin: User = Depends(_require_admin)) -> Response:
-    installation = _installation(request)
+async def clear_telegram(request: Request, admin: User = Depends(require_admin)) -> Response:
+    installation = installation_service(request)
     # Clearing fires the change listener, which stops the poller.
     await installation.set_telegram_token(None, actor_id=admin.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.delete("/secrets", status_code=status.HTTP_204_NO_CONTENT)
-async def clear_secrets(request: Request, admin: User = Depends(_require_admin)) -> Response:
+async def clear_secrets(request: Request, admin: User = Depends(require_admin)) -> Response:
     """Discard every stored provider key and the stored bot token.
 
     The documented way out after ENCRYPTION_KEY was rotated or lost: the
     old blobs can no longer be read, and the service refuses to overwrite
     them implicitly. Keys in the environment are untouched, and a cleared
     bot token stops the poller through the change listener."""
-    installation = _installation(request)
+    installation = installation_service(request)
     await installation.clear_stored_secrets(actor_id=admin.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/complete")
 async def complete_setup(
-    body: CompleteBody, request: Request, admin: User = Depends(_require_admin)
+    body: CompleteBody, request: Request, admin: User = Depends(require_admin)
 ) -> dict[str, bool]:
-    installation = _installation(request)
+    """Finish the wizard and store the registration switch (stored closed
+    while ALLOW_REGISTRATION=false locks it; completing never fails on
+    that)."""
+    installation = installation_service(request)
     await installation.mark_setup_complete(
         allow_registration=body.allow_registration, actor_id=admin.id
     )
     return {"ok": True}
+
+
+@router.put("/registration")
+async def update_registration(
+    body: RegistrationBody, request: Request, admin: User = Depends(require_admin)
+) -> dict[str, bool]:
+    """The owner's "allow other people to create accounts" switch, after
+    setup (Settings). 409 while ALLOW_REGISTRATION=false in the server
+    configuration locks registration closed: the stored switch would do
+    nothing until the lock was removed, and would then open sign-up
+    unannounced."""
+    installation = installation_service(request)
+    try:
+        await installation.set_registration(body.allow_registration, actor_id=admin.id)
+    except RegistrationLocked as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    return {
+        "ok": True,
+        "allow_registration": body.allow_registration,
+        "registration_open": await installation.registration_allowed(),
+    }

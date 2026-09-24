@@ -17,8 +17,9 @@ the agent can offer to close it. Three constraints shape the module:
   refuses to run it without that approval, so the model can never
   install unasked. Reading what is installed is free.
 - **Bounds.** Steps run without a shell, under one deadline for the
-  whole install, and only the tail of their output comes back: the user
-  pays per token for tool output, and a pip log is unbounded.
+  whole install, with an allowlisted environment (never the server's
+  secrets), and only the tail of their output comes back: the user pays
+  per token for tool output, and a pip log is unbounded.
 
 Detection is a filesystem check, not a browser launch. Launching Chromium
 to see whether it exists takes seconds and a driver process; instead the
@@ -192,14 +193,53 @@ def _step_label(argv: tuple[str, ...]) -> str:
     return " ".join(("python", *argv[1:]))
 
 
+# The only environment variables an install step inherits. pip and
+# Playwright run third-party code (build hooks, a downloaded driver), so
+# they get what they need to find the interpreter, the network, a CA bundle
+# and a cache, and none of the server's own secrets (SECRET_KEY,
+# ENCRYPTION_KEY, provider keys, the bot token, DATABASE_URL). The Windows
+# entries are what a Python child needs there to start at all.
+_STEP_ENV_ALLOWLIST: tuple[str, ...] = (
+    "PATH",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "VIRTUAL_ENV",
+    "PLAYWRIGHT_BROWSERS_PATH",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    # The lowercase spellings are the same proxy settings; pip and most
+    # Linux tooling read either.
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "SSL_CERT_FILE",
+    "REQUESTS_CA_BUNDLE",
+    "SYSTEMROOT",
+    "LOCALAPPDATA",
+    "APPDATA",
+    "USERPROFILE",
+)
+
+
+def _step_env() -> dict[str, str]:
+    """The environment for one install step: the allowlisted variables that
+    are set (an absent one stays absent), plus pip's non-interactive flags."""
+    env = {name: os.environ[name] for name in _STEP_ENV_ALLOWLIST if name in os.environ}
+    # pip must never block on a prompt or spend the budget phoning home.
+    env["PIP_NO_INPUT"] = "1"
+    env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
+    return env
+
+
 async def _run_step(argv: list[str], timeout_s: float) -> tuple[int, str]:
-    """Run one allowlisted step: no shell, stdin closed, output merged."""
-    env = {
-        **os.environ,
-        # pip must never block on a prompt or spend the budget phoning home.
-        "PIP_NO_INPUT": "1",
-        "PIP_DISABLE_PIP_VERSION_CHECK": "1",
-    }
+    """Run one allowlisted step: no shell, stdin closed, output merged, and
+    only the allowlisted environment (see _STEP_ENV_ALLOWLIST)."""
+    env = _step_env()
     proc = await asyncio.create_subprocess_exec(
         *argv,
         stdin=asyncio.subprocess.DEVNULL,

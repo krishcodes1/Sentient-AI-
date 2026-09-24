@@ -157,17 +157,26 @@ async def test_unknown_provider_is_still_rejected(client, session_factory):
 # ---------------------------------------------------------------------------
 
 
-async def _insert_user(session, email, provider, model, *, touched=False):
+async def _insert_user(session, email, provider, model, *, touched=False, drift=None):
+    """``touched``: edited a day after registration. ``drift``: an untouched
+    row whose two timestamps still differ by a hair — what the ORM writes,
+    since created_at and updated_at each call datetime.now() on insert."""
     from models.user import User
 
     created = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    if touched:
+        updated = created + timedelta(days=1)
+    elif drift is not None:
+        updated = created + drift
+    else:
+        updated = created
     user = User(
         email=email,
         hashed_password="x",
         llm_provider=provider,
         llm_model=model,
         created_at=created,
-        updated_at=created + timedelta(days=1) if touched else created,
+        updated_at=updated,
     )
     session.add(user)
     await session.flush()
@@ -181,7 +190,19 @@ async def test_backfill_turns_inherited_pairs_into_follow_the_install(session_fa
 
     async with session_factory() as session:
         inherited = await _insert_user(
-            session, "inherited@example.com", "gemini", "gemini-2.5-flash", touched=True
+            session, "inherited@example.com", "gemini", "gemini-2.5-flash"
+        )
+        inherited_drift = await _insert_user(
+            session,
+            "inherited-drift@example.com",
+            "gemini",
+            "gemini-2.5-flash",
+            drift=timedelta(microseconds=7),
+        )
+        # Pinned the server's own pair in Settings on purpose: it runs on
+        # every boot, so it must never reset a deliberate choice.
+        pinned_default = await _insert_user(
+            session, "pinned-default@example.com", "gemini", "gemini-2.5-flash", touched=True
         )
         mixed_case = await _insert_user(
             session, "mixed@example.com", "Gemini", "gemini-2.5-flash"
@@ -208,6 +229,8 @@ async def test_backfill_turns_inherited_pairs_into_follow_the_install(session_fa
         }
 
     assert rows[inherited] == (None, None)
+    assert rows[inherited_drift] == (None, None)
+    assert rows[pinned_default] == ("gemini", "gemini-2.5-flash")
     assert rows[mixed_case] == (None, None)
     assert rows[pinned] == ("openai", "gpt-4o")
     assert rows[same_provider_other_model] == ("gemini", "gemini-2.5-pro")
@@ -216,6 +239,75 @@ async def test_backfill_turns_inherited_pairs_into_follow_the_install(session_fa
     assert rows[legacy_untouched] == (None, None)
     # Someone who opened Settings since then may have chosen it on purpose.
     assert rows[legacy_chosen] == LEGACY_PAIR
+
+
+@pytest.mark.asyncio
+async def test_backfill_leaves_a_user_who_saved_settings_alone_on_every_boot(
+    client, session_factory
+):
+    """The real path: a user saves the env-default pair on the Settings
+    page (updated_at moves on), and the backfill that runs at every boot
+    must not reset it to "follow the install"."""
+    from core.config import settings as app_settings
+    from core.database import backfill_user_llm_defaults
+    from models.user import User
+
+    user, token = await make_user(session_factory, "keeps-it@example.com")
+    provider, model = app_settings.LLM_PROVIDER, app_settings.LLM_MODEL
+    async with session_factory() as session:
+        row = await session.get(User, user.id)
+        # Registered yesterday and never edited since.
+        row.created_at = row.created_at - timedelta(days=1)
+        row.updated_at = row.created_at
+        await session.commit()
+
+    saved = await _patch(client, token, {"llm_provider": provider, "llm_model": model})
+    assert saved.status_code == 200, saved.text
+
+    for _ in range(2):  # two restarts
+        async with session_factory() as session:
+            await backfill_user_llm_defaults(await session.connection(), provider, model)
+            await session.commit()
+
+    async with session_factory() as session:
+        row = await session.get(User, user.id)
+    assert row.updated_at.replace(tzinfo=timezone.utc) > row.created_at.replace(
+        tzinfo=timezone.utc
+    )
+    assert (row.llm_provider, row.llm_model) == (provider, model)
+
+
+@pytest.mark.asyncio
+async def test_backfill_catches_an_account_the_orm_just_created(session_factory):
+    """Accounts created by the ORM get created_at and updated_at from two
+    separate datetime.now() calls, so "never edited" cannot mean exactly
+    equal timestamps."""
+    from core.config import settings as app_settings
+    from core.database import backfill_user_llm_defaults
+    from models.user import User
+
+    provider, model = app_settings.LLM_PROVIDER, app_settings.LLM_MODEL
+    ids = []
+    async with session_factory() as session:
+        for i in range(20):
+            user = User(
+                email=f"fresh-{i}@example.com",
+                hashed_password="x",
+                llm_provider=provider,
+                llm_model=model,
+            )
+            session.add(user)
+            await session.flush()
+            ids.append(user.id)
+        await session.commit()
+
+    async with session_factory() as session:
+        await backfill_user_llm_defaults(await session.connection(), provider, model)
+        await session.commit()
+
+    async with session_factory() as session:
+        rows = (await session.execute(select(User).where(User.id.in_(ids)))).scalars().all()
+    assert {(u.llm_provider, u.llm_model) for u in rows} == {(None, None)}
 
 
 @pytest.mark.asyncio
@@ -353,22 +445,26 @@ async def test_init_db_migrates_and_backfills_inherited_accounts(tmp_path, monke
     engine = sa.create_engine(sync_url)
     try:
         with engine.begin() as conn:
-            for user_id, provider, model in (
-                ("inherited", "gemini", "gemini-2.5-flash"),
-                ("pinned", "openai", "gpt-4o"),
+            for user_id, provider, model, updated_at in (
+                # Never edited since registration: follows the install.
+                ("inherited", "gemini", "gemini-2.5-flash", "2026-01-01 00:00:00"),
+                # Saved Settings since, with the server's own pair: kept.
+                ("chosen", "gemini", "gemini-2.5-flash", "2026-02-01 00:00:00"),
+                ("pinned", "openai", "gpt-4o", "2026-02-01 00:00:00"),
             ):
                 conn.execute(
                     sa.text(
                         "INSERT INTO users (id, email, hashed_password, is_active, "
                         "llm_provider, llm_model, created_at, updated_at) VALUES "
                         "(:id, :email, 'x', 1, :provider, :model, "
-                        "'2026-01-01 00:00:00', '2026-02-01 00:00:00')"
+                        "'2026-01-01 00:00:00', :updated_at)"
                     ),
                     {
                         "id": user_id,
                         "email": f"{user_id}@example.com",
                         "provider": provider,
                         "model": model,
+                        "updated_at": updated_at,
                     },
                 )
     finally:
@@ -395,7 +491,11 @@ async def test_init_db_migrates_and_backfills_inherited_accounts(tmp_path, monke
             }
     finally:
         engine.dispose()
-    assert rows == {"inherited": (None, None), "pinned": ("openai", "gpt-4o")}
+    assert rows == {
+        "inherited": (None, None),
+        "chosen": ("gemini", "gemini-2.5-flash"),
+        "pinned": ("openai", "gpt-4o"),
+    }
 
 
 def test_migration_is_a_no_op_on_an_adopted_database(tmp_path):

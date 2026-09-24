@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import sys
 import time
 from typing import Iterable, Mapping, Optional
 
@@ -24,7 +22,7 @@ from services.capabilities.base import (
     ProbeResult,
     ReportContext,
 )
-from services.capabilities.env import in_container, platform_name
+from services.capabilities.env import crawler_executable, in_container, platform_name
 
 logger = structlog.get_logger(__name__)
 
@@ -99,9 +97,7 @@ def default_context(*, telegram_configured: bool = False) -> ReportContext:
         platform=platform_name(),
         telegram_configured=telegram_configured,
         browser_installed=browser_installed(),
-        # macOS attaches permission grants to the real binary, not to the
-        # venv symlink sys.executable usually is; name the one to toggle.
-        executable=os.path.realpath(sys.executable),
+        executable=crawler_executable(),
     )
 
 
@@ -192,7 +188,20 @@ def _status(cap: Capability, enabled: bool, ctx: ReportContext, use_cache: bool)
         install=cap.install,
         when_denied=cap.when_denied,
         tools=cap.tools,
+        install_size_hint=_install_size_hint(cap.install),
     )
+
+
+def _install_size_hint(install: Optional[str]) -> Optional[str]:
+    """The download size of the ALLOWLIST entry behind *install*, if any."""
+    if not install:
+        return None
+    # Deferred like browser_installed above: the registry stays importable
+    # without the toolkit module.
+    from services.tools.system import ALLOWLIST
+
+    entry = ALLOWLIST.get(install)
+    return entry.size_hint if entry is not None else None
 
 
 def _enabled(cap: Capability, switches: Mapping[str, object]) -> bool:
@@ -220,7 +229,10 @@ def report(
 
 
 def enabled_keys(switches: Mapping[str, object], ctx: ReportContext) -> frozenset[str]:
-    """Keys whose effective state is ``on`` — the only set the tool gates use."""
+    """Keys whose effective state is ``on``: the set the offer
+    (``build_tools``) filters by. The dispatch gates read the report by key
+    instead (``InstallationService.capability_statuses``), so they can say
+    off from blocked."""
     return frozenset(s.key for s in report(switches, ctx) if s.effective == "on")
 
 

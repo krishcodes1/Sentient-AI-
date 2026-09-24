@@ -27,25 +27,22 @@ STATUS_KEYS = set(CapabilityStatus.__dataclass_fields__)
 
 
 @pytest_asyncio.fixture
-async def installation(session_factory):
+async def installation(session_factory, monkeypatch):
+    from api.routes import capabilities as capabilities_routes
     from main import app
     from services.installation import InstallationService
 
     service = InstallationService(session_factory)
     app.state.installation = service
-    # The capabilities routes write audit rows through app.state.session_factory
-    # (falling back to the real core.database.async_session otherwise); the
-    # client fixture only overrides get_db, so without this the routes'
-    # short-lived audit sessions would miss the test's in-memory database.
-    app.state.session_factory = session_factory
+    # The capabilities routes write audit rows through their own short-lived
+    # sessions (core.database.async_session in production); the client
+    # fixture only overrides get_db, so without this those rows would miss
+    # the test's in-memory database.
+    monkeypatch.setattr(capabilities_routes, "_session_factory", session_factory)
     capabilities.clear_probe_cache()
     yield service
     try:
         del app.state.installation
-    except AttributeError:
-        pass
-    try:
-        del app.state.session_factory
     except AttributeError:
         pass
     capabilities.clear_probe_cache()

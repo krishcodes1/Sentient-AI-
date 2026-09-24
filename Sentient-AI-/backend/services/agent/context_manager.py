@@ -424,11 +424,17 @@ class ContextManager:
     3. Tool result compression: truncate large outputs
     4. Stable tool selection: a bounded, deterministic tool array
     5. Token budgeting: track and enforce limits
+
+    One instance serves every turn in the process, and turns run on
+    different models (the install default, or a user's own pick), so the
+    budget is sized per call: pass ``model`` to ``prepare_context`` /
+    ``get_budget``. ``self.model`` is only the fallback when a caller has
+    no model to name.
     """
 
     def __init__(
         self,
-        model: str = "claude-sonnet-4-20250514",
+        model: str = "claude-sonnet-5",
         window_size: int = 12,
         summary_trigger: int = 20,
         max_tool_result_chars: int = 2000,
@@ -444,9 +450,11 @@ class ContextManager:
         system_prompt: str,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
+        model: Optional[str] = None,
     ) -> ContextBudget:
-        """Calculate the token budget for a request."""
-        total = get_context_window(self.model)
+        """Calculate the token budget for a request to ``model`` (default:
+        the constructor's)."""
+        total = get_context_window(model or self.model)
         sys_tokens = estimate_tokens(system_prompt)
         tool_tokens = estimate_tool_schema_tokens(tools)
         conv_tokens = sum(estimate_message_tokens(m) for m in messages)
@@ -468,8 +476,11 @@ class ContextManager:
         system_prompt: str = "",
         conversation_id: str = "",
         active_connectors: list[str] | None = None,
+        model: Optional[str] = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """Prepare optimized messages and tools for an LLM request.
+        """Prepare optimized messages and tools for an LLM request to
+        ``model`` — the model the turn actually runs on, whose window the
+        budget is sized for (default: the constructor's).
 
         Returns:
             Tuple of (optimized_messages, optimized_tools)
@@ -487,7 +498,9 @@ class ContextManager:
         optimized_tools = select_offered_tools(tools, active_connectors or [])
 
         # Step 4: Check budget and trim if needed
-        budget = self.get_budget(system_prompt, optimized_messages, optimized_tools)
+        budget = self.get_budget(
+            system_prompt, optimized_messages, optimized_tools, model=model
+        )
         if budget.available < 500:
             # Emergency trim: keep the last 6 non-system messages, but NEVER
             # drop system messages — index 0 carries the security system

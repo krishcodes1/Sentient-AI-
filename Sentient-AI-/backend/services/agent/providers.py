@@ -51,7 +51,9 @@ class ProviderNotConfigured(ProviderError):
     ``reason`` says whose problem it is, because the fix differs:
 
     * ``not_set_up`` — the install itself has no usable provider yet (or its
-      key was removed). Routes answer 503 with ``setup_url``.
+      key was removed). Routes answer 503 with ``setup_url``; once setup is
+      complete (/setup then redirects away) with code
+      ``provider_unavailable`` and ``settings_url`` instead.
     * ``user_provider_unavailable`` — the install works, but the provider this
       user pinned in Settings has no key here. Routes answer 409 with
       ``settings_url``; /setup cannot fix someone's personal choice.

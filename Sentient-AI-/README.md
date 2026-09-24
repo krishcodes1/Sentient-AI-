@@ -116,12 +116,14 @@ Production checklist:
   `.env.example` placeholders or keys shorter than 32 chars, and with
   `ENVIRONMENT=production` it fails fast (instead of limping) when the
   database is unreachable.
-- Registration closes on its own once setup completes (the wizard's
-  Summary step defaults "Allow other people to create accounts" to off).
-  If you skip the wizard and configure everything through `.env` instead,
-  set `ALLOW_REGISTRATION=false` yourself after creating your account —
-  otherwise anyone who finds the URL can create accounts billed to your
-  LLM API keys.
+- Registration is closed unless you open it: the wizard's Summary step
+  defaults "Allow other people to create accounts" to off, and you can
+  change it later in Settings. Leave `ALLOW_REGISTRATION` unset to manage
+  it from the wizard/Settings; set `ALLOW_REGISTRATION=false` to lock it
+  closed (the Settings switch then cannot open it). An existing deployment
+  that skips the wizard on upgrade starts closed too, unless its `.env`
+  explicitly says `ALLOW_REGISTRATION=true`. Open registration lets anyone
+  who finds the URL create accounts billed to your LLM API keys.
 - Set `CORS_ORIGINS` to your real frontend origin and `ALLOWED_HOSTS`
   to your hostname. `AUDIT_HMAC_KEY` should be a dedicated key stored
   away from the database. Startup logs a warning for each of these that
@@ -347,13 +349,17 @@ wizard. It has five steps:
    capability report, plus the **"Allow other people to create accounts"**
    switch. It defaults to **off**: after setup, registration is closed
    unless you turn it on here or later in Settings — otherwise anyone who
-   finds the URL could create an account billed to your LLM API keys.
+   finds the URL could create an account billed to your LLM API keys. With
+   `ALLOW_REGISTRATION=false` in `backend/.env` the switch is locked closed
+   and shown read-only.
 
 Anything you set with `.env` (`backend/.env.example`) takes precedence over
-whatever the wizard stores — see [Environment Variables](#environment-variables)
-below. If your `.env` already has a working provider key when the backend
-starts and an account exists, setup is considered already done and the
-wizard is skipped (useful when upgrading an existing Docker deployment).
+whatever the wizard stores (for `ALLOW_REGISTRATION`, only `false` does) —
+see [Environment Variables](#environment-variables) below. If your `.env`
+already has a working provider key when the backend starts and an account
+exists, setup is considered already done and the wizard is skipped (useful
+when upgrading an existing Docker deployment); registration then starts
+closed unless `.env` explicitly sets `ALLOW_REGISTRATION=true`.
 
 Building a new capability? See
 [`backend/services/capabilities/README.md`](backend/services/capabilities/README.md)
@@ -392,7 +398,10 @@ keys and `TELEGRAM_BOT_TOKEN` below are **optional** if you plan to use the
 [setup wizard](#first-run-the-setup-wizard) instead: leave them blank, start
 the app, and add the provider and (optionally) Telegram from the wizard or
 Settings. Set them here instead when you want them fixed by deployment
-config (e.g. a shared server) rather than owner-editable at runtime. Either
+config (e.g. a shared server) rather than owner-editable at runtime.
+`ALLOW_REGISTRATION` is the one exception to "`.env` wins": only `false`
+overrides the owner's switch (it locks registration closed); leave it unset
+to manage registration from the wizard/Settings. Either
 way, after editing `backend/.env` for a Docker deployment, apply it with
 `docker compose up -d backend` — a plain `docker compose restart` does not
 re-read the `.env` file, it only restarts the process with the environment
@@ -405,7 +414,7 @@ it already has.
 | `DATABASE_URL` | Yes | PostgreSQL connection string. Default works with Docker. |
 | `REDIS_URL` | Recommended | Redis connection string (used for shared rate limiting; the API falls back to in-memory rate limiting if Redis is unreachable). Default works with Docker. |
 | `LLM_PROVIDER` | Yes | Which AI to use: `anthropic`, `openai`, `gemini`, `grok`, `deepseek`, `groq`, `mistral`, or `ollama`. Optional when using the wizard, which can set this instead. |
-| `LLM_MODEL` | Yes | Model name (e.g., `claude-sonnet-4-20250514`, `gpt-4o`, `gemini-2.5-flash`). Optional when using the wizard. |
+| `LLM_MODEL` | Yes | Model name (e.g., `claude-sonnet-5`, `gpt-4o`, `gemini-2.5-flash`). Optional when using the wizard. |
 | `ANTHROPIC_API_KEY` | If using Anthropic | Get from [console.anthropic.com](https://console.anthropic.com). Optional when using the wizard — see above. |
 | `OPENAI_API_KEY` | If using OpenAI | Get from [platform.openai.com](https://platform.openai.com/api-keys). Optional when using the wizard. |
 | `GEMINI_API_KEY` | If using Gemini | Get from [aistudio.google.com](https://aistudio.google.com/apikey). Optional when using the wizard. |
@@ -424,7 +433,7 @@ it already has.
 | `SESSION_MAX_HOURS` | No | Ceiling on how long refreshing can extend one session, measured from login (default 12) |
 | `APPROVAL_TTL_MINUTES` | No | How long a pending tool approval stays actionable (default 15) |
 | `CORS_ORIGINS` | No | Allowed browser origins (default localhost dev ports) |
-| `ALLOW_REGISTRATION` | No | Applies only until setup completes (default `true`, so the owner can register). Afterwards, registration is governed by the switch stored by the setup wizard (Summary step) or Settings — see [First run: the setup wizard](#first-run-the-setup-wizard) — which defaults to **closed**. |
+| `ALLOW_REGISTRATION` | No | Leave unset to manage open registration from the wizard/Settings (the switch on the Summary step, then in Settings — see [First run: the setup wizard](#first-run-the-setup-wizard) — which defaults to **closed**). Set `false` to lock it closed whatever that switch says. `true` opens nothing by itself; it only seeds the switch as open when an existing install is carried past the wizard on upgrade. The first account always comes from the wizard's owner step. |
 | `PASSWORD_MIN_LENGTH` | No | Minimum password length, floor 8 (default 8) |
 | `ALLOWED_HOSTS` | No | Accepted `Host` headers; set your real hostname in production (default `["*"]`) |
 | `LOG_LEVEL` | No | Log verbosity; production emits JSON lines (default `INFO`) |

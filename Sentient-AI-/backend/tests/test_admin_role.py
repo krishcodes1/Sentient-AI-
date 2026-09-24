@@ -260,7 +260,11 @@ async def test_the_last_owner_cannot_delete_their_account(client, session_factor
 
     resp = await _delete_own_account(client, owner)
     assert resp.status_code == 409
-    assert resp.json()["detail"] == "Transfer ownership before deleting the last owner account"
+    # There is no transfer feature; the message must not promise one.
+    assert resp.json()["detail"] == (
+        "This is the only owner account. Create another owner first (an admin "
+        "can promote an account) — or reset the install — before deleting it."
+    )
     assert (await client.get("/api/auth/me", headers=owner)).status_code == 200
 
     async with session_factory() as session:

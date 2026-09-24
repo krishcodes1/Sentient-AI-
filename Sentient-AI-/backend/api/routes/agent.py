@@ -49,21 +49,46 @@ router = APIRouter(prefix="/agent", tags=["agent"])
 SETUP_URL = "/setup"
 SETTINGS_URL = "/settings"
 
+# The install has no usable key although setup was completed (the key was
+# removed from .env, or the stored keys were cleared). /setup redirects
+# away once setup is complete, so the pointer is Settings instead.
+_NOT_SET_UP_CODE = "provider_not_configured"
+_UNAVAILABLE_AFTER_SETUP_CODE = "provider_unavailable"
+
 _NOT_CONFIGURED_POINTERS: dict[str, dict[str, str]] = {
-    "provider_not_configured": {"setup_url": SETUP_URL},
+    _NOT_SET_UP_CODE: {"setup_url": SETUP_URL},
+    _UNAVAILABLE_AFTER_SETUP_CODE: {"settings_url": SETTINGS_URL},
     "user_provider_unavailable": {"settings_url": SETTINGS_URL},
 }
 
 
-def _not_configured_info(exc: ProviderNotConfigured) -> dict[str, str]:
-    """``{"code": ..., "<setup|settings>_url": ...}`` for one failure."""
-    return {"code": exc.code, **_NOT_CONFIGURED_POINTERS.get(exc.code, {})}
+async def _setup_completed(installation: Any) -> bool:
+    """Whether the owner finished setup. False when unwired or when the
+    answer cannot be read: the original setup pointer then stands, and a
+    broken probe never turns the not-configured answer into a 500."""
+    if installation is None:
+        return False
+    try:
+        return bool(await installation.setup_completed())
+    except Exception as exc:
+        logger.warning("setup_state_unreadable", error_type=type(exc).__name__)
+        return False
 
 
-def _not_configured_http_error(exc: ProviderNotConfigured) -> HTTPException:
-    """503 when the install is not set up (the service genuinely cannot
-    answer anyone yet); 409 when only this user's pinned provider lacks a
-    key — the request conflicts with their own Settings, which they can
+async def _not_configured_info(code: str, installation: Any) -> dict[str, str]:
+    """``{"code": ..., "<setup|settings>_url": ...}`` for one failure, by the
+    code the runtime raised (``ProviderNotConfigured.code``)."""
+    if code == _NOT_SET_UP_CODE and await _setup_completed(installation):
+        code = _UNAVAILABLE_AFTER_SETUP_CODE
+    return {"code": code, **_NOT_CONFIGURED_POINTERS.get(code, {})}
+
+
+async def _not_configured_http_error(
+    exc: ProviderNotConfigured, installation: Any
+) -> HTTPException:
+    """503 when the install has no usable provider (the service genuinely
+    cannot answer anyone); 409 when only this user's pinned provider lacks
+    a key — the request conflicts with their own Settings, which they can
     change."""
     status_code = (
         status.HTTP_409_CONFLICT
@@ -72,7 +97,10 @@ def _not_configured_http_error(exc: ProviderNotConfigured) -> HTTPException:
     )
     return HTTPException(
         status_code=status_code,
-        detail={"message": str(exc), **_not_configured_info(exc)},
+        detail={
+            "message": str(exc),
+            **await _not_configured_info(exc.code, installation),
+        },
     )
 
 
@@ -833,15 +861,18 @@ async def send_message(
         )
     except ProviderNotConfigured as exc:
         # Not an upstream failure: no key for the provider this turn needs.
-        # 503 + setup_url when the install is not set up, 409 + settings_url
-        # when only the user's own choice is unavailable.
+        # 503 + setup_url when the install is not set up (settings_url once
+        # setup is complete), 409 + settings_url when only the user's own
+        # choice is unavailable.
         logger.warning(
             "send_message_provider_not_configured",
             conversation_id=str(conversation.id),
             provider=exc.provider,
             reason=exc.reason,
         )
-        raise _not_configured_http_error(exc) from None
+        raise await _not_configured_http_error(
+            exc, getattr(request.app.state, "installation", None)
+        ) from None
     except ProviderError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -1011,11 +1042,12 @@ async def stream_message(
         for m in history_result.scalars().all()
     ]
     _attach_images(history, body.images)
+    installation = getattr(request.app.state, "installation", None)
     tools, memory_block, permissions_text = await _build_tools_and_memory(
         getattr(request.app.state, "mcp_catalog", None),
         current_user,
         db,
-        getattr(request.app.state, "installation", None),
+        installation,
     )
     conv_id = conversation.id
     user_provider = current_user.llm_provider
@@ -1078,11 +1110,14 @@ async def stream_message(
                         # done frame; remember it so the failed turn is not
                         # persisted as an empty assistant message below.
                         turn_errored = True
-                        pointer = _NOT_CONFIGURED_POINTERS.get(str(data.get("code")))
-                        if pointer:
-                            # Same pointer the blocking route's 503/409
-                            # carries (setup_url or settings_url).
-                            data = {**data, **pointer}
+                        code = str(data.get("code"))
+                        if code in _NOT_CONFIGURED_POINTERS:
+                            # Same code and pointer the blocking route's
+                            # 503/409 carries (setup_url or settings_url).
+                            data = {
+                                **data,
+                                **await _not_configured_info(code, installation),
+                            }
                     if etype == "done":
                         final_content = data.get("content", "")
                         tool_calls_payload = data.get("tool_calls", []) or []
@@ -1540,7 +1575,7 @@ def build_chat_applier(app: Any, session_factory: Any = async_session):
             )
             return {
                 "error": str(exc),
-                **_not_configured_info(exc),
+                **await _not_configured_info(exc.code, installation),
                 "conversation_id": str(conversation_id),
             }
         except ProviderError as exc:

@@ -376,6 +376,23 @@ def test_open_settings_uses_the_absolute_open_and_reports_its_exit(monkeypatch, 
     assert seen == [["/usr/bin/open", macos.SCREEN_SETTINGS_URL]]
 
 
+def test_an_installable_capability_carries_its_download_size():
+    """The Permissions page shows the size next to the Install button; it
+    comes from the one ALLOWLIST entry the install would run."""
+    from services.tools.system import ALLOWLIST
+
+    statuses = by_key(capabilities.report({}, ctx(browser_installed=False)))
+    shots = statuses["site_screenshots"]
+    assert shots.install == "browser"
+    assert shots.install_size_hint == ALLOWLIST["browser"].size_hint
+    assert shots.to_dict()["install_size_hint"] == ALLOWLIST["browser"].size_hint
+
+    for key, status in statuses.items():
+        if status.install is None:
+            assert status.install_size_hint is None, key
+            assert status.to_dict()["install_size_hint"] is None
+
+
 def test_default_context_names_the_resolved_interpreter(monkeypatch, tmp_path):
     # macOS attaches the Screen Recording grant to the real binary, not to
     # the venv symlink that sys.executable usually is.
@@ -383,5 +400,23 @@ def test_default_context_names_the_resolved_interpreter(monkeypatch, tmp_path):
     real.write_text("")
     link = tmp_path / "venv-python"
     link.symlink_to(real)
-    monkeypatch.setattr(capabilities.sys, "executable", str(link))
+    monkeypatch.setattr("sys.executable", str(link))
     assert capabilities.default_context().executable == str(real.resolve())
+
+
+def test_the_report_and_screen_capture_name_one_executable(monkeypatch, tmp_path):
+    """The Permissions page tells the owner which binary to grant; the
+    capture tool checks the grant for a binary too. They must name the same
+    one (and share probe-cache entries), so both come from one helper."""
+    from services.capabilities.env import crawler_executable
+    from services.tools import desktop
+
+    real = tmp_path / "python3.13"
+    real.write_text("")
+    link = tmp_path / "venv-python"
+    link.symlink_to(real)
+    monkeypatch.setattr("sys.executable", str(link))
+
+    assert crawler_executable() == str(real.resolve())
+    assert capabilities.default_context().executable == crawler_executable()
+    assert desktop._screen_context().executable == crawler_executable()

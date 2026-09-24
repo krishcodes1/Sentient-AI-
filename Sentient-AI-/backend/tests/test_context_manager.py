@@ -149,6 +149,50 @@ def test_a_blank_model_still_returns_a_budget():
 
 
 # ---------------------------------------------------------------------------
+# Per-turn model: the window is the model's the turn runs on
+# ---------------------------------------------------------------------------
+
+
+def _long_history(turns: int = 12, tokens_each: int = 8_000) -> list[dict]:
+    """``turns`` alternating messages of ~``tokens_each`` tokens each: ~96k
+    tokens, which fits a 1M window and overflows a 64k one."""
+    body = "x" * int(tokens_each * 3.5)
+    return [
+        {"role": "system", "content": "policy"},
+        *(
+            {"role": "user" if i % 2 == 0 else "assistant", "content": f"{i} {body}"}
+            for i in range(turns)
+        ),
+    ]
+
+
+def test_the_budget_follows_the_model_passed_in_not_the_constructor_default():
+    manager = ContextManager(model="claude-sonnet-5")
+    small = manager.get_budget("", [], [], model="deepseek-chat")
+    large = manager.get_budget("", [], [], model="gemini-2.5-flash")
+    default = manager.get_budget("", [], [])
+    assert small.total_window == 64_000
+    assert large.total_window == 1_000_000
+    assert default.total_window == 200_000
+
+
+def test_prepare_context_trims_for_a_small_window_and_keeps_a_large_one_whole():
+    """One manager, two turns on two models: the history that fits Gemini's
+    window is kept whole, and the same history on a 64k model is trimmed
+    instead of being sent to a provider that would reject it."""
+    manager = ContextManager(model="claude-sonnet-5")
+    history = _long_history()
+
+    on_gemini, _ = manager.prepare_context(history, [], model="gemini-2.5-flash")
+    on_deepseek, _ = manager.prepare_context(history, [], model="deepseek-chat")
+
+    assert len(on_gemini) == len(history)  # 12 messages fit the window
+    assert on_deepseek[0] == {"role": "system", "content": "policy"}
+    assert len(on_deepseek) == 1 + 6  # emergency trim: system + last six
+    assert on_deepseek[-1] == history[-1]
+
+
+# ---------------------------------------------------------------------------
 # Multimodal token accounting
 # ---------------------------------------------------------------------------
 
