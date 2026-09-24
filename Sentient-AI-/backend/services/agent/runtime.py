@@ -35,15 +35,7 @@ from services.agent.providers import (
 )
 
 # Map provider names to their API key config attribute
-_PROVIDER_KEY_MAP = {
-    "anthropic": "ANTHROPIC_API_KEY",
-    "openai": "OPENAI_API_KEY",
-    "gemini": "GEMINI_API_KEY",
-    "grok": "GROK_API_KEY",
-    "deepseek": "DEEPSEEK_API_KEY",
-    "groq": "GROQ_API_KEY",
-    "mistral": "MISTRAL_API_KEY",
-}
+from core.config import PROVIDER_KEY_FIELDS as _PROVIDER_KEY_MAP
 
 logger = structlog.get_logger(__name__)
 
