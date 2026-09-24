@@ -15,7 +15,7 @@
 # `target: prod`. The nginx config is inlined below (heredoc) because the
 # build context is ../frontend, which cannot COPY files from docker/.
 
-FROM node:20-alpine AS base
+FROM node:25-alpine AS base
 
 WORKDIR /app
 
