@@ -7,8 +7,9 @@ export interface User {
   created_at: string;
   default_permission_tier: PermissionTier;
   rate_limit: number;
-  llm_provider?: string;
-  llm_model?: string;
+  /** null = the account follows this Crawler's default provider/model. */
+  llm_provider?: string | null;
+  llm_model?: string | null;
   memory_enabled?: boolean;
 }
 

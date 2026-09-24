@@ -812,8 +812,13 @@ async def test_path_like_or_non_ascii_model_ids_are_refused_on_both_routes(
         headers=auth_headers(token),
     )
     assert wizard.status_code == 422
+    # With a provider, so the only thing wrong with the request is the id
+    # (a model alone is refused anyway on an account that follows the
+    # install default).
     per_user = await client.patch(
-        "/api/auth/settings", json={"llm_model": model}, headers=auth_headers(token)
+        "/api/auth/settings",
+        json={"llm_provider": "gemini", "llm_model": model},
+        headers=auth_headers(token),
     )
     assert per_user.status_code == 422
     assert seen == []
@@ -831,7 +836,9 @@ async def test_ordinary_model_ids_are_still_accepted(client, env, monkeypatch):
         )
         assert wizard.json()["ok"] is True, model
         per_user = await client.patch(
-            "/api/auth/settings", json={"llm_model": model}, headers=auth_headers(token)
+            "/api/auth/settings",
+            json={"llm_provider": "groq", "llm_model": model},
+            headers=auth_headers(token),
         )
         assert per_user.status_code == 200, model
 

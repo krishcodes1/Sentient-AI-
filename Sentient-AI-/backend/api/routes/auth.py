@@ -78,8 +78,9 @@ class UserResponse(BaseModel):
     is_admin: bool = False
     default_permission_tier: str
     rate_limit: int
-    llm_provider: str
-    llm_model: str
+    # Both null = the account follows this Crawler's default provider/model.
+    llm_provider: Optional[str] = None
+    llm_model: Optional[str] = None
     memory_enabled: bool = True
     created_at: datetime
 
@@ -108,6 +109,11 @@ class AccountDeleteRequest(BaseModel):
 
 
 class SettingsUpdateRequest(BaseModel):
+    """Partial update: an OMITTED field is left alone. For ``llm_provider``
+    and ``llm_model`` an explicit ``null`` is meaningful — "follow this
+    Crawler's default" — so the handler tells the two apart through
+    ``model_fields_set``."""
+
     default_permission_tier: Optional[PermissionTierLiteral] = None
     rate_limit: Optional[int] = Field(default=None, ge=10, le=600)
     llm_provider: Optional[SafeStr] = Field(default=None, max_length=32)
@@ -588,34 +594,73 @@ async def update_settings(
 
     Field validation (tier enum, rate-limit range) is enforced by the
     Pydantic model, so anything that reaches here is already valid.
+
+    ``llm_provider: null`` (with or without ``llm_model: null``) puts the
+    account back on this Crawler's default provider/model; both columns
+    become NULL, because a model means nothing without the provider it was
+    picked for. A pinned provider must end up with a model.
     """
     if body.default_permission_tier is not None:
         current_user.default_permission_tier = body.default_permission_tier
     if body.rate_limit is not None:
         current_user.rate_limit = body.rate_limit
-    if body.llm_provider is not None:
-        provider = body.llm_provider.strip().lower()
-        if provider not in _KNOWN_PROVIDERS:
+
+    sent = body.model_fields_set
+    provider = current_user.llm_provider
+    model = current_user.llm_model
+    if "llm_provider" in sent:
+        if body.llm_provider is None or not body.llm_provider.strip():
+            provider = None
+        else:
+            provider = body.llm_provider.strip().lower()
+            if provider not in _KNOWN_PROVIDERS:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=(
+                        f"Unknown LLM provider '{body.llm_provider}'. Choose one of: "
+                        + ", ".join(sorted(_KNOWN_PROVIDERS))
+                    ),
+                )
+    if "llm_model" in sent:
+        if body.llm_model is None or not body.llm_model.strip():
+            model = None
+        else:
+            model = body.llm_model.strip()
+            # Model ids are provider catalog names (letters, digits, and a
+            # few separators). Anything else is a typo or probe; rejecting it
+            # here keeps garbage strings out of the runtime's provider cache
+            # and path-like ids out of any provider URL they are spliced into.
+            if not is_valid_model_id(model):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=MODEL_ID_RULES,
+                )
+    if sent & {"llm_provider", "llm_model"}:
+        if provider is None:
+            if "llm_provider" not in sent and model is not None:
+                # A model alone, on an account that follows the install:
+                # there is no provider to pair it with.
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=(
+                        "Choose a provider for this model, or leave both "
+                        "unset to use this Crawler's default."
+                    ),
+                )
+            # Following the install: the runtime ignores a per-user model
+            # then, so do not keep one that would silently come back later.
+            model = None
+        elif model is None:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=(
-                    f"Unknown LLM provider '{body.llm_provider}'. Choose one of: "
-                    + ", ".join(sorted(_KNOWN_PROVIDERS))
+                    f"Choose a model for the '{provider}' provider, or set "
+                    "llm_provider to null to use this Crawler's default."
                 ),
             )
         current_user.llm_provider = provider
-    if body.llm_model is not None:
-        model = body.llm_model.strip()
-        # Model ids are provider catalog names (letters, digits, and a few
-        # separators). Anything else is a typo or probe; rejecting it here
-        # keeps garbage strings out of the runtime's provider cache and
-        # path-like ids out of any provider URL they are spliced into.
-        if not is_valid_model_id(model):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=MODEL_ID_RULES,
-            )
         current_user.llm_model = model
+
     if body.memory_enabled is not None:
         current_user.memory_enabled = body.memory_enabled
 

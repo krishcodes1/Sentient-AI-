@@ -153,19 +153,44 @@ def auth_headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-def use_provider(runtime, provider) -> None:
-    """Make ``provider`` the LLM a runtime uses on the server's default
-    (provider, model) pair — what a turn with no per-user override, or with
-    the env defaults every test account is created with, resolves to.
+def _source_defaults_now(source) -> tuple[str, str]:
+    """``await source.llm_defaults()`` from synchronous code.
+
+    The runtime helpers that call use_provider are sync and run inside the
+    test's event loop, so the coroutine cannot be handed to the loop. Every
+    in-memory source (the environment one, the fakes tests pass) returns
+    without suspending, so one step of the coroutine yields its value. A
+    source that really awaits I/O cannot be read this way; the caller must
+    pass the pair instead.
+    """
+    coro = source.llm_defaults()
+    try:
+        coro.send(None)
+    except StopIteration as done:
+        return done.value
+    coro.close()
+    raise RuntimeError(
+        "the runtime's settings source suspends in llm_defaults(); pass "
+        "pair=(provider, model) to use_provider explicitly"
+    )
+
+
+def use_provider(runtime, provider, pair: tuple[str, str] | None = None) -> None:
+    """Make ``provider`` the LLM a runtime uses on its source's default
+    (provider, model) pair — what a turn by an account that follows the
+    install (NULL provider, the default for every test account) resolves to.
+
+    The pair comes from the runtime's OWN settings source, so a runtime
+    built with a custom source is seeded on that source's default, not on
+    the environment's. Pass ``pair`` to seed a specific pair instead.
 
     The runtime builds providers lazily from its settings source and caches
     them per pair, so tests seed that cache where they used to overwrite
     the eagerly built ``runtime._provider``. Call again to swap it.
     """
-    from core.config import settings
-
-    pair = (
-        (settings.LLM_PROVIDER or "").strip().lower(),
-        (settings.LLM_MODEL or "").strip(),
+    provider_name, model = pair if pair is not None else _source_defaults_now(
+        runtime._source
     )
-    runtime._provider_cache[pair] = provider
+    runtime._provider_cache[
+        ((provider_name or "").strip().lower(), (model or "").strip())
+    ] = provider

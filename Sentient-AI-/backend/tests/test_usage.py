@@ -508,26 +508,50 @@ async def test_summary_endpoint_rejects_an_unknown_zone(client, session_factory,
 # ---------------------------------------------------------------------------
 
 
+def _server_default_pair():
+    """What the real runtime's environment source resolves a turn to when
+    the account follows the install (NULL provider)."""
+    from core.config import settings
+
+    return settings.LLM_PROVIDER.strip().lower(), settings.LLM_MODEL.strip()
+
+
 class UsageRuntime:
+    """Reports, like the real runtime, the pair it ran on: the account's
+    pinned provider/model, else the install default. The routes persist
+    that report — never the account row."""
+
     def __init__(self, usage=None, content="ok"):
         self.calls = []
         self._usage = usage or {"input_tokens": 321, "output_tokens": 12}
         self._content = content
 
+    @staticmethod
+    def _ran_on(kwargs):
+        if kwargs.get("llm_provider"):
+            return kwargs["llm_provider"], kwargs.get("llm_model") or ""
+        return _server_default_pair()
+
     async def chat(self, messages, tools, user_id, conversation_id=None, **kwargs):
         from services.agent.runtime import AgentResponse
 
         self.calls.append(kwargs)
-        return AgentResponse(content=self._content, usage=dict(self._usage))
+        provider, model = self._ran_on(kwargs)
+        return AgentResponse(
+            content=self._content, usage=dict(self._usage), provider=provider, model=model
+        )
 
     async def stream_chat(self, messages, tools, user_id, conversation_id=None, **kwargs):
         self.calls.append(kwargs)
+        provider, model = self._ran_on(kwargs)
         yield {"type": "start", "data": {}}
         yield {
             "type": "done",
             "data": {
                 "content": self._content,
                 "usage": dict(self._usage),
+                "provider": provider,
+                "model": model,
                 "tool_calls": [],
                 "pending_approvals": [],
                 "blocked_actions": [],
@@ -676,7 +700,7 @@ async def test_orphaned_stream_turn_records_usage_and_model(
 
     assert rows, "the orphaned turn was not persisted"
     assert (rows[0].input_tokens, rows[0].output_tokens) == (40, 4)
-    assert (rows[0].llm_provider, rows[0].llm_model) == (user.llm_provider, user.llm_model)
+    assert (rows[0].llm_provider, rows[0].llm_model) == _server_default_pair()
 
 
 @pytest.mark.asyncio
@@ -741,7 +765,7 @@ async def test_resumed_turn_after_approval_is_counted(client, session_factory):
     assert outcome.input_tokens is None and outcome.llm_model is None
     assert resumed.content == "Done, email sent."
     assert (resumed.input_tokens, resumed.output_tokens) == (900, 9)
-    assert (resumed.llm_provider, resumed.llm_model) == (user.llm_provider, user.llm_model)
+    assert (resumed.llm_provider, resumed.llm_model) == _server_default_pair()
 
     body = (await client.get("/api/usage/summary", headers=auth_headers(token))).json()
     assert body["windows"]["today"]["turns"] == 1

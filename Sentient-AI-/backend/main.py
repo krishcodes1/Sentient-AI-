@@ -85,6 +85,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("shutting_down_crawler_ai")
     await reminder_service.stop()
     await app.state.telegram_manager.stop()
+    # Release every provider's HTTP client (cached, and retired but still
+    # leased by a turn being torn down) before the loop goes away.
+    runtime = getattr(app.state, "agent_runtime", None)
+    if runtime is not None:
+        try:
+            await runtime.aclose()
+        except Exception as exc:  # shutdown must finish regardless
+            logger.warning("agent_runtime_close_failed", error=str(exc))
     await engine.dispose()
 
 

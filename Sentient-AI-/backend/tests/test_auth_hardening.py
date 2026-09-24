@@ -519,9 +519,11 @@ async def test_settings_accepts_known_provider_case_insensitively(client: httpx.
         json={"email": "prov@example.com", "password": "password-123"},
     )
     token = login.json()["access_token"]
+    # A new account follows the install (no model of its own), so pinning a
+    # provider names the model too.
     resp = await client.patch(
         "/api/auth/settings",
-        json={"llm_provider": "OpenAI"},
+        json={"llm_provider": "OpenAI", "llm_model": "gpt-4o"},
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 200

@@ -209,6 +209,36 @@ describe("streamMessage SSE parsing", () => {
     expect(handlers.onError).toHaveBeenCalledWith("provider timeout");
   });
 
+  it("passes a not-set-up error's code and setup url through, with the pointer", async () => {
+    mockFetch(() =>
+      sseResponse([
+        'event: error\ndata: {"reason":"No AI provider is configured yet.","code":"provider_not_configured","setup_url":"/setup"}\n\n',
+      ]),
+    );
+    const handlers = recordHandlers();
+
+    await streamMessage("c1", "hi", handlers);
+    expect(handlers.onError).toHaveBeenCalledWith(
+      "No AI provider is configured yet. Open /setup to finish setup.",
+      { code: "provider_not_configured", setup_url: "/setup" },
+    );
+  });
+
+  it("points an unavailable personal provider at Settings, not setup", async () => {
+    mockFetch(() =>
+      sseResponse([
+        'event: error\ndata: {"reason":"The \'openai\' provider selected in your Settings is not configured on this server.","code":"user_provider_unavailable","settings_url":"/settings"}\n\n',
+      ]),
+    );
+    const handlers = recordHandlers();
+
+    await streamMessage("c1", "hi", handlers);
+    expect(handlers.onError).toHaveBeenCalledWith(
+      "The 'openai' provider selected in your Settings is not configured on this server. Change it in Settings.",
+      { code: "user_provider_unavailable", settings_url: "/settings" },
+    );
+  });
+
   it("sends the bearer token and message body to the stream endpoint", async () => {
     localStorage.setItem("auth_token", "tok-123");
     const fetchMock = mockFetch(() => sseResponse([DONE_FRAME]));

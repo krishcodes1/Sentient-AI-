@@ -17,7 +17,7 @@ from __future__ import annotations
 import abc
 import json
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import httpx
 import structlog
@@ -42,25 +42,52 @@ class ProviderError(Exception):
         super().__init__(f"{provider} provider error{suffix}: {detail}")
 
 
+ProviderNotConfiguredReason = Literal["not_set_up", "user_provider_unavailable"]
+
+
 class ProviderNotConfigured(ProviderError):
-    """No API key is available for the selected provider — the install has
-    not been set up yet (or the key was removed). Routes answer 503 with a
-    pointer to /setup; channels say the same sentence.
+    """No API key is available for the provider a turn resolved to.
+
+    ``reason`` says whose problem it is, because the fix differs:
+
+    * ``not_set_up`` — the install itself has no usable provider yet (or its
+      key was removed). Routes answer 503 with ``setup_url``.
+    * ``user_provider_unavailable`` — the install works, but the provider this
+      user pinned in Settings has no key here. Routes answer 409 with
+      ``settings_url``; /setup cannot fix someone's personal choice.
 
     ``str()`` is the bare sentence, without ProviderError's "<name> provider
-    error:" prefix, because the web app and Telegram show it verbatim to
-    someone who has not configured anything yet.
+    error:" prefix and without any URL: the web app and Telegram show it
+    verbatim, and the link travels separately so a chat channel never shows
+    a bare relative path.
     """
 
-    SETUP_MESSAGE = (
-        "No AI provider is configured yet. Finish setup at /setup or add a "
-        "key in Settings."
-    )
+    SETUP_MESSAGE = "No AI provider is configured yet. Add an API key to start chatting."
 
-    def __init__(self, provider: str, detail: Optional[str] = None):
+    _CODES: dict[str, str] = {
+        "not_set_up": "provider_not_configured",
+        "user_provider_unavailable": "user_provider_unavailable",
+    }
+
+    def __init__(
+        self,
+        provider: str,
+        *,
+        reason: ProviderNotConfiguredReason,
+        detail: Optional[str] = None,
+    ):
+        if reason not in self._CODES:
+            raise ValueError(f"unknown ProviderNotConfigured reason: {reason!r}")
         message = detail or self.SETUP_MESSAGE
         super().__init__(provider, None, message)
+        self.reason: ProviderNotConfiguredReason = reason
         self.args = (message,)
+
+    @property
+    def code(self) -> str:
+        """Machine-readable code carried on every surface (HTTP detail,
+        stream error frame, channel outcome)."""
+        return self._CODES[self.reason]
 
 
 def _raise_provider_error(provider: str, exc: httpx.HTTPStatusError) -> None:

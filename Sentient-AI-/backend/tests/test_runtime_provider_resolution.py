@@ -1,12 +1,14 @@
-"""Lazy provider resolution, ``ProviderNotConfigured`` and the
+"""Lazy provider resolution, leases, ``ProviderNotConfigured`` and the
 ``<permissions>`` block.
 
 The runtime no longer builds its LLM provider at startup: a fresh install
 has no key yet, and the owner adds one through /setup or Settings while
 the server keeps running. Keys come from a settings source when a turn
 needs them, providers are cached per (provider, model) until the owner
-changes something, and a turn with no key fails with one sentence that
-points at /setup rather than a stack of provider jargon.
+changes something (a turn in flight keeps its instance until it ends), and
+a turn with no key fails with one sentence plus a pointer: setup_url when
+the install is not set up (503), settings_url when only the user's own
+provider choice lacks a key (409).
 """
 
 from __future__ import annotations
@@ -27,10 +29,9 @@ from services.agent.runtime import AgentRuntime, PromptGuard, Tool
 from services.agent.tool_registry import RuntimePermissionAdapter
 from tests.conftest import auth_headers, make_user
 
-SETUP_SENTENCE = (
-    "No AI provider is configured yet. Finish setup at /setup or add a key "
-    "in Settings."
-)
+# The sentence travels without a URL: routes and channels carry the link in
+# ``setup_url`` so a Telegram reply never shows a bare relative path.
+SETUP_SENTENCE = "No AI provider is configured yet. Add an API key to start chatting."
 
 
 class Source:
@@ -47,6 +48,8 @@ class Source:
 
 
 class FakeProvider:
+    supports_vision = False
+
     def __init__(self, api_key, model, responses=None):
         self.api_key, self.model = api_key, model
         self._responses = list(responses or [])
@@ -54,6 +57,9 @@ class FakeProvider:
         self.closed = False
 
     async def complete(self, messages, tools=None):
+        # A closed provider's HTTP client is gone; using it mid-turn is the
+        # bug leases exist to prevent.
+        assert not self.closed, "provider used after it was closed"
         self.calls.append(list(messages))
         if self._responses:
             return self._responses.pop(0)
@@ -88,13 +94,29 @@ def runtime(source, monkeypatch, **kwargs):
 
 
 def test_provider_not_configured_is_a_provider_error_that_reads_as_one_sentence():
-    exc = ProviderNotConfigured("gemini")
+    exc = ProviderNotConfigured("gemini", reason="not_set_up")
     # Every existing `except ProviderError` keeps catching it.
     assert isinstance(exc, ProviderError)
     assert exc.provider == "gemini" and exc.status_code is None
     # Shown verbatim by the web app and by Telegram, so no
-    # "gemini provider error:" prefix.
+    # "gemini provider error:" prefix — and no "/setup": the link travels
+    # separately, in setup_url.
     assert str(exc) == SETUP_SENTENCE
+    assert "/setup" not in str(exc)
+    assert exc.reason == "not_set_up" and exc.code == "provider_not_configured"
+
+
+def test_user_provider_unavailable_has_its_own_code():
+    exc = ProviderNotConfigured(
+        "openai", reason="user_provider_unavailable", detail="pick another"
+    )
+    assert str(exc) == "pick another"
+    assert exc.code == "user_provider_unavailable"
+
+
+def test_provider_not_configured_requires_a_reason():
+    with pytest.raises(TypeError):
+        ProviderNotConfigured("gemini")  # type: ignore[call-arg]
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +230,230 @@ async def test_override_without_a_key_names_the_provider(monkeypatch):
         await rt._resolve_provider("openai", "gpt-4o")
     message = str(excinfo.value)
     assert "openai" in message and "not configured" in message
+    assert excinfo.value.reason == "user_provider_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_default_provider_is_compared_case_insensitively(monkeypatch):
+    """A source that reports its default as "Gemini" still means gemini: a
+    user who picked that same provider is looking at an install that is not
+    set up, not at a Settings choice of their own to change."""
+    rt = runtime(Source(provider="Gemini", model="m", keys={"Gemini": "k"}), monkeypatch)
+    with pytest.raises(ProviderNotConfigured) as excinfo:
+        await rt._resolve_provider("gemini", "m")
+    assert excinfo.value.reason == "not_set_up"
+
+
+# ---------------------------------------------------------------------------
+# A user with no provider of their own follows the install
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_no_user_provider_follows_the_source_default_and_ignores_the_model(
+    monkeypatch,
+):
+    """NULL provider means "use this Crawler's default". A stray per-user
+    model must not be paired with the install's provider: gpt-4o sent to
+    Gemini is a failed turn."""
+    rt = runtime(Source(keys={"gemini": "k"}), monkeypatch)
+    assert await rt._select_provider(None, "gpt-4o") == ("gemini", "gemini-2.5-flash")
+    assert await rt._select_provider("", "gpt-4o") == ("gemini", "gemini-2.5-flash")
+    response = await rt.chat(
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[],
+        user_id="u1",
+        llm_provider=None,
+        llm_model="gpt-4o",
+    )
+    assert (response.provider, response.model) == ("gemini", "gemini-2.5-flash")
+
+
+@pytest.mark.asyncio
+async def test_response_names_the_pair_that_actually_ran(monkeypatch):
+    rt = runtime(Source(keys={"gemini": "k", "openai": "o"}), monkeypatch)
+    response = await rt.chat(
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[],
+        user_id="u1",
+        llm_provider="OpenAI",
+        llm_model="gpt-4o",
+    )
+    assert (response.provider, response.model) == ("openai", "gpt-4o")
+
+
+def test_use_provider_seeds_the_runtimes_own_source_default():
+    """The test helper honours a custom source instead of assuming the
+    environment's pair."""
+    from tests.conftest import use_provider
+
+    rt = AgentRuntime(
+        config=settings,
+        approval_store=InMemoryApprovalStore(),
+        settings_source=Source(provider=" Gemini ", model="m"),
+    )
+    marker = FakeProvider("k", "m")
+    use_provider(rt, marker)
+    assert rt._provider_cache[("gemini", "m")] is marker
+    use_provider(rt, marker, pair=("openai", "gpt-4o"))
+    assert rt._provider_cache[("openai", "gpt-4o")] is marker
+
+
+@pytest.mark.asyncio
+async def test_use_provider_refuses_a_source_it_cannot_read_synchronously():
+    from tests.conftest import use_provider
+
+    class SuspendingSource(Source):
+        async def llm_defaults(self):
+            await asyncio.sleep(0)
+            return self.provider, self.model
+
+    rt = AgentRuntime(
+        config=settings,
+        approval_store=InMemoryApprovalStore(),
+        settings_source=SuspendingSource(),
+    )
+    with pytest.raises(RuntimeError, match="pair="):
+        use_provider(rt, FakeProvider("k", "m"))
+
+
+# ---------------------------------------------------------------------------
+# Key re-reads are bounded
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_key_rereads_stop_after_three_attempts(monkeypatch):
+    """Settings that change during every read must not spin the turn
+    forever. After three reads the turn runs on the freshest key, and that
+    provider is not cached: a later change may already have superseded it."""
+    holder = {}
+
+    class ChurningSource(Source):
+        async def llm_api_key(self, provider):
+            self.calls += 1
+            holder["rt"].invalidate_providers()
+            return self.keys.get(provider)
+
+    src = ChurningSource(keys={"gemini": "k"})
+    rt = holder["rt"] = runtime(src, monkeypatch)
+    provider = await rt._resolve_provider(None, None)
+    assert provider.api_key == "k"
+    assert src.calls == 3
+    assert len(rt._provider_cache) == 0
+
+
+# ---------------------------------------------------------------------------
+# Leases: a provider in use is never closed under a turn
+# ---------------------------------------------------------------------------
+
+
+class _InvalidatingExecutor:
+    """Runs between the two model rounds of a turn, which is exactly when an
+    owner saving a new key would land."""
+
+    def __init__(self, runtime_holder):
+        self._holder = runtime_holder
+        self.calls = 0
+
+    async def execute(self, tool_name, arguments, user_id, approved=False):
+        self.calls += 1
+        self._holder["rt"].invalidate_providers()
+        await asyncio.sleep(0)  # give a (wrongly) scheduled close its chance
+        return {"ok": True}
+
+
+def _two_round_responses():
+    return [
+        LLMResponse(
+            content="",
+            tool_calls=[ToolCall(id="t1", name="reminders.now", arguments={})],
+        ),
+        LLMResponse(content="It is noon."),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_invalidation_mid_turn_waits_for_the_turn_to_finish(monkeypatch):
+    import services.agent.runtime as rt_module
+
+    built = []
+
+    def factory(provider_name, model, api_key, base_url=None):
+        provider = FakeProvider(
+            api_key, model, responses=_two_round_responses() if not built else None
+        )
+        built.append(provider)
+        return provider
+
+    holder = {}
+    executor = _InvalidatingExecutor(holder)
+    rt = holder["rt"] = AgentRuntime(
+        config=settings,
+        approval_store=InMemoryApprovalStore(),
+        prompt_guard=PromptGuard(),
+        tool_executor=executor,
+        settings_source=Source(keys={"gemini": "k"}),
+    )
+    monkeypatch.setattr(rt_module, "create_provider", factory)
+    tool = Tool(
+        name="reminders.now",
+        description="What time is it",
+        parameters={"type": "object", "properties": {}},
+        connector_type="reminders",
+    )
+
+    response = await rt.chat(
+        messages=[{"role": "user", "content": "time?"}], tools=[tool], user_id="u1"
+    )
+
+    first = built[0]
+    assert executor.calls == 1
+    assert response.content == "It is noon."
+    assert len(first.calls) == 2  # both rounds ran on the same, open provider
+    await asyncio.sleep(0)
+    assert first.closed, "the retired provider is closed once its turn ends"
+    assert rt._retired == {}
+
+    await rt.chat(messages=[{"role": "user", "content": "again"}], tools=[], user_id="u1")
+    assert len(built) == 2 and built[1] is not first
+    assert built[1].calls and not built[1].closed
+
+
+@pytest.mark.asyncio
+async def test_eviction_retires_a_leased_provider_until_its_turn_ends(monkeypatch):
+    rt = runtime(Source(keys={"gemini": "k", "openai": "o"}), monkeypatch)
+    rt._PROVIDER_CACHE_MAX = 1
+    async with rt._lease("gemini", "gemini-2.5-flash") as leased:
+        await rt._resolve_provider("openai", "gpt-4o")  # evicts the leased one
+        await asyncio.sleep(0)
+        assert not leased.closed
+        assert id(leased) in rt._retired
+    await asyncio.sleep(0)
+    assert leased.closed and rt._retired == {}
+
+
+@pytest.mark.asyncio
+async def test_two_turns_share_a_lease_and_the_last_one_out_closes(monkeypatch):
+    rt = runtime(Source(keys={"gemini": "k"}), monkeypatch)
+    async with rt._lease("gemini", "gemini-2.5-flash") as first:
+        async with rt._lease("gemini", "gemini-2.5-flash") as second:
+            assert first is second
+            rt.invalidate_providers()
+        await asyncio.sleep(0)
+        assert not first.closed
+    await asyncio.sleep(0)
+    assert first.closed
+
+
+@pytest.mark.asyncio
+async def test_aclose_closes_cached_and_retired_providers(monkeypatch):
+    rt = runtime(Source(keys={"gemini": "k", "openai": "o"}), monkeypatch)
+    cached = await rt._resolve_provider("openai", "gpt-4o")
+    async with rt._lease("gemini", "gemini-2.5-flash") as leased:
+        await rt.aclose()
+        assert leased.closed and cached.closed
+    assert len(rt._provider_cache) == 0 and rt._retired == {}
 
 
 @pytest.mark.asyncio
@@ -269,6 +515,38 @@ async def test_stream_chat_marks_a_missing_key_on_its_error_event(monkeypatch):
         }
     ]
     assert events[-1] == {"type": "done", "data": {}}
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_marks_an_unavailable_user_provider(monkeypatch):
+    rt = runtime(Source(keys={"gemini": "k"}), monkeypatch)
+    events = [
+        e
+        async for e in rt.stream_chat(
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[],
+            user_id="u1",
+            llm_provider="openai",
+            llm_model="gpt-4o",
+        )
+    ]
+    [error] = [e for e in events if e["type"] == "error"]
+    assert error["data"]["code"] == "user_provider_unavailable"
+    assert "openai" in error["data"]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_stream_done_frame_names_the_pair_that_ran(monkeypatch):
+    rt = runtime(Source(keys={"gemini": "k"}), monkeypatch)
+    rt._CONTENT_CHUNK_DELAY = 0
+    events = [
+        e
+        async for e in rt.stream_chat(
+            messages=[{"role": "user", "content": "hi"}], tools=[], user_id="u1"
+        )
+    ]
+    done = events[-1]["data"]
+    assert (done["provider"], done["model"]) == ("gemini", "gemini-2.5-flash")
 
 
 def test_permissions_text_is_folded_into_system_prompt():
@@ -338,9 +616,10 @@ class _ScreenshotExecutor:
         return {"ok": True, "url": "https://example.com", "image": "data:image/png;base64,AAAA"}
 
 
-async def _follow_up_after_screenshot(monkeypatch, default_provider):
+async def _follow_up_after_screenshot(monkeypatch, default_provider, vision):
     """Run one screenshot round with ``default_provider`` as the source's
-    default and return the follow-up request the model received."""
+    default, on a provider whose ``supports_vision`` is ``vision``, and
+    return the follow-up request the model received."""
     import services.agent.runtime as rt_module
 
     scripted = FakeProvider(
@@ -354,6 +633,7 @@ async def _follow_up_after_screenshot(monkeypatch, default_provider):
             LLMResponse(content="I see a page."),
         ],
     )
+    scripted.supports_vision = vision
     monkeypatch.setattr(rt_module, "create_provider", lambda **_kwargs: scripted)
     rt = AgentRuntime(
         config=settings,
@@ -380,20 +660,45 @@ async def _follow_up_after_screenshot(monkeypatch, default_provider):
 @pytest.mark.asyncio
 async def test_screenshot_image_follows_the_resolved_vision_provider(monkeypatch):
     """Whether the model is shown the screenshot depends on the provider
-    the SOURCE resolved for this turn, not on the process environment."""
-    follow_up = await _follow_up_after_screenshot(monkeypatch, "gemini")
+    instance this turn resolved to (its ``supports_vision``), not on the
+    process environment or on a hardcoded list of names."""
+    follow_up = await _follow_up_after_screenshot(monkeypatch, "gemini", True)
     assert isinstance(follow_up["content"], list)
     assert any(block.get("type") == "image" for block in follow_up["content"])
 
 
 @pytest.mark.asyncio
 async def test_screenshot_image_is_withheld_from_a_non_vision_provider(monkeypatch):
-    follow_up = await _follow_up_after_screenshot(monkeypatch, "groq")
+    follow_up = await _follow_up_after_screenshot(monkeypatch, "groq", False)
     assert isinstance(follow_up["content"], str)
 
 
+@pytest.mark.asyncio
+async def test_screenshot_image_reaches_a_vision_provider_outside_the_old_list(
+    monkeypatch,
+):
+    """Mistral and Grok accept images too; a list of names had silently
+    withheld screenshots from them."""
+    follow_up = await _follow_up_after_screenshot(monkeypatch, "mistral", True)
+    assert isinstance(follow_up["content"], list)
+
+
+def test_every_provider_class_declares_vision_support():
+    from services.agent.providers import PROVIDER_REGISTRY, LLMProvider
+
+    assert LLMProvider.supports_vision is False
+    for name, cls in PROVIDER_REGISTRY.items():
+        declared = [
+            klass for klass in cls.__mro__
+            if klass is not LLMProvider and "supports_vision" in vars(klass)
+        ]
+        assert declared, f"{name} does not declare supports_vision"
+        assert isinstance(cls.supports_vision, bool)
+
+
 # ---------------------------------------------------------------------------
-# Routes and channels: ProviderNotConfigured -> 503 + /setup
+# Routes and channels: not set up -> 503 + setup_url; the user's own
+# provider unavailable -> 409 + settings_url
 # ---------------------------------------------------------------------------
 
 
@@ -404,6 +709,51 @@ def _unconfigured_runtime():
         approval_store=InMemoryApprovalStore(),
         settings_source=Source(keys={}),
     )
+
+
+def _gemini_only_runtime():
+    return AgentRuntime(
+        config=settings,
+        permission_engine=RuntimePermissionAdapter(),
+        approval_store=InMemoryApprovalStore(),
+        prompt_guard=PromptGuard(),
+        settings_source=Source(keys={"gemini": "k"}),
+    )
+
+
+def _fake_create_provider(monkeypatch):
+    import services.agent.runtime as rt_module
+
+    monkeypatch.setattr(
+        rt_module,
+        "create_provider",
+        lambda provider_name, model, api_key, base_url=None: FakeProvider(api_key, model),
+    )
+
+
+async def _pick_provider(session_factory, user_id, provider, model):
+    from sqlalchemy import update
+
+    from models.user import User
+
+    async with session_factory() as session:
+        await session.execute(
+            update(User)
+            .where(User.id == user_id)
+            .values(llm_provider=provider, llm_model=model)
+        )
+        await session.commit()
+
+
+def _frames(text):
+    import json
+
+    frames = []
+    for block in text.strip().split("\n\n"):
+        lines = dict(line.split(": ", 1) for line in block.splitlines() if ": " in line)
+        if "event" in lines:
+            frames.append((lines["event"], json.loads(lines["data"])))
+    return frames
 
 
 @pytest.mark.asyncio
@@ -425,6 +775,7 @@ async def test_send_message_without_a_key_is_503_pointing_at_setup(client, sessi
         assert response.status_code == 503
         assert response.json()["detail"] == {
             "message": SETUP_SENTENCE,
+            "code": "provider_not_configured",
             "setup_url": "/setup",
         }
     finally:
@@ -432,11 +783,81 @@ async def test_send_message_without_a_key_is_503_pointing_at_setup(client, sessi
 
 
 @pytest.mark.asyncio
+async def test_send_message_with_an_unavailable_user_provider_is_409_pointing_at_settings(
+    client, session_factory, monkeypatch
+):
+    """The install works; only this user's own choice has no key. That is
+    not "service unavailable" and not something /setup can fix: 409 and a
+    pointer at the user's Settings."""
+    from api.routes import agent as agent_routes
+    from main import app
+
+    _fake_create_provider(monkeypatch)
+    app.dependency_overrides[agent_routes.get_runtime] = _gemini_only_runtime
+    try:
+        user, token = await make_user(session_factory, "own-pick@example.com")
+        await _pick_provider(session_factory, user.id, "openai", "gpt-4o")
+        created = await client.post(
+            "/api/agent/conversations", headers=auth_headers(token), json={}
+        )
+        response = await client.post(
+            f"/api/agent/conversations/{created.json()['id']}/messages",
+            headers=auth_headers(token),
+            json={"content": "hello"},
+        )
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert detail["code"] == "user_provider_unavailable"
+        assert detail["settings_url"] == "/settings"
+        assert "setup_url" not in detail
+        assert "openai" in detail["message"]
+    finally:
+        app.dependency_overrides.pop(agent_routes.get_runtime, None)
+
+
+@pytest.mark.asyncio
+async def test_user_following_the_install_default_chats_on_it(
+    client, session_factory, monkeypatch
+):
+    """A NULL provider on the account runs on whatever the install's default
+    is, and the stored message names that pair — not the account row."""
+    from sqlalchemy import select
+
+    from api.routes import agent as agent_routes
+    from main import app
+    from models.conversation import Message, MessageRole
+
+    _fake_create_provider(monkeypatch)
+    shared = _gemini_only_runtime()
+    app.dependency_overrides[agent_routes.get_runtime] = lambda: shared
+    try:
+        user, token = await make_user(session_factory, "follower@example.com")
+        assert user.llm_provider is None and user.llm_model is None
+        created = await client.post(
+            "/api/agent/conversations", headers=auth_headers(token), json={}
+        )
+        response = await client.post(
+            f"/api/agent/conversations/{created.json()['id']}/messages",
+            headers=auth_headers(token),
+            json={"content": "hello"},
+        )
+        assert response.status_code == 201, response.text
+    finally:
+        app.dependency_overrides.pop(agent_routes.get_runtime, None)
+
+    async with session_factory() as session:
+        row = (
+            await session.execute(
+                select(Message).where(Message.role == MessageRole.assistant)
+            )
+        ).scalar_one()
+    assert (row.llm_provider, row.llm_model) == ("gemini", "gemini-2.5-flash")
+
+
+@pytest.mark.asyncio
 async def test_stream_without_a_key_sends_an_error_frame_with_setup_url(
     client, session_factory
 ):
-    import json
-
     from api.routes import agent as agent_routes
     from main import app
 
@@ -452,13 +873,7 @@ async def test_stream_without_a_key_sends_an_error_frame_with_setup_url(
             json={"content": "hello"},
         )
         assert response.status_code == 200
-        frames = []
-        for block in response.text.strip().split("\n\n"):
-            lines = dict(
-                line.split(": ", 1) for line in block.splitlines() if ": " in line
-            )
-            if "event" in lines:
-                frames.append((lines["event"], json.loads(lines["data"])))
+        frames = _frames(response.text)
         errors = [data for name, data in frames if name == "error"]
         assert errors == [
             {
@@ -469,6 +884,34 @@ async def test_stream_without_a_key_sends_an_error_frame_with_setup_url(
         ]
         # A failed turn is not persisted as an empty assistant bubble.
         assert ("saved", {"assistant_message": None}) in frames
+    finally:
+        app.dependency_overrides.pop(agent_routes.get_runtime, None)
+
+
+@pytest.mark.asyncio
+async def test_stream_with_an_unavailable_user_provider_points_at_settings(
+    client, session_factory, monkeypatch
+):
+    from api.routes import agent as agent_routes
+    from main import app
+
+    _fake_create_provider(monkeypatch)
+    app.dependency_overrides[agent_routes.get_runtime] = _gemini_only_runtime
+    try:
+        user, token = await make_user(session_factory, "own-pick-stream@example.com")
+        await _pick_provider(session_factory, user.id, "openai", "gpt-4o")
+        created = await client.post(
+            "/api/agent/conversations", headers=auth_headers(token), json={}
+        )
+        response = await client.post(
+            f"/api/agent/conversations/{created.json()['id']}/messages/stream",
+            headers=auth_headers(token),
+            json={"content": "hello"},
+        )
+        [error] = [data for name, data in _frames(response.text) if name == "error"]
+        assert error["code"] == "user_provider_unavailable"
+        assert error["settings_url"] == "/settings"
+        assert "setup_url" not in error
     finally:
         app.dependency_overrides.pop(agent_routes.get_runtime, None)
 
@@ -491,3 +934,27 @@ async def test_channel_chat_without_a_key_replies_with_the_setup_sentence(sessio
     assert outcome["code"] == "provider_not_configured"
     assert outcome["setup_url"] == "/setup"
     assert outcome["conversation_id"]
+
+
+@pytest.mark.asyncio
+async def test_channel_chat_with_an_unavailable_user_provider_points_at_settings(
+    session_factory, monkeypatch
+):
+    from api.routes.agent import build_chat_applier
+    from main import app
+
+    _fake_create_provider(monkeypatch)
+    user, _ = await make_user(session_factory, "own-pick-telegram@example.com")
+    await _pick_provider(session_factory, user.id, "openai", "gpt-4o")
+    saved_runtime = getattr(app.state, "agent_runtime", None)
+    app.state.agent_runtime = _gemini_only_runtime()
+    try:
+        outcome = await build_chat_applier(app, session_factory=session_factory)(
+            str(user.id), "hello"
+        )
+    finally:
+        app.state.agent_runtime = saved_runtime
+    assert outcome["code"] == "user_provider_unavailable"
+    assert outcome["settings_url"] == "/settings"
+    assert "setup_url" not in outcome
+    assert "openai" in outcome["error"]

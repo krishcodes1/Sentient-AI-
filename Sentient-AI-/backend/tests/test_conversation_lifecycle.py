@@ -404,11 +404,13 @@ async def test_user_rate_limit_enforced_on_send_message(client, session_factory)
 
 
 @pytest.mark.asyncio
-async def test_unconfigured_user_provider_returns_503_pointing_at_setup(
+async def test_unconfigured_user_provider_returns_409_pointing_at_settings(
     client, session_factory, monkeypatch
 ):
-    """No key for the provider the user picked is a configuration gap, not
-    an upstream failure: 503, the provider named, and where to fix it."""
+    """No key for the provider the user picked, on an install whose default
+    works, is a conflict with the user's own Settings — not an upstream
+    failure and not something /setup fixes: 409, the provider named, and
+    where to change it."""
     from api.routes import agent as agent_routes
     from core.config import settings
     from main import app
@@ -432,11 +434,12 @@ async def test_unconfigured_user_provider_returns_503_pointing_at_setup(
             headers=auth_headers(token),
             json={"content": "hello"},
         )
-        assert response.status_code == 503
+        assert response.status_code == 409
         detail = response.json()["detail"]
         assert "openai" in detail["message"]
         assert "not configured" in detail["message"]
-        assert detail["setup_url"] == "/setup"
+        assert detail["code"] == "user_provider_unavailable"
+        assert detail["settings_url"] == "/settings"
     finally:
         app.dependency_overrides.pop(agent_routes.get_runtime, None)
 
