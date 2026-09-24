@@ -34,6 +34,12 @@ the toolkit the caller's identity rather than anything in the tool
 arguments. ``system`` installs optional software onto the host from a
 fixed allowlist; its install action is the one built-in that always goes
 through the approval card, and the executor refuses it unapproved.
+``desktop`` reads this computer's display and is off by default.
+
+Every built-in tool belongs to a capability (``services/capabilities``)
+the owner can switch off, except the few in ``ALWAYS_ON_TOOLS``. That
+switch is enforced twice: ``build_tools`` does not offer a tool whose
+capability is off, and the executor refuses it at dispatch.
 """
 
 from __future__ import annotations
@@ -42,7 +48,7 @@ import hashlib
 import json
 import uuid as uuid_module
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Awaitable, Callable, Iterable, Optional
 
 import structlog
 
@@ -54,6 +60,7 @@ from services.agent.permissions import (
     is_hard_blocked_action,
 )
 from services.agent.runtime import Tool
+from services.tools.desktop import DesktopToolkit
 from services.tools.reminders import ReminderToolkit
 from services.tools.system import ALLOWLIST as SYSTEM_CAPABILITIES
 from services.tools.system import SystemToolkit
@@ -402,10 +409,22 @@ CONNECTOR_CATALOG: dict[str, list[ToolSpec]] = {
             ),
         ),
     ],
+    # Built-in, capability "screen" (off by default): the owner turns it on
+    # in Settings → Permissions. Reads the display; never types or clicks.
+    "desktop": [
+        ToolSpec(
+            "screenshot",
+            "Take a picture of what is currently on this computer's screen "
+            "(the real desktop, not a web page). Use when the user asks what "
+            "they are looking at or to send them a screenshot of the computer.",
+            ActionCategory.READ,
+            _schema(display={"type": "integer", "description": "Display index, 0 = main"}),
+        ),
+    ],
 }
 
 # Types offered to every user with no connector row and no credentials.
-BUILTIN_CONNECTOR_TYPES: tuple[str, ...] = ("web", "reminders", "system")
+BUILTIN_CONNECTOR_TYPES: tuple[str, ...] = ("web", "reminders", "system", "desktop")
 
 # The tier each built-in stands in for the connector row it does not
 # have. web and reminders run unattended by policy, so an account whose
@@ -417,6 +436,9 @@ _BUILTIN_STANCE: dict[str, str] = {
     "web": "auto_approve",
     "reminders": "auto_approve",
     "system": "user_confirm",
+    # Reads are auto by policy, so this changes nothing for the one action
+    # there is; the capability switch (off by default) is the real gate.
+    "desktop": "user_confirm",
 }
 
 
@@ -712,13 +734,20 @@ def build_tools(
     is_admin: bool = False,
     *,
     include_builtins: bool = True,
+    enabled_capabilities: Optional[frozenset[str]] = None,
 ) -> list[Tool]:
     """Produce the runtime ``Tool`` objects for a user's active connectors.
 
-    Built-in types (``web``, ``reminders``, ``system``) are appended for
-    every user: they hold no credentials, so there is no connector row to
-    gate them on. They are still held to the user's account-level tier,
-    which is a floor over everything the agent may do unattended. The
+    ``enabled_capabilities`` is the owner's effective set (see
+    services/capabilities); tools of any other capability are not offered.
+    ``None`` means the registry defaults, so a caller that forgets the
+    argument can never offer an off-by-default capability (``screen``).
+
+    Built-in types (``web``, ``reminders``, ``system``, ``desktop``) are
+    appended for every user: they hold no credentials, so there is no
+    connector row to gate them on. They are still held to the user's
+    account-level tier, which is a floor over everything the agent may do
+    unattended. The
     account tier can only tighten what the static policy grants: an
     action the policy auto-approves (web reads, reminder writes) stays
     unattended under the default ``user_confirm``, exactly as connector
@@ -746,6 +775,15 @@ def build_tools(
     - ``user_confirm`` (default): static policy applies unchanged —
       write-scope tools require explicit approval.
     """
+    from services import capabilities as capability_registry
+
+    if enabled_capabilities is None:
+        # No wiring supplied: fall back to the registry defaults so a caller
+        # that forgets the argument can never switch on an off-by-default
+        # capability (screen). Wired callers pass the owner's effective set.
+        enabled_capabilities = frozenset(
+            k for k, on in capability_registry.default_switches().items() if on
+        )
     engine = engine or PermissionEngine()
     # The static policy already distinguishes admins (ADMIN_ONLY actions
     # require their confirmation instead of being refused outright); it had
@@ -798,9 +836,13 @@ def build_tools(
                 and not is_hard_blocked_action(spec.action)
             ):
                 runtime_decision = "approved"
+            tool_name = f"{offer.namespace}.{spec.action}"
+            cap = capability_registry.capability_for_tool(tool_name)
+            if cap is not None and cap.key not in enabled_capabilities:
+                continue
             tools.append(
                 Tool(
-                    name=f"{offer.namespace}.{spec.action}",
+                    name=tool_name,
                     description=(
                         f"{spec.description} (account: {offer.label})"
                         if offer.label
@@ -903,8 +945,11 @@ class ConnectorToolExecutor:
     instantiate the connector (which arms the deny-by-default network
     policy), authenticate, execute, and return the sanitized result.
 
-    Built-in tools (``web.*``, ``reminders.*``, ``system.*``) run here
-    too, but take none of that path: they have no credentials to decrypt,
+    Built-in tools (``web.*``, ``reminders.*``, ``system.*``,
+    ``desktop.*``) run here too, but take none of that path. They are
+    first checked against the owner's enabled capabilities
+    (``capability_gate``; the registry defaults when unwired) and refused
+    if theirs is off. Beyond that they have no credentials to decrypt,
     no connector row to load and no scopes to check, so they dispatch
     straight to their toolkit. The reminder toolkit shares this
     executor's session factory and is handed the caller's ``user_id``,
@@ -932,15 +977,29 @@ class ConnectorToolExecutor:
         web_toolkit: Optional[WebToolkit] = None,
         reminder_toolkit: Optional[ReminderToolkit] = None,
         system_toolkit: Optional[SystemToolkit] = None,
+        desktop_toolkit: Optional[DesktopToolkit] = None,
+        capability_gate: Optional[Callable[[], Awaitable[frozenset[str]]]] = None,
     ) -> None:
         self._session_factory = session_factory
         self._web = web_toolkit or WebToolkit()
         self._reminders = reminder_toolkit or ReminderToolkit(session_factory)
         self._system = system_toolkit or SystemToolkit()
+        self._desktop = desktop_toolkit or DesktopToolkit()
+        # Returns the owner's effective capability set. Unwired, the
+        # registry defaults apply (see _enabled_capabilities), so an
+        # off-by-default capability stays refused.
+        self._capability_gate = capability_gate
         # Per connector-config sliding-window limiters. Persist across
         # calls (connector instances are per-call) within this process.
         self._limiters: dict[uuid_module.UUID, Any] = {}
         self._mcp_dispatcher: Optional[Any] = None
+
+    async def _enabled_capabilities(self) -> frozenset[str]:
+        if self._capability_gate is not None:
+            return await self._capability_gate()
+        from services import capabilities as capability_registry
+
+        return frozenset(k for k, on in capability_registry.default_switches().items() if on)
 
     def _get_mcp_dispatcher(self):
         if self._mcp_dispatcher is None:
@@ -988,6 +1047,19 @@ class ConnectorToolExecutor:
         # model. Strip any attempt to smuggle it through tool arguments.
         arguments = {k: v for k, v in arguments.items() if k != "user_confirmed"}
 
+        from services import capabilities as capability_registry
+
+        cap = capability_registry.capability_for_tool(tool_name)
+        if cap is not None and cap.key not in await self._enabled_capabilities():
+            # Second gate, independent of the offer: a tool the owner turned
+            # off is refused even if the model somehow names it.
+            logger.info("tool_capability_off", tool=tool_name, capability=cap.key, user_id=user_id)
+            return {
+                "ok": False,
+                "capability": cap.key,
+                "error": f"{cap.label} is turned off. {cap.when_denied}",
+            }
+
         if resolved.connector_type == "web":
             if resolved.spec.category != ActionCategory.READ:
                 # The web tools are read-only by construction; a non-read
@@ -1033,6 +1105,11 @@ class ConnectorToolExecutor:
                     ),
                 }
             return await self._system.execute(resolved.action, dict(arguments))
+
+        if resolved.connector_type == "desktop":
+            if resolved.spec.category != ActionCategory.READ:
+                return {"ok": False, "error": f"Desktop action '{resolved.action}' is not permitted."}
+            return await self._desktop.execute(resolved.action, dict(arguments))
 
         if self._session_factory is None:
             return {
