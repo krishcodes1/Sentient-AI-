@@ -19,7 +19,12 @@ row in the same transaction and commits both together, so a change
 without its audit row (or the reverse) cannot exist. Listeners hear about
 a change only after that commit.
 
-Single-process assumption: the asyncio lock, the 5 s snapshot cache and
+The capability report is cached next to the snapshot, for the same TTL
+and dropped by the same invalidate(): every gated tool call reads it, and
+building it gathers environment facts (filesystem stats, the browser
+install record) that must not be re-read per call.
+
+Single-process assumption: the asyncio locks, the 5 s caches and
 the change listeners are per process. The production image and the
 native install each run one process (one uvicorn worker), so they are
 authoritative there. The row lock still serialises writers at the
@@ -37,6 +42,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from types import MappingProxyType
 from typing import Any, Awaitable, Callable, Mapping, Optional
 
 import structlog
@@ -76,6 +82,17 @@ class _Snapshot:
     token_unreadable: bool = False
 
 
+@dataclass(frozen=True)
+class _ReportView:
+    """One capability report and the two indexes the gates read, built
+    together so they can never disagree."""
+
+    statuses: tuple[CapabilityStatus, ...]
+    enabled: frozenset[str]
+    # Read-only: every gate caller shares this one mapping.
+    by_key: Mapping[str, CapabilityStatus]
+
+
 class InstallationService:
     CACHE_TTL_S = 5.0
 
@@ -83,11 +100,15 @@ class InstallationService:
         self._session_factory = session_factory
         self._config = config
         self._snapshot: Optional[tuple[float, _Snapshot]] = None
+        self._report_view: Optional[tuple[float, _ReportView]] = None
         # Bumped by invalidate(); a load only caches what it read if no
         # invalidate() happened while it was reading.
         self._gen = 0
         self._callbacks: list[ChangeCallback] = []
         self._lock = asyncio.Lock()
+        # Single-flight for the report: gate calls arriving together when
+        # the cache runs out build it once, not once each.
+        self._report_lock = asyncio.Lock()
         # Fingerprints of blobs already reported as undecryptable, so a
         # lost key logs once per blob rather than on every cache refresh.
         self._warned_blobs: set[str] = set()
@@ -184,8 +205,12 @@ class InstallationService:
         return snap
 
     def invalidate(self) -> None:
+        """Drop the cached snapshot and the report built from it, so the
+        next read sees the database and the environment afresh (after a
+        write, an install, or an OS permission grant)."""
         self._gen += 1
         self._snapshot = None
+        self._report_view = None
 
     def on_change(self, callback: ChangeCallback) -> None:
         self._callbacks.append(callback)
@@ -263,11 +288,49 @@ class InstallationService:
     async def context(self) -> ReportContext:
         return registry.default_context(telegram_configured=bool(await self.telegram_token()))
 
+    def _cached_view(self) -> Optional[_ReportView]:
+        cached = self._report_view
+        if cached is not None and time.monotonic() - cached[0] < self.CACHE_TTL_S:
+            return cached[1]
+        return None
+
+    async def _view(self) -> _ReportView:
+        """The capability report, built at most once per cache period.
+        default_context() (filesystem stats, the browser install record)
+        runs only here."""
+        view = self._cached_view()
+        if view is not None:
+            return view
+        async with self._report_lock:
+            view = self._cached_view()  # built while this call waited
+            if view is not None:
+                return view
+            now = time.monotonic()
+            gen = self._gen
+            statuses = tuple(registry.report(await self.capabilities(), await self.context()))
+            view = _ReportView(
+                statuses=statuses,
+                enabled=frozenset(s.key for s in statuses if s.effective == "on"),
+                by_key=MappingProxyType(registry.statuses_by_key(statuses)),
+            )
+            # As in _load: a report built across an invalidate() may
+            # predate the change, so it is returned but not cached.
+            if gen == self._gen:
+                self._report_view = (now, view)
+            return view
+
     async def report(self) -> list[CapabilityStatus]:
-        return registry.report(await self.capabilities(), await self.context())
+        return list((await self._view()).statuses)
 
     async def enabled_keys(self) -> frozenset[str]:
-        return registry.enabled_keys(await self.capabilities(), await self.context())
+        """Keys whose effective state is ``on``."""
+        return (await self._view()).enabled
+
+    async def capability_statuses(self) -> Mapping[str, CapabilityStatus]:
+        """The report indexed by key (read-only): the capability gate the
+        permission adapter and the executor read, so they can tell a
+        capability the owner switched off from one that is on but blocked."""
+        return (await self._view()).by_key
 
     # ── AI provider ────────────────────────────────────────────────────
 

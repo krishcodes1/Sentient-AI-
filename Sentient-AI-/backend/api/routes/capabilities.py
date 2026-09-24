@@ -189,9 +189,11 @@ async def request_access(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Could not open the permission prompt.",
         )
-    # The probe is cached for a few seconds; the answer must reflect what
-    # the owner just granted, not the denial cached a moment ago.
+    # The probe and the report are cached for a few seconds; the answer
+    # must reflect what the owner just granted, not the denial cached a
+    # moment ago.
     capabilities.clear_probe_cache()
+    service.invalidate()
     fresh = capabilities.statuses_by_key(await service.report())[key]
 
     await _audit(
@@ -256,6 +258,13 @@ async def install(
                 "capability_install_crashed", capability=key, error_type=type(exc).__name__
             )
             result = {"ok": False, "error": "The install failed unexpectedly."}
+
+        if result.get("ok") is True:
+            # The report is cached for a few seconds; the component just
+            # installed must show up (and its tools unblock) right away.
+            service = getattr(request.app.state, "installation", None)
+            if service is not None:
+                service.invalidate()
 
         await _audit(
             request,

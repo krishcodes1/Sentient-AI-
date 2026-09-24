@@ -374,6 +374,69 @@ async def test_a_load_that_raced_an_invalidate_is_not_cached(session_factory):
 
 
 @pytest.mark.asyncio
+async def test_report_is_built_once_per_cache_period(session_factory, monkeypatch):
+    """Every gated tool call asks for the owner's statuses; the environment
+    facts (filesystem stats, browsers.json) are gathered once per cache
+    period, not per call, and a change rebuilds them."""
+    from services import capabilities as registry
+
+    real = registry.default_context
+    calls: list[bool] = []
+
+    def counting_context(**kwargs):
+        calls.append(True)
+        return real(**kwargs)
+
+    monkeypatch.setattr(registry, "default_context", counting_context)
+    svc = InstallationService(session_factory)
+
+    first = await svc.enabled_keys()
+    for _ in range(20):
+        assert await svc.enabled_keys() == first
+    statuses = await svc.capability_statuses()
+    report = await svc.report()
+    assert len(calls) == 1
+    assert set(statuses) == {s.key for s in report}
+    assert first == frozenset(k for k, s in statuses.items() if s.effective == "on")
+    # The cached index is read-only: a gate caller cannot corrupt it.
+    with pytest.raises(TypeError):
+        statuses["screen"] = statuses["web_browsing"]  # type: ignore[index]
+
+    svc.invalidate()
+    await svc.enabled_keys()
+    assert len(calls) == 2
+
+    # A switch change rebuilds the report and the gates see it at once.
+    user, _ = await make_user(session_factory, "cache-owner@example.com")
+    await svc.set_capabilities({"web_browsing": False}, actor_id=user.id)
+    assert "web_browsing" not in await svc.enabled_keys()
+    assert (await svc.capability_statuses())["web_browsing"].effective == "off"
+
+    # Past the TTL the report is rebuilt.
+    count = len(calls)
+    monkeypatch.setattr(InstallationService, "CACHE_TTL_S", 0.0)
+    await svc.enabled_keys()
+    assert len(calls) == count + 1
+
+
+@pytest.mark.asyncio
+async def test_a_report_that_raced_an_invalidate_is_not_cached(session_factory, monkeypatch):
+    from services import capabilities as registry
+
+    svc = InstallationService(session_factory)
+    real = registry.default_context
+
+    def racing_context(**kwargs):
+        svc.invalidate()  # a write committed while the report was built
+        return real(**kwargs)
+
+    monkeypatch.setattr(registry, "default_context", racing_context)
+    await svc.enabled_keys()
+    monkeypatch.setattr(registry, "default_context", real)
+    assert svc._report_view is None
+
+
+@pytest.mark.asyncio
 async def test_snapshot_repr_hides_secrets(session_factory):
     svc = InstallationService(session_factory)
     user, _ = await make_user(session_factory, "o@example.com")

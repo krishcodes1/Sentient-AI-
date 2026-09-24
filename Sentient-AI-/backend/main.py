@@ -96,12 +96,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await engine.dispose()
 
 
-def _wire_telegram(app: FastAPI, service: TelegramService) -> None:
+def _wire_telegram(
+    app: FastAPI,
+    service: TelegramService,
+    session_factory: Callable[[], Any] = async_session,
+) -> None:
     """Point a poller at the agent pipelines. The manager calls this on
     every (re)start, so a bot token saved while the server runs gets the
-    same approval and chat wiring as one present at boot."""
-    service.decide = agent.build_decision_applier(app)
-    service.chat = agent.build_chat_applier(app)
+    same approval and chat wiring as one present at boot. Both pipelines
+    open sessions from the factory wire_services was given."""
+    service.decide = agent.build_decision_applier(app, session_factory)
+    service.chat = agent.build_chat_applier(app, session_factory)
 
 
 async def wire_services(
@@ -139,13 +144,10 @@ async def wire_services(
 
     telegram_manager = TelegramManager(
         session_factory,
-        on_start=lambda service: _wire_telegram(app, service),
+        on_start=lambda service: _wire_telegram(app, service, session_factory),
         service_factory=telegram_service_factory,
     )
     app.state.telegram_manager = telegram_manager
-    # Compatibility alias for code that still reads app.state.telegram; it
-    # is the manager now, never a bare service.
-    app.state.telegram = telegram_manager
 
     # Pending actions are pushed to each user's linked Telegram chat while
     # a poller runs, and the Approve/Deny press flows through the same
@@ -162,36 +164,34 @@ async def wire_services(
     system_toolkit = SystemToolkit(report_source=installation.report)
     app.state.system_toolkit = system_toolkit
 
-    try:
-        # All security-relevant services own short-lived sessions via the
-        # application session factory: the executor decrypts credentials and
-        # dispatches real connectors, the audit logger writes hash-chained
-        # rows, and the approval store persists pending actions across
-        # restarts and workers. The capability gate is enforced at both
-        # the permission seam (blocked before anything runs, audited as
-        # capability_off) and the executor (the backstop).
-        app.state.agent_runtime = AgentRuntime(
-            config=settings,
-            permission_engine=RuntimePermissionAdapter(
-                capability_gate=installation.enabled_keys
-            ),
-            tool_executor=ConnectorToolExecutor(
-                session_factory=session_factory,
-                capability_gate=installation.enabled_keys,
-                system_toolkit=system_toolkit,
-            ),
-            audit_service=RuntimeAuditLogger(session_factory=session_factory),
-            approval_store=approval_store,
-            settings_source=installation,
-        )
-        logger.info("agent_runtime_initialized")
-    except Exception as exc:
-        # The runtime needs no provider key at boot any more (a turn
-        # without one answers "not configured"), so this only catches a
-        # genuine construction bug. Keep serving health and setup; agent
-        # routes answer 503 until it is fixed.
-        logger.error("agent_runtime_init_failed", error=str(exc))
-        app.state.agent_runtime = None
+    # All security-relevant services own short-lived sessions via the
+    # application session factory: the executor decrypts credentials and
+    # dispatches real connectors, the audit logger writes hash-chained
+    # rows, and the approval store persists pending actions across
+    # restarts and workers. The capability gate (the owner's report by
+    # key) is enforced at both the permission seam (blocked before
+    # anything runs, audited as capability_off / capability_blocked) and
+    # the executor (the backstop).
+    #
+    # No fallback: the runtime needs no provider key at boot (a turn
+    # without one answers "not configured"), so a construction error is a
+    # genuine bug and must fail startup rather than leave /api/health
+    # reporting healthy with no agent behind it.
+    app.state.agent_runtime = AgentRuntime(
+        config=settings,
+        permission_engine=RuntimePermissionAdapter(
+            capability_gate=installation.capability_statuses
+        ),
+        tool_executor=ConnectorToolExecutor(
+            session_factory=session_factory,
+            capability_gate=installation.capability_statuses,
+            system_toolkit=system_toolkit,
+        ),
+        audit_service=RuntimeAuditLogger(session_factory=session_factory),
+        approval_store=approval_store,
+        settings_source=installation,
+    )
+    logger.info("agent_runtime_initialized")
 
     # Tool discovery for user-registered MCP servers (short-TTL cache).
     app.state.mcp_catalog = MCPToolCatalog(MCPConnectorLoader(session_factory))

@@ -39,9 +39,14 @@ through the approval card, and the executor refuses it unapproved.
 Every built-in tool belongs to a capability (``services/capabilities``)
 the owner can switch off, except the few in ``ALWAYS_ON_TOOLS``. That
 switch is enforced three times, always by the canonical ``type.action``
-name: ``build_tools`` does not offer a tool whose capability is off, the
-permission adapter blocks it (audited as ``capability_off``) before
-anything runs, and the executor refuses it at dispatch as the backstop.
+name: ``build_tools`` offers a tool only when its capability is on, the
+permission adapter blocks it before anything runs, and the executor
+refuses it at dispatch as the backstop. The adapter and the executor read
+the owner's report (``capability_gate``) and tell the cases apart: off
+(the owner's switch; ``capability_off``), blocked (switched on but not
+usable here, e.g. not installed or no OS permission;
+``capability_blocked``, with the reason and fix), and a gate that could
+not answer (``capability_gate_error``: refused, fail closed).
 """
 
 from __future__ import annotations
@@ -49,8 +54,9 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid as uuid_module
+from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Iterable, Optional
+from typing import Any, Awaitable, Callable, Iterable, Literal, Mapping, Optional
 
 import structlog
 
@@ -61,7 +67,14 @@ from services.agent.permissions import (
     UserTier,
     is_hard_blocked_action,
 )
-from services.agent.runtime import CAPABILITY_OFF_POLICY, Tool
+from services.agent.runtime import (
+    CAPABILITY_BLOCKED_POLICY,
+    CAPABILITY_GATE_ERROR_POLICY,
+    CAPABILITY_GATE_ERROR_REASON,
+    CAPABILITY_OFF_POLICY,
+    Tool,
+)
+from services.capabilities.base import Capability, CapabilityStatus
 from services.tools.desktop import DesktopToolkit
 from services.tools.reminders import ReminderToolkit
 from services.tools.system import ALLOWLIST as SYSTEM_CAPABILITIES
@@ -616,13 +629,92 @@ def _default_enabled_capabilities() -> frozenset[str]:
     return frozenset(k for k, on in capability_registry.default_switches().items() if on)
 
 
-def _capability_of(connector_type: str, action: str):
+def _capability_of(connector_type: str, action: str) -> Optional[Capability]:
     """The capability gating one built-in action, looked up by its
     canonical ``type.action`` name — never by whatever spelling the model
     used — so every gate agrees on which switch applies."""
     from services import capabilities as capability_registry
 
     return capability_registry.capability_for_tool(f"{connector_type}.{action}")
+
+
+def capability_of_tool(tool_name: str) -> Optional[Capability]:
+    """The capability gating *tool_name*: the name is resolved first and
+    the capability looked up by its canonical ``type.action``. None for a
+    name that does not resolve (MCP tools, unknown or slugged built-in
+    spellings) and for a tool no capability gates."""
+    resolved = resolve_tool(tool_name)
+    if resolved is None:
+        return None
+    return _capability_of(resolved.connector_type, resolved.action)
+
+
+# The owner's capability report indexed by key
+# (InstallationService.capability_statuses). The adapter and the executor
+# read it per call; the offer (build_tools) takes the enabled set instead.
+CapabilityGate = Callable[[], Awaitable[Mapping[str, CapabilityStatus]]]
+
+CapabilityState = Literal["off", "blocked", "error"]
+
+
+@dataclass(frozen=True)
+class _CapabilityRefusal:
+    """Why a capability refuses a tool right now: what to tell the model
+    and the user (``reason``) and what the audit row records (``policy``)."""
+
+    state: CapabilityState
+    reason: str
+    policy: str
+
+
+def _off(cap: Capability) -> _CapabilityRefusal:
+    return _CapabilityRefusal("off", cap.when_denied, CAPABILITY_OFF_POLICY)
+
+
+def _blocked_reason(status: CapabilityStatus) -> str:
+    """Why a switched-on capability is unusable here, and how to fix it:
+    the report's reason, its first fix step, and the Install button when
+    there is something to install."""
+    reason = status.reason or f"{status.label} is not available here."
+    if status.fix_steps:
+        reason += f" To fix: {status.fix_steps[0]}"
+    if status.install:
+        reason += " The owner can install it from Settings → Permissions."
+    return reason
+
+
+async def _gate_refusal(
+    gate: Optional[CapabilityGate], cap: Capability
+) -> Optional[_CapabilityRefusal]:
+    """Why *cap* refuses its tools right now, or None when they may run.
+
+    Unwired (``gate`` None), the registry defaults stand in, so an
+    off-by-default capability stays refused. Anything short of a report
+    saying ``on`` refuses: ``off`` and ``blocked`` as the report says, a
+    report without this capability as off, and a gate that raises (or
+    answers with something that is not a report) as a gate error — fail
+    closed. Only the exception's type is logged: its message can quote a
+    connection string.
+    """
+    if gate is None:
+        return None if cap.default_enabled else _off(cap)
+    try:
+        status = (await gate()).get(cap.key)
+        effective = status.effective if status is not None else "off"
+        if effective == "on":
+            return None
+        if effective == "blocked":
+            return _CapabilityRefusal(
+                "blocked", _blocked_reason(status), CAPABILITY_BLOCKED_POLICY
+            )
+        return _off(cap)
+    except Exception as exc:
+        logger.warning(
+            "capability_gate_failed", capability=cap.key, error_type=type(exc).__name__
+        )
+        return _CapabilityRefusal(
+            "error", CAPABILITY_GATE_ERROR_REASON, CAPABILITY_GATE_ERROR_POLICY
+        )
 
 
 # Map a PermissionDecision to the string the runtime's check() returns.
@@ -893,95 +985,106 @@ class RuntimePermissionAdapter:
     resolve the tool name to its policy key + category and delegate to the
     real engine. Unknown tools are denied (blocked), which is default-deny.
 
-    A built-in tool whose capability the owner has not got on (see
-    ``capability_gate``; the registry defaults when unwired) is "blocked"
-    here with policy ``capability_off``. Refusing at this seam rather than
-    only in the executor means the runtime records ``tool_blocked`` before
-    any ``tool_executing`` intent row and shows the user a blocked card;
-    the executor's own gate stays as the backstop.
+    A built-in tool whose capability refuses it (see ``capability_gate``,
+    the owner's report; the registry defaults when unwired) is "blocked"
+    here: policy ``capability_off`` when the owner switched it off,
+    ``capability_blocked`` (with the reason and fix) when it is on but not
+    usable here, and ``capability_gate_error`` when the report could not
+    be read. Refusing at this seam rather than only in the executor means
+    the runtime records ``tool_blocked`` before any ``tool_executing``
+    intent row and shows the user a blocked card; the executor's own gate
+    stays as the backstop.
+
+    The runtime calls ``check``, then (when blocked) ``get_block_reason``
+    and ``get_policy_name`` for the same tool. The reason and policy come
+    from the decision ``check`` made, not a fresh one: the report can
+    refresh in between, and the audit row must not pair a capability block
+    with the engine's reason for an allowed call.
     """
+
+    # Decisions kept for the reason/policy calls that follow a check. The
+    # runtime makes those right after check(), so a small window suffices.
+    _DECISION_MEMO_SIZE = 256
 
     def __init__(
         self,
         engine: Optional[PermissionEngine] = None,
         user_tier: UserTier = UserTier.STANDARD,
-        capability_gate: Optional[Callable[[], Awaitable[frozenset[str]]]] = None,
+        capability_gate: Optional[CapabilityGate] = None,
     ) -> None:
         self._engine = engine or PermissionEngine()
         self._user_tier = user_tier
         self._capability_gate = capability_gate
+        # (user_id, tool_name) -> (decision, reason, policy) of the last check.
+        self._decisions: OrderedDict[tuple[str, str], tuple[str, str, str]] = OrderedDict()
 
-    async def _capability_off(self, resolved: ResolvedTool):
-        """The capability refusing *resolved*, or None when it may run."""
-        cap = _capability_of(resolved.connector_type, resolved.action)
-        if cap is None:
-            return None
-        enabled = (
-            await self._capability_gate()
-            if self._capability_gate is not None
-            else _default_enabled_capabilities()
-        )
-        return None if cap.key in enabled else cap
-
-    async def check(self, user_id: str, tool_name: str, arguments: dict[str, Any]) -> str:
+    async def _decide(self, tool_name: str) -> tuple[str, str, str]:
+        """(decision, reason, policy) for one call to *tool_name*."""
         from services.mcp.integration import classify_mcp_tool, is_mcp_tool
 
         if is_mcp_tool(tool_name):
             # Third-party MCP tools never auto-approve; financial-looking
             # names are blocked outright.
-            return classify_mcp_tool(tool_name)
-        resolved = resolve_tool(tool_name)
-        if resolved is None:
-            return "blocked"  # default-deny unknown tools
-        if await self._capability_off(resolved) is not None:
-            return "blocked"
-        decision = self._engine.check_permission(
-            connector_type=resolved.policy_key,
-            action=resolved.action,
-            scope=resolved.spec.category,
-            user_tier=self._user_tier,
-        )
-        return _runtime_decision(decision.allowed, decision.requires_approval, decision.tier)
-
-    async def get_block_reason(self, user_id: str, tool_name: str, arguments: dict[str, Any]) -> str:
-        from services.mcp.integration import classify_mcp_tool, is_mcp_tool
-
-        if is_mcp_tool(tool_name):
-            if classify_mcp_tool(tool_name) == "blocked":
+            mcp_decision = classify_mcp_tool(tool_name)
+            if mcp_decision == "blocked":
                 return (
+                    "blocked",
                     "MCP tool name matches a financial pattern; money-moving "
-                    "actions are permanently blocked."
+                    "actions are permanently blocked.",
+                    "mcp:financial-pattern",
                 )
-            return "MCP tools require explicit user approval."
-        resolved = resolve_tool(tool_name)
-        if resolved is None:
-            return f"Unknown tool '{tool_name}' is denied by default."
-        cap = await self._capability_off(resolved)
-        if cap is not None:
-            return cap.when_denied
-        decision = self._engine.check_permission(
-            connector_type=resolved.policy_key,
-            action=resolved.action,
-            scope=resolved.spec.category,
-            user_tier=self._user_tier,
-        )
-        return decision.reason
-
-    async def get_policy_name(self, user_id: str, tool_name: str) -> str:
-        from services.mcp.integration import classify_mcp_tool, is_mcp_tool
-
-        if is_mcp_tool(tool_name):
             return (
-                "mcp:financial-pattern"
-                if classify_mcp_tool(tool_name) == "blocked"
-                else "mcp:default-approval"
+                mcp_decision,
+                "MCP tools require explicit user approval.",
+                "mcp:default-approval",
             )
         resolved = resolve_tool(tool_name)
         if resolved is None:
-            return "default-deny"
-        if await self._capability_off(resolved) is not None:
-            return CAPABILITY_OFF_POLICY
-        return f"{resolved.policy_key}:{resolved.spec.category.value}"
+            # Default-deny unknown tools.
+            return "blocked", f"Unknown tool '{tool_name}' is denied by default.", "default-deny"
+        cap = _capability_of(resolved.connector_type, resolved.action)
+        if cap is not None:
+            refusal = await _gate_refusal(self._capability_gate, cap)
+            if refusal is not None:
+                return "blocked", refusal.reason, refusal.policy
+        decision = self._engine.check_permission(
+            connector_type=resolved.policy_key,
+            action=resolved.action,
+            scope=resolved.spec.category,
+            user_tier=self._user_tier,
+        )
+        return (
+            _runtime_decision(decision.allowed, decision.requires_approval, decision.tier),
+            decision.reason,
+            f"{resolved.policy_key}:{resolved.spec.category.value}",
+        )
+
+    def _remember(self, key: tuple[str, str], decision: tuple[str, str, str]) -> None:
+        self._decisions[key] = decision
+        self._decisions.move_to_end(key)
+        while len(self._decisions) > self._DECISION_MEMO_SIZE:
+            self._decisions.popitem(last=False)
+
+    async def _last_decision(self, user_id: str, tool_name: str) -> tuple[str, str, str]:
+        """The decision the last check() made for this call, or a fresh one
+        (remembered, so the policy call that follows agrees with it)."""
+        key = (user_id, tool_name)
+        decision = self._decisions.get(key)
+        if decision is None:
+            decision = await self._decide(tool_name)
+            self._remember(key, decision)
+        return decision
+
+    async def check(self, user_id: str, tool_name: str, arguments: dict[str, Any]) -> str:
+        decision = await self._decide(tool_name)
+        self._remember((user_id, tool_name), decision)
+        return decision[0]
+
+    async def get_block_reason(self, user_id: str, tool_name: str, arguments: dict[str, Any]) -> str:
+        return (await self._last_decision(user_id, tool_name))[1]
+
+    async def get_policy_name(self, user_id: str, tool_name: str) -> str:
+        return (await self._last_decision(user_id, tool_name))[2]
 
 
 # ---------------------------------------------------------------------------
@@ -1018,10 +1121,11 @@ class ConnectorToolExecutor:
 
     Built-in tools (``web.*``, ``reminders.*``, ``system.*``,
     ``desktop.*``) run here too, but take none of that path. They are
-    first checked against the owner's enabled capabilities
+    first checked against the owner's capability report
     (``capability_gate``; the registry defaults when unwired) and refused
-    if theirs is off. Beyond that they have no credentials to decrypt,
-    no connector row to load and no scopes to check, so they dispatch
+    unless theirs is on; the refusal says whether it is off, blocked or
+    the report could not be read. Beyond that they have no credentials to
+    decrypt, no connector row to load and no scopes to check, so they dispatch
     straight to their toolkit. The reminder toolkit shares this
     executor's session factory and is handed the caller's ``user_id``,
     which is the only identity it will write under.
@@ -1049,7 +1153,7 @@ class ConnectorToolExecutor:
         reminder_toolkit: Optional[ReminderToolkit] = None,
         system_toolkit: Optional[SystemToolkit] = None,
         desktop_toolkit: Optional[DesktopToolkit] = None,
-        capability_gate: Optional[Callable[[], Awaitable[frozenset[str]]]] = None,
+        capability_gate: Optional[CapabilityGate] = None,
     ) -> None:
         self._session_factory = session_factory
         web = web_toolkit or WebToolkit()
@@ -1089,19 +1193,14 @@ class ConnectorToolExecutor:
                 frozenset({read}),
             ),
         }
-        # Returns the owner's effective capability set. Unwired, the
-        # registry defaults apply (see _enabled_capabilities), so an
-        # off-by-default capability stays refused.
+        # Returns the owner's capability report by key. Unwired, the
+        # registry defaults apply (see _gate_refusal), so an off-by-default
+        # capability stays refused.
         self._capability_gate = capability_gate
         # Per connector-config sliding-window limiters. Persist across
         # calls (connector instances are per-call) within this process.
         self._limiters: dict[uuid_module.UUID, Any] = {}
         self._mcp_dispatcher: Optional[Any] = None
-
-    async def _enabled_capabilities(self) -> frozenset[str]:
-        if self._capability_gate is not None:
-            return await self._capability_gate()
-        return _default_enabled_capabilities()
 
     def _get_mcp_dispatcher(self):
         if self._mcp_dispatcher is None:
@@ -1150,12 +1249,26 @@ class ConnectorToolExecutor:
         arguments = {k: v for k, v in arguments.items() if k != "user_confirmed"}
 
         cap = _capability_of(resolved.connector_type, resolved.action)
-        if cap is not None and cap.key not in await self._enabled_capabilities():
-            # Second gate, independent of the offer: a tool the owner turned
-            # off is refused even if the model somehow names it. Looked up
-            # by the canonical name, so no alternate spelling slips past.
-            logger.info("tool_capability_off", tool=tool_name, capability=cap.key, user_id=user_id)
-            return {"ok": False, "capability": cap.key, "error": cap.when_denied}
+        refusal = await _gate_refusal(self._capability_gate, cap) if cap is not None else None
+        if cap is not None and refusal is not None:
+            # Second gate, independent of the offer: a tool whose capability
+            # is off, blocked, or unreadable is refused even if the model
+            # somehow names it. Looked up by the canonical name, so no
+            # alternate spelling slips past. The runtime files this shape
+            # as tool_blocked under the state's policy (_capability_refusal).
+            logger.info(
+                "tool_capability_refused",
+                tool=tool_name,
+                capability=cap.key,
+                state=refusal.state,
+                user_id=user_id,
+            )
+            return {
+                "ok": False,
+                "capability": cap.key,
+                "state": refusal.state,
+                "error": refusal.reason,
+            }
 
         builtin = self._builtins.get(resolved.connector_type)
         if builtin is not None:

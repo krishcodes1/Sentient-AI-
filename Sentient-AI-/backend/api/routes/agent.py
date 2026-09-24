@@ -35,7 +35,7 @@ from services.memory import render_memory_block
 from services.agent.context_manager import compress_tool_result
 from services.agent.providers import ProviderError, ProviderNotConfigured
 from services.agent.runtime import AgentRuntime
-from services.agent.tool_registry import ConnectorSpec, build_tools, effective_tier
+from services.agent.tool_registry import ConnectorSpec, build_tools, effective_tier, resolve_tool
 
 logger = structlog.get_logger(__name__)
 
@@ -155,8 +155,9 @@ _user_rate_limiter = UserRateLimiter()
 def get_runtime(request: Request) -> AgentRuntime:
     """Return the singleton AgentRuntime stored on app.state.
 
-    Raises 503 if the runtime failed to initialize at startup. A missing
-    provider key is not such a failure any more: the runtime resolves keys
+    Raises 503 while the app has not been wired (wire_services has not run;
+    a runtime construction error fails startup instead of landing here). A
+    missing provider key is not such a failure: the runtime resolves keys
     per turn and a turn without one answers ProviderNotConfigured instead.
     """
     runtime: Optional[AgentRuntime] = getattr(request.app.state, "agent_runtime", None)
@@ -1363,18 +1364,19 @@ async def _apply_decision(
     return result
 
 
-def build_decision_applier(app: Any):
+def build_decision_applier(app: Any, session_factory: Any = async_session):
     """Async callback for out-of-band approval channels (the Telegram
     poller): (user_id, action_id, approved) -> outcome dict. Runs the same
     decide → record → resume pipeline as POST /approvals/{action_id},
-    with its own DB session and an explicit commit at the end."""
+    with its own DB session from ``session_factory`` and an explicit
+    commit at the end."""
 
     async def apply(user_id: str, action_id: str, approved: bool) -> Dict[str, Any]:
         runtime: Optional[AgentRuntime] = getattr(app.state, "agent_runtime", None)
         if runtime is None:
             return {"error": "Agent runtime is not available."}
         mcp_catalog = getattr(app.state, "mcp_catalog", None)
-        async with async_session() as db:
+        async with session_factory() as db:
             user = (
                 await db.execute(select(User).where(User.id == uuid.UUID(user_id)))
             ).scalar_one_or_none()
@@ -1412,6 +1414,28 @@ TELEGRAM_CONVERSATION_TITLE = "Telegram"
 
 # Most tool-captured images one channel turn delivers.
 MAX_CHANNEL_IMAGES = 3
+
+# The only images a channel forwards: base64 raster data URLs of the types
+# the built-in screenshot tools produce. SVG (which can carry script) and
+# anything else never reach the person's chat as a photo.
+_CHANNEL_IMAGE_URL = re.compile(r"data:image/(?:jpeg|png|webp);base64,")
+
+
+def _channel_image(name: str, result: Any) -> Optional[str]:
+    """The data URL a channel may deliver for one tool call, else None.
+
+    Only built-in tools qualify: a third-party (MCP) tool, or a name that
+    does not resolve, could hand the person an arbitrary picture that
+    looks like one of ours.
+    """
+    from services.mcp.integration import is_mcp_tool
+
+    if is_mcp_tool(name) or resolve_tool(name) is None or not isinstance(result, dict):
+        return None
+    image = result.get("image")
+    if isinstance(image, str) and _CHANNEL_IMAGE_URL.match(image):
+        return image
+    return None
 
 
 def build_chat_applier(app: Any, session_factory: Any = async_session):
@@ -1559,17 +1583,15 @@ def build_chat_applier(app: Any, session_factory: Any = async_session):
         for tc in agent_response.tool_calls:
             if len(images) >= MAX_CHANNEL_IMAGES:
                 break
-            result = tc.get("result")
-            if not (
-                isinstance(result, dict)
-                and str(result.get("image", "")).startswith("data:image/")
-            ):
-                continue
             name = str(tc.get("name", ""))
+            result = tc.get("result")
+            data_url = _channel_image(name, result)
+            if data_url is None:
+                continue
             caption = result.get("final_url") or result.get("url") or (
                 "Your screen" if name.startswith("desktop.") else ""
             )
-            images.append({"data_url": result["image"], "caption": str(caption)})
+            images.append({"data_url": data_url, "caption": str(caption)})
 
         return {
             "content": agent_response.content,

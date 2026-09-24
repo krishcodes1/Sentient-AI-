@@ -9,6 +9,7 @@ restored afterwards so no other test sees the wiring.
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any
 
 import pytest
@@ -81,12 +82,94 @@ async def test_telegram_status_follows_the_saved_token_without_restart(
 
 
 @pytest.mark.asyncio
-async def test_state_aliases_and_reminder_channel(wired_app):
+async def test_reminder_channel_reports_not_delivered_while_stopped(wired_app):
     state = wired_app.state
-    assert state.telegram is state.telegram_manager
     # The sweeper is wired to the manager once; stopped, it reports "not
     # delivered" instead of raising.
     assert await state.reminders.send("u1", "hello") is False
+
+
+class CountingFactory:
+    """The test session factory, counting how often it is opened."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.opened = 0
+
+    def __call__(self):
+        self.opened += 1
+        return self._inner()
+
+
+@pytest.mark.asyncio
+async def test_telegram_pipelines_use_the_wired_session_factory(session_factory, monkeypatch):
+    """The poller's approval and chat pipelines open the session factory
+    wire_services was given, never the module-level default."""
+    import api.routes.agent as agent_routes
+    from main import app, wire_services
+
+    def global_factory():
+        raise AssertionError("a Telegram pipeline opened the global session factory")
+
+    monkeypatch.setattr(agent_routes, "async_session", global_factory)
+    monkeypatch.setattr(settings, "TELEGRAM_BOT_TOKEN", "", raising=False)
+    FakeService.instances.clear()
+    factory = CountingFactory(session_factory)
+    saved = dict(app.state._state)
+    await wire_services(app, factory, telegram_service_factory=FakeService)
+    try:
+        user, _ = await make_user(session_factory, "wiring-tg-factory@example.com")
+        await app.state.installation.set_telegram_token(BOT_TOKEN, actor_id=user.id)
+        service = FakeService.instances[-1]
+
+        before = factory.opened
+        denied = await service.decide(str(user.id), "no-such-action", False)
+        assert "error" in denied
+        assert factory.opened > before
+
+        class Provider:
+            async def complete(self, messages, tools=None):
+                from services.agent.providers import LLMResponse
+
+                return LLMResponse(content="hello from the model")
+
+            async def aclose(self):
+                pass
+
+        use_provider(app.state.agent_runtime, Provider())
+        before = factory.opened
+        reply = await service.chat(str(user.id), "hi there")
+        assert reply.get("content") == "hello from the model", reply
+        assert factory.opened > before
+    finally:
+        await app.state.telegram_manager.stop()
+        app.state._state.clear()
+        app.state._state.update(saved)
+
+
+@pytest.mark.asyncio
+async def test_a_runtime_construction_error_is_not_swallowed(session_factory, monkeypatch):
+    """No silent agent_runtime = None: a broken runtime fails startup
+    instead of leaving /api/health reporting healthy with no agent."""
+    import main
+
+    class ConstructionBug(Exception):
+        pass
+
+    def broken_runtime(*_args, **_kwargs):
+        raise ConstructionBug("runtime construction failed")
+
+    monkeypatch.setattr(main, "AgentRuntime", broken_runtime)
+    monkeypatch.setattr(settings, "TELEGRAM_BOT_TOKEN", "", raising=False)
+    saved = dict(main.app.state._state)
+    try:
+        with pytest.raises(ConstructionBug):
+            await main.wire_services(
+                main.app, session_factory, telegram_service_factory=FakeService
+            )
+    finally:
+        main.app.state._state.clear()
+        main.app.state._state.update(saved)
 
 
 # ── runtime wiring ──────────────────────────────────────────────────────
@@ -110,10 +193,17 @@ async def test_llm_change_drops_cached_providers(session_factory, wired_app):
 
 
 @pytest.mark.asyncio
-async def test_runtime_gates_follow_the_owner_switches(session_factory, wired_app):
+async def test_runtime_gates_follow_the_owner_switches(session_factory, wired_app, monkeypatch):
     user, _ = await make_user(session_factory, "wiring-gates@example.com")
     runtime = wired_app.state.agent_runtime
     installation = wired_app.state.installation
+
+    # If the gate failed, web.search must hit a tripwire, not the network.
+    async def tripwire(action, params, user_id, approved):
+        raise AssertionError("the web gate let web.search reach the real toolkit")
+
+    builtins = runtime._executor._builtins
+    monkeypatch.setitem(builtins, "web", dataclasses.replace(builtins["web"], call=tripwire))
 
     assert await runtime._permissions.check("u1", "web.search", {}) == "approved"
     await installation.set_capabilities({"web_browsing": False}, actor_id=user.id)
@@ -317,3 +407,48 @@ async def test_channel_turn_delivers_tool_images_and_passes_permissions(
     ]
     assert "- See my screen: on" in seen["permissions_text"]
     assert "desktop.screenshot" in {t.name for t in seen["tools"]}
+
+
+@pytest.mark.asyncio
+async def test_channel_delivers_only_builtin_raster_images(client, session_factory):
+    """A third-party (MCP) tool, a name that does not resolve, and a
+    non-raster data URL (SVG can carry script; GIF is not a type the tools
+    produce) are never forwarded to the person as photos."""
+    from api.routes.agent import build_chat_applier
+    from main import app
+
+    user, _ = await make_user(session_factory, "wiring-image-filter@example.com")
+    png = "data:image/png;base64,QUJD"
+    webp = "data:image/webp;base64,QUJD"
+
+    class FakeRuntime:
+        async def chat(self, **kwargs):
+            return AgentResponse(
+                content="Here you go.",
+                tool_calls=[
+                    {"name": "mcp.photos.latest", "result": {"ok": True, "image": _image("M")}},
+                    {"name": "made.up", "result": {"ok": True, "image": _image("U")}},
+                    {"name": "desktop__deadbeef.screenshot", "result": {"ok": True, "image": _image("S")}},
+                    {"name": "web.screenshot", "result": {"ok": True, "image": "data:image/svg+xml;base64,PHN2Zz4="}},
+                    {"name": "web.screenshot", "result": {"ok": True, "image": "data:image/gif;base64,R0lG"}},
+                    {"name": "web.screenshot", "result": {"ok": True, "image": "data:image/png,QUJD"}},
+                    {"name": "web.screenshot", "result": {"ok": True, "image": png, "final_url": "https://a.example/"}},
+                    {"name": "desktop.screenshot", "result": {"ok": True, "image": webp}},
+                ],
+            )
+
+    saved = dict(app.state._state)
+    app.state.agent_runtime = FakeRuntime()
+    app.state.installation = FakeInstallation(screen=True)
+    try:
+        outcome = await build_chat_applier(app, session_factory=session_factory)(
+            str(user.id), "show me"
+        )
+    finally:
+        app.state._state.clear()
+        app.state._state.update(saved)
+
+    assert outcome["images"] == [
+        {"data_url": png, "caption": "https://a.example/"},
+        {"data_url": webp, "caption": "Your screen"},
+    ]

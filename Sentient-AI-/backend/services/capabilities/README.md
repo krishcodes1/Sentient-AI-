@@ -2,20 +2,36 @@
 
 A capability is one switch the owner sees in the setup wizard and in
 Settings → Permissions. Declaring it drives everything else: the tools it
-unlocks are offered only when it is on, refused at dispatch when it is off,
-and the agent's `<permissions>` block tells it (and the user) why.
+unlocks are offered only when it is on, refused before and at dispatch
+otherwise, and the agent's `<permissions>` block tells it (and the user)
+why. A refusal says which case applies: *off* (the owner's switch;
+audited as `capability_off`), *blocked* (switched on but unusable here —
+not installed, no OS permission — with the reason and first fix step;
+`capability_blocked`), or the owner's settings could not be read
+(`capability_gate_error`; the tool is refused, never run).
 
 ## Five steps
 
 1. **Toolkit.** Write `services/tools/<family>.py`. New toolkits take the
    shape `async def execute(self, action, params, *, user_id, approved) -> dict`,
    returning `{"ok": True, ...}` or `{"ok": False, "error": "..."}`. Fail closed.
-2. **Catalog and policy.** In `services/agent/tool_registry.py` add the
-   `ToolSpec`s under `CONNECTOR_CATALOG["<family>"]`, add `<family>` to
-   `BUILTIN_CONNECTOR_TYPES` and `_BUILTIN_STANCE`, and register the toolkit
-   in the built-in toolkit map in the executor (being introduced in the
-   wiring task). In `services/agent/permissions.py` add one policy row per
-   `ActionCategory` (hard-block what you don't use).
+2. **Catalog, toolkit map and policy.** In `services/agent/tool_registry.py`
+   add the `ToolSpec`s under `CONNECTOR_CATALOG["<family>"]` and add
+   `<family>` to `BUILTIN_CONNECTOR_TYPES` and `_BUILTIN_STANCE`. Then
+   register the toolkit in `ConnectorToolExecutor.__init__`:
+   - a constructor argument, `<family>_toolkit: Optional[<Family>Toolkit] = None`,
+     defaulting to a fresh instance (`<family>_toolkit or <Family>Toolkit()`),
+     so tests can hand in a fake;
+   - a `_Builtin` entry in `self._builtins["<family>"]`: a label for
+     refusals, a lambda adapting the executor's `(action, params, user_id,
+     approved)` call to your toolkit's signature (e.g.
+     `lambda a, p, uid, ok: toolkit.execute(a, p)`; pass `uid` only if the
+     toolkit stores anything per user), the `ActionCategory`s it may run at
+     all, and in `confirm` the ones that run only after the approval card.
+
+   `test_every_builtin_type_has_a_toolkit` fails until the entry exists. In
+   `services/agent/permissions.py` add one policy row per `ActionCategory`
+   (hard-block what you don't use).
 3. **Capability file.** Copy `_template.py` to `services/capabilities/<key>.py`,
    fill it in (your own `label` and `when_denied`, not the template's), and
    append `CAPABILITY` to `REGISTRY` in `__init__.py`.
