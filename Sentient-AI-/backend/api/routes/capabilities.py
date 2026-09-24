@@ -13,14 +13,14 @@ nothing from it but the report is ever serialized here.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, Callable
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, StrictBool
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.database import get_db
+from core.database import async_session
 from models.audit import AuditStatus
 from models.user import User
 from services import capabilities
@@ -36,8 +36,23 @@ router = APIRouter(prefix="/capabilities", tags=["capabilities"])
 
 # One toolkit for every admin-triggered install, so its lock serializes
 # them: a double-click must not start two pip processes on the same
-# environment.
+# environment. A wired app hands the route its own shared instance through
+# app.state.system_toolkit; this module-level one is the fallback for tests
+# and any app that never set one.
 _toolkit = SystemToolkit()
+
+# Audit rows must never sit behind a running install: each write opens its
+# own short-lived session from this factory instead of borrowing the
+# request's session. app.state.session_factory (set by tests, since the
+# httpx client fixture only overrides get_db) takes precedence so a test's
+# in-memory database sees these rows.
+_session_factory: Callable[[], AsyncSession] = async_session
+
+# Capability keys with an install currently running. A second POST for the
+# same key while one is in flight is rejected outright — queueing it behind
+# SystemToolkit's own lock would silently make the caller wait minutes for
+# someone else's install instead of getting an answer.
+_installs_in_progress: set[str] = set()
 
 
 class CapabilitiesPatch(BaseModel):
@@ -53,6 +68,10 @@ def _installation(request: Request) -> InstallationService:
             detail="Installation service not available",
         )
     return service
+
+
+def _system_toolkit(request: Request) -> SystemToolkit:
+    return getattr(request.app.state, "system_toolkit", None) or _toolkit
 
 
 def _require_admin(user: User) -> None:
@@ -71,18 +90,29 @@ def _capability(key: str) -> Capability:
 
 
 async def _audit(
-    db: AsyncSession, *, user_id: Any, action: str, endpoint: str, data: dict[str, Any]
+    request: Request, *, user_id: Any, action: str, endpoint: str, data: dict[str, Any]
 ) -> None:
-    await append_audit_log(
-        db,
-        user_id=user_id,
-        connector_name="installation",
-        action=action,
-        endpoint=endpoint,
-        scope_used="admin",
-        status=AuditStatus.approved,
-        request_data=data,
-    )
+    """Write one audit row through a short-lived session.
+
+    Never the request's own DB session: an install can run for minutes,
+    and holding a session open that long would tie up a pool connection
+    for nothing. app.state.session_factory lets a test's in-memory
+    database see these rows even though the test client only overrides
+    get_db, not this module's factory.
+    """
+    factory = getattr(request.app.state, "session_factory", None) or _session_factory
+    async with factory() as session:
+        await append_audit_log(
+            session,
+            user_id=user_id,
+            connector_name="installation",
+            action=action,
+            endpoint=endpoint,
+            scope_used="admin",
+            status=AuditStatus.approved,
+            request_data=data,
+        )
+        await session.commit()
 
 
 @router.get("")
@@ -123,23 +153,23 @@ async def request_access(
     key: str,
     request: Request,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Show the OS permission prompt / open the settings pane.
 
     Native installs only: in a container (or on an unsupported platform)
-    the capability is unavailable and there is no OS to ask, so the reason
-    comes back as a 409 the UI can show as-is.
+    the capability is unavailable and there is no OS to ask; switched off
+    or already granted, there is nothing left to request either. Any of
+    those come back as a 409 the UI can show as-is.
     """
     _require_admin(current_user)
     cap = _capability(key)
     service = _installation(request)
     current = capabilities.statuses_by_key(await service.report()).get(key)
-    if cap.request_access is None or current is None or not current.available:
-        reason = current.availability_reason if current is not None else ""
+    if current is None or not current.can_request_access:
+        detail = (current.availability_reason or current.reason) if current is not None else None
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=reason or "This capability has nothing to request here.",
+            detail=detail or "Nothing to request for this capability.",
         )
 
     try:
@@ -147,6 +177,13 @@ async def request_access(
     except Exception as exc:
         logger.warning(
             "capability_request_access_failed", capability=key, error_type=type(exc).__name__
+        )
+        await _audit(
+            request,
+            user_id=current_user.id,
+            action="capability_access_request_failed",
+            endpoint=request.url.path,
+            data={"capability": key, "error_type": type(exc).__name__},
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -158,7 +195,7 @@ async def request_access(
     fresh = capabilities.statuses_by_key(await service.report())[key]
 
     await _audit(
-        db,
+        request,
         user_id=current_user.id,
         action="capability_access_requested",
         endpoint=request.url.path,
@@ -172,7 +209,6 @@ async def install(
     key: str,
     request: Request,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Run the allowlisted install behind ``capability.install``.
 
@@ -180,6 +216,11 @@ async def install(
     here the owner pressing the button is that approval. Only the name is
     taken from the registry: the steps themselves are fixed in
     services.tools.system.ALLOWLIST.
+
+    Holds no DB session across the install itself (it can run for
+    minutes): each audit row below opens its own short-lived session. A
+    second POST for the same key while one is already running is refused
+    outright rather than queued.
     """
     _require_admin(current_user)
     cap = _capability(key)
@@ -189,34 +230,40 @@ async def install(
             detail="This capability has nothing to install.",
         )
 
+    if key in _installs_in_progress:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="An install for this capability is already running.",
+        )
+
     user_id = current_user.id
     endpoint = request.url.path
-    await _audit(
-        db,
-        user_id=user_id,
-        action="capability_install_started",
-        endpoint=endpoint,
-        data={"capability": key, "install": cap.install},
-    )
-    # Commit now: an install can run for minutes, and the audit append
-    # holds this user's chain lock until the transaction ends. The row
-    # must also survive a crash mid-install.
-    await db.commit()
-
+    _installs_in_progress.add(key)
     try:
-        result = await _toolkit.install_capability(cap.install)
-    except Exception as exc:  # install_capability reports errors as results; this is a bug path
-        logger.warning(
-            "capability_install_crashed", capability=key, error_type=type(exc).__name__
+        await _audit(
+            request,
+            user_id=user_id,
+            action="capability_install_started",
+            endpoint=endpoint,
+            data={"capability": key, "install": cap.install},
         )
-        result = {"ok": False, "error": "The install failed unexpectedly."}
 
-    await _audit(
-        db,
-        user_id=user_id,
-        action="capability_install_finished",
-        endpoint=endpoint,
-        data={"capability": key, "install": cap.install, "ok": result.get("ok")},
-    )
-    await db.commit()
-    return result
+        toolkit = _system_toolkit(request)
+        try:
+            result = await toolkit.install_capability(cap.install)
+        except Exception as exc:  # install_capability reports errors as results; this is a bug path
+            logger.warning(
+                "capability_install_crashed", capability=key, error_type=type(exc).__name__
+            )
+            result = {"ok": False, "error": "The install failed unexpectedly."}
+
+        await _audit(
+            request,
+            user_id=user_id,
+            action="capability_install_finished",
+            endpoint=endpoint,
+            data={"capability": key, "install": cap.install, "ok": result.get("ok")},
+        )
+        return result
+    finally:
+        _installs_in_progress.discard(key)
