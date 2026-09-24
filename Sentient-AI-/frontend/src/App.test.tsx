@@ -43,11 +43,14 @@ describe("SetupGate", () => {
     ).toBeInTheDocument();
   });
 
-  it("renders /login normally once setup is done, asking the server only once", async () => {
+  it("renders /login normally once setup is done", async () => {
     vi.mocked(getSetupStatus).mockResolvedValue(status(false, true));
     renderAt("/login");
     expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
-    expect(getSetupStatus).toHaveBeenCalledTimes(1);
+    // SetupGate asks once to decide routing; Login asks again on its own to
+    // decide whether "Create one" is honest to show — see its setupStatus
+    // effect.
+    expect(getSetupStatus).toHaveBeenCalledTimes(2);
   });
 
   it("lets an existing owner reach /login to finish an interrupted setup", async () => {

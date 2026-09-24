@@ -1,9 +1,10 @@
-import { useId, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useEffect, useId, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { ArrowRight, Eye, EyeOff, HardDrive, Server } from "lucide-react";
-import { login, register } from "@/services/api";
+import { getSetupStatus, login, register } from "@/services/api";
 import Brand, { Wordmark } from "@/components/Brand";
 import ThemeToggle from "@/components/ThemeToggle";
+import type { SetupStatus } from "@/types";
 
 const labelCls = "block text-sm font-medium mb-1.5";
 
@@ -16,9 +17,30 @@ export default function Login() {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null);
   const nameId = useId();
   const emailId = useId();
   const passwordId = useId();
+
+  // Registration is closed server-side until setup finishes (see
+  // /api/auth/register), so while that's true the "Create one" link would
+  // just lead to a 403. Ask once and swap it for a more honest hint.
+  useEffect(() => {
+    let cancelled = false;
+    getSetupStatus()
+      .then((s) => {
+        if (!cancelled) setSetupStatus(s);
+      })
+      .catch(() => {
+        // Status unknown: fail open, like SetupGate does, and keep the
+        // ordinary sign-in/register toggle below.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const setupInProgress = !!setupStatus && !setupStatus.setup_completed;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -52,8 +74,8 @@ export default function Login() {
       </div>
 
       <div className="flex flex-col items-center gap-5 w-full max-w-[440px]">
-        {/* Brand mark. The animated variant falls back to the still mark
-            under prefers-reduced-motion — see components/Brand.tsx. */}
+        {/* Brand mark. "animated" currently renders the still mark — see
+            the TODO(brand) note in components/Brand.tsx. */}
         <div className="relative w-[150px] h-[150px] flex items-center justify-center">
           <div
             aria-hidden
@@ -232,25 +254,47 @@ export default function Login() {
             </button>
           </form>
 
-          <p
-            className="text-center text-sm mt-5"
-            style={{ color: "var(--text-secondary)" }}
-          >
-            {isRegister
-              ? "Already have an account?"
-              : "Don't have an account?"}{" "}
-            <button
-              type="button"
-              onClick={() => {
-                setIsRegister(!isRegister);
-                setError("");
-              }}
-              className="font-medium hover:underline"
-              style={{ color: "var(--accent-primary)" }}
+          {setupInProgress ? (
+            <p
+              className="text-center text-sm mt-5"
+              style={{ color: "var(--text-secondary)" }}
             >
-              {isRegister ? "Sign in" : "Create one"}
-            </button>
-          </p>
+              {setupStatus?.has_owner ? (
+                "Setup is in progress — sign in as the owner to finish it."
+              ) : (
+                <>
+                  Don't have an account?{" "}
+                  <Link
+                    to="/setup"
+                    className="font-medium hover:underline"
+                    style={{ color: "var(--accent-primary)" }}
+                  >
+                    Set up this Crawler
+                  </Link>
+                </>
+              )}
+            </p>
+          ) : (
+            <p
+              className="text-center text-sm mt-5"
+              style={{ color: "var(--text-secondary)" }}
+            >
+              {isRegister
+                ? "Already have an account?"
+                : "Don't have an account?"}{" "}
+              <button
+                type="button"
+                onClick={() => {
+                  setIsRegister(!isRegister);
+                  setError("");
+                }}
+                className="font-medium hover:underline"
+                style={{ color: "var(--accent-primary)" }}
+              >
+                {isRegister ? "Sign in" : "Create one"}
+              </button>
+            </p>
+          )}
         </div>
 
         <div className="mono-tag text-center" style={{ color: "var(--text-muted)" }}>
