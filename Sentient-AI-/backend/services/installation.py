@@ -210,6 +210,11 @@ class InstallationService:
         stored = (await self._load()).llm_api_keys.get(name, "").strip()
         return stored or None
 
+    async def stored_provider_keys(self) -> set[str]:
+        """Providers with a key saved through the wizard: names only, never
+        the values, so a caller cannot leak what it was never handed."""
+        return {name for name, key in (await self._load()).llm_api_keys.items() if key.strip()}
+
     async def provider_configured(self) -> bool:
         provider, _model = await self.llm_defaults()
         return bool(provider) and (await self.llm_api_key(provider)) is not None

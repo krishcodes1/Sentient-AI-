@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, EmailStr, Field
@@ -115,20 +115,22 @@ class SettingsUpdateRequest(BaseModel):
     memory_enabled: Optional[bool] = None
 
 
-@router.post(
-    "/register",
-    response_model=UserResponse,
-    status_code=status.HTTP_201_CREATED,
-)
-async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)) -> User:
-    """Create a new user account."""
-    if not settings.ALLOW_REGISTRATION:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Registration is disabled on this server",
-        )
+async def create_account(
+    db: AsyncSession,
+    *,
+    email: str,
+    password: str,
+    name: Optional[str],
+    endpoint: str,
+) -> User:
+    """Create a user; the first account on the install becomes the owner (admin).
 
-    email = normalize_email(body.email)
+    Shared by open registration and the first-run wizard's owner step, so
+    the duplicate check, the password policy, the owner rule and the audit
+    row cannot drift apart between the two ways an account comes to exist.
+    The caller decides whether creating an account is allowed at all.
+    """
+    email = normalize_email(email)
     result = await db.execute(select(User).where(User.email == email))
     if result.scalar_one_or_none() is not None:
         raise HTTPException(
@@ -136,7 +138,7 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)) ->
             detail="Email already registered",
         )
 
-    if len(body.password) < settings.PASSWORD_MIN_LENGTH:
+    if len(password) < settings.PASSWORD_MIN_LENGTH:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=(
@@ -153,11 +155,11 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)) ->
 
     user = User(
         email=email,
-        name=body.name,
+        name=name,
         is_admin=is_first_account,
         # bcrypt is ~200ms of pure CPU; run it in a worker thread so the
         # event loop (and every in-flight SSE stream) keeps moving.
-        hashed_password=await asyncio.to_thread(hash_password, body.password),
+        hashed_password=await asyncio.to_thread(hash_password, password),
     )
     db.add(user)
     await db.flush()
@@ -167,10 +169,46 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)) ->
         user_id=user.id,
         action="account_created",
         status=AuditStatus.approved,
-        endpoint="/api/auth/register",
+        endpoint=endpoint,
         reason="owner account" if is_first_account else None,
     )
     return user
+
+
+@router.post(
+    "/register",
+    response_model=UserResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def register(
+    body: RegisterRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    """Create a new user account.
+
+    Once setup is complete the owner's stored switch decides whether
+    strangers may sign up; before that (and in unit tests that build no
+    installation service) the environment's ALLOW_REGISTRATION does.
+    """
+    installation = getattr(request.app.state, "installation", None)
+    if installation is not None:
+        allowed = await installation.registration_allowed()
+    else:
+        allowed = settings.ALLOW_REGISTRATION
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Registration is disabled on this server",
+        )
+
+    return await create_account(
+        db,
+        email=body.email,
+        password=body.password,
+        name=body.name,
+        endpoint="/api/auth/register",
+    )
 
 
 async def _record_auth_event(

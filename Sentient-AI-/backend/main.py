@@ -32,6 +32,7 @@ from api.routes import (
     connectors,
     memory,
     reminders,
+    setup,
     telegram,
     usage,
 )
@@ -188,6 +189,7 @@ app.include_router(reminders.router, prefix="/api")
 app.include_router(telegram.router, prefix="/api")
 app.include_router(usage.router, prefix="/api")
 app.include_router(capabilities.router, prefix="/api")
+app.include_router(setup.router, prefix="/api")
 
 
 @app.get("/")
