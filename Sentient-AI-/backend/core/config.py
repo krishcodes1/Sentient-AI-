@@ -301,4 +301,17 @@ class Settings(BaseSettings):
         return wide
 
 
+# Provider name → the Settings attribute that holds its API key. Shared by
+# the runtime and the installation service so the ".env wins" rule has one
+# definition.
+PROVIDER_KEY_FIELDS: dict[str, str] = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "grok": "GROK_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "mistral": "MISTRAL_API_KEY",
+}
+
 settings = Settings()  # type: ignore[call-arg]
