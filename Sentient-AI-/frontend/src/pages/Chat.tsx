@@ -1,6 +1,5 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  Send,
   Plus,
   Bot,
   User as UserIcon,
@@ -8,6 +7,7 @@ import {
   XCircle,
   Shield,
   ChevronRight,
+  ChevronDown,
   Loader2,
   Pencil,
   Trash2,
@@ -16,6 +16,7 @@ import {
   Clock,
   Search,
   X,
+  PanelLeft,
 } from "lucide-react";
 import clsx from "clsx";
 import type {
@@ -39,6 +40,9 @@ import {
 } from "@/services/api";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import MarkdownMessage from "@/components/MarkdownMessage";
+import ChatComposer from "@/components/ChatComposer";
+import { DESKTOP_QUERY, useMediaQuery } from "@/hooks/useMediaQuery";
+import { useFocusTrap } from "@/hooks/useFocusTrap";
 
 const CONV_PAGE_SIZE = 50;
 const DEFAULT_TITLE = "New Conversation";
@@ -47,46 +51,16 @@ const AUTO_TITLE_MAX = 40;
 // but well inside the 15-minute approval TTL — 20s keeps the loop alive
 // without hammering the API.
 const APPROVAL_POLL_MS = 20_000;
+// How close to the end of the thread still counts as "reading the latest".
+// Roughly one line of text plus padding, so a reader who has nudged the
+// scrollbar is not dragged back down by the next token.
+const NEAR_BOTTOM_PX = 120;
 
-// Remaining whole seconds until `iso`, re-computed every second so approval
-// cards can count down toward the server-side TTL instead of silently 404ing
-// when the user clicks after expiry. Returns null when there is no deadline
-// (or it cannot be parsed) so such cards stay fully interactive.
-export function useCountdown(iso: string | null | undefined): number | null {
-  const target = iso ? new Date(iso).getTime() : NaN;
-  const [remaining, setRemaining] = useState<number | null>(() =>
-    Number.isNaN(target) ? null : Math.max(0, Math.ceil((target - Date.now()) / 1000)),
-  );
-  useEffect(() => {
-    if (Number.isNaN(target)) {
-      setRemaining(null);
-      return;
-    }
-    const compute = () => Math.max(0, Math.ceil((target - Date.now()) / 1000));
-    const first = compute();
-    setRemaining(first);
-    // Once expired the value can never change again — don't tick at all.
-    if (first <= 0) return;
-    const id = window.setInterval(() => {
-      const left = compute();
-      setRemaining(left);
-      if (left <= 0) window.clearInterval(id);
-    }, 1000);
-    return () => window.clearInterval(id);
-  }, [target]);
-  return remaining;
-}
-
-// mm:ss (or h:mm:ss past an hour) for the approval countdown.
-export function formatCountdown(totalSec: number): string {
-  const sec = totalSec % 60;
-  const min = Math.floor(totalSec / 60);
-  if (min >= 60) {
-    const hr = Math.floor(min / 60);
-    return `${hr}:${String(min % 60).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
-  }
-  return `${min}:${String(sec).padStart(2, "0")}`;
-}
+// Countdown helpers live in their own module (shared with Dashboard) so the
+// Dashboard chunk doesn't drag in this whole page; re-exported here for
+// existing importers.
+import { formatCountdown, useCountdown } from "./approvalCountdown";
+export { formatCountdown, useCountdown } from "./approvalCountdown";
 
 function formatRelative(iso: string | undefined): string {
   if (!iso) return "";
@@ -101,6 +75,32 @@ function formatRelative(iso: string | undefined): string {
   const diffDay = Math.round(diffHr / 24);
   if (diffDay < 7) return `${diffDay}d ago`;
   return new Date(iso).toLocaleDateString();
+}
+
+/**
+ * Clock time on each bubble, with the full date in the tooltip and in the
+ * machine-readable attribute — "2:14 PM" alone is ambiguous the moment a
+ * thread spans midnight.
+ */
+function MessageTime({ iso, onAccent }: { iso?: string; onAccent?: boolean }) {
+  if (!iso) return null;
+  const when = new Date(iso);
+  if (Number.isNaN(when.getTime())) return null;
+  return (
+    <time
+      dateTime={iso}
+      title={when.toLocaleString()}
+      className="mono-tag block mt-1.5"
+      style={{
+        color: onAccent ? "var(--text-on-accent)" : "var(--text-muted)",
+        // Quiet, but not below 4.5:1 against the accent fill behind it —
+        // at 11px this is the smallest text in the thread.
+        opacity: onAccent ? 0.9 : 1,
+      }}
+    >
+      {when.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
+    </time>
+  );
 }
 
 function ToolCallBadge({ tc }: { tc: ToolCall }) {
@@ -253,7 +253,7 @@ function ApprovalCard({
         </p>
       )}
       {error && (
-        <p className="text-xs mb-2" style={{ color: "var(--accent-danger)" }}>
+        <p role="alert" className="text-xs mb-2" style={{ color: "var(--accent-danger)" }}>
           {error}
         </p>
       )}
@@ -262,8 +262,12 @@ function ApprovalCard({
           type="button"
           disabled={pending || expired}
           onClick={() => handle(true)}
-          className="px-3 py-1.5 rounded-[8px] text-xs font-semibold disabled:opacity-50 inline-flex items-center gap-1.5"
-          style={{ background: "var(--accent-success)", color: "#0a0a0b" }}
+          className="px-3 py-2 rounded-[8px] text-xs font-semibold disabled:opacity-50 inline-flex items-center gap-1.5"
+          style={{
+            minHeight: 36,
+            background: "var(--accent-success)",
+            color: "var(--text-on-accent)",
+          }}
         >
           {pending ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
           Approve
@@ -272,8 +276,9 @@ function ApprovalCard({
           type="button"
           disabled={pending || expired}
           onClick={() => handle(false)}
-          className="px-3 py-1.5 rounded-[8px] text-xs font-medium disabled:opacity-50"
+          className="px-3 py-2 rounded-[8px] text-xs font-medium disabled:opacity-50"
           style={{
+            minHeight: 36,
             border: "1px solid var(--border-danger)",
             color: "var(--accent-danger)",
           }}
@@ -283,6 +288,16 @@ function ApprovalCard({
       </div>
     </div>
   );
+}
+
+/** A turn that never reached the server, kept so Retry can resend it intact. */
+interface FailedTurn {
+  content: string;
+  images: string[];
+  error: string;
+  /** The optimistic user bubble this attempt left behind, so a retry can
+   *  replace exactly that one rather than every pending bubble. */
+  userTempId: string;
 }
 
 export default function Chat() {
@@ -310,10 +325,20 @@ export default function Chat() {
   const [renameText, setRenameText] = useState("");
   const [renameError, setRenameError] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Conversation | null>(null);
-  const [input, setInput] = useState("");
+  const [failedTurn, setFailedTurn] = useState<FailedTurn | null>(null);
   // Live status line while a turn streams ("Running canvas.get_courses…").
   const [streamStatus, setStreamStatus] = useState<string | null>(null);
+  // Below the desktop breakpoint the conversation list is an overlay over
+  // the thread rather than a column beside it.
+  const [listOpen, setListOpen] = useState(false);
+  const isDesktop = useMediaQuery(DESKTOP_QUERY, true);
+  const listRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  // Whether the reader is at the live end of the thread. Streaming only
+  // scrolls while this is true, so scrolling up to re-read something is not
+  // undone by the next token.
+  const [atBottom, setAtBottom] = useState(true);
   // action_ids GET /agent/approvals has returned at least once. Lets the
   // poller drop cards decided elsewhere (absent from the server list) while
   // never clobbering stream-delivered approvals the server has not yet
@@ -328,6 +353,11 @@ export default function Chat() {
   // scoped to a conversation the user has since navigated away from, and
   // drop its result instead of clobbering the new thread's cards.
   const activeConvRef = useRef<string | null>(null);
+  // Controller for the in-flight stream; lets the Stop button abort it.
+  const abortRef = useRef<AbortController | null>(null);
+
+  const closeList = useCallback(() => setListOpen(false), []);
+  useFocusTrap(listOpen && !isDesktop, listRef, closeList);
 
   // Load the current user once
   useEffect(() => {
@@ -381,6 +411,12 @@ export default function Chat() {
   // them here means Approve/Deny cards survive page reloads instead of
   // living only in the transient send-message response.
   useEffect(() => {
+    // A turn still streaming into the thread we are leaving would write its
+    // tokens into the new one's state.
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setFailedTurn(null);
+    setAtBottom(true);
     if (!activeConv) {
       setMessages([]);
       setApprovals([]);
@@ -428,6 +464,10 @@ export default function Chat() {
     activeConvRef.current = activeConv;
   }, [activeConv]);
 
+  // Leaving the page mid-turn should not leave a reader writing into state
+  // that has been torn down.
+  useEffect(() => () => abortRef.current?.abort(), []);
+
   // Pull the approvals queue for the open conversation. Merged by action_id:
   // the server row wins when both exist (it carries the real arguments,
   // reason, expires_at and risk_note — the SSE frame carries none of those),
@@ -473,10 +513,26 @@ export default function Chat() {
     return () => clearInterval(interval);
   }, [activeConv, refreshApprovals]);
 
-  // Scroll to bottom on message updates
+  const handleScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    setAtBottom(
+      el.scrollHeight - el.scrollTop - el.clientHeight <= NEAR_BOTTOM_PX,
+    );
+  };
+
+  const jumpToLatest = () => {
+    setAtBottom(true);
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  };
+
+  // Follow the conversation only while the reader is already at the end of
+  // it. Scrolling up is an explicit "I am reading something else"; yanking
+  // them back on every streamed token made scrollback unusable.
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, approvals]);
+    if (!atBottom) return;
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [messages, approvals, atBottom]);
 
   const handleNewConversation = async () => {
     if (!me || creating) return;
@@ -487,6 +543,7 @@ export default function Chat() {
       setConversations((prev) => [conv, ...prev]);
       setActiveConv(conv.id);
       setMessages([]);
+      setListOpen(false);
     } catch (err) {
       setCreateError((err as Error).message);
     } finally {
@@ -580,10 +637,28 @@ export default function Chat() {
       });
   };
 
-  const handleSend = async (e: FormEvent) => {
-    e.preventDefault();
-    if (!input.trim() || !activeConv || !me || sending) return;
-    const content = input.trim();
+  const handleRetry = async (
+    errorMessageId: string,
+    content: string,
+    images: string[],
+  ) => {
+    if (sending) return;
+    // Drop the error bubble; the resend renders its own fresh pair.
+    setMessages((prev) => prev.filter((m) => m.id !== errorMessageId));
+    await sendContent(content, images);
+  };
+
+  const handleStop = () => {
+    // Aborts the client stream only. Server-side the turn keeps running
+    // to completion (side-effectful tools must not be cut between a side
+    // effect and its audit record) and persists via on_orphaned; the
+    // finished reply appears on the next thread load.
+    abortRef.current?.abort();
+  };
+
+  const sendContent = async (content: string, images: string[]) => {
+    if (!activeConv || !me || sending) return;
+    if (!content && images.length === 0) return;
     const conv = activeConv;
 
     // Optimistically render the user message + an empty assistant bubble
@@ -595,6 +670,7 @@ export default function Chat() {
       conversation_id: conv,
       role: "user",
       content,
+      images,
       created_at: new Date().toISOString(),
     };
     const streamingAssistant: Message = {
@@ -607,89 +683,121 @@ export default function Chat() {
       created_at: new Date().toISOString(),
     };
     setMessages((prev) => [...prev, optimisticUser, streamingAssistant]);
-    setInput("");
+    setFailedTurn(null);
     setSending(true);
     setStreamStatus(null);
+    // A message the reader just sent is theirs to follow, wherever they had
+    // scrolled to before.
+    setAtBottom(true);
+
+    const controller = new AbortController();
+    abortRef.current = controller;
 
     const patchAssistant = (patch: Partial<Message>) =>
       setMessages((prev) =>
         prev.map((m) => (m.id === asstTempId ? { ...m, ...patch } : m)),
       );
 
+    // A provider failure arrives as an `error` frame immediately followed
+    // by an empty `done` frame; without this flag the done handler would
+    // overwrite the error text with blank content.
+    let errored = false;
+
     try {
-      await streamMessage(conv, content, {
-        onUserMessage: (saved) =>
-          setMessages((prev) =>
-            prev.map((m) => (m.id === userTempId ? saved : m)),
-          ),
-        onToolCall: (name) => setStreamStatus(`Running ${name}…`),
-        onToolResult: (name) => setStreamStatus(`Finished ${name}`),
-        onContentDelta: (text) => {
-          setStreamStatus(null);
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === asstTempId ? { ...m, content: m.content + text } : m,
+      await streamMessage(
+        conv,
+        content,
+        {
+          onUserMessage: (saved) =>
+            setMessages((prev) =>
+              // Keep the local attachments: the saved row may not echo them
+              // back, and dropping them would blank thumbnails the user can
+              // still see in their own message.
+              prev.map((m) =>
+                m.id === userTempId ? { ...saved, images: saved.images ?? images } : m,
+              ),
             ),
-          );
-        },
-        onPendingApproval: (approval) => {
-          // The runtime emits the full PendingApprovalOut shape, so this is
-          // normally a straight passthrough. The fallbacks stay because an
-          // approval prompt that renders "Tool undefined wants to run." with
-          // no arguments — showing none of what is being approved — is worse
-          // than a generic label; refreshApprovals() below reconciles against
-          // the list endpoint either way.
-          const raw = approval as PendingApproval & { tool?: string };
-          const normalized: PendingApproval = {
-            ...raw,
-            tool_name: raw.tool_name ?? raw.tool ?? "unknown tool",
-            arguments: raw.arguments ?? {},
-            reason:
-              raw.reason ??
-              "This tool requires your explicit approval before it runs.",
-            conversation_id: raw.conversation_id ?? conv,
-          };
-          setApprovals((prev) => {
-            const seen = new Set(prev.map((pa) => pa.action_id));
-            return seen.has(normalized.action_id) ? prev : [...prev, normalized];
-          });
-        },
-        onBlocked: (blocked) =>
-          // Append to the message's *current* blocked_actions via a
-          // functional update. Reading `streamingAssistant` here would use
-          // the array captured before streaming began (always []), so a
-          // second blocked event in one turn would overwrite the first.
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === asstTempId
-                ? {
-                    ...m,
-                    blocked_actions: [...(m.blocked_actions ?? []), blocked],
-                  }
-                : m,
-            ),
-          ),
-        onDone: (data) =>
-          patchAssistant({
-            content: data.content ?? "",
-            tool_calls: data.tool_calls ?? [],
-            blocked_actions: data.blocked_actions ?? [],
-          }),
-        onSaved: (saved) => {
-          if (saved) {
-            // Swap the temp assistant bubble for the persisted row, keeping
-            // the streamed tool_calls/blocked metadata.
+          onToolCall: (name) => setStreamStatus(`Running ${name}…`),
+          onToolResult: (name) => setStreamStatus(`Finished ${name}`),
+          onContentDelta: (text) => {
+            setStreamStatus(null);
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === asstTempId ? { ...m, content: m.content + text } : m,
+              ),
+            );
+          },
+          onPendingApproval: (approval) => {
+            // The runtime emits the full PendingApprovalOut shape, so this is
+            // normally a straight passthrough. The fallbacks stay because an
+            // approval prompt that renders "Tool undefined wants to run." with
+            // no arguments — showing none of what is being approved — is worse
+            // than a generic label; refreshApprovals() below reconciles against
+            // the list endpoint either way.
+            const raw = approval as PendingApproval & { tool?: string };
+            const normalized: PendingApproval = {
+              ...raw,
+              tool_name: raw.tool_name ?? raw.tool ?? "unknown tool",
+              arguments: raw.arguments ?? {},
+              reason:
+                raw.reason ??
+                "This tool requires your explicit approval before it runs.",
+              conversation_id: raw.conversation_id ?? conv,
+            };
+            setApprovals((prev) => {
+              const seen = new Set(prev.map((pa) => pa.action_id));
+              return seen.has(normalized.action_id) ? prev : [...prev, normalized];
+            });
+          },
+          onBlocked: (blocked) =>
+            // Append to the message's *current* blocked_actions via a
+            // functional update. Reading `streamingAssistant` here would use
+            // the array captured before streaming began (always []), so a
+            // second blocked event in one turn would overwrite the first.
             setMessages((prev) =>
               prev.map((m) =>
                 m.id === asstTempId
-                  ? { ...saved, tool_calls: m.tool_calls, blocked_actions: m.blocked_actions }
+                  ? {
+                      ...m,
+                      blocked_actions: [...(m.blocked_actions ?? []), blocked],
+                    }
                   : m,
               ),
-            );
-          }
+            ),
+          onDone: (data) => {
+            if (errored) return;
+            patchAssistant({
+              content: data.content ?? "",
+              tool_calls: data.tool_calls ?? [],
+              blocked_actions: data.blocked_actions ?? [],
+            });
+          },
+          onSaved: (saved) => {
+            if (saved) {
+              // Swap the temp assistant bubble for the persisted row, keeping
+              // the streamed tool_calls/blocked metadata.
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === asstTempId
+                    ? { ...saved, tool_calls: m.tool_calls, blocked_actions: m.blocked_actions }
+                    : m,
+                ),
+              );
+            }
+          },
+          onError: (reason) => {
+            errored = true;
+            patchAssistant({
+              content: reason,
+              error: true,
+              retry_content: content,
+              retry_images: images,
+            });
+          },
         },
-        onError: (reason) => patchAssistant({ content: `Error: ${reason}` }),
-      });
+        controller.signal,
+        images.length > 0 ? images : undefined,
+      );
       maybeAutoTitle(conv, content);
       // Any approval raised during this turn arrived over SSE with only
       // {tool, action_id, expires_at, risk_note}. Pull the full rows now so
@@ -697,19 +805,36 @@ export default function Chat() {
       // up to APPROVAL_POLL_MS.
       void refreshApprovals();
     } catch (err) {
-      // The whole request failed (auth, network, 4xx). Drop the streaming
-      // bubble and surface the error; keep the user's message visible.
-      setMessages((prev) => [
-        ...prev.filter((m) => m.id !== asstTempId),
-        {
-          id: `err-${Date.now()}`,
-          conversation_id: conv,
-          role: "system",
-          content: `Error: ${(err as Error).message}`,
-          created_at: new Date().toISOString(),
-        },
-      ]);
+      if (controller.signal.aborted) {
+        // The user pressed Stop. The server finishes the turn on its own and
+        // persists it, so whatever streamed so far is real output and stays,
+        // marked as cut short; an assistant bubble that never got a token is
+        // just noise.
+        setMessages((prev) =>
+          prev
+            .map((m) =>
+              m.id === asstTempId
+                ? m.content
+                  ? { ...m, content: `${m.content}\n\n*— stopped*` }
+                  : null
+                : m,
+            )
+            .filter((m): m is Message => m !== null),
+        );
+      } else {
+        // The whole request failed (auth, network, a server that refuses the
+        // attachments). Drop the empty streaming bubble, keep the user's
+        // message on screen, and hold the turn so Retry can resend it.
+        setMessages((prev) => prev.filter((m) => m.id !== asstTempId));
+        setFailedTurn({
+          content,
+          images,
+          userTempId,
+          error: (err as Error).message,
+        });
+      }
     } finally {
+      if (abortRef.current === controller) abortRef.current = null;
       setSending(false);
       setStreamStatus(null);
     }
@@ -735,53 +860,91 @@ export default function Chat() {
 
   if (authError) {
     return (
-      <div className="flex items-center justify-center h-[calc(100vh-3rem)]">
-        <p className="text-sm" style={{ color: "var(--accent-danger)" }}>
+      <div className="flex items-center justify-center chat-shell">
+        <p role="alert" className="text-sm" style={{ color: "var(--accent-danger)" }}>
           {authError}
         </p>
       </div>
     );
   }
 
+  const activeTitle =
+    conversations.find((c) => c.id === activeConv)?.title || "Conversation";
+
   return (
     <div
-      className="flex h-[calc(100vh-3rem)] rounded-[14px] overflow-hidden"
+      className="relative flex chat-shell rounded-[14px] overflow-hidden"
       style={{
         background: "var(--claw-panel)",
         border: "1px solid var(--claw-border)",
         boxShadow: "var(--shadow-card)",
       }}
     >
-      {/* Conversation List */}
+      {/* Conversation List — a column beside the thread on a desktop, an
+          overlay over it on anything narrower. */}
+      {listOpen && !isDesktop && (
+        <div
+          className="absolute inset-0 z-20 lg:hidden"
+          style={{ background: "var(--scrim)" }}
+          onClick={closeList}
+          aria-hidden
+        />
+      )}
       <div
-        className="w-72 flex flex-col shrink-0"
+        ref={listRef}
+        id="conversation-list"
+        role={listOpen && !isDesktop ? "dialog" : undefined}
+        aria-modal={listOpen && !isDesktop ? true : undefined}
+        aria-label="Conversations"
+        className={clsx(
+          "absolute inset-y-0 left-0 z-30 w-[86%] max-w-[300px] flex flex-col shrink-0 transition-transform",
+          "lg:static lg:w-72 lg:max-w-none lg:translate-x-0 lg:visible lg:z-auto",
+          listOpen ? "translate-x-0 visible" : "-translate-x-full invisible",
+        )}
         style={{
           borderRight: "1px solid var(--claw-border)",
           background: "var(--claw-sidebar)",
         }}
       >
-        <div className="p-4" style={{ borderBottom: "1px solid var(--claw-border)" }}>
+        <div
+          className="p-4 flex items-center gap-2"
+          style={{ borderBottom: "1px solid var(--claw-border)" }}
+        >
           <button
             type="button"
             onClick={handleNewConversation}
             disabled={!me || creating}
-            className="w-full flex items-center justify-center gap-2 py-2.5 rounded-[10px] text-sm font-semibold disabled:opacity-50"
-            style={{ background: "var(--accent-primary)", color: "#0a0a0b" }}
+            className="flex-1 flex items-center justify-center gap-2 rounded-[10px] text-sm font-semibold disabled:opacity-50"
+            style={{
+              minHeight: 44,
+              background: "var(--accent-primary)",
+              color: "var(--text-on-accent)",
+            }}
           >
             {creating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
             New Chat
           </button>
-          {createError && (
-            <p className="text-xs mt-2" style={{ color: "var(--accent-danger)" }}>
-              Could not create a conversation: {createError}
-            </p>
-          )}
+          <button
+            type="button"
+            onClick={closeList}
+            aria-label="Close conversations"
+            className="lg:hidden inline-flex items-center justify-center rounded-[10px] shrink-0"
+            style={{ width: 44, height: 44, color: "var(--text-muted)" }}
+          >
+            <X className="w-4 h-4" aria-hidden />
+          </button>
         </div>
+        {createError && (
+          <p role="alert" className="text-xs px-4 pt-2" style={{ color: "var(--accent-danger)" }}>
+            Could not create a conversation: {createError}
+          </p>
+        )}
         <div className="px-4 pt-3 pb-2">
           <div className="eyebrow mb-2">Conversations</div>
           <div
-            className="flex items-center gap-2 rounded-[8px] px-2.5 py-1.5"
+            className="flex items-center gap-2 rounded-[8px] px-2.5"
             style={{
+              minHeight: 40,
               background: "var(--bg-input)",
               border: "1px solid var(--claw-border)",
             }}
@@ -789,6 +952,7 @@ export default function Chat() {
             <Search
               className="w-3.5 h-3.5 shrink-0"
               style={{ color: "var(--text-muted)" }}
+              aria-hidden
             />
             <input
               type="text"
@@ -804,10 +968,10 @@ export default function Chat() {
                 type="button"
                 onClick={() => setSearchInput("")}
                 aria-label="Clear search"
-                className="shrink-0"
+                className="tap-target shrink-0"
                 style={{ color: "var(--text-muted)" }}
               >
-                <X className="w-3.5 h-3.5" />
+                <X className="w-3.5 h-3.5" aria-hidden />
               </button>
             )}
           </div>
@@ -815,6 +979,7 @@ export default function Chat() {
         <div className="flex-1 overflow-y-auto">
           {convError && (
             <div
+              role="alert"
               className="mx-3 my-2 px-3 py-2.5 rounded-[8px]"
               style={{
                 background: "var(--fill-danger)",
@@ -830,7 +995,7 @@ export default function Chat() {
                 className="inline-flex items-center gap-1.5 text-xs font-semibold"
                 style={{ color: "var(--accent-danger)" }}
               >
-                <RefreshCw className="w-3 h-3" />
+                <RefreshCw className="w-3 h-3" aria-hidden />
                 Retry
               </button>
             </div>
@@ -853,19 +1018,23 @@ export default function Chat() {
                 key={conv.id}
                 role="button"
                 tabIndex={0}
+                aria-current={isActive ? "true" : undefined}
                 onClick={() => {
-                  if (!isRenaming) setActiveConv(conv.id);
+                  if (!isRenaming) {
+                    setActiveConv(conv.id);
+                    setListOpen(false);
+                  }
                 }}
                 onKeyDown={(e) => {
                   if (!isRenaming && (e.key === "Enter" || e.key === " ")) {
                     e.preventDefault();
                     setActiveConv(conv.id);
+                    setListOpen(false);
                   }
                 }}
-                className={clsx(
-                  "group w-full text-left px-4 py-3 transition-colors relative cursor-pointer",
-                )}
+                className="group w-full text-left px-4 py-3 transition-colors relative cursor-pointer"
                 style={{
+                  minHeight: 56,
                   borderBottom: "1px solid var(--border-subtle)",
                   background: isActive ? "var(--claw-surface-active)" : "transparent",
                   boxShadow: isActive
@@ -879,6 +1048,7 @@ export default function Chat() {
                       type="text"
                       value={renameText}
                       autoFocus
+                      aria-label="Conversation title"
                       onChange={(e) => setRenameText(e.target.value)}
                       onKeyDown={(e) => {
                         if (e.key === "Enter") void commitRename();
@@ -893,7 +1063,7 @@ export default function Chat() {
                       }}
                     />
                     {renameError && (
-                      <p className="text-xs mt-1" style={{ color: "var(--accent-danger)" }}>
+                      <p role="alert" className="text-xs mt-1" style={{ color: "var(--accent-danger)" }}>
                         {renameError}
                       </p>
                     )}
@@ -906,33 +1076,36 @@ export default function Chat() {
                     >
                       {conv.title || "Untitled"}
                     </span>
-                    <span className="mono-tag shrink-0 group-hover:hidden" style={{ color: "var(--text-muted)" }}>
+                    <span
+                      className="mono-tag shrink-0 hidden sm:block"
+                      style={{ color: "var(--text-muted)" }}
+                    >
                       {formatRelative(conv.updated_at)}
                     </span>
-                    <span className="hidden group-hover:flex items-center gap-1 shrink-0">
+                    <span className="row-actions flex items-center gap-1 shrink-0">
                       <button
                         type="button"
-                        aria-label="Rename conversation"
+                        aria-label={`Rename ${conv.title || "Untitled"}`}
                         onClick={(e) => {
                           e.stopPropagation();
                           startRename(conv);
                         }}
-                        className="p-1 rounded-[6px] hover:opacity-80"
+                        className="tap-target p-1 rounded-[6px]"
                         style={{ color: "var(--text-muted)" }}
                       >
-                        <Pencil className="w-3.5 h-3.5" />
+                        <Pencil className="w-3.5 h-3.5" aria-hidden />
                       </button>
                       <button
                         type="button"
-                        aria-label="Delete conversation"
+                        aria-label={`Delete ${conv.title || "Untitled"}`}
                         onClick={(e) => {
                           e.stopPropagation();
                           setDeleteTarget(conv);
                         }}
-                        className="p-1 rounded-[6px] hover:opacity-80"
+                        className="tap-target p-1 rounded-[6px]"
                         style={{ color: "var(--accent-danger)" }}
                       >
-                        <Trash2 className="w-3.5 h-3.5" />
+                        <Trash2 className="w-3.5 h-3.5" aria-hidden />
                       </button>
                     </span>
                   </div>
@@ -946,15 +1119,16 @@ export default function Chat() {
                 type="button"
                 onClick={() => void handleLoadMoreConversations()}
                 disabled={loadingMoreConvs}
-                className="w-full inline-flex items-center justify-center gap-2 py-2 rounded-[8px] text-xs font-medium disabled:opacity-50"
+                className="w-full inline-flex items-center justify-center gap-2 rounded-[8px] text-xs font-medium disabled:opacity-50"
                 style={{
+                  minHeight: 44,
                   background: "var(--bg-input)",
                   border: "1px solid var(--claw-border)",
                   color: "var(--text-secondary)",
                 }}
               >
                 {loadingMoreConvs ? (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden />
                 ) : null}
                 {loadingMoreConvs ? "Loading..." : "Load more"}
               </button>
@@ -965,8 +1139,37 @@ export default function Chat() {
 
       {/* Chat Area */}
       <div className="flex-1 flex flex-col min-w-0">
+        {/* The list is off-canvas below 1024px, so the thread carries its own
+            way back to it. */}
+        <div
+          className="lg:hidden flex items-center gap-2 px-3 py-2"
+          style={{ borderBottom: "1px solid var(--claw-border)" }}
+        >
+          <button
+            type="button"
+            onClick={() => setListOpen(true)}
+            aria-label="Show conversations"
+            aria-expanded={listOpen}
+            aria-controls="conversation-list"
+            className="inline-flex items-center justify-center rounded-[8px] shrink-0"
+            style={{ width: 40, height: 40, color: "var(--text-secondary)" }}
+          >
+            <PanelLeft className="w-4 h-4" aria-hidden />
+          </button>
+          <span
+            className="text-sm font-medium truncate"
+            style={{ color: "var(--text-primary)" }}
+          >
+            {activeConv ? activeTitle : "No conversation"}
+          </span>
+        </div>
+
         {/* Messages */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-4">
+        <div
+          ref={scrollRef}
+          onScroll={handleScroll}
+          className="flex-1 overflow-y-auto p-3 sm:p-4 space-y-4"
+        >
           {!activeConv && !loadingMessages && (
             <div className="flex items-center justify-center h-full">
               <p className="text-sm" style={{ color: "var(--text-muted)" }}>
@@ -975,14 +1178,19 @@ export default function Chat() {
             </div>
           )}
           {loadingMessages && (
-            <div className="flex items-center justify-center h-full gap-2" style={{ color: "var(--text-muted)" }}>
-              <Loader2 className="w-4 h-4 animate-spin" />
+            <div
+              role="status"
+              className="flex items-center justify-center h-full gap-2"
+              style={{ color: "var(--text-muted)" }}
+            >
+              <Loader2 className="w-4 h-4 animate-spin" aria-hidden />
               <span className="text-sm">Loading messages...</span>
             </div>
           )}
           {!loadingMessages && activeConv && messagesError && (
             <div className="flex items-center justify-center h-full">
               <div
+                role="alert"
                 className="flex flex-col items-center gap-3 px-6 py-5 rounded-[12px]"
                 style={{
                   background: "var(--fill-danger)",
@@ -990,7 +1198,7 @@ export default function Chat() {
                 }}
               >
                 <div className="flex items-center gap-2">
-                  <AlertTriangle className="w-4 h-4" style={{ color: "var(--accent-danger)" }} />
+                  <AlertTriangle className="w-4 h-4" style={{ color: "var(--accent-danger)" }} aria-hidden />
                   <p className="text-sm" style={{ color: "var(--accent-danger)" }}>
                     This conversation failed to load: {messagesError}
                   </p>
@@ -998,13 +1206,14 @@ export default function Chat() {
                 <button
                   type="button"
                   onClick={() => setMessagesRetryKey((k) => k + 1)}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-[8px] text-xs font-semibold"
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-[8px] text-xs font-semibold"
                   style={{
+                    minHeight: 36,
                     border: "1px solid var(--border-danger)",
                     color: "var(--accent-danger)",
                   }}
                 >
-                  <RefreshCw className="w-3 h-3" />
+                  <RefreshCw className="w-3 h-3" aria-hidden />
                   Retry
                 </button>
               </div>
@@ -1028,46 +1237,97 @@ export default function Chat() {
             >
               {msg.role === "assistant" && (
                 <div
+                  aria-hidden
                   className="w-8 h-8 rounded-[8px] flex items-center justify-center shrink-0"
                   style={{
                     background: "var(--accent-glow)",
-                    border: "1px solid rgba(34,211,238,0.35)",
+                    border: "1px solid var(--border-accent)",
                   }}
                 >
                   <Bot className="w-4 h-4" style={{ color: "var(--accent-primary)" }} />
                 </div>
               )}
               <div
-                className={clsx("max-w-[70%] rounded-[12px] px-4 py-3")}
+                className="max-w-[85%] sm:max-w-[70%] rounded-[12px] px-4 py-3"
                 style={{
                   background:
                     msg.role === "user"
                       ? "var(--accent-primary)"
-                      : msg.role === "system"
+                      : msg.error || msg.role === "system"
                       ? "var(--fill-danger)"
                       : "var(--claw-surface)",
                   border:
-                    msg.role === "assistant"
-                      ? "1px solid var(--claw-border)"
-                      : msg.role === "system"
+                    msg.error || msg.role === "system"
                       ? "1px solid var(--border-danger)"
+                      : msg.role === "assistant"
+                      ? "1px solid var(--claw-border)"
                       : "none",
                 }}
               >
-                {msg.role === "assistant" ? (
+                {msg.images && msg.images.length > 0 && (
+                  <ul className="flex flex-wrap gap-2 mb-2">
+                    {msg.images.map((src, i) => (
+                      <li key={i}>
+                        {/* Attachments the user picked themselves, so unlike
+                            markdown images in assistant output there is no
+                            third party whose URL could be fetched here. */}
+                        <img
+                          src={src}
+                          alt={`Attachment ${i + 1}`}
+                          className="w-20 h-20 rounded-[8px] object-cover"
+                          style={{ border: "1px solid var(--claw-border)" }}
+                        />
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {msg.error ? (
+                  <div>
+                    <p
+                      role="alert"
+                      className="text-sm whitespace-pre-wrap"
+                      style={{ color: "var(--accent-danger)" }}
+                    >
+                      {msg.content || "The assistant failed to respond."}
+                    </p>
+                    {Boolean(msg.retry_content || msg.retry_images?.length) && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          void handleRetry(
+                            msg.id,
+                            msg.retry_content ?? "",
+                            msg.retry_images ?? [],
+                          )
+                        }
+                        disabled={sending}
+                        className="mt-2 inline-flex items-center gap-1.5 text-xs font-semibold disabled:opacity-50"
+                        style={{ color: "var(--accent-danger)" }}
+                      >
+                        <RefreshCw className="w-3 h-3" aria-hidden />
+                        Retry
+                      </button>
+                    )}
+                  </div>
+                ) : msg.role === "assistant" ? (
                   // Assistant output may be shaped by untrusted tool data, so
                   // it renders through the exfiltration-safe markdown component
                   // (no auto-fetched images, no raw HTML, inert links).
                   <MarkdownMessage content={msg.content} />
                 ) : (
-                  <p
-                    className="text-sm whitespace-pre-wrap"
-                    style={{
-                      color: msg.role === "user" ? "#0a0a0b" : "var(--text-primary)",
-                    }}
-                  >
-                    {msg.content}
-                  </p>
+                  msg.content && (
+                    <p
+                      className="text-sm whitespace-pre-wrap"
+                      style={{
+                        color:
+                          msg.role === "user"
+                            ? "var(--text-on-accent)"
+                            : "var(--text-primary)",
+                      }}
+                    >
+                      {msg.content}
+                    </p>
+                  )
                 )}
                 {msg.tool_calls && msg.tool_calls.length > 0 && (
                   <div className="mt-2 space-y-1">
@@ -1083,13 +1343,15 @@ export default function Chat() {
                     ))}
                   </div>
                 )}
+                <MessageTime iso={msg.created_at} onAccent={msg.role === "user"} />
               </div>
               {msg.role === "user" && (
                 <div
+                  aria-hidden
                   className="w-8 h-8 rounded-[8px] flex items-center justify-center shrink-0"
                   style={{
                     background: "var(--accent-glow)",
-                    border: "1px solid rgba(34,211,238,0.35)",
+                    border: "1px solid var(--border-accent)",
                   }}
                 >
                   <UserIcon className="w-4 h-4" style={{ color: "var(--accent-primary)" }} />
@@ -1102,15 +1364,16 @@ export default function Chat() {
           {!loadingMessages && !messagesError && approvals.length > 0 && (
             <div className="flex gap-3">
               <div
+                aria-hidden
                 className="w-8 h-8 rounded-[8px] flex items-center justify-center shrink-0"
                 style={{
                   background: "var(--accent-glow)",
-                  border: "1px solid rgba(34,211,238,0.35)",
+                  border: "1px solid var(--border-accent)",
                 }}
               >
                 <Shield className="w-4 h-4" style={{ color: "var(--accent-warning)" }} />
               </div>
-              <div className="max-w-[70%] flex-1 space-y-2">
+              <div className="flex-1 min-w-0 space-y-2">
                 {approvals.map((pa) => (
                   <ApprovalCard
                     key={pa.action_id}
@@ -1121,60 +1384,99 @@ export default function Chat() {
               </div>
             </div>
           )}
+          {/* A turn that never reached the server. The user's message is
+              still on screen above; this offers it back rather than making
+              them retype it (or re-pick the images). */}
+          {failedTurn && (
+            <div
+              role="alert"
+              className="flex flex-wrap items-center gap-3 px-4 py-3 rounded-[12px]"
+              style={{
+                background: "var(--fill-danger)",
+                border: "1px solid var(--border-danger)",
+              }}
+            >
+              <AlertTriangle
+                className="w-4 h-4 shrink-0"
+                style={{ color: "var(--accent-danger)" }}
+                aria-hidden
+              />
+              <p className="text-sm flex-1 min-w-0" style={{ color: "var(--accent-danger)" }}>
+                {failedTurn.error}
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  const turn = failedTurn;
+                  setFailedTurn(null);
+                  // The retry re-appends the user's message, so drop the
+                  // copy this attempt already left behind.
+                  setMessages((prev) =>
+                    prev.filter((m) => m.id !== turn.userTempId),
+                  );
+                  void sendContent(turn.content, turn.images);
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-[8px] text-xs font-semibold shrink-0"
+                style={{
+                  minHeight: 36,
+                  border: "1px solid var(--border-danger)",
+                  color: "var(--accent-danger)",
+                }}
+              >
+                <RefreshCw className="w-3 h-3" aria-hidden />
+                Retry
+              </button>
+            </div>
+          )}
           {/* Live turn status: tool activity or a thinking indicator while
               the stream is in flight before the first token arrives. */}
           {sending && (
-            <div className="flex items-center gap-2 pl-11" style={{ color: "var(--text-muted)" }}>
-              <Loader2 className="w-3.5 h-3.5 animate-spin" style={{ color: "var(--accent-primary)" }} />
+            <div
+              role="status"
+              aria-live="polite"
+              className="flex items-center gap-2 pl-11"
+              style={{ color: "var(--text-muted)" }}
+            >
+              <Loader2
+                className="w-3.5 h-3.5 animate-spin"
+                style={{ color: "var(--accent-primary)" }}
+                aria-hidden
+              />
               <span className="text-xs">{streamStatus ?? "Thinking…"}</span>
             </div>
           )}
           <div ref={messagesEndRef} />
         </div>
 
-        {/* Input */}
-        <form
-          onSubmit={handleSend}
-          className="p-4"
-          style={{ borderTop: "1px solid var(--claw-border)" }}
-        >
-          <div
-            className="flex items-center gap-3 rounded-[12px] px-4 py-2"
-            style={{
-              background: "var(--bg-input)",
-              border: "1px solid var(--claw-border)",
-            }}
-          >
-            <input
-              type="text"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder={activeConv ? "Ask SentientAI anything..." : "Start a conversation first"}
-              disabled={!activeConv || sending}
-              className="flex-1 bg-transparent outline-none text-sm disabled:opacity-50"
-              style={{ color: "var(--text-primary)" }}
-            />
+        {/* Shown only once the reader has left the live end of the thread —
+            the counterpart to no longer auto-scrolling them. */}
+        {!atBottom && (
+          <div className="relative">
             <button
-              type="submit"
-              disabled={!input.trim() || !activeConv || sending}
-              className="w-8 h-8 rounded-[8px] flex items-center justify-center transition-colors disabled:opacity-50"
+              type="button"
+              onClick={jumpToLatest}
+              className="absolute -top-12 right-4 inline-flex items-center gap-1.5 px-3 py-2 rounded-full text-xs font-medium shadow-lg"
               style={{
-                background: input.trim() && activeConv ? "var(--accent-primary)" : "transparent",
+                background: "var(--claw-surface)",
+                border: "1px solid var(--claw-border)",
+                color: "var(--text-primary)",
               }}
             >
-              {sending ? (
-                <Loader2 className="w-4 h-4 animate-spin" style={{ color: "#0a0a0b" }} />
-              ) : (
-                <Send
-                  className="w-4 h-4"
-                  style={{
-                    color: input.trim() && activeConv ? "#0a0a0b" : "var(--text-muted)",
-                  }}
-                />
-              )}
+              <ChevronDown className="w-3.5 h-3.5" aria-hidden />
+              Jump to latest
             </button>
           </div>
-        </form>
+        )}
+
+        <ChatComposer
+          disabled={!activeConv}
+          sending={sending}
+          placeholder={
+            activeConv ? "Ask SentientAI anything..." : "Start a conversation first"
+          }
+          onSend={(content, images) => void sendContent(content, images)}
+          onStop={handleStop}
+        />
       </div>
 
       <ConfirmDialog

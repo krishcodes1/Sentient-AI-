@@ -196,19 +196,28 @@ class NetworkPolicy:
     allowed_hosts: list[str] = field(default_factory=list)
     allowed_paths: dict[str, list[str]] = field(default_factory=dict)
     # host -> list of allowed path prefixes
+    instance_paths: list[str] = field(default_factory=list)
+    # Path prefixes applied to a host the *user* configured (see the
+    # ``extra_hosts`` argument of ``check_network_policy``). Empty means
+    # the connector has no notion of a self-hosted instance, and a caller
+    # passing extra hosts for it gets nothing.
 
+
+# /api/v1/ is the Canvas REST surface; /login/oauth2/token is the OAuth
+# code-exchange + refresh endpoint used by CanvasConnector. The
+# interactive /login/oauth2/auth page is browser-side and stays blocked.
+# Shared between the hosted (*.instructure.com) and self-hosted cases so
+# a self-hosted instance is never reachable at paths the hosted one is
+# not.
+_CANVAS_PATHS = ["/api/v1/", "/login/oauth2/token"]
 
 # Default network policies per connector (deny-by-default)
 DEFAULT_POLICIES: dict[str, NetworkPolicy] = {
     "canvas": NetworkPolicy(
         connector_type="canvas",
         allowed_hosts=["*.instructure.com"],
-        allowed_paths={
-            # /login/oauth2/token is the OAuth code-exchange + refresh
-            # endpoint used by CanvasConnector; the interactive
-            # /login/oauth2/auth page is browser-side and stays blocked.
-            "*.instructure.com": ["/api/v1/", "/login/oauth2/token"],
-        },
+        allowed_paths={"*.instructure.com": list(_CANVAS_PATHS)},
+        instance_paths=list(_CANVAS_PATHS),
     ),
     "google": NetworkPolicy(
         connector_type="google",
@@ -302,12 +311,49 @@ def check_ssrf(url: str) -> SSRFCheckResult:
     )
 
 
-def check_network_policy(url: str, connector_type: str) -> SSRFCheckResult:
+def normalize_policy_host(host: str) -> str:
+    """Lowercased, punycode hostname for allowlist comparison.
+
+    A host typed by the user ("MySchool.Instructure.com", an IDN, or a
+    whole URL) has to reduce to exactly the form ``urlparse().hostname``
+    produces, or an allowlist entry added for it never matches what the
+    connector actually requests. Returns "" when nothing usable is left.
+    """
+    candidate = host.strip()
+    if "://" in candidate:
+        candidate = urlparse(candidate).hostname or ""
+    candidate = candidate.strip().strip(".").lower()
+    if not candidate:
+        return ""
+    try:
+        return candidate.encode("idna").decode("ascii")
+    except UnicodeError:
+        # Not encodable as IDNA (over-long label, empty label, ...). It
+        # cannot match a resolvable host either, so leave it as-is and let
+        # the allowlist comparison fail.
+        return candidate
+
+
+def check_network_policy(
+    url: str,
+    connector_type: str,
+    *,
+    extra_hosts: tuple[str, ...] = (),
+) -> SSRFCheckResult:
     """
     Check if a URL is allowed by the connector's network policy.
 
     Enforces deny-by-default: only explicitly allowlisted hosts and
     path prefixes are permitted.
+
+    ``extra_hosts`` carries the hosts the *user* configured for this
+    connector — a self-hosted Canvas domain, for instance, which no
+    static allowlist can know. They are matched exactly (never as
+    wildcards, so one configured host can never open a whole domain) and
+    are held to the policy's ``instance_paths``, so a self-hosted
+    instance is reachable at the same endpoints as the hosted one and no
+    others. The SSRF check above still applies to them unchanged:
+    a configured host that resolves into a private range is refused.
     """
     # First, run SSRF check
     ssrf_result = check_ssrf(url)
@@ -329,6 +375,7 @@ def check_network_policy(url: str, connector_type: str) -> SSRFCheckResult:
     # Check host allowlist (supports wildcard prefix matching)
     host_allowed = False
     matched_host = None
+    allowed_paths: list[str] = []
     for allowed_host in policy.allowed_hosts:
         if allowed_host.startswith("*."):
             suffix = allowed_host[1:]  # e.g., ".instructure.com"
@@ -341,6 +388,15 @@ def check_network_policy(url: str, connector_type: str) -> SSRFCheckResult:
             matched_host = allowed_host
             break
 
+    if matched_host is not None:
+        allowed_paths = policy.allowed_paths.get(matched_host, [])
+    elif policy.instance_paths:
+        for configured in extra_hosts:
+            if hostname and hostname == normalize_policy_host(configured):
+                host_allowed = True
+                allowed_paths = policy.instance_paths
+                break
+
     if not host_allowed:
         return SSRFCheckResult(
             safe=False,
@@ -348,7 +404,6 @@ def check_network_policy(url: str, connector_type: str) -> SSRFCheckResult:
         )
 
     # Check path allowlist
-    allowed_paths = policy.allowed_paths.get(matched_host, [])
     if allowed_paths:
         path_allowed = any(path.startswith(prefix) for prefix in allowed_paths)
         if not path_allowed:

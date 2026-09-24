@@ -152,10 +152,17 @@ class PromptGuard:
         (
             "role_hijack",
             re.compile(
+                # "switch to/enter/activate X mode" is only hostile for modes
+                # that target the ASSISTANT's behavior. The old catch-all
+                # (?:\w+\s+)?mode blocked everyday sentences like "switch to
+                # dark mode" and "how do I enter focus mode on iPhone?".
                 r"(?:you\s+are\s+now|from\s+now\s+on\s+you\s+are|"
                 r"act\s+as\s+if\s+you\s+are|you\s+have\s+been\s+reprogrammed|"
-                r"new\s+instructions?:\s*you\s+are|switch\s+to\s+(?:\w+\s+)?mode|"
-                r"enter\s+(?:\w+\s+)?mode|activate\s+(?:\w+\s+)?mode)",
+                r"new\s+instructions?:\s*you\s+are|"
+                r"(?:switch\s+to|enter|activate)\s+"
+                r"(?:developer|debug|admin|root|sudo|god|dan|evil|opposite|"
+                r"unrestricted|unfiltered|uncensored|unsafe|jailbreak|bypass|"
+                r"override)\s+mode)",
                 re.IGNORECASE,
             ),
             "critical",
@@ -216,13 +223,24 @@ class PromptGuard:
         (
             "data_exfiltration",
             re.compile(
-                r"(?:send|post|transmit|exfiltrate|forward|upload|email|leak|"
-                r"share|export)\s+"
-                # One or more stacked determiners so "send all my api keys" is
-                # caught, not just "send my api keys".
-                r"(?:(?:to|the|all|my|your|user|this|out|me)\s+){0,4}"
-                r"(?:data|info(?:rmation)?|credentials?|tokens?|keys?|passwords?|secrets?|"
-                r"api[\s_-]?keys?|results?)",
+                # Two hostile shapes, chosen so everyday requests ("export
+                # all my data as JSON", "send me the information") pass:
+                # (a) moving SENSITIVE material (credentials/tokens/keys/
+                #     passwords/secrets) with any transfer verb;
+                # (b) moving generic data/info/results to an EXTERNAL
+                #     destination (URL, email address, or an explicitly
+                #     external/remote/third-party target).
+                # "share" and "export" were dropped from the verb set: export
+                # is a first-class feature of this app and both verbs are
+                # ordinary conversation.
+                r"(?:(?:send|post|transmit|exfiltrate|forward|upload|email|leak)\s+"
+                r"(?:(?:to|the|all|my|your|user|this)\s+){0,4}"
+                r"(?:credentials?|tokens?|keys?|passwords?|secrets?|api[\s_-]?keys?))"
+                r"|"
+                r"(?:(?:send|post|transmit|exfiltrate|forward|upload|email|leak)\s+"
+                r"(?:(?:the|all|my|your|user|this)\s+){0,4}"
+                r"(?:data|info(?:rmation)?|results?)\s+to\s+"
+                r"(?:https?://|\S+@|(?:an?\s+)?(?:external|remote|third[-\s]?party)))",
                 re.IGNORECASE,
             ),
             "high",

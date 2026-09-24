@@ -252,6 +252,17 @@ export async function getMe(): Promise<User> {
 }
 
 export function logout(): void {
+  // Best-effort server-side revocation (bumps token_epoch so the JWT dies
+  // now instead of at expiry). Fire-and-forget: local sign-out must never
+  // be blocked by a network failure.
+  const token = localStorage.getItem("auth_token");
+  if (token) {
+    void fetch(`${API_BASE}/auth/logout`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      keepalive: true,
+    }).catch(() => {});
+  }
   localStorage.removeItem("auth_token");
   clearMeCache();
   window.location.href = "/login";
@@ -307,15 +318,29 @@ export async function deleteConversation(conversationId: string): Promise<void> 
   });
 }
 
+/**
+ * Attachments travel as an `images` array of data URLs beside `content`.
+ *
+ * The key is omitted entirely when there is nothing attached, so a server
+ * that has not shipped image support yet sees exactly the request it saw
+ * before — only a turn that actually carries an image can be rejected by it.
+ */
+function turnBody(content: string, images?: string[]): string {
+  return JSON.stringify(
+    images && images.length > 0 ? { content, images } : { content },
+  );
+}
+
 export async function sendMessage(
   conversationId: string,
-  content: string
+  content: string,
+  images?: string[]
 ): Promise<AgentTurnResponse> {
   return request<AgentTurnResponse>(
     `/agent/conversations/${conversationId}/messages`,
     {
       method: "POST",
-      body: JSON.stringify({ content }),
+      body: turnBody(content, images),
     }
   );
 }
@@ -348,6 +373,7 @@ export async function streamMessage(
   content: string,
   handlers: StreamHandlers,
   signal?: AbortSignal,
+  images?: string[],
 ): Promise<void> {
   // An agent turn can run for minutes; renewing first means a long one
   // cannot start on a token that lapses halfway through.
@@ -361,7 +387,7 @@ export async function streamMessage(
         "Content-Type": "application/json",
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
-      body: JSON.stringify({ content }),
+      body: turnBody(content, images),
       signal,
     },
   );
@@ -417,7 +443,13 @@ export async function streamMessage(
         handlers.onPendingApproval?.(data as unknown as PendingApproval);
         break;
       case "blocked":
-        handlers.onBlocked?.(data as unknown as BlockedAction);
+        // The streamed event carries the tool name as `tool`; the persisted
+        // shape (and our type) uses `tool_name`. Accept both.
+        handlers.onBlocked?.({
+          tool_name: String(data.tool_name ?? data.tool ?? ""),
+          reason: String(data.reason ?? ""),
+          policy: String(data.policy ?? ""),
+        });
         break;
       case "done":
         sawTerminalEvent = true;
@@ -635,3 +667,29 @@ export async function deleteMemory(id: string): Promise<void> {
   return request<void>(`/memories/${id}`, { method: "DELETE" });
 }
 
+
+// Telegram approvals.
+
+export interface TelegramStatus {
+  configured: boolean;
+  linked: boolean;
+  bot_username?: string | null;
+}
+
+export interface TelegramLink {
+  link_url: string;
+  bot_username: string;
+  expires_in_minutes: number;
+}
+
+export async function getTelegramStatus(): Promise<TelegramStatus> {
+  return request<TelegramStatus>("/telegram/status");
+}
+
+export async function createTelegramLink(): Promise<TelegramLink> {
+  return request<TelegramLink>("/telegram/link", { method: "POST" });
+}
+
+export async function unlinkTelegram(): Promise<void> {
+  return request<void>("/telegram/link", { method: "DELETE" });
+}

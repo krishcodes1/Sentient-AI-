@@ -59,6 +59,36 @@ CREDENTIAL_REQUIREMENTS: dict[str, dict[str, Any]] = {
 }
 
 
+def coerce_header_map(value: Any) -> Optional[dict[str, str]]:
+    """``value`` as a ``{str: str}`` header map, or ``None`` if it is not one.
+
+    Credentials are user-supplied JSON, so ``headers`` can be a string, a
+    list, or a dict of nested objects. ``dict(value)`` on any of those
+    raises deep inside the MCP loader, and that loader runs on every chat
+    send — one malformed connector took down every turn for that user.
+    Callers turn ``None`` into "this connector is misconfigured".
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        return None
+    headers: dict[str, str] = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or not isinstance(item, (str, int, float)):
+            return None
+        if isinstance(item, bool):
+            return None
+        headers[key] = str(item)
+    return headers
+
+
+def canvas_instance_host(base_url: str) -> str:
+    """Hostname of a Canvas base URL, normalized for allowlist matching."""
+    from core.network_security import normalize_policy_host
+
+    return normalize_policy_host(base_url)
+
+
 def validate_credentials(connector_type: str, credentials: dict[str, Any]) -> list[str]:
     """Return a list of human-readable problems (empty when valid)."""
     requirements = CREDENTIAL_REQUIREMENTS.get(connector_type)
@@ -73,10 +103,17 @@ def validate_credentials(connector_type: str, credentials: dict[str, Any]) -> li
         base_url = str(credentials.get("base_url", ""))
         if base_url and not base_url.startswith(("http://", "https://")):
             problems.append("base_url must start with http:// or https://")
+        elif base_url and not canvas_instance_host(base_url):
+            # Without a hostname there is nothing to add to the network
+            # allowlist, so every call this connector ever makes would be
+            # refused. Say so now instead of at first use.
+            problems.append("base_url must include a hostname")
     if connector_type == "mcp":
         url = str(credentials.get("url", ""))
         if url and not url.startswith(("http://", "https://")):
             problems.append("url must start with http:// or https://")
+        if coerce_header_map(credentials.get("headers")) is None:
+            problems.append("headers must be an object of header name -> value")
     return problems
 
 
@@ -116,7 +153,15 @@ def create_connector(
         raise CredentialError(f"Unsupported connector type '{connector_type}'")
 
     # Arm deny-by-default outbound filtering before any request is possible.
-    connector.set_network_policy(NETWORK_POLICY_KEYS[connector_type])
+    # A Canvas instance the user self-hosts is not under *.instructure.com,
+    # so its host is added as the single extra allowlist entry for this
+    # connector — the SSRF address policy still applies to it.
+    extra_hosts: tuple[str, ...] = ()
+    if isinstance(connector, CanvasConnector) and connector.instance_host:
+        extra_hosts = (connector.instance_host,)
+    connector.set_network_policy(
+        NETWORK_POLICY_KEYS[connector_type], extra_hosts=extra_hosts
+    )
 
     if rate_limit is not None:
         # The per-config limiter in the executor is authoritative; this just

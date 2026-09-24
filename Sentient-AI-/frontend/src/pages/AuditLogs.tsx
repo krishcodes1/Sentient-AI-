@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import {
   Search,
   CheckCircle2,
@@ -20,10 +20,34 @@ type StatusFilter = "all" | AuditStatus;
 type ConnectorFilter = "all" | string;
 type TimeRangeFilter = "all" | "24h" | "7d" | "30d";
 
-const statusConfig: Record<AuditStatus, { icon: typeof CheckCircle2; color: string; label: string }> = {
-  approved: { icon: CheckCircle2, color: "var(--accent-success)", label: "Approved" },
-  blocked: { icon: XCircle, color: "var(--accent-danger)", label: "Blocked" },
-  pending: { icon: Clock, color: "var(--accent-warning)", label: "Pending" },
+// Fill and border are their own tokens rather than an alpha suffix on
+// `color`: appending to a custom property produces `var(--accent-success)1f`,
+// which is not a color, so the status chips rendered with no tint at all.
+const statusConfig: Record<
+  AuditStatus,
+  { icon: typeof CheckCircle2; color: string; fill: string; border: string; label: string }
+> = {
+  approved: {
+    icon: CheckCircle2,
+    color: "var(--accent-success)",
+    fill: "var(--fill-success)",
+    border: "var(--border-success)",
+    label: "Approved",
+  },
+  blocked: {
+    icon: XCircle,
+    color: "var(--accent-danger)",
+    fill: "var(--fill-danger)",
+    border: "var(--border-danger)",
+    label: "Blocked",
+  },
+  pending: {
+    icon: Clock,
+    color: "var(--accent-warning)",
+    fill: "var(--fill-warning)",
+    border: "var(--border-warning)",
+    label: "Pending",
+  },
 };
 
 const timeRangeMs: Record<Exclude<TimeRangeFilter, "all">, number> = {
@@ -100,11 +124,25 @@ function LogRow({ log }: { log: AuditLog }) {
         onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "var(--claw-surface)")}
         onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
       >
-        <td className="px-4 py-3">
-          <ChevronRight
-            className={`w-4 h-4 transition-transform ${expanded ? "rotate-90" : ""}`}
-            style={{ color: "var(--text-muted)" }}
-          />
+        <td className="px-2 py-3">
+          {/* The row click is a convenience; this button is the one a
+              keyboard or screen reader can actually reach. */}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setExpanded(!expanded);
+            }}
+            aria-expanded={expanded}
+            aria-label={`${expanded ? "Hide" : "Show"} details for ${log.action} on ${log.connector_name}`}
+            className="inline-flex items-center justify-center rounded-[6px]"
+            style={{ width: 36, height: 36, color: "var(--text-muted)" }}
+          >
+            <ChevronRight
+              className={`w-4 h-4 transition-transform ${expanded ? "rotate-90" : ""}`}
+              aria-hidden
+            />
+          </button>
         </td>
         <td className="px-4 py-3 text-xs mono-num">
           {ts.toLocaleTimeString()} <br />
@@ -127,7 +165,7 @@ function LogRow({ log }: { log: AuditLog }) {
         <td className="px-4 py-3">
           <span
             className="mono-tag inline-flex items-center gap-1.5 px-2 py-1 rounded-[6px]"
-            style={{ backgroundColor: `${cfg.color}1f`, color: cfg.color, border: `1px solid ${cfg.color}40` }}
+            style={{ backgroundColor: cfg.fill, color: cfg.color, border: `1px solid ${cfg.border}` }}
           >
             <StatusIcon className="w-3 h-3" /> {cfg.label}
           </span>
@@ -242,6 +280,12 @@ function LogRow({ log }: { log: AuditLog }) {
 }
 
 export default function AuditLogs() {
+  const ids = {
+    search: useId(),
+    connector: useId(),
+    status: useId(),
+    range: useId(),
+  };
   const [logs, setLogs] = useState<AuditLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -256,11 +300,21 @@ export default function AuditLogs() {
 
   // The filter dropdown lists every configured connector, not just the ones
   // present in the currently loaded (already-filtered) page of logs.
+  //
+  // Audit rows store connector_name as the TOOL-NAME PREFIX ("canvas",
+  // "google_workspace", "mcp", "agent"), never the user's display name —
+  // filtering by display_name matched zero rows for any renamed connector.
+  // So the dropdown's values are connector types; display names appear only
+  // in the label.
   useEffect(() => {
     let cancelled = false;
     getConnectors()
       .then((data) => {
-        if (!cancelled) setConnectorNames(data.map((c) => c.display_name));
+        if (!cancelled) {
+          setConnectorNames(
+            Array.from(new Set(data.map((c) => String(c.connector_type)))),
+          );
+        }
       })
       .catch(() => {
         // Fall back to the names visible in the loaded logs.
@@ -348,7 +402,7 @@ export default function AuditLogs() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
         <div>
           <div className="eyebrow mb-2">Audit trail</div>
           <h1 style={{ color: "var(--text-primary)" }}>Audit logs</h1>
@@ -361,10 +415,10 @@ export default function AuditLogs() {
           type="button"
           onClick={() => setRefreshKey((k) => k + 1)}
           disabled={loading}
-          className="inline-flex items-center gap-2 px-3.5 py-2 rounded-[10px] text-sm font-medium disabled:opacity-50 transition-colors shrink-0"
-          style={inputStyle}
+          className="inline-flex items-center justify-center gap-2 px-3.5 rounded-[10px] text-sm font-medium disabled:opacity-50 transition-colors shrink-0 self-start"
+          style={{ ...inputStyle, minHeight: 44 }}
         >
-          <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
+          <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} aria-hidden />
           Refresh
         </button>
       </div>
@@ -373,9 +427,17 @@ export default function AuditLogs() {
         className="flex flex-wrap items-center gap-3 p-4 rounded-[14px]"
         style={panelStyle}
       >
-        <div className="relative flex-1 min-w-[200px]">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4" style={{ color: "var(--text-muted)" }} />
+        <div className="relative flex-1 basis-full sm:basis-auto min-w-[200px]">
+          <label htmlFor={ids.search} className="sr-only">
+            Search audit logs
+          </label>
+          <Search
+            className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 pointer-events-none"
+            style={{ color: "var(--text-muted)" }}
+            aria-hidden
+          />
           <input
+            id={ids.search}
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
@@ -385,10 +447,14 @@ export default function AuditLogs() {
           />
         </div>
 
+        <label htmlFor={ids.connector} className="sr-only">
+          Filter by connector
+        </label>
         <select
+          id={ids.connector}
           value={connectorFilter}
           onChange={(e) => setConnectorFilter(e.target.value)}
-          className="px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
+          className="flex-1 sm:flex-none px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
           style={inputStyle}
         >
           <option value="all">All Connectors</option>
@@ -399,10 +465,14 @@ export default function AuditLogs() {
           ))}
         </select>
 
+        <label htmlFor={ids.status} className="sr-only">
+          Filter by status
+        </label>
         <select
+          id={ids.status}
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
-          className="px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
+          className="flex-1 sm:flex-none px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
           style={inputStyle}
         >
           <option value="all">All Statuses</option>
@@ -411,10 +481,14 @@ export default function AuditLogs() {
           <option value="pending">Pending</option>
         </select>
 
+        <label htmlFor={ids.range} className="sr-only">
+          Filter by time range
+        </label>
         <select
+          id={ids.range}
           value={timeRange}
           onChange={(e) => setTimeRange(e.target.value as TimeRangeFilter)}
-          className="px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
+          className="flex-1 sm:flex-none px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
           style={inputStyle}
         >
           <option value="all">All Time</option>
@@ -428,8 +502,15 @@ export default function AuditLogs() {
         <div className="px-5 pt-4 pb-3">
           <div className="eyebrow">Action log</div>
         </div>
+        {/* Seven columns do not fit a phone. The panel scrolls sideways
+            rather than the page, and the columns keep their widths instead
+            of collapsing into unreadable slivers. */}
         <div className="overflow-x-auto">
-          <table className="w-full">
+          <table className="w-full min-w-[760px]">
+            <caption className="sr-only">
+              Agent actions, newest first. Expand a row for its reasoning
+              chain and integrity hash.
+            </caption>
             <thead>
               <tr
                 style={{
@@ -438,7 +519,9 @@ export default function AuditLogs() {
                   background: "var(--claw-surface)",
                 }}
               >
-                <th className="px-4 py-2.5 text-left w-8"></th>
+                <th className="px-2 py-2.5 text-left w-10">
+                  <span className="sr-only">Expand</span>
+                </th>
                 <th className="px-4 py-2.5 text-left eyebrow">Timestamp</th>
                 <th className="px-4 py-2.5 text-left eyebrow">Connector</th>
                 <th className="px-4 py-2.5 text-left eyebrow">Action</th>
@@ -451,8 +534,8 @@ export default function AuditLogs() {
               {loading && (
                 <tr>
                   <td colSpan={7} className="px-4 py-10 text-center text-sm" style={{ color: "var(--text-muted)" }}>
-                    <span className="inline-flex items-center gap-2">
-                      <Loader2 className="w-4 h-4 animate-spin" />
+                    <span role="status" className="inline-flex items-center gap-2">
+                      <Loader2 className="w-4 h-4 animate-spin" aria-hidden />
                       Loading audit logs...
                     </span>
                   </td>
@@ -487,8 +570,8 @@ export default function AuditLogs() {
               type="button"
               onClick={() => void loadMore()}
               disabled={loadingMore}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-[10px] text-sm font-medium disabled:opacity-50"
-              style={inputStyle}
+              className="inline-flex items-center gap-2 px-4 rounded-[10px] text-sm font-medium disabled:opacity-50"
+              style={{ ...inputStyle, minHeight: 44 }}
             >
               {loadingMore ? (
                 <Loader2 className="w-4 h-4 animate-spin" />

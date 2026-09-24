@@ -230,7 +230,15 @@ async def test_account_deletion_cascades_to_all_owned_rows(
         session.add(_audit_row(user_id, "something"))
         await session.commit()
 
-    resp = await client.delete("/api/auth/account", headers=headers)
+    # Destroying an account re-authenticates: a bearer token alone is not
+    # evidence the holder owns it. httpx needs the explicit request form
+    # because DELETE bodies are not supported by the shorthand.
+    resp = await client.request(
+        "DELETE",
+        "/api/auth/account",
+        headers=headers,
+        json={"current_password": "password-123"},
+    )
     assert resp.status_code == 204
 
     async with session_factory() as session:

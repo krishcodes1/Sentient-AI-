@@ -540,6 +540,79 @@ def test_canvas_auth_url_carries_a_valid_pkce_challenge():
     assert "courses.read" in params["scope"]
 
 
+# ---------------------------------------------------------------------------
+# Path-parameter injection
+#
+# Identifiers reach a connector as tool arguments the model chose, which
+# untrusted content it read can steer. An id carrying "/" must stay one
+# path segment or it reaches sibling endpoints on the allowlisted host,
+# outside the scopes the user granted.
+# ---------------------------------------------------------------------------
+
+TRAVERSAL_ID = "1/../../users/self/enrollments?x=y"
+
+
+@pytest.mark.asyncio
+async def test_canvas_course_id_cannot_add_path_segments():
+    recorder = _Recorder(_json_ok([]))
+    async with _wired(_canvas(), recorder) as connector:
+        await connector.authenticate({"access_token": "tok"})
+        await connector.get_assignments(TRAVERSAL_ID)
+
+    # raw_path is what goes on the wire; the id survives as ONE escaped
+    # segment and the endpoint reached is still the assignments
+    # collection. (URL.path is the decoded form and proves nothing here.)
+    request = recorder.only()
+    wire_path = request.url.raw_path.decode().split("?")[0]
+    assert wire_path == (
+        "/api/v1/courses/"
+        "1%2F..%2F..%2Fusers%2Fself%2Fenrollments%3Fx%3Dy/assignments"
+    )
+    assert wire_path.split("/")[-1] == "assignments"
+
+
+@pytest.mark.asyncio
+async def test_canvas_grades_and_submission_ids_are_encoded():
+    recorder = _Recorder(_json_ok([]))
+    async with _wired(_canvas(), recorder) as connector:
+        await connector.authenticate({"access_token": "tok"})
+        await connector.get_grades("7/../8")
+        await connector.get_submissions("7/../8", "9/../10")
+
+    raw_paths = [r.url.raw_path.decode() for r in recorder.requests]
+    assert raw_paths[0] == (
+        "/api/v1/courses/7%2F..%2F8/enrollments"
+        "?user_id=self&type%5B%5D=StudentEnrollment"
+    )
+    assert raw_paths[1].startswith(
+        "/api/v1/courses/7%2F..%2F8/assignments/9%2F..%2F10/submissions"
+    )
+    # Every request still lands on the same two collection endpoints.
+    assert [p.split("?")[0].split("/")[-1] for p in raw_paths] == [
+        "enrollments",
+        "submissions",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_canvas_submit_assignment_encodes_both_ids():
+    recorder = _Recorder(_json_ok({"id": 5}))
+    async with _wired(_canvas(), recorder) as connector:
+        await connector.authenticate({"access_token": "tok"})
+        await connector.submit_assignment(
+            "1/../../users",
+            "2/../../self",
+            {"body": "done"},
+            user_confirmed=True,
+        )
+
+    request = recorder.only()
+    assert request.url.raw_path.decode() == (
+        "/api/v1/courses/1%2F..%2F..%2Fusers/assignments/2%2F..%2F..%2Fself"
+        "/submissions"
+    )
+
+
 @pytest.mark.asyncio
 async def test_canvas_health_check_reflects_upstream_status():
     async with _wired(_canvas(), _json_ok({"id": 1})) as connector:
@@ -600,6 +673,25 @@ async def test_google_get_message_parses_headers_and_decodes_body():
         "body": "Meeting moved to Friday.",
         "label_ids": ["INBOX", "UNREAD"],
     }
+
+
+@pytest.mark.asyncio
+async def test_google_message_id_cannot_add_path_segments():
+    """A message id is one path segment. Unencoded, "m1/../../settings/..."
+    walks out of /messages/ and reaches Gmail settings endpoints the
+    connector was never granted."""
+    recorder = _Recorder(_json_ok(_gmail_message("hi")))
+    async with _wired(_google(), recorder) as connector:
+        await connector.authenticate({"access_token": "g-tok"})
+        await connector.get_message("m1/../../settings/forwardingAddresses")
+
+    # raw_path is what goes on the wire (URL.path is the decoded form, so
+    # it still reads as traversal there and proves nothing).
+    request = recorder.only()
+    assert request.url.raw_path.decode() == (
+        "/gmail/v1/users/me/messages/"
+        "m1%2F..%2F..%2Fsettings%2FforwardingAddresses?format=full"
+    )
 
 
 @pytest.mark.asyncio
@@ -942,6 +1034,59 @@ async def test_google_unknown_action_and_server_error_mapping():
     assert "HTTP 502 from Google Workspace" in str(exc_info.value)
 
 
+@pytest.mark.asyncio
+async def test_google_health_check_passes_for_a_calendar_only_grant():
+    """Incremental authorization is a supported way to connect Google, so
+    a calendar-only token is a legitimate configuration. Probing Gmail
+    alone reported it as broken credentials."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "gmail.googleapis.com":
+            return httpx.Response(
+                403, json={"error": {"status": "PERMISSION_DENIED"}}
+            )
+        return httpx.Response(200, json={"items": []})
+
+    recorder = _Recorder(handler)
+    async with _wired(_google(), recorder) as connector:
+        await connector.authenticate({"access_token": "calendar-only"})
+        assert await connector.health_check() is True
+
+    assert [r.url.host for r in recorder.requests] == [
+        "gmail.googleapis.com",
+        "www.googleapis.com",
+    ]
+    assert recorder.requests[-1].url.path.startswith("/calendar/")
+
+
+@pytest.mark.asyncio
+async def test_google_health_check_probes_only_the_granted_surface():
+    """When the OAuth exchange told us the scopes, there is no reason to
+    ask an API the token cannot reach."""
+    recorder = _Recorder(_json_ok({"items": []}))
+    connector = _google()
+    async with _wired(connector, recorder):
+        await connector.authenticate({"access_token": "calendar-only"})
+        connector._granted_scopes = {
+            "https://www.googleapis.com/auth/calendar.readonly"
+        }
+        assert await connector.health_check() is True
+
+    assert [r.url.host for r in recorder.requests] == ["www.googleapis.com"]
+
+
+@pytest.mark.asyncio
+async def test_google_health_check_fails_fast_on_an_invalid_token():
+    """401 is the token itself being refused — every other surface will
+    refuse it too, so there is nothing to fall through to."""
+    recorder = _Recorder(lambda _r: httpx.Response(401))
+    async with _wired(_google(), recorder) as connector:
+        await connector.authenticate({"access_token": "revoked"})
+        assert await connector.health_check() is False
+
+    assert len(recorder.requests) == 1
+
+
 # ---------------------------------------------------------------------------
 # Robinhood — read-only enforcement
 # ---------------------------------------------------------------------------
@@ -1033,6 +1178,54 @@ async def test_robinhood_prices_query_one_pair_per_symbol():
         hashlib.sha256,
     ).hexdigest()
     assert first.headers["x-signature"] == expected
+
+
+@pytest.mark.asyncio
+async def test_robinhood_signs_exactly_what_it_sends():
+    """The HMAC used to be computed over ``urlencode(params)`` while httpx
+    encoded the query itself. The two disagree (booleans, ``None``, and
+    repeated keys among them) and every disagreement is an opaque 401, so
+    the signature is now taken from the request object that is sent."""
+    from urllib.parse import urlencode
+
+    params = {"symbol": ["BTC-USD", "ETH-USD"], "detail": True, "cursor": None}
+    # Proof the two encoders really do disagree for this input — without
+    # it this test would pass even if the old signing came back.
+    assert urlencode(params) != "symbol=BTC-USD&symbol=ETH-USD&detail=true&cursor="
+
+    recorder = _Recorder(_json_ok({"results": []}))
+    async with _wired_robinhood(recorder) as connector:
+        await connector._api_get(
+            "/api/v1/crypto/marketdata/best_bid_ask/",
+            params=params,
+            user_confirmed=True,
+        )
+
+    request = recorder.only()
+    sent = request.url.raw_path.decode()
+    expected = hmac.new(
+        b"rh-secret",
+        f"rh-key{request.headers['x-timestamp']}{sent}GET".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    assert request.headers["x-signature"] == expected
+
+
+@pytest.mark.asyncio
+async def test_robinhood_authenticate_signs_its_probe_request():
+    recorder = _Recorder(_json_ok({"account_number": "abc"}))
+    connector = _robinhood()
+    async with _wired(connector, recorder, base_url=RobinhoodConnector.BASE_URL):
+        await connector.authenticate({"api_key": "rh-key", "api_secret": "rh-secret"})
+
+    request = recorder.only()
+    sent = request.url.raw_path.decode()
+    expected = hmac.new(
+        b"rh-secret",
+        f"rh-key{request.headers['x-timestamp']}{sent}GET".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    assert request.headers["x-signature"] == expected
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   GraduationCap,
   Mail,
@@ -32,6 +32,7 @@ import {
   updateConnector,
 } from "@/services/api";
 import ConfirmDialog from "@/components/ConfirmDialog";
+import { useFocusTrap } from "@/hooks/useFocusTrap";
 
 const connectorIcons: Record<ConnectorType, typeof GraduationCap> = {
   canvas: GraduationCap,
@@ -73,10 +74,25 @@ function scopeRisk(scope: string): "read" | "write" | "financial" {
   return "read";
 }
 
+// Each tint carries its own fill and border rather than deriving them by
+// appending an alpha suffix to `text`: `var(--accent-success)1f` is not a
+// color, so those chips were rendering untinted.
 const riskColors = {
-  read: { text: "var(--accent-success)" },
-  write: { text: "var(--accent-warning)" },
-  financial: { text: "var(--accent-danger)" },
+  read: {
+    text: "var(--accent-success)",
+    fill: "var(--fill-success)",
+    border: "var(--border-success)",
+  },
+  write: {
+    text: "var(--accent-warning)",
+    fill: "var(--fill-warning)",
+    border: "var(--border-warning)",
+  },
+  financial: {
+    text: "var(--accent-danger)",
+    fill: "var(--fill-danger)",
+    border: "var(--border-danger)",
+  },
 };
 
 function ScopeTag({ name }: { name: string }) {
@@ -85,9 +101,9 @@ function ScopeTag({ name }: { name: string }) {
   return (
     <div
       className="mono-tag inline-flex items-center gap-1.5 px-2 py-1 rounded-[6px]"
-      style={{ backgroundColor: `${c.text}1a`, border: `1px solid ${c.text}33` }}
+      style={{ backgroundColor: c.fill, border: `1px solid ${c.border}` }}
     >
-      <Check className="w-3 h-3" style={{ color: c.text }} />
+      <Check className="w-3 h-3" style={{ color: c.text }} aria-hidden />
       <span style={{ color: c.text }}>{name}</span>
       {risk === "financial" && (
         <span
@@ -143,7 +159,7 @@ function ConnectorCard({
       className="rounded-[14px] overflow-hidden transition-all duration-200"
       style={panelStyle}
       onMouseOver={(e) => {
-        e.currentTarget.style.borderColor = "rgba(34,211,238,0.4)";
+        e.currentTarget.style.borderColor = "var(--border-accent-strong)";
         e.currentTarget.style.transform = "translateY(-2px)";
       }}
       onMouseOut={(e) => {
@@ -161,9 +177,9 @@ function ConnectorCard({
               style={{
                 background: connector.is_active
                   ? "var(--accent-glow)"
-                  : "rgba(148,163,184,0.12)",
+                  : "var(--fill-neutral)",
                 border: connector.is_active
-                  ? "1px solid rgba(34,211,238,0.35)"
+                  ? "1px solid var(--border-accent)"
                   : "1px solid var(--claw-border)",
               }}
             >
@@ -188,7 +204,7 @@ function ConnectorCard({
           <span
             className="mono-tag px-2 py-1 rounded-[6px] shrink-0"
             style={{
-              background: connector.is_active ? "var(--fill-success)" : "rgba(148,163,184,0.12)",
+              background: connector.is_active ? "var(--fill-success)" : "var(--fill-neutral)",
               color: connector.is_active ? "var(--accent-success)" : "var(--text-muted)",
               border: connector.is_active ? "1px solid var(--border-success)" : "1px solid var(--claw-border)",
             }}
@@ -197,7 +213,7 @@ function ConnectorCard({
           </span>
         </div>
 
-        <div className="flex items-center gap-6 mb-4">
+        <div className="flex flex-wrap gap-x-6 gap-y-3 mb-4">
           <div>
             <div className="eyebrow mb-1">Tier</div>
             <p className="text-sm font-medium" style={{ color: tier.color }}>
@@ -230,6 +246,7 @@ function ConnectorCard({
 
         {testResult && (
           <div
+            role="status"
             className="flex items-start gap-2 mt-3 px-3 py-2 rounded-[8px] text-xs"
             style={{
               background: testResult.ok ? "var(--fill-success)" : "var(--fill-danger)",
@@ -248,14 +265,14 @@ function ConnectorCard({
       </div>
 
       <div
-        className="flex items-center justify-between px-5 py-3"
+        className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 px-5 py-2"
         style={{
           borderTop: "1px solid var(--border-subtle)",
           background: "var(--claw-surface)",
         }}
       >
         {error ? (
-          <span className="text-xs" style={{ color: "var(--accent-danger)" }}>
+          <span role="alert" className="text-xs" style={{ color: "var(--accent-danger)" }}>
             {error}
           </span>
         ) : (
@@ -268,36 +285,39 @@ function ConnectorCard({
             type="button"
             onClick={() => void handleTest()}
             disabled={testing}
-            className="flex items-center gap-1.5 text-xs font-medium disabled:opacity-50"
-            style={{ color: "var(--accent-primary)" }}
+            aria-label={`Test ${connector.display_name}`}
+            className="inline-flex items-center gap-1.5 text-xs font-medium disabled:opacity-50"
+            style={{ minHeight: 44, color: "var(--accent-primary)" }}
           >
             {testing ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden />
             ) : (
-              <Zap className="w-3.5 h-3.5" />
+              <Zap className="w-3.5 h-3.5" aria-hidden />
             )}
             Test
           </button>
           <button
             type="button"
             onClick={onEdit}
-            className="flex items-center gap-1.5 text-xs font-medium"
-            style={{ color: "var(--text-secondary)" }}
+            aria-label={`Edit ${connector.display_name}`}
+            className="inline-flex items-center gap-1.5 text-xs font-medium"
+            style={{ minHeight: 44, color: "var(--text-secondary)" }}
           >
-            <Pencil className="w-3.5 h-3.5" />
+            <Pencil className="w-3.5 h-3.5" aria-hidden />
             Edit
           </button>
           <button
             type="button"
             onClick={() => setConfirmOpen(true)}
             disabled={deleting}
-            className="flex items-center gap-1.5 text-xs font-medium disabled:opacity-50"
-            style={{ color: "var(--accent-danger)" }}
+            aria-label={`Remove ${connector.display_name}`}
+            className="inline-flex items-center gap-1.5 text-xs font-medium disabled:opacity-50"
+            style={{ minHeight: 44, color: "var(--accent-danger)" }}
           >
             {deleting ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden />
             ) : (
-              <Trash2 className="w-3.5 h-3.5" />
+              <Trash2 className="w-3.5 h-3.5" aria-hidden />
             )}
             Remove
           </button>
@@ -400,21 +420,25 @@ const SERVICES: ServiceDef[] = [
       },
       {
         key: "refresh_token",
-        label: "Refresh token (optional)",
+        label: "Refresh token (strongly recommended)",
         type: "password",
-        placeholder: "Keeps access working after the token expires",
+        placeholder: "Without this, the connection stops working in ~1 hour",
+        hint:
+          "Google access tokens expire after about an hour. With a refresh " +
+          "token + client credentials, SentientAI renews and saves tokens " +
+          "automatically; without them you must paste a fresh token every hour.",
       },
       {
         key: "client_id",
-        label: "OAuth client ID (optional)",
+        label: "OAuth client ID (needed for auto-refresh)",
         type: "text",
-        placeholder: "Needed only for automatic refresh",
+        placeholder: "Required for automatic renewal",
       },
       {
         key: "client_secret",
-        label: "OAuth client secret (optional)",
+        label: "OAuth client secret (needed for auto-refresh)",
         type: "password",
-        placeholder: "Needed only for automatic refresh",
+        placeholder: "Required for automatic renewal",
       },
     ],
     readScopes: ["gmail.read", "calendar.read"],
@@ -483,7 +507,7 @@ const TIER_OPTIONS: { value: PermissionTier; label: string }[] = [
   { value: "admin_only", label: "Admin Only" },
 ];
 
-const labelCls = "block mb-1.5 text-sm";
+const labelCls = "block mb-1.5 text-sm text-[var(--text-secondary)]";
 const fieldCls =
   "w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none transition-colors";
 
@@ -497,20 +521,25 @@ function ScopeChip({
   onToggle: () => void;
 }) {
   const risk = scopeRisk(scope);
-  const color = riskColors[risk].text;
+  const tint = riskColors[risk];
   return (
     <button
       type="button"
       onClick={onToggle}
-      className="mono-tag inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-[8px] transition-all"
+      className="mono-tag inline-flex items-center gap-1.5 px-2.5 rounded-[8px] transition-all"
       style={{
-        backgroundColor: selected ? `${color}1f` : "var(--bg-input)",
-        border: `1px solid ${selected ? `${color}66` : "var(--claw-border)"}`,
-        color: selected ? color : "var(--text-muted)",
+        minHeight: 36,
+        backgroundColor: selected ? tint.fill : "var(--bg-input)",
+        border: `1px solid ${selected ? tint.border : "var(--claw-border)"}`,
+        color: selected ? tint.text : "var(--text-muted)",
       }}
       aria-pressed={selected}
     >
-      {selected ? <Check className="w-3 h-3" /> : <Plus className="w-3 h-3" />}
+      {selected ? (
+        <Check className="w-3 h-3" aria-hidden />
+      ) : (
+        <Plus className="w-3 h-3" aria-hidden />
+      )}
       {scope}
     </button>
   );
@@ -532,14 +561,20 @@ function AddConnectorModal({
   const [rateLimit, setRateLimit] = useState(30);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const ids = {
+    title: useId(),
+    service: useId(),
+    displayName: useId(),
+    scopes: useId(),
+    tier: useId(),
+    rate: useId(),
+    field: useId(),
+  };
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  // Also supplies Escape, so the hand-rolled key listener this replaced is
+  // gone — the trap has to own both to keep them from disagreeing.
+  useFocusTrap(true, panelRef, onClose);
 
   const switchService = (value: ConnectorType) => {
     const next = SERVICES.find((s) => s.value === value) ?? SERVICES[0];
@@ -600,24 +635,29 @@ function AddConnectorModal({
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ background: "rgba(0,0,0,0.62)", backdropFilter: "blur(2px)" }}
+      style={{ background: "var(--scrim)", backdropFilter: "blur(2px)" }}
       onClick={onClose}
     >
       <div
-        className="w-full max-w-lg rounded-[16px] max-h-[90vh] overflow-y-auto"
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={ids.title}
+        className="w-full max-w-lg rounded-[16px] max-h-[90dvh] overflow-y-auto"
         style={{ ...panelStyle, boxShadow: "var(--shadow-modal)" }}
         onClick={(e) => e.stopPropagation()}
       >
         <div
-          className="flex items-center justify-between px-6 py-4"
+          className="flex items-center justify-between px-4 sm:px-6 py-4"
           style={{ borderBottom: "1px solid var(--border-subtle)" }}
         >
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 min-w-0">
             <div
-              className="w-9 h-9 rounded-[10px] flex items-center justify-center"
+              aria-hidden
+              className="w-9 h-9 rounded-[10px] flex items-center justify-center shrink-0"
               style={{
                 background: "var(--accent-glow)",
-                border: "1px solid rgba(34,211,238,0.35)",
+                border: "1px solid var(--border-accent)",
               }}
             >
               <TypeIcon
@@ -625,26 +665,29 @@ function AddConnectorModal({
                 style={{ color: "var(--accent-primary)" }}
               />
             </div>
-            <div>
+            <div className="min-w-0">
               <div className="eyebrow">New integration</div>
-              <h3 style={{ color: "var(--text-primary)" }}>Add connector</h3>
+              <h2 id={ids.title} className="h3" style={{ color: "var(--text-primary)" }}>
+                Add connector
+              </h2>
             </div>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="p-1 rounded-md transition-colors hover:opacity-80"
-            style={{ color: "var(--text-muted)" }}
+            className="inline-flex items-center justify-center rounded-md transition-colors shrink-0"
+            style={{ width: 44, height: 44, color: "var(--text-muted)" }}
             aria-label="Close"
           >
-            <X className="w-5 h-5" />
+            <X className="w-5 h-5" aria-hidden />
           </button>
         </div>
 
         <form onSubmit={handleSubmit}>
-          <div className="px-6 py-5 flex flex-col gap-4">
+          <div className="px-4 sm:px-6 py-5 flex flex-col gap-4">
             {error && (
               <div
+                role="alert"
                 className="px-3 py-2.5 rounded-[8px] text-sm"
                 style={{
                   background: "var(--fill-danger)",
@@ -657,10 +700,11 @@ function AddConnectorModal({
             )}
 
             <div>
-              <label className={labelCls} style={{ color: "var(--text-secondary)" }}>
+              <label htmlFor={ids.service} className={labelCls}>
                 Service
               </label>
               <select
+                id={ids.service}
                 value={service.value}
                 onChange={(e) => switchService(e.target.value as ConnectorType)}
                 className={fieldCls}
@@ -687,7 +731,7 @@ function AddConnectorModal({
                     : {
                         background: "var(--accent-glow)",
                         color: "var(--accent-primary)",
-                        border: "1px solid rgba(34,211,238,0.35)",
+                        border: "1px solid var(--border-accent)",
                       }
                 }
               >
@@ -696,27 +740,31 @@ function AddConnectorModal({
             )}
 
             <div>
-              <label className={labelCls} style={{ color: "var(--text-secondary)" }}>
+              <label htmlFor={ids.displayName} className={labelCls}>
                 Display name
               </label>
               <input
+                id={ids.displayName}
                 type="text"
                 value={displayName}
                 onChange={(e) => setDisplayName(e.target.value)}
                 className={fieldCls}
                 style={inputStyle}
                 placeholder={`e.g. My ${service.label}`}
-                autoFocus
                 required
               />
             </div>
 
             {service.fields.map((field) => (
               <div key={field.key}>
-                <label className={labelCls} style={{ color: "var(--text-secondary)" }}>
+                <label htmlFor={`${ids.field}-${field.key}`} className={labelCls}>
                   {field.label}
                 </label>
                 <input
+                  id={`${ids.field}-${field.key}`}
+                  aria-describedby={
+                    field.hint ? `${ids.field}-${field.key}-hint` : undefined
+                  }
                   type={field.type}
                   value={fieldValues[field.key] ?? ""}
                   onChange={(e) =>
@@ -731,7 +779,11 @@ function AddConnectorModal({
                   autoComplete="off"
                 />
                 {field.hint && (
-                  <p className="text-xs mt-1.5" style={{ color: "var(--text-muted)" }}>
+                  <p
+                    id={`${ids.field}-${field.key}-hint`}
+                    className="text-xs mt-1.5"
+                    style={{ color: "var(--text-muted)" }}
+                  >
                     {field.hint}
                   </p>
                 )}
@@ -745,10 +797,14 @@ function AddConnectorModal({
 
             {hasScopes && (
               <div>
-                <label className={labelCls} style={{ color: "var(--text-secondary)" }}>
+                <span id={ids.scopes} className={labelCls}>
                   Permissions to grant
-                </label>
-                <div className="flex flex-wrap gap-2">
+                </span>
+                <div
+                  role="group"
+                  aria-labelledby={ids.scopes}
+                  className="flex flex-wrap gap-2"
+                >
                   {[...service.readScopes, ...service.writeScopes].map((scope) => (
                     <ScopeChip
                       key={scope}
@@ -772,12 +828,13 @@ function AddConnectorModal({
               </div>
             )}
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <label className={labelCls} style={{ color: "var(--text-secondary)" }}>
+                <label htmlFor={ids.tier} className={labelCls}>
                   Approval policy
                 </label>
                 <select
+                  id={ids.tier}
                   value={permissionTier}
                   onChange={(e) =>
                     setPermissionTier(e.target.value as PermissionTier)
@@ -793,10 +850,11 @@ function AddConnectorModal({
                 </select>
               </div>
               <div>
-                <label className={labelCls} style={{ color: "var(--text-secondary)" }}>
+                <label htmlFor={ids.rate} className={labelCls}>
                   Rate limit (/min)
                 </label>
                 <input
+                  id={ids.rate}
                   type="number"
                   min={1}
                   max={600}
@@ -819,7 +877,7 @@ function AddConnectorModal({
           </div>
 
           <div
-            className="flex items-center justify-end gap-2 px-6 py-4"
+            className="flex items-center justify-end gap-2 px-4 sm:px-6 py-4"
             style={{
               borderTop: "1px solid var(--border-subtle)",
               background: "var(--claw-surface)",
@@ -828,21 +886,25 @@ function AddConnectorModal({
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 rounded-[10px] text-sm font-medium transition-colors"
-              style={inputStyle}
+              className="px-4 rounded-[10px] text-sm font-medium transition-colors"
+              style={{ ...inputStyle, minHeight: 44 }}
             >
               Cancel
             </button>
             <button
               type="submit"
               disabled={!canSubmit}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-[10px] text-sm font-semibold transition-all disabled:opacity-50"
-              style={{ background: "var(--accent-primary)", color: "#0a0a0b" }}
+              className="inline-flex items-center gap-2 px-4 rounded-[10px] text-sm font-semibold transition-all disabled:opacity-50"
+              style={{
+                minHeight: 44,
+                background: "var(--accent-primary)",
+                color: "var(--text-on-accent)",
+              }}
             >
               {submitting ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
+                <Loader2 className="w-4 h-4 animate-spin" aria-hidden />
               ) : (
-                <Plus className="w-4 h-4" />
+                <Plus className="w-4 h-4" aria-hidden />
               )}
               {submitting ? "Creating..." : "Create connector"}
             </button>
@@ -897,14 +959,21 @@ function EditConnectorModal({
   const [fieldValues, setFieldValues] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const ids = {
+    title: useId(),
+    status: useId(),
+    displayName: useId(),
+    scopes: useId(),
+    scopesText: useId(),
+    tier: useId(),
+    rate: useId(),
+    field: useId(),
+  };
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  // Also supplies Escape, so the hand-rolled key listener this replaced is
+  // gone — the trap has to own both to keep them from disagreeing.
+  useFocusTrap(true, panelRef, onClose);
 
   // Chips show the service presets plus anything already granted (covers
   // scopes granted before a preset change).
@@ -999,24 +1068,29 @@ function EditConnectorModal({
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ background: "rgba(0,0,0,0.62)", backdropFilter: "blur(2px)" }}
+      style={{ background: "var(--scrim)", backdropFilter: "blur(2px)" }}
       onClick={onClose}
     >
       <div
-        className="w-full max-w-lg rounded-[16px] max-h-[90vh] overflow-y-auto"
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={ids.title}
+        className="w-full max-w-lg rounded-[16px] max-h-[90dvh] overflow-y-auto"
         style={{ ...panelStyle, boxShadow: "var(--shadow-modal)" }}
         onClick={(e) => e.stopPropagation()}
       >
         <div
-          className="flex items-center justify-between px-6 py-4"
+          className="flex items-center justify-between px-4 sm:px-6 py-4"
           style={{ borderBottom: "1px solid var(--border-subtle)" }}
         >
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 min-w-0">
             <div
-              className="w-9 h-9 rounded-[10px] flex items-center justify-center"
+              aria-hidden
+              className="w-9 h-9 rounded-[10px] flex items-center justify-center shrink-0"
               style={{
                 background: "var(--accent-glow)",
-                border: "1px solid rgba(34,211,238,0.35)",
+                border: "1px solid var(--border-accent)",
               }}
             >
               <TypeIcon
@@ -1024,26 +1098,29 @@ function EditConnectorModal({
                 style={{ color: "var(--accent-primary)" }}
               />
             </div>
-            <div>
+            <div className="min-w-0">
               <div className="eyebrow">{connector.connector_type}</div>
-              <h3 style={{ color: "var(--text-primary)" }}>Edit connector</h3>
+              <h2 id={ids.title} className="h3" style={{ color: "var(--text-primary)" }}>
+                Edit connector
+              </h2>
             </div>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="p-1 rounded-md transition-colors hover:opacity-80"
-            style={{ color: "var(--text-muted)" }}
+            className="inline-flex items-center justify-center rounded-md transition-colors shrink-0"
+            style={{ width: 44, height: 44, color: "var(--text-muted)" }}
             aria-label="Close"
           >
-            <X className="w-5 h-5" />
+            <X className="w-5 h-5" aria-hidden />
           </button>
         </div>
 
         <form onSubmit={handleSubmit}>
-          <div className="px-6 py-5 flex flex-col gap-4">
+          <div className="px-4 sm:px-6 py-5 flex flex-col gap-4">
             {error && (
               <div
+                role="alert"
                 className="px-3 py-2.5 rounded-[8px] text-sm"
                 style={{
                   background: "var(--fill-danger)",
@@ -1056,25 +1133,28 @@ function EditConnectorModal({
             )}
 
             <div>
-              <label className={labelCls} style={{ color: "var(--text-secondary)" }}>
+              <span id={ids.status} className={labelCls}>
                 Status
-              </label>
+              </span>
               <button
                 type="button"
                 onClick={() => setIsActive((v) => !v)}
-                aria-pressed={isActive}
-                className="inline-flex items-center gap-2 px-3.5 py-2 rounded-[10px] text-sm font-medium transition-colors"
+                role="switch"
+                aria-checked={isActive}
+                aria-labelledby={ids.status}
+                className="inline-flex items-center gap-2 px-3.5 rounded-[10px] text-sm font-medium transition-colors"
                 style={{
+                  minHeight: 44,
                   background: isActive
                     ? "var(--fill-success)"
-                    : "rgba(148,163,184,0.12)",
+                    : "var(--fill-neutral)",
                   border: isActive
                     ? "1px solid var(--border-success)"
                     : "1px solid var(--claw-border)",
                   color: isActive ? "var(--accent-success)" : "var(--text-muted)",
                 }}
               >
-                <Power className="w-4 h-4" />
+                <Power className="w-4 h-4" aria-hidden />
                 {isActive ? "Active" : "Inactive"}
               </button>
               <p className="text-xs mt-1.5" style={{ color: "var(--text-muted)" }}>
@@ -1084,10 +1164,11 @@ function EditConnectorModal({
             </div>
 
             <div>
-              <label className={labelCls} style={{ color: "var(--text-secondary)" }}>
+              <label htmlFor={ids.displayName} className={labelCls}>
                 Display name
               </label>
               <input
+                id={ids.displayName}
                 type="text"
                 value={displayName}
                 onChange={(e) => setDisplayName(e.target.value)}
@@ -1099,10 +1180,14 @@ function EditConnectorModal({
 
             {hasPresetScopes ? (
               <div>
-                <label className={labelCls} style={{ color: "var(--text-secondary)" }}>
+                <span id={ids.scopes} className={labelCls}>
                   Permissions to grant
-                </label>
-                <div className="flex flex-wrap gap-2">
+                </span>
+                <div
+                  role="group"
+                  aria-labelledby={ids.scopes}
+                  className="flex flex-wrap gap-2"
+                >
                   {scopeOptions.map((scope) => (
                     <ScopeChip
                       key={scope}
@@ -1125,11 +1210,12 @@ function EditConnectorModal({
               </div>
             ) : (
               <div>
-                <label className={labelCls} style={{ color: "var(--text-secondary)" }}>
+                <label htmlFor={ids.scopesText} className={labelCls}>
                   Granted scopes{" "}
                   <span style={{ color: "var(--text-muted)" }}>(comma-separated)</span>
                 </label>
                 <input
+                  id={ids.scopesText}
                   type="text"
                   value={scopesText}
                   onChange={(e) => setScopesText(e.target.value)}
@@ -1140,12 +1226,13 @@ function EditConnectorModal({
               </div>
             )}
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <label className={labelCls} style={{ color: "var(--text-secondary)" }}>
+                <label htmlFor={ids.tier} className={labelCls}>
                   Approval policy
                 </label>
                 <select
+                  id={ids.tier}
                   value={permissionTier}
                   onChange={(e) =>
                     setPermissionTier(e.target.value as PermissionTier)
@@ -1161,10 +1248,11 @@ function EditConnectorModal({
                 </select>
               </div>
               <div>
-                <label className={labelCls} style={{ color: "var(--text-secondary)" }}>
+                <label htmlFor={ids.rate} className={labelCls}>
                   Rate limit (/min)
                 </label>
                 <input
+                  id={ids.rate}
                   type="number"
                   min={1}
                   max={600}
@@ -1190,10 +1278,11 @@ function EditConnectorModal({
               <div className="flex flex-col gap-4">
                 {credentialFields.map((field) => (
                   <div key={field.key}>
-                    <label className={labelCls} style={{ color: "var(--text-secondary)" }}>
+                    <label htmlFor={`${ids.field}-${field.key}`} className={labelCls}>
                       {field.label}
                     </label>
                     <input
+                      id={`${ids.field}-${field.key}`}
                       type={field.type}
                       value={fieldValues[field.key] ?? ""}
                       onChange={(e) =>
@@ -1216,7 +1305,7 @@ function EditConnectorModal({
                 ))}
               </div>
               {anyCredentialEntered && !credentialsComplete && (
-                <p className="text-xs mt-2" style={{ color: "var(--accent-warning)" }}>
+                <p role="alert" className="text-xs mt-2" style={{ color: "var(--accent-warning)" }}>
                   Re-entering credentials replaces the stored set — fill in all
                   required fields.
                 </p>
@@ -1225,7 +1314,7 @@ function EditConnectorModal({
           </div>
 
           <div
-            className="flex items-center justify-end gap-2 px-6 py-4"
+            className="flex items-center justify-end gap-2 px-4 sm:px-6 py-4"
             style={{
               borderTop: "1px solid var(--border-subtle)",
               background: "var(--claw-surface)",
@@ -1234,21 +1323,25 @@ function EditConnectorModal({
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 rounded-[10px] text-sm font-medium transition-colors"
-              style={inputStyle}
+              className="px-4 rounded-[10px] text-sm font-medium transition-colors"
+              style={{ ...inputStyle, minHeight: 44 }}
             >
               Cancel
             </button>
             <button
               type="submit"
               disabled={!canSubmit}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-[10px] text-sm font-semibold transition-all disabled:opacity-50"
-              style={{ background: "var(--accent-primary)", color: "#0a0a0b" }}
+              className="inline-flex items-center gap-2 px-4 rounded-[10px] text-sm font-semibold transition-all disabled:opacity-50"
+              style={{
+                minHeight: 44,
+                background: "var(--accent-primary)",
+                color: "var(--text-on-accent)",
+              }}
             >
               {submitting ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
+                <Loader2 className="w-4 h-4 animate-spin" aria-hidden />
               ) : (
-                <Check className="w-4 h-4" />
+                <Check className="w-4 h-4" aria-hidden />
               )}
               {submitting ? "Saving..." : "Save changes"}
             </button>
@@ -1303,7 +1396,7 @@ export default function Connectors() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between gap-4">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <div className="eyebrow mb-2">Integrations</div>
           <h1 style={{ color: "var(--text-primary)" }}>Connectors</h1>
@@ -1327,31 +1420,36 @@ export default function Connectors() {
             type="button"
             onClick={() => setRefreshKey((k) => k + 1)}
             disabled={loading}
-            className="inline-flex items-center gap-2 px-3.5 py-2 rounded-[10px] text-sm font-medium disabled:opacity-50"
-            style={inputStyle}
+            className="inline-flex items-center justify-center gap-2 px-3.5 rounded-[10px] text-sm font-medium disabled:opacity-50"
+            style={{ ...inputStyle, minHeight: 44 }}
           >
-            <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
+            <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} aria-hidden />
             Refresh
           </button>
           <button
             type="button"
             onClick={() => setShowAdd(true)}
-            className="flex items-center gap-2 px-4 py-2 rounded-[10px] text-sm font-semibold transition-all"
-            style={{ background: "var(--accent-primary)", color: "#0a0a0b" }}
+            className="flex items-center justify-center gap-2 px-4 rounded-[10px] text-sm font-semibold transition-all"
+            style={{
+              minHeight: 44,
+              background: "var(--accent-primary)",
+              color: "var(--text-on-accent)",
+            }}
             onMouseOver={(e) => (e.currentTarget.style.filter = "brightness(1.1)")}
             onMouseOut={(e) => (e.currentTarget.style.filter = "none")}
           >
-            <Plus className="w-4 h-4" /> Add Connector
+            <Plus className="w-4 h-4" aria-hidden /> Add Connector
           </button>
         </div>
       </div>
 
       {loading && (
         <div
+          role="status"
           className="rounded-[14px] p-8 flex items-center justify-center gap-2"
           style={{ ...panelStyle, color: "var(--text-muted)" }}
         >
-          <Loader2 className="w-4 h-4 animate-spin" />
+          <Loader2 className="w-4 h-4 animate-spin" aria-hidden />
           <span className="text-sm">Loading connectors...</span>
         </div>
       )}
@@ -1361,16 +1459,16 @@ export default function Connectors() {
           className="rounded-[14px] p-6 flex flex-col items-center gap-3 text-center"
           style={{ ...panelStyle }}
         >
-          <p className="text-sm" style={{ color: "var(--accent-danger)" }}>
+          <p role="alert" className="text-sm" style={{ color: "var(--accent-danger)" }}>
             {error}
           </p>
           <button
             type="button"
             onClick={() => setRefreshKey((k) => k + 1)}
-            className="inline-flex items-center gap-2 px-3.5 py-2 rounded-[10px] text-sm font-medium"
-            style={inputStyle}
+            className="inline-flex items-center gap-2 px-3.5 rounded-[10px] text-sm font-medium"
+            style={{ ...inputStyle, minHeight: 44 }}
           >
-            <RefreshCw className="w-4 h-4" />
+            <RefreshCw className="w-4 h-4" aria-hidden />
             Try again
           </button>
         </div>
@@ -1384,7 +1482,7 @@ export default function Connectors() {
             color: "var(--text-muted)",
           }}
         >
-          <Plug className="w-10 h-10" />
+          <Plug className="w-10 h-10" aria-hidden />
           <p className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
             No connectors yet
           </p>
@@ -1396,12 +1494,16 @@ export default function Connectors() {
           <button
             type="button"
             onClick={() => setShowAdd(true)}
-            className="mt-2 inline-flex items-center gap-2 px-4 py-2 rounded-[10px] text-sm font-semibold transition-all"
-            style={{ background: "var(--accent-primary)", color: "#0a0a0b" }}
+            className="mt-2 inline-flex items-center gap-2 px-4 rounded-[10px] text-sm font-semibold transition-all"
+            style={{
+              minHeight: 44,
+              background: "var(--accent-primary)",
+              color: "var(--text-on-accent)",
+            }}
             onMouseOver={(e) => (e.currentTarget.style.filter = "brightness(1.1)")}
             onMouseOut={(e) => (e.currentTarget.style.filter = "none")}
           >
-            <Plus className="w-4 h-4" /> Add Connector
+            <Plus className="w-4 h-4" aria-hidden /> Add Connector
           </button>
         </div>
       )}

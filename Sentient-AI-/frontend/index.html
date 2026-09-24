@@ -2,14 +2,34 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
     <title>SentientAI - Secure Agentic AI Platform</title>
     <meta
       name="description"
       content="SentientAI — a secure agentic AI platform with human-in-the-loop approvals, connector management, and tamper-evident audit logging."
     />
     <meta name="theme-color" content="#0a0a0b" />
-    <link rel="icon" type="image/png" href="/brand/sentientai-emblem.png" />
+    <link rel="icon" type="image/png" href="/brand/sentientai-logo.png" />
+    <script>
+      // Applied before first paint. Without it the stylesheet resolves
+      // light-dark() from the OS preference and React then corrects it a
+      // frame later, which is a full-screen flash of the wrong theme for
+      // anyone whose saved choice disagrees with their system. Key must
+      // match THEME_STORAGE_KEY in src/theme.tsx.
+      (function () {
+        try {
+          var saved = localStorage.getItem("sentientai_theme");
+          if (saved === "light" || saved === "dark") {
+            document.documentElement.setAttribute("data-theme", saved);
+          }
+        } catch (err) {
+          /* private window with site data blocked — follow the OS */
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

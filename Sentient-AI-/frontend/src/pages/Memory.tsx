@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useId, useMemo, useState, type FormEvent } from "react";
 import {
   Brain,
   Plus,
@@ -75,6 +75,8 @@ function CategoryPill({ category }: { category: MemoryCategory }) {
 }
 
 export default function MemoryPage() {
+  const memoryToggleId = useId();
+  const newMemoryId = useId();
   const [me, setMe] = useState<User | null>(null);
   const [memories, setMemories] = useState<Memory[]>([]);
   const [loading, setLoading] = useState(true);
@@ -242,11 +244,18 @@ export default function MemoryPage() {
       </div>
 
       {/* Enable toggle */}
-      <section className="rounded-[14px] p-5 flex items-center justify-between" style={panelStyle}>
-        <div className="flex items-start gap-3">
-          <ShieldCheck className="w-5 h-5 mt-0.5" style={{ color: memoryEnabled ? "var(--accent-success)" : "var(--text-muted)" }} />
-          <div>
-            <div className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
+      <section
+        className="rounded-[14px] p-5 flex items-center justify-between gap-4 flex-wrap"
+        style={panelStyle}
+      >
+        <div className="flex items-start gap-3 min-w-0">
+          <ShieldCheck
+            className="w-5 h-5 mt-0.5 shrink-0"
+            aria-hidden
+            style={{ color: memoryEnabled ? "var(--accent-success)" : "var(--text-muted)" }}
+          />
+          <div className="min-w-0">
+            <div id={memoryToggleId} className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
               Use memory in conversations
             </div>
             <div className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>
@@ -260,14 +269,17 @@ export default function MemoryPage() {
           type="button"
           onClick={handleToggleMemory}
           disabled={togglingMemory || !me}
-          aria-pressed={memoryEnabled}
-          className="relative inline-flex h-6 w-11 items-center rounded-full transition-colors disabled:opacity-50"
+          role="switch"
+          aria-checked={memoryEnabled}
+          aria-labelledby={memoryToggleId}
+          className="tap-target relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50"
           style={{ background: memoryEnabled ? "var(--accent-primary)" : "var(--claw-border)" }}
         >
           <span
+            aria-hidden
             className="inline-block h-4 w-4 transform rounded-full transition-transform"
             style={{
-              background: "#0a0a0b",
+              background: "var(--text-on-accent)",
               transform: memoryEnabled ? "translateX(24px)" : "translateX(4px)",
             }}
           />
@@ -279,7 +291,11 @@ export default function MemoryPage() {
         <div className="eyebrow mb-1">Add</div>
         <h2 className="mb-4">New memory</h2>
         <form onSubmit={handleAdd} className="space-y-3">
+          <label htmlFor={newMemoryId} className="sr-only">
+            New memory
+          </label>
           <textarea
+            id={newMemoryId}
             value={newContent}
             onChange={(e) => setNewContent(e.target.value)}
             placeholder="e.g. I'm a computer science student at NYIT and prefer concise, technical answers."
@@ -302,7 +318,7 @@ export default function MemoryPage() {
                     style={{
                       background: active ? "var(--accent-glow)" : "var(--claw-surface)",
                       border: active
-                        ? "1px solid rgba(34,211,238,0.35)"
+                        ? "1px solid var(--border-accent)"
                         : "1px solid var(--claw-border)",
                       color: active ? "var(--accent-primary)" : "var(--text-secondary)",
                     }}
@@ -315,8 +331,12 @@ export default function MemoryPage() {
             <button
               type="submit"
               disabled={!newContent.trim() || adding}
-              className="ml-auto flex items-center gap-2 px-4 py-2 rounded-[10px] text-sm font-semibold disabled:opacity-50"
-              style={{ background: "var(--accent-primary)", color: "#0a0a0b" }}
+              className="ml-auto flex items-center gap-2 px-4 rounded-[10px] text-sm font-semibold disabled:opacity-50"
+              style={{
+                minHeight: 44,
+                background: "var(--accent-primary)",
+                color: "var(--text-on-accent)",
+              }}
             >
               {adding ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
               Save Memory
@@ -327,7 +347,7 @@ export default function MemoryPage() {
               {newContent.length}/500
             </span>
             {addError && (
-              <span className="text-xs" style={{ color: "var(--accent-danger)" }}>
+              <span role="alert" className="text-xs" style={{ color: "var(--accent-danger)" }}>
                 {addError}
               </span>
             )}
@@ -377,7 +397,7 @@ export default function MemoryPage() {
                   type="button"
                   aria-label="Clear search"
                   onClick={() => setSearch("")}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 rounded-[6px]"
+                  className="tap-target absolute right-2.5 top-1/2 -translate-y-1/2 p-1 rounded-[6px]"
                   style={{ color: "var(--text-muted)" }}
                 >
                   <X className="w-3.5 h-3.5" />
@@ -399,7 +419,7 @@ export default function MemoryPage() {
                     style={{
                       background: active ? "var(--accent-glow)" : "var(--claw-surface)",
                       border: active
-                        ? "1px solid rgba(34,211,238,0.35)"
+                        ? "1px solid var(--border-accent)"
                         : "1px solid var(--claw-border)",
                       color: active ? "var(--accent-primary)" : "var(--text-secondary)",
                     }}
@@ -413,15 +433,20 @@ export default function MemoryPage() {
         </div>
 
         {loading && (
-          <div className="flex items-center gap-2 py-8 justify-center" style={{ color: "var(--text-muted)" }}>
-            <Loader2 className="w-4 h-4 animate-spin" />
+          <div
+            role="status"
+            className="flex items-center gap-2 py-8 justify-center"
+            style={{ color: "var(--text-muted)" }}
+          >
+            <Loader2 className="w-4 h-4 animate-spin" aria-hidden />
             <span className="text-sm">Loading memories...</span>
           </div>
         )}
 
         {!loading && loadError && (
           <div
-            className="rounded-[10px] p-4 flex items-center justify-between"
+            role="alert"
+            className="rounded-[10px] p-4 flex items-center justify-between gap-3 flex-wrap"
             style={{ background: "var(--fill-danger)", border: "1px solid var(--border-danger)" }}
           >
             <span className="text-sm" style={{ color: "var(--accent-danger)" }}>
@@ -487,7 +512,7 @@ export default function MemoryPage() {
                         style={{ ...inputStyle, border: "1px solid var(--accent-primary)" }}
                       />
                       {editError && (
-                        <p className="text-xs" style={{ color: "var(--accent-danger)" }}>
+                        <p role="alert" className="text-xs" style={{ color: "var(--accent-danger)" }}>
                           {editError}
                         </p>
                       )}
@@ -496,7 +521,11 @@ export default function MemoryPage() {
                           type="button"
                           onClick={() => commitEdit(m.id)}
                           className="inline-flex items-center gap-1 px-2.5 py-1 rounded-[6px] text-xs font-semibold"
-                          style={{ background: "var(--accent-success)", color: "#0a0a0b" }}
+                          style={{
+                            minHeight: 32,
+                            background: "var(--accent-success)",
+                            color: "var(--text-on-accent)",
+                          }}
                         >
                           <Check className="w-3 h-3" /> Save
                         </button>
@@ -525,21 +554,21 @@ export default function MemoryPage() {
                           )}
                         </div>
                       </div>
-                      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+                      <div className="row-actions flex items-center gap-1 shrink-0">
                         <button
                           type="button"
-                          aria-label="Edit memory"
+                          aria-label={`Edit memory: ${m.content.slice(0, 40)}`}
                           onClick={() => startEdit(m)}
-                          className="p-1.5 rounded-[6px]"
+                          className="tap-target p-1.5 rounded-[6px]"
                           style={{ color: "var(--text-muted)" }}
                         >
                           <Pencil className="w-3.5 h-3.5" />
                         </button>
                         <button
                           type="button"
-                          aria-label="Delete memory"
+                          aria-label={`Delete memory: ${m.content.slice(0, 40)}`}
                           onClick={() => setDeleteTarget(m)}
-                          className="p-1.5 rounded-[6px]"
+                          className="tap-target p-1.5 rounded-[6px]"
                           style={{ color: "var(--accent-danger)" }}
                         >
                           <Trash2 className="w-3.5 h-3.5" />

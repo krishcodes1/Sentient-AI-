@@ -142,6 +142,11 @@ async def init_db(retries: int = 10, delay: float = 2.0) -> None:
     # stays here rather than becoming a migration: the target values come
     # from runtime settings, so it cannot be expressed as static DDL. Values
     # come from admin config; validate anyway since they are inlined in SQL.
+    #
+    # "Never chose it" is expressed as updated_at = created_at: any account
+    # that touched Settings since registration has a newer updated_at.
+    # Without that predicate this rewrite ran on EVERY boot and silently
+    # reverted users who deliberately picked this provider/model combination.
     data_fixes: list[str] = []
     if (settings.LLM_PROVIDER, settings.LLM_MODEL) != (
         "anthropic",
@@ -155,7 +160,8 @@ async def init_db(retries: int = 10, delay: float = 2.0) -> None:
             f"llm_provider = '{settings.LLM_PROVIDER}', "
             f"llm_model = '{settings.LLM_MODEL}' "
             "WHERE llm_provider = 'anthropic' "
-            "AND llm_model = 'claude-sonnet-4-20250514'"
+            "AND llm_model = 'claude-sonnet-4-20250514' "
+            "AND updated_at = created_at"
         )
 
     last_exc: Exception | None = None

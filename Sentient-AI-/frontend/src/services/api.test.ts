@@ -221,6 +221,40 @@ describe("streamMessage SSE parsing", () => {
     expect(JSON.parse(String(init?.body))).toEqual({ content: "hello there" });
   });
 
+  it("sends attachments as an images array beside the content", async () => {
+    const fetchMock = mockFetch(() => sseResponse([DONE_FRAME]));
+    const png = "data:image/png;base64,iVBORw0KGgo=";
+
+    await streamMessage("c1", "what is this", recordHandlers(), undefined, [png]);
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+      content: "what is this",
+      images: [png],
+    });
+  });
+
+  it("omits `images` entirely when nothing is attached", async () => {
+    const fetchMock = mockFetch(() => sseResponse([DONE_FRAME]));
+
+    // A server without image support must see byte-for-byte the request it
+    // always saw, so only a turn that really carries an image can be
+    // rejected by one.
+    await streamMessage("c1", "plain text", recordHandlers(), undefined, []);
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
+    expect(body).toEqual({ content: "plain text" });
+    expect("images" in body).toBe(false);
+  });
+
+  it("passes an abort signal through so Stop can cancel the turn", async () => {
+    const fetchMock = mockFetch(() => sseResponse([DONE_FRAME]));
+    const controller = new AbortController();
+
+    await streamMessage("c1", "hi", recordHandlers(), controller.signal);
+
+    expect(fetchMock.mock.calls[0][1]?.signal).toBe(controller.signal);
+  });
+
   it("clears the token and redirects to /login on a 401", async () => {
     const { replace } = stubLocation("/chat");
     localStorage.setItem("auth_token", "expired");

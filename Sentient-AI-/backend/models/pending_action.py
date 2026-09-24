@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Dict, Optional
 
-from sqlalchemy import JSON, DateTime, Enum, ForeignKey, String, Text, Uuid
+from sqlalchemy import JSON, DateTime, Enum, ForeignKey, Index, String, Text, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.database import Base
@@ -28,6 +28,9 @@ class PendingAction(Base):
     """
 
     __tablename__ = "pending_actions"
+    __table_args__ = (
+        Index("ix_pending_actions_user_id_status", "user_id", "status"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         Uuid(),

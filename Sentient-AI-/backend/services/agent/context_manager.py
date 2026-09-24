@@ -5,19 +5,29 @@ Solves the OpenClaw token explosion problem by implementing:
 1. Sliding window — keep only the last N messages in full
 2. Conversation summarization — compress older messages into summaries
 3. Tool result compression — truncate large tool outputs
-4. Dynamic tool loading — only send relevant tool schemas
+4. Bounded, STABLE tool loading — a fixed tool array per tool set
 5. Token counting — accurate estimation to prevent silent overflow
 
 This prevents the 100k+ token problem where the full conversation
 history + all tool schemas + all tool results are sent on every request.
+
+A second, equally expensive problem is churn. Every provider bills a
+cached prompt prefix at roughly a tenth of a fresh one, and the prefix is
+matched byte for byte from position zero: system prompt, then tools, then
+history. Anything that reshuffles an earlier element invalidates the cache
+for everything after it, so the pieces of the request that do not change
+between turns are kept byte-identical here on purpose.
 """
 
 from __future__ import annotations
 
 import json
 import hashlib
+import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
+
+from services.agent.providers import IMAGE_BLOCK, content_text
 
 
 # ---------------------------------------------------------------------------
@@ -37,6 +47,15 @@ def estimate_tokens(text: str) -> int:
     return max(1, int(len(text) / _CHARS_PER_TOKEN))
 
 
+# What one image costs the model. Every vendor prices images by pixel
+# area, which this layer never sees — it holds base64 whose LENGTH says
+# nothing about token cost. A flat figure in the range a phone photo
+# actually bills is far closer than measuring the encoded string, which
+# would read a 3 MB JPEG as ~850k tokens and trip the emergency trim on
+# every image message.
+_IMAGE_TOKENS = 1_200
+
+
 def estimate_message_tokens(message: dict[str, Any]) -> int:
     """Estimate tokens for a single message including role overhead."""
     # ~4 tokens overhead per message (role, delimiters)
@@ -47,7 +66,9 @@ def estimate_message_tokens(message: dict[str, Any]) -> int:
     if isinstance(content, list):
         total = overhead
         for part in content:
-            if isinstance(part, dict):
+            if isinstance(part, dict) and part.get("type") == IMAGE_BLOCK:
+                total += _IMAGE_TOKENS
+            elif isinstance(part, dict):
                 total += estimate_tokens(json.dumps(part))
             else:
                 total += estimate_tokens(str(part))
@@ -67,7 +88,9 @@ def estimate_tool_schema_tokens(tools: list[dict[str, Any]]) -> int:
 # Context budget
 # ---------------------------------------------------------------------------
 
-# Model context window sizes (input tokens)
+# Model context window sizes (input tokens). Exact ids only; anything
+# newer is resolved by family below, because this table goes stale the
+# moment a vendor ships a model and nobody here notices.
 MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     # Anthropic
     "claude-opus-4-20250514": 200_000,
@@ -101,13 +124,60 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "mixtral": 32_000,
 }
 
+# Per-family floor for a model id the table has never heard of. Matched on
+# the longest prefix, so "claude-sonnet-4-6" resolves through "claude-"
+# instead of falling all the way through. These are the smallest window
+# the family has shipped, so a newer member is under-estimated rather than
+# over-estimated — the failure mode is trimming a little early, not an
+# oversized request the provider rejects.
+_MODEL_FAMILY_WINDOWS: tuple[tuple[str, int], ...] = (
+    ("claude-", 200_000),
+    ("gpt-4o", 128_000),
+    ("gpt-", 128_000),
+    ("o1", 128_000),
+    ("o3", 200_000),
+    ("o4", 200_000),
+    ("gemini-", 1_000_000),
+    ("grok-", 131_072),
+    ("deepseek-", 64_000),
+    ("mistral-", 128_000),
+    ("magistral-", 128_000),
+    ("llama-3", 128_000),
+    ("llama3", 128_000),
+    ("qwen", 32_768),
+    ("mixtral", 32_768),
+)
+
+# Where an unrecognised model lands. The old 32k default was punitive:
+# every model released after this table was written got budgeted at a
+# sixth of its real window, which triggered summarization and emergency
+# trims on conversations the model could have held in full. 128k is the
+# floor across every hosted family the platform supports, and the budget
+# is an estimate feeding a trim heuristic — not a hard API limit — so a
+# slightly generous guess costs one provider-side error at worst, while a
+# stingy one silently degrades every long conversation.
+_DEFAULT_CONTEXT_WINDOW = 128_000
+
 # Reserve tokens for the model's response
 _RESPONSE_RESERVE = 4096
 
 
 def get_context_window(model: str) -> int:
-    """Get the context window size for a model, with a safe default."""
-    return MODEL_CONTEXT_WINDOWS.get(model, 32_000)
+    """Get the context window size for a model.
+
+    Falls back to the model's family (longest matching prefix) and then to
+    a sensible platform default, so an unrecognised id is not punished
+    with a window six times smaller than it actually has.
+    """
+    name = (model or "").strip().lower()
+    if name in MODEL_CONTEXT_WINDOWS:
+        return MODEL_CONTEXT_WINDOWS[name]
+    best = ""
+    window = _DEFAULT_CONTEXT_WINDOW
+    for prefix, size in _MODEL_FAMILY_WINDOWS:
+        if name.startswith(prefix) and len(prefix) > len(best):
+            best, window = prefix, size
+    return window
 
 
 # ---------------------------------------------------------------------------
@@ -128,14 +198,19 @@ def summarize_messages(messages: list[dict[str, Any]]) -> dict[str, Any]:
     for msg in messages:
         role = msg.get("role", "")
         content = msg.get("content", "")
+        # Multimodal turns summarize by their text alone: the base64 of an
+        # attachment says nothing a summary can use, and folding it in
+        # would put megabytes of it back into the very context this is
+        # compressing.
+        text = content_text(content)
 
-        if role == "user" and isinstance(content, str):
+        if role == "user":
             # Keep first 200 chars of each user message
-            user_points.append(content[:200].strip())
+            user_points.append(text[:200].strip())
 
-        elif role == "assistant" and isinstance(content, str):
+        elif role == "assistant":
             # Keep first 300 chars of each assistant response
-            assistant_points.append(content[:300].strip())
+            assistant_points.append(text[:300].strip())
 
         elif role == "tool":
             name = msg.get("name", "unknown")
@@ -186,72 +261,54 @@ def compress_tool_result(result: str, max_chars: int = 2000) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Dynamic tool selection
+# Tool selection
 # ---------------------------------------------------------------------------
 
 
-def select_relevant_tools(
+def select_offered_tools(
     tools: list[dict[str, Any]],
-    user_message: str,
     active_connectors: list[str],
     max_tools: int = 15,
 ) -> list[dict[str, Any]]:
-    """Select only the tools relevant to the current query.
+    """Choose the bounded tool array to offer, deterministically.
 
-    Instead of sending all 50+ tool schemas on every request (which
-    wastes thousands of tokens and degrades model accuracy), we filter
-    to the tools most likely to be needed.
+    This used to re-score every tool against the latest user message, so
+    the same conversation offered a different set — in a different order —
+    on every turn. Two costs came out of that:
+
+    - The tool array is part of the cached request prefix. Reordering it
+      invalidates the cache for the system prompt and the tools on every
+      single turn, which is most of what a turn is billed for.
+    - A tool the model used two messages ago could vanish because the
+      newest message happened not to mention it, which reads to the model
+      as a capability that comes and goes.
+
+    Selection now depends only on the tool set and the user's active
+    connectors, both of which change when the user changes a connector and
+    not otherwise. That makes the array byte-identical turn to turn, and
+    makes which tools got dropped reproducible instead of a function of
+    phrasing.
+
+    Ordering within a tier is by name so that two calls with the same
+    inputs produce the same array regardless of how the tool list was
+    assembled.
     """
     if len(tools) <= max_tools:
         return tools
 
-    msg_lower = user_message.lower()
+    active = {c.lower() for c in active_connectors}
 
-    scored: list[tuple[float, dict[str, Any]]] = []
-    for tool in tools:
-        score = 0.0
-        name = tool.get("name", "").lower()
-        desc = tool.get("description", "").lower()
-        connector = tool.get("connector_type", "").lower()
+    def rank(tool: dict[str, Any]) -> tuple[int, str]:
+        # Tools from a connector the user has actually enabled come first;
+        # everything else keeps a stable alphabetical order behind them.
+        connector = (tool.get("connector_type") or "").lower()
+        return (0 if connector in active else 1, tool.get("name", ""))
 
-        # Boost tools from active connectors
-        if connector in [c.lower() for c in active_connectors]:
-            score += 2.0
-
-        # Keyword matching against user message
-        name_words = name.replace("_", " ").split()
-        for word in name_words:
-            if word in msg_lower:
-                score += 3.0
-
-        desc_words = set(desc.split())
-        msg_words = set(msg_lower.split())
-        overlap = len(desc_words & msg_words)
-        score += overlap * 0.5
-
-        # Common action keywords
-        action_keywords = {
-            "email": ["email", "mail", "send", "inbox", "message"],
-            "calendar": ["calendar", "event", "schedule", "meeting", "appointment"],
-            "assignment": ["assignment", "homework", "due", "submit", "grade"],
-            "course": ["course", "class", "enrolled", "professor"],
-            "crypto": ["crypto", "bitcoin", "portfolio", "coin", "price"],
-            "file": ["file", "document", "read", "write", "upload"],
-        }
-        for category, keywords in action_keywords.items():
-            if any(kw in msg_lower for kw in keywords):
-                if any(kw in name or kw in desc for kw in keywords):
-                    score += 5.0
-
-        scored.append((score, tool))
-
-    # Sort by score descending and take top N
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [tool for _, tool in scored[:max_tools]]
+    return sorted(tools, key=rank)[:max_tools]
 
 
 # ---------------------------------------------------------------------------
-# Semantic cache
+# Turn replay cache
 # ---------------------------------------------------------------------------
 
 
@@ -260,28 +317,55 @@ class CacheEntry:
     query_hash: str
     response: str
     usage: dict[str, int]
+    created_at: float = field(default_factory=time.monotonic)
     hits: int = 0
 
 
-class SemanticCache:
-    """Simple hash-based semantic cache for repeated queries.
+class TurnReplayCache:
+    """Short-lived de-duplication for a turn that is submitted twice.
 
-    Caches exact query matches to avoid re-sending identical requests.
-    ``scope`` (e.g. ``"<user_id>:<conversation_id>"``) partitions the
-    cache so an entry can never be replayed across users or
-    conversations. For production, use embedding-based similarity with
-    Redis.
+    This was written as a "semantic cache", and it was never one: it keys
+    on an exact hash, so nothing but a byte-identical request can hit it.
+    It is kept, deliberately narrowed, as what it actually does — absorbing
+    a double-submit or a client retry of the SAME turn — because that is a
+    real event (the chat UI retries a dropped SSE stream) and a second
+    provider round-trip for it is pure waste.
+
+    What it is NOT is a cost lever. The saving that matters comes from
+    provider prompt caching, which bills a repeated prefix at ~10% and hits
+    on every turn of every conversation rather than on an exact repeat.
+    Widening this one to "similar" questions was considered and rejected:
+    an answer is only correct for the conversation that produced it, and
+    similarity matching across users is a cross-tenant leak waiting for a
+    bad embedding.
+
+    Two guards keep it honest:
+
+    - ``scope`` (``"<user_id>:<conversation_id>"``) is hashed into the key,
+      so an entry can never be served to another user or another thread.
+    - Entries expire after ``ttl_seconds``. A retry arrives in seconds; an
+      identical request half an hour later is a new question about a world
+      that may have moved on, and should reach the model.
+
+    The whole prepared message list is hashed, not just its tail. The old
+    last-three-messages key meant two different conversations that happened
+    to end the same way collided — held apart only by ``scope``, with the
+    consequence of getting that wrong being one user's answer shown to
+    another.
     """
 
-    def __init__(self, max_entries: int = 500):
+    _DEFAULT_TTL_SECONDS = 120.0
+
+    def __init__(self, max_entries: int = 500, ttl_seconds: float | None = None):
         self._cache: dict[str, CacheEntry] = {}
         self._max_entries = max_entries
+        self._ttl_seconds = (
+            self._DEFAULT_TTL_SECONDS if ttl_seconds is None else ttl_seconds
+        )
 
     @staticmethod
     def _hash_query(messages: list[dict[str, Any]], scope: str = "") -> str:
-        # Hash the scope + last user message + recent context
-        relevant = messages[-3:] if len(messages) >= 3 else messages
-        payload = scope + "\n" + json.dumps(relevant, sort_keys=True, default=str)
+        payload = scope + "\n" + json.dumps(messages, sort_keys=True, default=str)
         return hashlib.sha256(payload.encode()).hexdigest()
 
     def get(
@@ -289,10 +373,13 @@ class SemanticCache:
     ) -> Optional[CacheEntry]:
         key = self._hash_query(messages, scope)
         entry = self._cache.get(key)
-        if entry:
-            entry.hits += 1
-            return entry
-        return None
+        if entry is None:
+            return None
+        if time.monotonic() - entry.created_at > self._ttl_seconds:
+            del self._cache[key]
+            return None
+        entry.hits += 1
+        return entry
 
     def put(
         self,
@@ -302,9 +389,11 @@ class SemanticCache:
         scope: str = "",
     ) -> None:
         if len(self._cache) >= self._max_entries:
-            # Evict least-hit entry
-            min_key = min(self._cache, key=lambda k: self._cache[k].hits)
-            del self._cache[min_key]
+            # Evict the oldest entry. Evicting the least-HIT one kept
+            # whatever had been replayed most, which in a TTL'd retry cache
+            # is exactly the entry closest to expiring anyway.
+            oldest = min(self._cache, key=lambda k: self._cache[k].created_at)
+            del self._cache[oldest]
 
         key = self._hash_query(messages, scope)
         self._cache[key] = CacheEntry(query_hash=key, response=response, usage=usage)
@@ -333,7 +422,7 @@ class ContextManager:
     1. Sliding window: keep last `window_size` messages in full
     2. Summarization: compress older messages into a summary
     3. Tool result compression: truncate large outputs
-    4. Dynamic tool selection: only send relevant tool schemas
+    4. Stable tool selection: a bounded, deterministic tool array
     5. Token budgeting: track and enforce limits
     """
 
@@ -348,7 +437,7 @@ class ContextManager:
         self.window_size = window_size
         self.summary_trigger = summary_trigger
         self.max_tool_result_chars = max_tool_result_chars
-        self._cache = SemanticCache()
+        self._cache = TurnReplayCache()
 
     def get_budget(
         self,
@@ -393,31 +482,31 @@ class ContextManager:
             optimized_messages, conversation_id
         )
 
-        # Step 3: Select relevant tools
-        last_user_msg = ""
-        for m in reversed(optimized_messages):
-            if m.get("role") == "user":
-                last_user_msg = m.get("content", "")
-                break
-
-        optimized_tools = select_relevant_tools(
-            tools,
-            last_user_msg,
-            active_connectors or [],
-        )
+        # Step 3: Pick the tool array. Deliberately independent of the
+        # messages above — see select_offered_tools.
+        optimized_tools = select_offered_tools(tools, active_connectors or [])
 
         # Step 4: Check budget and trim if needed
         budget = self.get_budget(system_prompt, optimized_messages, optimized_tools)
         if budget.available < 500:
-            # Emergency trim: keep only last 6 messages
-            optimized_messages = optimized_messages[-6:]
+            # Emergency trim: keep the last 6 non-system messages, but NEVER
+            # drop system messages — index 0 carries the security system
+            # prompt and the user's memory block, and the provider layer
+            # builds its system prompt only from system-role messages. The
+            # sliding-window step already preserves them; this trim must too.
+            system_messages = [
+                m for m in optimized_messages if m.get("role") == "system"
+            ]
+            rest = [m for m in optimized_messages if m.get("role") != "system"]
+            optimized_messages = system_messages + rest[-6:]
 
         return optimized_messages, optimized_tools
 
     def check_cache(
         self, messages: list[dict[str, Any]], scope: str = ""
     ) -> Optional[CacheEntry]:
-        """Check if we have a cached response for this query (within scope)."""
+        """Return a just-produced answer for a byte-identical repeat of this
+        turn within ``scope`` (see :class:`TurnReplayCache`)."""
         return self._cache.get(messages, scope=scope)
 
     def cache_response(
@@ -427,7 +516,8 @@ class ContextManager:
         usage: dict[str, int],
         scope: str = "",
     ) -> None:
-        """Cache a response for future reuse (within scope)."""
+        """Record this turn's answer so an immediate retry can skip the
+        provider round-trip (within ``scope``)."""
         self._cache.put(messages, response, usage, scope=scope)
 
     def _compress_tool_results(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

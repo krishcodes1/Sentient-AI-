@@ -92,6 +92,7 @@ def test_production_warns_on_risky_defaults():
     assert "AUDIT_HMAC_KEY" in text
     assert "ALLOW_REGISTRATION" in text
     assert "ALLOWED_HOSTS" in text
+    assert "TRUSTED_PROXIES" in text  # default trusts every private range
 
 
 def test_production_clean_config_has_no_warnings():
@@ -101,8 +102,28 @@ def test_production_clean_config_has_no_warnings():
         AUDIT_HMAC_KEY=secrets.token_urlsafe(48),
         ALLOW_REGISTRATION=False,
         ALLOWED_HOSTS=["assistant.example.com"],
+        TRUSTED_PROXIES=["127.0.0.1/32"],
     )
     assert cfg.production_warnings() == []
+
+
+def test_trusted_proxy_warning_names_the_ranges_it_objects_to():
+    """The shipped default trusts every RFC1918 range, which any host on
+    the same network can exploit to spoof its client IP. Keeping the
+    default (the compose topology needs it) is only acceptable if the
+    deployment is told, by range, what it is trusting."""
+    cfg = _settings(ENVIRONMENT="production", TRUSTED_PROXIES=["10.0.0.0/8", "::1/128"])
+    warning = next(w for w in cfg.production_warnings() if "TRUSTED_PROXIES" in w)
+    assert "10.0.0.0/8" in warning
+    # Loopback is where a co-located proxy legitimately lives — not a risk.
+    assert "::1/128" not in warning
+
+
+def test_loopback_only_trusted_proxies_is_not_flagged():
+    cfg = _settings(
+        ENVIRONMENT="production", TRUSTED_PROXIES=["127.0.0.0/8", "::1/128"]
+    )
+    assert not any("TRUSTED_PROXIES" in w for w in cfg.production_warnings())
 
 
 # ---------------------------------------------------------------------------

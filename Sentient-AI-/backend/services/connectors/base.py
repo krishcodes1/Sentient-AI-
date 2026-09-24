@@ -13,11 +13,26 @@ from abc import ABC, abstractmethod
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Optional
+from urllib.parse import quote
 
 import httpx
 import structlog
 
 logger = structlog.get_logger(__name__)
+
+
+def path_segment(value: Any) -> str:
+    """Percent-encode *value* for use as a single URL path segment.
+
+    Identifiers reaching a connector come from tool arguments the model
+    chose, which in turn can be shaped by untrusted content the model
+    read. Interpolating one raw lets ``../`` or a bare ``/`` inside it
+    add path segments, so ``/courses/{id}/assignments`` reaches any
+    sibling endpoint on the allowlisted host — outside whatever scopes
+    the user granted. ``safe=""`` keeps the separator itself encoded, so
+    the value can only ever be one segment.
+    """
+    return quote(str(value), safe="")
 
 # ---------------------------------------------------------------------------
 # Prompt injection / content sanitization
@@ -176,11 +191,14 @@ class BaseConnector(ABC):
         self._authenticated = False
         self._http_client: httpx.AsyncClient | None = None
         self._network_policy_key: Optional[str] = None
+        self._policy_extra_hosts: tuple[str, ...] = ()
         self._log = logger.bind(connector=self.name)
 
     # -- Network policy --------------------------------------------------------
 
-    def set_network_policy(self, policy_key: str) -> None:
+    def set_network_policy(
+        self, policy_key: str, *, extra_hosts: tuple[str, ...] = ()
+    ) -> None:
         """Enable deny-by-default outbound filtering for this connector.
 
         Every HTTP request issued through ``_get_client()`` (including
@@ -188,15 +206,25 @@ class BaseConnector(ABC):
         ``core.network_security.DEFAULT_POLICIES[policy_key]`` plus the SSRF
         ranges. Must be called before the first request; the executor does
         this for every connector it instantiates.
+
+        ``extra_hosts`` are the hosts the user configured for this specific
+        connector (a self-hosted Canvas domain, say). They widen the host
+        allowlist by exactly those names and nothing else, and remain
+        subject to the SSRF address policy.
         """
         self._network_policy_key = policy_key
+        self._policy_extra_hosts = tuple(extra_hosts)
 
     async def _enforce_network_policy(self, request: httpx.Request) -> None:
         if not self._network_policy_key:
             return
         from core.network_security import check_network_policy
 
-        result = check_network_policy(str(request.url), self._network_policy_key)
+        result = check_network_policy(
+            str(request.url),
+            self._network_policy_key,
+            extra_hosts=self._policy_extra_hosts,
+        )
         if not result.safe:
             self._log.warning(
                 "network_policy_blocked",

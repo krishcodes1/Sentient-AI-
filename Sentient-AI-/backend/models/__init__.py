@@ -8,6 +8,7 @@ from models.connector import (
 from models.conversation import Conversation, Message, MessageRole
 from models.memory import Memory, MemoryCategory, MemorySource
 from models.pending_action import PendingAction, PendingActionStatus
+from models.reminder import Reminder, ReminderSource, ReminderStatus
 from models.user import User
 
 __all__ = [
@@ -25,5 +26,8 @@ __all__ = [
     "PendingAction",
     "PendingActionStatus",
     "PermissionTier",
+    "Reminder",
+    "ReminderSource",
+    "ReminderStatus",
     "User",
 ]

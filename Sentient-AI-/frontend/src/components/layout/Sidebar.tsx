@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { NavLink } from "react-router-dom";
 import {
   LayoutDashboard,
@@ -8,11 +8,14 @@ import {
   Shield,
   Settings as SettingsIcon,
   LogOut,
+  X,
 } from "lucide-react";
 import clsx from "clsx";
 import type { User } from "@/types";
 import { getMe, logout } from "@/services/api";
 import Brand, { Wordmark } from "@/components/Brand";
+import ThemeToggle from "@/components/ThemeToggle";
+import { useFocusTrap } from "@/hooks/useFocusTrap";
 
 const navItems = [
   { to: "/", icon: LayoutDashboard, label: "Gateway", end: true },
@@ -23,8 +26,21 @@ const navItems = [
   { to: "/settings", icon: SettingsIcon, label: "Settings" },
 ];
 
-export default function Sidebar() {
+export default function Sidebar({
+  open = false,
+  onClose,
+  isDrawer = false,
+}: {
+  open?: boolean;
+  onClose?: () => void;
+  /** True below the desktop breakpoint, where this is an overlay. */
+  isDrawer?: boolean;
+}) {
   const [me, setMe] = useState<User | null>(null);
+  const asideRef = useRef<HTMLElement>(null);
+  const trapped = isDrawer && open;
+
+  useFocusTrap(trapped, asideRef, onClose);
 
   useEffect(() => {
     let cancelled = false;
@@ -32,8 +48,13 @@ export default function Sidebar() {
       .then((u) => {
         if (!cancelled) setMe(u);
       })
-      .catch(() => {
-        logout();
+      .catch((err: Error & { status?: number }) => {
+        // Only an actual auth rejection means the session is dead. A
+        // transient network error or a 5xx must not hard-log the user out
+        // of an otherwise working session.
+        if (err?.status === 401 || err?.status === 403) {
+          logout();
+        }
       });
     return () => {
       cancelled = true;
@@ -50,9 +71,16 @@ export default function Sidebar() {
 
   return (
     <aside
-      className="fixed left-0 top-0 h-screen flex flex-col flex-shrink-0"
+      ref={asideRef}
+      id="app-navigation"
+      data-open={open ? "true" : "false"}
+      // Only a dialog while it overlays the page; above 1024px it is an
+      // ordinary landmark and announcing it as modal would be a lie.
+      role={trapped ? "dialog" : undefined}
+      aria-modal={trapped ? true : undefined}
+      aria-label="Sidebar"
+      className="app-sidebar flex flex-col flex-shrink-0 overflow-y-auto"
       style={{
-        width: 248,
         background: "var(--claw-sidebar)",
         borderRight: "1px solid var(--claw-border)",
         padding: "20px 14px",
@@ -66,20 +94,26 @@ export default function Sidebar() {
           borderBottom: "1px solid var(--border-subtle)",
         }}
       >
-        <Brand size={44} variant="emblem" rounded={0} />
+        <Brand size={44} variant="emblem" rounded={0} alt="" />
         <div className="flex flex-col leading-none min-w-0">
           <Wordmark height={18} />
-          <span
-            className="eyebrow mt-2"
-            style={{ letterSpacing: "0.14em" }}
-          >
+          <span className="eyebrow mt-2" style={{ letterSpacing: "0.14em" }}>
             Control UI
           </span>
         </div>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close navigation"
+          className="lg:hidden ml-auto inline-flex items-center justify-center rounded-[10px] shrink-0"
+          style={{ width: 44, height: 44, color: "var(--text-muted)" }}
+        >
+          <X size={18} strokeWidth={1.75} aria-hidden />
+        </button>
       </div>
 
       {/* Nav */}
-      <nav className="mt-5 flex flex-col gap-1">
+      <nav aria-label="Main navigation" className="mt-5 flex flex-col gap-1">
         <div className="eyebrow px-2.5 pb-2">Workspace</div>
         {navItems.map((item) => (
           <NavLink
@@ -88,12 +122,19 @@ export default function Sidebar() {
             end={item.end}
             className={({ isActive }) =>
               clsx(
-                "group relative flex items-center gap-3 px-3 py-2 rounded-[10px] text-sm transition-colors",
+                "group relative flex items-center gap-3 px-3 rounded-[10px] text-sm transition-colors",
                 isActive ? "font-medium" : "font-normal"
               )
             }
             style={({ isActive }) => ({
-              background: isActive
+              // A 44px row is the tap target; the nav is the most-used
+              // control on the page and the hardest to hit on a phone.
+              minHeight: 44,
+              // backgroundColor, not the `background` shorthand: jsdom
+              // cannot re-parse a shorthand holding a var() when it clones
+              // a node, which it does to compute an accessible name — every
+              // role query touching these links would throw.
+              backgroundColor: isActive
                 ? "var(--claw-surface-active)"
                 : "transparent",
               border: `1px solid ${
@@ -124,6 +165,7 @@ export default function Sidebar() {
                 <item.icon
                   size={16}
                   strokeWidth={isActive ? 2 : 1.75}
+                  aria-hidden
                   style={{
                     color: isActive
                       ? "var(--text-primary)"
@@ -153,10 +195,13 @@ export default function Sidebar() {
         className="mt-auto pt-4"
         style={{ borderTop: "1px solid var(--border-subtle)" }}
       >
-        <div
-          className="flex items-center gap-2.5 px-2 py-2.5 rounded-[10px]"
-        >
+        <div className="flex items-center justify-between gap-2 px-2 pb-3">
+          <span className="eyebrow">Theme</span>
+          <ThemeToggle />
+        </div>
+        <div className="flex items-center gap-2.5 px-2 py-2.5 rounded-[10px]">
           <div
+            aria-hidden
             className="w-8 h-8 rounded-full flex items-center justify-center text-[13px] font-semibold shrink-0"
             style={{
               background: "var(--accent-glow)",
@@ -182,12 +227,14 @@ export default function Sidebar() {
             </div>
           </div>
           <button
+            type="button"
             onClick={handleLogout}
-            className="p-1 transition-colors"
-            style={{ color: "var(--text-muted)" }}
+            aria-label="Sign out"
             title="Sign out"
+            className="inline-flex items-center justify-center rounded-[8px] shrink-0 transition-colors"
+            style={{ width: 44, height: 44, color: "var(--text-muted)" }}
           >
-            <LogOut size={15} strokeWidth={1.75} />
+            <LogOut size={15} strokeWidth={1.75} aria-hidden />
           </button>
         </div>
       </div>

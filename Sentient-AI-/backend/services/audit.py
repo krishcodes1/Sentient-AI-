@@ -17,13 +17,15 @@ the same millisecond sort ambiguously, weakening verification and causing
 spurious chain failures), so head selection and verification order by
 ``seq``.
 
-Three layers live here:
+Four layers live here:
 
 - ``sanitize_request_data`` / ``_sanitize``: strip credentials and other
   sensitive values before anything is persisted.
 - ``build_hash_payload`` + ``append_audit_log``: the canonical hash
   payload (shared with ``api/routes/audit.py`` verification and
   ``scripts/verify_audit_log.py``) and the chained insert.
+- ``append_auth_event``: the same chain for account-level events —
+  sign-ins, failed sign-ins, lockouts, credential changes, deletion.
 - ``RuntimeAuditLogger``: adapter implementing the agent runtime's audit
   protocol (``log(entry: dict)``); opens its own short-lived sessions so
   the singleton runtime never holds a request-scoped session.
@@ -233,14 +235,17 @@ async def append_audit_log(
         # seq is the deterministic order key; timestamp alone is ambiguous
         # within a millisecond. NULLS LAST keeps legacy (pre-seq) rows from
         # shadowing a numbered head; timestamp breaks ties for a chain that
-        # is still all-legacy.
+        # is still all-legacy. Only the two columns the chain needs are
+        # selected: loading the full ORM row dragged the head's JSON
+        # request_data/reasoning_chain and Text response_summary across the
+        # wire on every append, inside the per-user critical section.
         prev_result = await db.execute(
-            select(AuditLog)
+            select(AuditLog.integrity_hash, AuditLog.seq)
             .where(AuditLog.user_id == user_uuid)
             .order_by(AuditLog.seq.desc().nullslast(), AuditLog.timestamp.desc())
             .limit(1)
         )
-        prev = prev_result.scalar_one_or_none()
+        prev = prev_result.first()
         previous_hash = prev.integrity_hash if prev is not None else None
         # max(seq)+1 under the per-user lock; a legacy head (seq NULL)
         # starts the numbered chain at 1.
@@ -284,6 +289,55 @@ async def append_audit_log(
         await db.flush()
         await db.refresh(entry)
         return entry
+
+
+# ------------------------------------------------------------------ #
+# Authentication events
+# ------------------------------------------------------------------ #
+
+# Audit rows for account-level events are filed under this pseudo-connector
+# so the UI's connector filter can separate "what the agent did on my
+# behalf" from "what happened to my account".
+AUTH_CONNECTOR = "auth"
+
+
+async def append_auth_event(
+    db: AsyncSession,
+    *,
+    user_id: uuid.UUID | str,
+    action: str,
+    status: AuditStatus,
+    endpoint: str,
+    reason: Optional[str] = None,
+    details: Optional[dict[str, Any]] = None,
+    request_id: Optional[str] = None,
+) -> AuditLog:
+    """Record an authentication or account event in the user's hash chain.
+
+    Who signed in, which attempts failed, when credentials changed, and
+    when the account was deleted are the events a compliance reviewer
+    reaches for first, and they were the ones this log did not carry: only
+    agent tool activity was chained. Putting them in the same chain gives
+    them the same property — an adversary with database write access cannot
+    quietly remove the failed logins that preceded a successful one without
+    breaking the chain.
+
+    Failure events are recorded as ``blocked`` so they read the same way as
+    a refused tool call: the platform declined to act.
+    """
+    return await append_audit_log(
+        db,
+        user_id=user_id,
+        connector_name=AUTH_CONNECTOR,
+        action=action,
+        endpoint=endpoint,
+        scope_used=AUTH_CONNECTOR,
+        status=status,
+        reasoning_chain={"event": action, **({"reason": reason} if reason else {})},
+        request_data=details,
+        response_summary=reason,
+        request_id=request_id,
+    )
 
 
 # ------------------------------------------------------------------ #

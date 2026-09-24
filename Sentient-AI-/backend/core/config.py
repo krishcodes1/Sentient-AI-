@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import ipaddress
 from typing import Optional
 
 from pydantic import Field, field_validator
@@ -138,6 +139,12 @@ class Settings(BaseSettings):
     GROQ_API_KEY: Optional[str] = None
     MISTRAL_API_KEY: Optional[str] = None
 
+    # ── Telegram approvals (optional) ─────────────────────────────────────
+    # Bot token from @BotFather. When set, pending approvals are pushed to
+    # each user's linked Telegram chat with Approve/Deny buttons and the
+    # decision is taken from there. Empty = feature disabled.
+    TELEGRAM_BOT_TOKEN: str = ""
+
     # ── Rate limiting ─────────────────────────────────────────────────────
     RATE_LIMIT_PER_MINUTE: int = 60
     # Stricter bucket for credential endpoints (login/register) to slow
@@ -151,6 +158,17 @@ class Settings(BaseSettings):
     # throttle. Defaults cover loopback + RFC1918/ULA private ranges, which
     # is where a reverse proxy (nginx in the compose network) sits. Set to
     # an empty list to never trust XFF.
+    #
+    # That default width is a real risk and worth stating plainly rather
+    # than burying: ANY host that reaches the API from a private range — a
+    # second container on the same bridge network, a machine on the office
+    # LAN, a pod neighbour — can then set X-Forwarded-For freely and mint
+    # one rate-limit bucket per spoofed address. Narrow this to the proxy's
+    # actual address wherever the deployment allows it;
+    # production_warnings() flags a non-loopback list at startup. What
+    # bounds the login path regardless is LOCKOUT_THRESHOLD, which counts
+    # failures per ACCOUNT and so cannot be diluted by choosing source
+    # addresses.
     TRUSTED_PROXIES: list[str] = [
         "127.0.0.0/8",
         "::1/128",
@@ -161,6 +179,15 @@ class Settings(BaseSettings):
     ]
 
     # ── Auth ──────────────────────────────────────────────────────────────
+    # Consecutive failed logins for one ACCOUNT before it is locked, and how
+    # long the lock lasts. Per-IP throttling alone does not bound a
+    # brute-force run: the attacker picks the source addresses, so a botnet
+    # — or a single host behind a trusted proxy, where X-Forwarded-For
+    # decides the bucket — gets a fresh allowance per address while the
+    # target account sees every attempt. Counting failures per account is
+    # the half of the limit the attacker cannot choose.
+    LOCKOUT_THRESHOLD: int = Field(default=5, ge=1, le=100)
+    LOCKOUT_DURATION_MINUTES: int = Field(default=15, ge=1, le=1440)
     TOKEN_EXPIRE_MINUTES: int = 60
     # Hard ceiling on how long a session can be extended by refreshing.
     # Refresh trades "logged out mid-sentence every hour" for "a stolen
@@ -229,7 +256,41 @@ class Settings(BaseSettings):
                 "ALLOWED_HOSTS is ['*']; set it to the real hostname(s) to "
                 "enable Host-header validation"
             )
+        wide = self._non_loopback_trusted_proxies()
+        if wide:
+            warnings.append(
+                "TRUSTED_PROXIES trusts X-Forwarded-For from "
+                + ", ".join(wide)
+                + "; every host that can reach this API from those ranges can "
+                "spoof its client IP and mint a fresh rate-limit bucket per "
+                "request — narrow it to the reverse proxy's own address"
+            )
         return warnings
+
+    def _non_loopback_trusted_proxies(self) -> list[str]:
+        """Trusted-proxy entries that extend past loopback.
+
+        Anything wider than the loopback interface means the XFF header is
+        believed from hosts other than a proxy running on this machine, so
+        client-IP attribution — and every limit keyed on it — is only as
+        trustworthy as the narrowest network in the list.
+        """
+        loopback_v4 = ipaddress.IPv4Network("127.0.0.0/8")
+        loopback_v6 = ipaddress.IPv6Network("::1/128")
+        wide: list[str] = []
+        for cidr in self.TRUSTED_PROXIES:
+            try:
+                net = ipaddress.ip_network(cidr, strict=False)
+            except ValueError:
+                continue  # the rate limiter logs and skips these
+            local = (
+                net.subnet_of(loopback_v4)
+                if isinstance(net, ipaddress.IPv4Network)
+                else net.subnet_of(loopback_v6)
+            )
+            if not local:
+                wide.append(cidr)
+        return wide
 
 
 settings = Settings()  # type: ignore[call-arg]

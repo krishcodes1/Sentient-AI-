@@ -156,6 +156,19 @@ export interface Message {
   tool_calls?: ToolCall[] | null;
   blocked_actions?: BlockedAction[];
   created_at: string;
+  /**
+   * Attachments on a user turn, as data URLs. Optional because the backend
+   * only started returning them alongside image support, so rows written
+   * before that — and any server without it — simply have none.
+   */
+  images?: string[] | null;
+  /** Client-only: this bubble is a failed turn (never persisted). */
+  error?: boolean;
+  /** Client-only: the user content to resend when Retry is clicked. */
+  retry_content?: string;
+  /** Client-only: the attachments to resend with `retry_content`, so a
+   *  retried turn carries the images the first attempt did. */
+  retry_images?: string[];
 }
 
 export interface ToolCall {

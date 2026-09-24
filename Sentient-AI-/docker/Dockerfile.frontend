@@ -48,6 +48,34 @@ server {
     # SPA fallback — client-side routing
     location / {
         try_files $uri $uri/ /index.html;
+
+        # The API hardens its own responses; the document nginx serves was
+        # getting nothing, and it is the surface that matters most — the
+        # approval UI is where a tool call is authorised, so a page that
+        # can be framed is a page where a click meant for something else
+        # approves an action.
+        #
+        # These live in `location /` rather than at server level on
+        # purpose: add_header appends to PROXIED responses too, so a
+        # server-level copy would emit a second Content-Security-Policy
+        # alongside the backend's on every /api/ response, and browsers
+        # enforce the intersection of the two.
+        #
+        # `always` because nginx otherwise drops add_header on error
+        # responses — precisely the ones an attack provokes.
+        add_header X-Frame-Options "DENY" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+        # Mirrors the API's policy with the differences a built SPA needs:
+        # the bundler inlines a style block, and connect-src has to allow
+        # the browser to call the API and hold the SSE stream open on this
+        # same origin (the /api/ proxy below). frame-ancestors is the real
+        # clickjacking control; X-Frame-Options above is its legacy twin.
+        # HSTS is deliberately absent: this container is reached over plain
+        # HTTP inside the compose network, so the TLS terminator in front
+        # of it is what should assert it.
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'" always;
     }
 
     # Reverse proxy to the FastAPI backend

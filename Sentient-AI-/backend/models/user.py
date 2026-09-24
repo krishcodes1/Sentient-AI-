@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Uuid
+from sqlalchemy import BigInteger, Boolean, DateTime, Index, Integer, String, Uuid
 from sqlalchemy import false as sa_false
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -21,6 +21,11 @@ def _server_llm_defaults() -> tuple[str, str]:
 
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = (
+        # Unique so a one-time Telegram link code can never match two
+        # accounts; NULLs (the steady state) are exempt from uniqueness.
+        Index("ix_users_telegram_link_code", "telegram_link_code", unique=True),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         Uuid(),
@@ -105,6 +110,23 @@ class User(Base):
         default=True,
         server_default="true",
         nullable=False,
+    )
+    # ── Telegram approvals ────────────────────────────────────────────────
+    # Chat this user linked for approval notifications; NULL = not linked.
+    # Linking happens via a one-time /start code (see services/notifications/
+    # telegram.py) so a chat can never be attached without proof of control
+    # of both the SentientAI session and the Telegram account.
+    telegram_chat_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger,
+        nullable=True,
+    )
+    telegram_link_code: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    telegram_link_expires_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

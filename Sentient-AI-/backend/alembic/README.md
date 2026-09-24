@@ -23,6 +23,27 @@ schema: it was built by `create_all()` plus the idempotent `ALTER` list that
 used to live in `core.database.init_db`. Revision `0001_baseline` describes
 exactly that schema, so those databases must **not** run it.
 
+**This happens by itself.** `core.database.init_db` checks, on every boot,
+whether the database has the application's tables but no `alembic_version`
+row; that combination can only mean "predates Alembic", so it stamps the
+baseline and then upgrades. Nothing below is required for an ordinary
+upgrade — start the app and it adopts the database.
+
+The automation exists because the failure it prevents is silent and total:
+`upgrade head` on such a database starts at the baseline and dies on
+`CREATE TABLE users`, which on Postgres aborts the transaction and so fails
+identically on every restart. The app never serves a request, and the only
+clue is a log line. Making the operator run `alembic stamp` first is a
+footgun — nothing warns you until you are already down. An empty database
+is *not* stamped: it has no `users` table, so it is a fresh install and
+runs the migrations normally.
+
+The manual procedure below is still worth following when you want to
+**inspect** the schema before adopting it — the automatic stamp asserts the
+schema is complete, it does not verify it, and `init_db`'s old ALTERs
+swallowed their own failures. Run through it once for a database you are
+not sure about, ideally before the first boot on the new code.
+
 1. Confirm the live schema really is complete. `init_db`'s ALTERs swallowed
    their own failures, so a half-migrated database is possible:
 
@@ -51,6 +72,9 @@ exactly that schema, so those databases must **not** run it.
 
 A brand-new/empty database skips all of this: `alembic upgrade head` builds
 the schema from scratch.
+
+`tests/test_migration_adoption.py` covers both routes — the manual stamp
+and the automatic one `init_db` performs.
 
 ### Known drift
 

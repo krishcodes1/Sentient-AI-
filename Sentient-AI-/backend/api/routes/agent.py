@@ -1,8 +1,12 @@
 from __future__ import annotations
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union, get_args
 
 import asyncio
+import base64
+import binascii
+import hashlib
 import json
+import re
 import time
 import uuid
 from collections import OrderedDict, deque
@@ -11,7 +15,7 @@ from datetime import datetime, timezone
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -148,8 +152,110 @@ class UpdateConversationRequest(BaseModel):
     title: SafeStr = Field(min_length=1, max_length=200)
 
 
+# Image attachments. The caps are deliberately tight: images are relayed
+# verbatim to a paid API, and every vendor rejects oversized payloads
+# anyway — far better to answer 422 here than to spend a provider
+# round-trip discovering it.
+#
+# These bound what the server PROCESSES, not what it reads: FastAPI has the
+# whole body buffered before any validator or dependency runs, so the
+# ceiling on a request body is whatever the ASGI layer allows (today,
+# nothing). That gap is not new — a 1GB body was already buffered before
+# `content`'s max_length could reject it — but four 5MB images raise the
+# legitimate ceiling from ~100KB to ~28MB, which makes a body-size
+# middleware the right next piece of work. See the proposal alongside this
+# change.
+ImageMediaType = Literal["image/png", "image/jpeg", "image/webp", "image/gif"]
+ALLOWED_IMAGE_TYPES = get_args(ImageMediaType)
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
+MAX_IMAGES_PER_MESSAGE = 4
+
+# data:<media type>;base64,<payload> — the form a browser's FileReader
+# produces, accepted so the client does not have to split it apart.
+_DATA_URL_RE = re.compile(
+    r"^data:(?P<media_type>[\w.+-]+/[\w.+-]+)(?P<params>;[^,]*)?,", re.IGNORECASE
+)
+
+
+class ImageAttachment(BaseModel):
+    """One image sent alongside a chat message.
+
+    ``data`` is base64 with no ``data:`` prefix. A full data URL — what a
+    browser's FileReader hands the client — is also accepted and split
+    apart, and its own media type then governs: if the URL and the field
+    disagree, the bytes came with the URL, so trusting the field would let
+    a PNG be relayed to the provider labelled as something else.
+    """
+
+    media_type: ImageMediaType = "image/png"
+    data: str = Field(min_length=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _split_data_url(cls, values: Any) -> Any:
+        if not isinstance(values, dict):
+            return values
+        data = values.get("data")
+        if not isinstance(data, str):
+            return values
+        match = _DATA_URL_RE.match(data)
+        if not match:
+            return values
+        if "base64" not in (match.group("params") or ""):
+            raise ValueError("image data URLs must be base64-encoded")
+        # Rewritten before field validation, so an unsupported media type
+        # carried by the URL is rejected by the Literal like any other.
+        return {
+            **values,
+            "media_type": match.group("media_type").lower(),
+            "data": data[match.end():],
+        }
+
+    @field_validator("data")
+    @classmethod
+    def _decodable_and_within_cap(cls, value: str) -> str:
+        # Checked before decoding: base64 inflates by 4/3, so bounding the
+        # encoded length bounds the work done here, instead of decoding an
+        # arbitrarily large string only to find out it was too big.
+        if len(value) > MAX_IMAGE_BYTES * 4 // 3 + 4:
+            raise ValueError(
+                f"image exceeds the {MAX_IMAGE_BYTES // (1024 * 1024)}MB limit"
+            )
+        try:
+            raw = base64.b64decode(value, validate=True)
+        except (binascii.Error, ValueError):
+            raise ValueError("image data is not valid base64") from None
+        if not raw:
+            raise ValueError("image data is empty")
+        if len(raw) > MAX_IMAGE_BYTES:
+            raise ValueError(
+                f"image exceeds the {MAX_IMAGE_BYTES // (1024 * 1024)}MB limit"
+            )
+        return value
+
+    def metadata(self) -> dict[str, Any]:
+        """What is persisted on the Message row: enough to tell a later
+        reader what was attached, none of the bytes. The digest is what a
+        future object store would key the blob by."""
+        raw = base64.b64decode(self.data, validate=True)
+        return {
+            "media_type": self.media_type,
+            "size_bytes": len(raw),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+        }
+
+
 class SendMessageRequest(BaseModel):
-    content: SafeStr = Field(min_length=1, max_length=100_000)
+    # No min_length: a photo on its own is a complete question ("what is
+    # this?" is implied by sending it). The routes still reject a turn that
+    # is empty of both text and images.
+    content: SafeStr = Field(default="", max_length=100_000)
+    images: list[ImageAttachment] = Field(
+        default_factory=list, max_length=MAX_IMAGES_PER_MESSAGE
+    )
+
+    def is_empty(self) -> bool:
+        return not self.content.strip() and not self.images
 
 
 class MessageResponse(BaseModel):
@@ -158,6 +264,9 @@ class MessageResponse(BaseModel):
     role: MessageRole
     content: str
     tool_calls: Optional[Union[Dict, List]] = None
+    attachments: Optional[List] = None
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -170,6 +279,10 @@ class ConversationResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     messages: list[MessageResponse] = []
+    # Everything the provider has billed for this thread, so a cost view
+    # needs one request rather than a scan of the transcript.
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
 
     model_config = {"from_attributes": True}
 
@@ -236,13 +349,15 @@ class ApprovalDecisionResponse(BaseModel):
 
 
 async def _build_tools_and_memory(
-    request: Request,
+    mcp_catalog: Any,
     current_user: User,
     db: AsyncSession,
 ) -> tuple[list, Optional[str]]:
     """Build the runtime tool list (connector + MCP tools) and the memory
     block for a user. Shared by the blocking and streaming send paths so
-    both offer exactly the same tools and context.
+    both offer exactly the same tools and context. Takes the MCP catalog
+    directly (not a Request) so out-of-band callers — the Telegram approval
+    poller — can run the same pipeline without an HTTP request.
     """
     conn_result = await db.execute(
         select(ConnectorConfig).where(
@@ -269,7 +384,6 @@ async def _build_tools_and_memory(
     )
 
     if any(spec.connector_type == "mcp" for spec in connector_specs):
-        mcp_catalog = getattr(request.app.state, "mcp_catalog", None)
         if mcp_catalog is not None:
             from services.mcp.integration import slugify_label, split_mcp_tool
 
@@ -331,6 +445,54 @@ async def _get_owned_conversation(
             detail="Conversation not found",
         )
     return conversation
+
+
+def _attach_images(
+    history: list[dict[str, Any]], images: list[ImageAttachment]
+) -> None:
+    """Replace the newest user turn's text content with multimodal blocks.
+
+    History is rebuilt from Message rows, which hold text only — the image
+    bytes exist for exactly one turn, in memory, on their way to the
+    provider. This splices them back onto the turn they arrived with, and
+    is a no-op if the tail is not the user message that was just written.
+    """
+    if not images or not history or history[-1].get("role") != "user":
+        return
+    history[-1] = {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": history[-1].get("content", "")},
+            *(
+                {
+                    "type": "image",
+                    "media_type": image.media_type,
+                    "data": image.data,
+                }
+                for image in images
+            ),
+        ],
+    }
+
+
+def _usage_columns(usage: Optional[Dict[str, Any]]) -> dict[str, Optional[int]]:
+    """Map a runtime usage dict onto the Message columns.
+
+    A turn that reported nothing (a replay-cache hit, a provider that does
+    not return counts) stores NULL rather than 0 — "not billed" and "we
+    never found out" are different facts, and summing a guessed zero into a
+    cost view would quietly understate it.
+    """
+    usage = usage or {}
+
+    def _count(key: str) -> Optional[int]:
+        value = usage.get(key)
+        return value if isinstance(value, int) else None
+
+    return {
+        "input_tokens": _count("input_tokens"),
+        "output_tokens": _count("output_tokens"),
+    }
 
 
 def _like_pattern(term: str) -> str:
@@ -422,10 +584,27 @@ async def get_conversation(
     conversation_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> Conversation:
-    """Retrieve one of the authenticated user's conversations with messages."""
-    return await _get_owned_conversation(
+) -> ConversationResponse:
+    """Retrieve one of the authenticated user's conversations with messages,
+    plus what the provider has billed across the thread.
+
+    The totals are summed from the transcript already loaded here rather
+    than with an aggregate query — the rows are in hand, and this endpoint
+    is held to a query budget (tests/test_query_efficiency.py).
+    """
+    conversation = await _get_owned_conversation(
         conversation_id, current_user, db, with_messages=True
+    )
+    messages = list(conversation.messages)
+    return ConversationResponse(
+        id=conversation.id,
+        user_id=conversation.user_id,
+        title=conversation.title,
+        created_at=conversation.created_at,
+        updated_at=conversation.updated_at,
+        messages=[MessageResponse.model_validate(m) for m in messages],
+        total_input_tokens=sum(m.input_tokens or 0 for m in messages),
+        total_output_tokens=sum(m.output_tokens or 0 for m in messages),
     )
 
 
@@ -492,7 +671,7 @@ async def send_message(
     Returns both saved messages plus any tool calls, pending approvals, or
     blocked actions surfaced by the runtime.
     """
-    if not body.content.strip():
+    if body.is_empty():
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Message content cannot be empty",
@@ -512,11 +691,13 @@ async def send_message(
 
     conversation = await _get_owned_conversation(conversation_id, current_user, db)
 
-    # 1. Persist the user message
+    # 1. Persist the user message. Only attachment METADATA is stored; see
+    #    models.conversation.Message.attachments for why the bytes are not.
     user_message = Message(
         conversation_id=conversation.id,
         role=MessageRole.user,
         content=body.content.strip(),
+        attachments=[image.metadata() for image in body.images] or None,
     )
     db.add(user_message)
     await db.flush()
@@ -532,12 +713,15 @@ async def send_message(
         {"role": m.role.value, "content": m.content}
         for m in history_result.scalars().all()
     ]
+    _attach_images(history, body.images)
 
     # 3. Build the tool list (connectors + MCP) and memory block. The
     #    runtime's permission adapter and executor (injected at startup)
     #    handle tiering, approval, and dispatch. A user with no connectors
     #    gets an empty list and simply chats with the LLM.
-    tools, memory_block = await _build_tools_and_memory(request, current_user, db)
+    tools, memory_block = await _build_tools_and_memory(
+        getattr(request.app.state, "mcp_catalog", None), current_user, db
+    )
 
     # Release the pooled connection before the LLM turn: committing ends
     # the transaction, so the minutes a slow provider can take are not
@@ -570,6 +754,7 @@ async def send_message(
         role=MessageRole.assistant,
         content=agent_response.content,
         tool_calls=agent_response.tool_calls or None,
+        **_usage_columns(agent_response.usage),
     )
     db.add(assistant_message)
     conversation.updated_at = datetime.now(timezone.utc)
@@ -625,6 +810,7 @@ async def _persist_assistant_detached(
     conversation_id: uuid.UUID,
     content: str,
     tool_calls: Optional[list],
+    usage: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Persist an assistant turn outside any request session.
 
@@ -641,6 +827,7 @@ async def _persist_assistant_detached(
                     role=MessageRole.assistant,
                     content=content,
                     tool_calls=tool_calls or None,
+                    **_usage_columns(usage),
                 )
             )
             conversation = await session.get(Conversation, conversation_id)
@@ -680,7 +867,7 @@ async def stream_message(
     persisted in a fresh session once the turn completes, so the DB write
     does not depend on the request session staying open across the stream.
     """
-    if not body.content.strip():
+    if body.is_empty():
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Message content cannot be empty",
@@ -701,6 +888,7 @@ async def stream_message(
         conversation_id=conversation.id,
         role=MessageRole.user,
         content=body.content.strip(),
+        attachments=[image.metadata() for image in body.images] or None,
     )
     db.add(user_message)
     await db.flush()
@@ -716,7 +904,10 @@ async def stream_message(
         {"role": m.role.value, "content": m.content}
         for m in history_result.scalars().all()
     ]
-    tools, memory_block = await _build_tools_and_memory(request, current_user, db)
+    _attach_images(history, body.images)
+    tools, memory_block = await _build_tools_and_memory(
+        getattr(request.app.state, "mcp_catalog", None), current_user, db
+    )
     conv_id = conversation.id
     user_provider = current_user.llm_provider
     user_model = current_user.llm_model
@@ -732,7 +923,10 @@ async def stream_message(
         # The client went away before the turn was saved; record it with a
         # session of our own so the executed tools aren't lost from history.
         await _persist_assistant_detached(
-            conv_id, response.content or "", response.tool_calls or None
+            conv_id,
+            response.content or "",
+            response.tool_calls or None,
+            response.usage,
         )
 
     async def event_stream():
@@ -740,7 +934,9 @@ async def stream_message(
 
         final_content = ""
         tool_calls_payload: list[dict[str, Any]] = []
+        usage_payload: dict[str, Any] = {}
         turn_done = False
+        turn_errored = False
         saved_confirmed = False
         try:
             try:
@@ -762,9 +958,15 @@ async def stream_message(
                         # spec-compliant parsers (and ours).
                         yield ": ping\n\n"
                         continue
+                    if etype == "error":
+                        # The runtime follows an error frame with an empty
+                        # done frame; remember it so the failed turn is not
+                        # persisted as an empty assistant message below.
+                        turn_errored = True
                     if etype == "done":
                         final_content = data.get("content", "")
                         tool_calls_payload = data.get("tool_calls", []) or []
+                        usage_payload = data.get("usage", {}) or {}
                         turn_done = True
                     yield _sse(etype, data)
             except GeneratorExit:
@@ -772,6 +974,14 @@ async def stream_message(
             except Exception:  # pragma: no cover - defensive
                 yield _sse("error", {"reason": "The assistant failed to respond."})
                 yield _sse("done", {})
+                return
+
+            if turn_errored or not (final_content.strip() or tool_calls_payload):
+                # Errored or empty turn: nothing worth persisting. The client
+                # already received the error frame; writing an empty row here
+                # is what used to leave permanent blank bubbles in the
+                # transcript.
+                yield _sse("saved", {"assistant_message": None})
                 return
 
             # Persist the assistant message. The request DB session is still
@@ -785,6 +995,7 @@ async def stream_message(
                     role=MessageRole.assistant,
                     content=final_content,
                     tool_calls=tool_calls_payload or None,
+                    **_usage_columns(usage_payload),
                 )
                 db.add(assistant)
                 conversation.updated_at = datetime.now(timezone.utc)
@@ -806,7 +1017,12 @@ async def stream_message(
                 yield _sse("saved", {"assistant_message": assistant_out})
                 saved_confirmed = True
         finally:
-            if turn_done and not saved_confirmed:
+            if (
+                turn_done
+                and not turn_errored
+                and not saved_confirmed
+                and (final_content.strip() or tool_calls_payload)
+            ):
                 # The consumer disconnected between the turn completing and
                 # the saved frame being delivered. The request session's
                 # write is rolled back with the aborted request, so persist
@@ -814,7 +1030,7 @@ async def stream_message(
                 # done event are covered by on_orphaned above.)
                 asyncio.create_task(
                     _persist_assistant_detached(
-                        conv_id, final_content, tool_calls_payload
+                        conv_id, final_content, tool_calls_payload, usage_payload
                     )
                 )
 
@@ -851,7 +1067,7 @@ async def list_pending_approvals(
 
 
 async def _resume_after_approval(
-    request: Request,
+    mcp_catalog: Any,
     current_user: User,
     db: AsyncSession,
     runtime: AgentRuntime,
@@ -880,7 +1096,7 @@ async def _resume_after_approval(
     if not history:
         return None
 
-    tools, memory_block = await _build_tools_and_memory(request, current_user, db)
+    tools, memory_block = await _build_tools_and_memory(mcp_catalog, current_user, db)
     # Return the pooled connection before the (potentially minutes-long)
     # resumed turn; everything written so far — the decision message — is
     # durable from here.
@@ -927,39 +1143,31 @@ def _render_decision_message(
     return content, [{"name": tool_name, "result": safe_result, "approved": True}]
 
 
-@router.post("/approvals/{action_id}", response_model=ApprovalDecisionResponse)
-async def decide_approval(
+async def _apply_decision(
+    db: AsyncSession,
+    runtime: AgentRuntime,
+    mcp_catalog: Any,
+    current_user: User,
     action_id: str,
-    body: ApprovalDecisionRequest,
-    request: Request,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-    runtime: AgentRuntime = Depends(get_runtime),
-) -> ApprovalDecisionResponse:
-    """Approve or deny a pending action. On approval the runtime executes the
-    tool call; on denial the action is dropped. Only the user who owns the
-    pending action can decide it — ownership is checked against the JWT.
-
-    The decision (and, for approvals, the tool result) is persisted as an
-    assistant Message in the originating conversation, so the transcript
-    shows the outcome and the LLM's subsequent turns — whose history is
-    rebuilt from Message rows — know the action ran.
+    approved: bool,
+) -> Dict[str, Any]:
+    """Decide a pending action, persist the outcome into its conversation,
+    and (on approval) run the resumed agent turn. Shared by the HTTP route
+    and out-of-band decision channels (Telegram); returns the runtime's
+    result dict, or {"error": ...} for unknown/expired/foreign actions.
     """
-    # Release the request's pooled connection before the decision: an
-    # approval executes the real tool (connector/MCP HTTP) and then runs a
-    # resumed agent turn, neither of which needs this session.
+    # Release the pooled connection before the decision: an approval
+    # executes the real tool (connector/MCP HTTP) and then runs a resumed
+    # agent turn, neither of which needs this session.
     await db.commit()
 
-    if body.approved:
+    if approved:
         result = await runtime.approve_action(action_id, str(current_user.id))
     else:
         result = await runtime.deny_action(action_id, str(current_user.id))
 
     if "error" in result:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=result["error"],
-        )
+        return result
 
     # Persist the outcome into the conversation the action came from.
     conv_id = result.pop("conversation_id", None)
@@ -976,7 +1184,7 @@ async def decide_approval(
             conversation = conv_result.scalar_one_or_none()
             if conversation is not None and conversation.user_id == current_user.id:
                 content, tool_calls_payload = _render_decision_message(
-                    body.approved, tool_name, result.get("result")
+                    approved, tool_name, result.get("result")
                 )
                 db.add(
                     Message(
@@ -997,21 +1205,93 @@ async def decide_approval(
                 #
                 # Best effort: the approval already happened and is recorded,
                 # so a resume failure must not turn into a failed request.
-                if body.approved:
+                if approved:
                     try:
                         resumed = await _resume_after_approval(
-                            request, current_user, db, runtime, conversation
+                            mcp_catalog, current_user, db, runtime, conversation
                         )
                         if resumed is not None:
                             db.add(resumed)
                             conversation.updated_at = datetime.now(timezone.utc)
                             await db.flush()
+                            result["assistant_reply"] = resumed.content
                     except Exception as exc:
                         logger.warning(
                             "resume_after_approval_failed",
                             conversation_id=str(conversation.id),
                             error=str(exc),
                         )
+    return result
+
+
+def build_decision_applier(app: Any):
+    """Async callback for out-of-band approval channels (the Telegram
+    poller): (user_id, action_id, approved) -> outcome dict. Runs the same
+    decide → record → resume pipeline as POST /approvals/{action_id},
+    with its own DB session and an explicit commit at the end."""
+
+    async def apply(user_id: str, action_id: str, approved: bool) -> Dict[str, Any]:
+        runtime: Optional[AgentRuntime] = getattr(app.state, "agent_runtime", None)
+        if runtime is None:
+            return {"error": "Agent runtime is not available."}
+        mcp_catalog = getattr(app.state, "mcp_catalog", None)
+        async with async_session() as db:
+            user = (
+                await db.execute(select(User).where(User.id == uuid.UUID(user_id)))
+            ).scalar_one_or_none()
+            if user is None or not user.is_active:
+                return {"error": "Unknown account."}
+            result = await _apply_decision(
+                db, runtime, mcp_catalog, user, action_id, approved
+            )
+            await db.commit()
+
+        if "error" in result:
+            return result
+        summary = None
+        if approved:
+            reply = (result.get("assistant_reply") or "").strip()
+            summary = reply[:1500] if reply else (
+                f"Executed '{result.get('tool', '')}'. Open SentientAI for the "
+                "full result."
+            )
+        return {"status": "approved" if approved else "denied", "summary": summary}
+
+    return apply
+
+
+@router.post("/approvals/{action_id}", response_model=ApprovalDecisionResponse)
+async def decide_approval(
+    action_id: str,
+    body: ApprovalDecisionRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    runtime: AgentRuntime = Depends(get_runtime),
+) -> ApprovalDecisionResponse:
+    """Approve or deny a pending action. On approval the runtime executes the
+    tool call; on denial the action is dropped. Only the user who owns the
+    pending action can decide it — ownership is checked against the JWT.
+
+    The decision (and, for approvals, the tool result) is persisted as an
+    assistant Message in the originating conversation, so the transcript
+    shows the outcome and the LLM's subsequent turns — whose history is
+    rebuilt from Message rows — know the action ran.
+    """
+    result = await _apply_decision(
+        db,
+        runtime,
+        getattr(request.app.state, "mcp_catalog", None),
+        current_user,
+        action_id,
+        body.approved,
+    )
+    if "error" in result:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=result["error"],
+        )
+    result.pop("assistant_reply", None)
 
     return ApprovalDecisionResponse(
         action_id=action_id,

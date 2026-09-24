@@ -3,6 +3,7 @@ from typing import Dict, List, Literal, Optional
 
 import json
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -13,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.database import get_db
 from core.security import encrypt_credentials
 from core.validation import SafeStr
-from models.audit import AuditLog
+from models.audit import AuditLog, AuditStatus
 from models.connector import (
     AuthMethod,
     ConnectorConfig,
@@ -185,7 +186,25 @@ async def list_connectors(
 
 
 HealthStatus = Literal["healthy", "degraded", "unhealthy"]
-_DEGRADED_AFTER = timedelta(hours=24)
+_HEALTH_WINDOW = timedelta(hours=24)
+
+
+@dataclass
+class _Observations:
+    """Audited outcomes for one connector inside the health window."""
+
+    carried_out: int = 0
+    refused: int = 0
+
+    @property
+    def total(self) -> int:
+        return self.carried_out + self.refused
+
+    @property
+    def success_rate(self) -> float:
+        if not self.total:
+            return 100.0
+        return round(100.0 * self.carried_out / self.total, 1)
 
 
 class ConnectorHealthEntry(BaseModel):
@@ -193,8 +212,16 @@ class ConnectorHealthEntry(BaseModel):
     name: str
     type: ConnectorType
     status: HealthStatus
+    # Share of this connector's audited actions in the last 24h that the
+    # platform carried out rather than refused. It is a measured ratio,
+    # not an availability figure: with ``checks_24h == 0`` there is
+    # nothing to measure and it reads 100.0, which ``checks_24h`` and
+    # ``detail`` are there to qualify.
     uptime: float
+    checks_24h: int
+    failures_24h: int
     last_check: str
+    detail: str
 
 
 @router.get("/health", response_model=list[ConnectorHealthEntry])
@@ -204,14 +231,23 @@ async def get_connector_health(
 ) -> list[ConnectorHealthEntry]:
     """Derive a per-connector health summary for the authenticated user.
 
-    Status rules (no third-party network calls; this is platform-level
-    health, not the remote service's health):
+    Every number here comes from a recorded observation (no third-party
+    network calls; this is platform-level health, not the remote
+    service's health):
     - ``unhealthy``: connector is disabled (``is_active = False``)
-    - ``degraded``: enabled but no observed activity in the last 24h
-    - ``healthy``:  enabled and used in the last 24h
+    - ``degraded``:  a failure was observed in the last 24h
+    - ``healthy``:   no failure was observed
 
-    First-party connectors derive activity from the audit log. MCP rows
-    cannot (the audit logger stores them under ``connector_name="mcp"``,
+    A connector nobody has used yet is ``healthy``, not ``degraded``:
+    "never called" is not evidence of a problem, and reporting it as one
+    told every user their brand-new connector was already failing.
+
+    First-party connectors derive their counts from the audit log: an
+    ``approved`` row is one action the platform carried out, a
+    ``blocked`` row one it refused. ``pending`` rows are the
+    intent-before-side-effect half of an approved action and are skipped,
+    so a single tool call counts once. MCP rows cannot use the audit log
+    at all (the audit logger stores them under ``connector_name="mcp"``,
     not the display name), so they use the in-process MCP activity
     registry populated by discovery/dispatch/tests instead.
     """
@@ -222,6 +258,9 @@ async def get_connector_health(
 
     if not connectors:
         return []
+
+    now = datetime.now(timezone.utc)
+    window_start = now - _HEALTH_WINDOW
 
     # Audit rows usually record the connector segment of the tool name
     # ("canvas", "google_workspace", ...) rather than the display name, so
@@ -238,18 +277,40 @@ async def get_connector_health(
     audit_rows = list(audit_result.scalars().all())
 
     last_seen_by_name: Dict[str, datetime] = {}
+    observed_by_name: Dict[str, _Observations] = {}
     for row in audit_rows:
         if row.connector_name not in last_seen_by_name:
             last_seen_by_name[row.connector_name] = row.timestamp
+        if _as_utc(row.timestamp) < window_start:
+            continue
+        counts = observed_by_name.setdefault(row.connector_name, _Observations())
+        if row.status == AuditStatus.approved:
+            counts.carried_out += 1
+        elif row.status == AuditStatus.blocked:
+            counts.refused += 1
 
     from services.mcp.activity import mcp_activity
 
-    now = datetime.now(timezone.utc)
     entries: list[ConnectorHealthEntry] = []
     for c in connectors:
+        failed_recently = False
+        observed_recently = False
         if c.connector_type == ConnectorType.mcp:
+            # The registry keeps only the latest outcome of each kind, so
+            # an MCP server has no tally to report — only whether the last
+            # thing observed was a failure. Its counts stay at zero and
+            # ``detail`` says what was actually seen.
             activity = mcp_activity.get(c.id)
             last_seen = activity.last_success if activity else None
+            counts = _Observations()
+            if activity and activity.last_error:
+                failed_recently = _as_utc(activity.last_error) >= window_start and (
+                    last_seen is None
+                    or _as_utc(activity.last_error) > _as_utc(last_seen)
+                )
+            observed_recently = (
+                last_seen is not None and _as_utc(last_seen) >= window_start
+            )
         else:
             # Audit rows record the connector segment of the tool name
             # (e.g. "canvas" from "canvas.submit_assignment"), so fall back
@@ -257,16 +318,33 @@ async def get_connector_health(
             last_seen = last_seen_by_name.get(
                 c.display_name
             ) or last_seen_by_name.get(c.connector_type.value)
+            counts = observed_by_name.get(c.display_name) or observed_by_name.get(
+                c.connector_type.value
+            ) or _Observations()
+            failed_recently = counts.refused > 0
+            observed_recently = counts.total > 0
 
         if not c.is_active:
             status_value: HealthStatus = "unhealthy"
-            uptime = 0.0
-        elif last_seen is None or (now - _as_utc(last_seen)) > _DEGRADED_AFTER:
+            detail = "Disabled. Enable it to let the agent use it again."
+        elif failed_recently:
             status_value = "degraded"
-            uptime = 95.0
+            detail = (
+                f"{counts.refused} of {counts.total} action(s) refused in the "
+                "last 24h."
+                if counts.total
+                else "The most recent call to this server failed."
+            )
+        elif observed_recently:
+            status_value = "healthy"
+            detail = (
+                f"{counts.total} action(s) in the last 24h, none refused."
+                if counts.total
+                else "Last call to this server succeeded."
+            )
         else:
             status_value = "healthy"
-            uptime = 100.0
+            detail = "No activity in the last 24h."
 
         last_check = last_seen.isoformat() if last_seen else "Never"
 
@@ -276,8 +354,11 @@ async def get_connector_health(
                 name=c.display_name,
                 type=c.connector_type,
                 status=status_value,
-                uptime=uptime,
+                uptime=counts.success_rate,
+                checks_24h=counts.total,
+                failures_24h=counts.refused,
                 last_check=last_check,
+                detail=detail,
             )
         )
     return entries
@@ -316,16 +397,42 @@ async def update_connector(
         _validate_scopes(connector.connector_type.value, update_data["granted_scopes"])
 
     if "credentials" in update_data:
-        connector.encrypted_credentials = encrypt_credentials(
-            json.dumps(update_data.pop("credentials"))
-        )
+        credentials = update_data.pop("credentials") or {}
+        # The same gate POST applies. Without it an edit could store a
+        # credential blob the connector can never use — and the failure
+        # then surfaces at tool-call time, far from the change that caused
+        # it.
+        problems = validate_credentials(connector.connector_type.value, credentials)
+        if problems:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="; ".join(problems),
+            )
+        connector.encrypted_credentials = encrypt_credentials(json.dumps(credentials))
 
     for field, value in update_data.items():
         setattr(connector, field, value)
 
     await db.flush()
     await db.refresh(connector)
+    _forget_mcp_state(connector)
     return connector
+
+
+def _forget_mcp_state(connector: ConnectorConfig) -> None:
+    """Drop in-process state tied to an MCP connector's old configuration.
+
+    Tool-name bindings are sticky against a *server* that tries to rebind
+    an approved name. They must not outlive the *user* repointing or
+    removing the connector: the bindings then name tools on a server that
+    is no longer configured, and every call fails until the process
+    restarts.
+    """
+    if connector.connector_type != ConnectorType.mcp:
+        return
+    from services.mcp.integration import invalidate_mcp_connector
+
+    invalidate_mcp_connector(connector.id)
 
 
 @router.delete("/{connector_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -337,6 +444,7 @@ async def delete_connector(
     """Delete a connector owned by the authenticated user."""
     connector = await _get_owned_connector(connector_id, current_user, db)
     await db.delete(connector)
+    _forget_mcp_state(connector)
 
 
 class ConnectorTestResult(BaseModel):
@@ -367,23 +475,50 @@ async def test_connector(
             ok=False, detail="Custom connectors do not support automated tests yet."
         )
 
+    # Decryption and parsing fail for different reasons and only one of
+    # them is fixed by re-entering the credentials, so they must not share
+    # a message: a rotated ENCRYPTION_KEY reported as "re-enter them" sends
+    # the user round a loop that cannot work.
     try:
-        credentials = json.loads(decrypt_credentials(row.encrypted_credentials))
+        decrypted = decrypt_credentials(row.encrypted_credentials)
     except Exception:
         return ConnectorTestResult(
             ok=False,
-            detail="Stored credentials could not be decrypted. Re-enter them to fix.",
+            detail=(
+                "Stored credentials could not be decrypted — the server's "
+                "encryption key has changed since they were saved. Re-enter "
+                "them to fix."
+            ),
+        )
+    try:
+        credentials = json.loads(decrypted)
+        if not isinstance(credentials, dict):
+            raise ValueError("credentials are not a JSON object")
+    except Exception:
+        return ConnectorTestResult(
+            ok=False,
+            detail="Stored credentials are malformed. Re-enter them to fix.",
         )
 
     if row.connector_type == ConnectorType.mcp:
+        from services.connectors.factory import coerce_header_map
         from services.mcp.activity import mcp_activity
         from services.mcp.client import HttpMCPTransport, MCPClient, MCPError
 
-        client = MCPClient(
-            HttpMCPTransport(
-                str(credentials.get("url", "")),
-                headers=dict(credentials.get("headers") or {}),
+        headers = coerce_header_map(credentials.get("headers"))
+        if headers is None:
+            mcp_activity.record_error(row.id, "malformed 'headers' credential")
+            return ConnectorTestResult(
+                ok=False,
+                detail=(
+                    "This connector is misconfigured: 'headers' must be an "
+                    "object of header name -> value. Re-enter the credentials "
+                    "to fix."
+                ),
             )
+
+        client = MCPClient(
+            HttpMCPTransport(str(credentials.get("url", "")), headers=headers)
         )
         try:
             tools = await client.list_tools()

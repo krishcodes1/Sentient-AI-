@@ -639,6 +639,33 @@ class ConnectorToolExecutor:
         if scope_error:
             return {"ok": False, "error": scope_error}
 
+        # Dispatch-time tier enforcement. Offer-time filtering alone is not
+        # enough: a model can emit a tool name it was never offered (via
+        # hallucination or injected content), and the static permission
+        # engine cannot see per-connector or per-user tiers. Re-resolve the
+        # effective tier here so hard_blocked and admin_only hold at the
+        # moment of execution — the same defense-in-depth the financial
+        # block already has.
+        tier = effective_tier(
+            config.get("permission_tier"), config.get("user_default_tier")
+        )
+        if tier == "hard_blocked":
+            return {
+                "ok": False,
+                "error": (
+                    f"Connector '{resolved.connector_type}' is hard-blocked "
+                    "by its permission tier."
+                ),
+            }
+        if tier == "admin_only" and not config.get("user_is_admin"):
+            return {
+                "ok": False,
+                "error": (
+                    f"Connector '{resolved.connector_type}' is admin-only "
+                    "and this account is not an administrator."
+                ),
+            }
+
         from services.connectors.base import (
             AuthenticationError,
             ConnectorError,
@@ -701,7 +728,45 @@ class ConnectorToolExecutor:
             )
             return {"ok": False, "error": f"Connector failure: {exc}"}
         finally:
+            # Persist tokens the connector rotated during this call (e.g. a
+            # Google refresh) before the instance is thrown away — even when
+            # the API call itself failed, a newly minted token is valid and
+            # saves the next call a round trip (or a dead connector).
+            updater = getattr(connector, "updated_credentials", None)
+            if callable(updater):
+                try:
+                    new_creds = updater(config["credentials"])
+                    if new_creds:
+                        await self._persist_credentials(config["id"], new_creds)
+                except Exception as exc:
+                    logger.warning(
+                        "credential_persist_failed",
+                        connector=resolved.connector_type,
+                        error=str(exc),
+                    )
             await connector.close()
+
+    async def _persist_credentials(
+        self, config_id: uuid_module.UUID, credentials: dict[str, Any]
+    ) -> None:
+        import json as json_module
+
+        from sqlalchemy import update
+
+        from core.security import encrypt_credentials
+        from models.connector import ConnectorConfig
+
+        async with self._session_factory() as session:
+            await session.execute(
+                update(ConnectorConfig)
+                .where(ConnectorConfig.id == config_id)
+                .values(
+                    encrypted_credentials=encrypt_credentials(
+                        json_module.dumps(credentials)
+                    )
+                )
+            )
+            await session.commit()
 
     # -- helpers ------------------------------------------------------------
 
@@ -719,6 +784,7 @@ class ConnectorToolExecutor:
 
         from core.security import decrypt_credentials
         from models.connector import ConnectorConfig, ConnectorType
+        from models.user import User
 
         try:
             user_uuid = uuid_module.UUID(user_id)
@@ -741,6 +807,21 @@ class ConnectorToolExecutor:
             if config is None:
                 return None
 
+            # The tier must be re-checked at dispatch time (not only at
+            # tool-offer time), so load the pieces effective_tier needs.
+            user_row = (
+                await session.execute(select(User).where(User.id == user_uuid))
+            ).scalar_one_or_none()
+            raw_tier = getattr(config, "permission_tier", None)
+            tier_fields = {
+                # The column is an Enum; effective_tier() wants the string.
+                "permission_tier": getattr(raw_tier, "value", raw_tier),
+                "user_default_tier": getattr(
+                    user_row, "default_permission_tier", None
+                ),
+                "user_is_admin": bool(getattr(user_row, "is_admin", False)),
+            }
+
             try:
                 credentials = json_module.loads(
                     decrypt_credentials(config.encrypted_credentials)
@@ -756,6 +837,7 @@ class ConnectorToolExecutor:
                     "credentials": {},
                     "granted_scopes": config.granted_scopes,
                     "rate_limit_per_minute": config.rate_limit_per_minute,
+                    **tier_fields,
                 }
 
             return {
@@ -763,6 +845,7 @@ class ConnectorToolExecutor:
                 "credentials": credentials,
                 "granted_scopes": config.granted_scopes,
                 "rate_limit_per_minute": config.rate_limit_per_minute,
+                **tier_fields,
             }
 
     @staticmethod

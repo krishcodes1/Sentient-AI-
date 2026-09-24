@@ -149,11 +149,16 @@ async def _make_mcp_connector(
     user_id,
     display_name="Notes Server",
     rate_limit_per_minute=30,
+    credentials=None,
 ):
     from core.security import encrypt_credentials
     from models.connector import AuthMethod, ConnectorConfig, ConnectorType
 
-    credentials = {"url": "https://mcp.example.com/mcp", "headers": {"X-Key": "k"}}
+    if credentials is None:
+        credentials = {
+            "url": "https://mcp.example.com/mcp",
+            "headers": {"X-Key": "k"},
+        }
     async with session_factory() as session:
         row = ConnectorConfig(
             user_id=user_id,
@@ -624,3 +629,387 @@ async def test_agent_route_injects_mcp_tools(client, session_factory):
     )
     assert mcp_tool.connector_type == "mcp"
     assert mcp_tool.permission_tier == "approval"
+
+
+# ---------------------------------------------------------------------------
+# Financial blocklist precision
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        "execute_trade",
+        "place_order",
+        "transfer_funds",
+        "withdraw_all",
+        "purchase_item",
+        "buyStock",
+        "sellShares",
+        "make_payment",
+        "wire_money",
+        "create_investment",
+        "pay",
+        # No separators to tokenize: the shape an evasive server would
+        # pick, so the substring search still covers it.
+        "executetrade",
+        "transfernow",
+    ],
+)
+def test_money_moving_actions_stay_blocked(action):
+    from services.mcp.integration import is_financial_action
+
+    assert is_financial_action(action) is True
+    assert classify_mcp_tool(f"mcp.notes_server.{action}") == "blocked"
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        "search_notes",
+        "list_assignments",
+        "get_weather",
+        "summarize_document",
+        # Each of these carries a blocked word as a substring and used to
+        # be refused for it.
+        "borderline_check",
+        "investigate_incident",
+        "payload_inspect",
+        "wireframe_export",
+        "overselling_report",
+    ],
+)
+def test_benign_actions_are_not_mistaken_for_money_movement(action):
+    from services.mcp.integration import is_financial_action
+
+    assert is_financial_action(action) is False
+    assert classify_mcp_tool(f"mcp.notes_server.{action}") == "requires_approval"
+
+
+def test_server_label_does_not_classify_its_tools():
+    """The label is the user's own display name. Matching it suppressed
+    every tool on a server called e.g. "Banking Orders" — silently, and
+    with no indication that the server's name was the cause."""
+    assert classify_mcp_tool("mcp.banking_orders.search_notes") == "requires_approval"
+    assert classify_mcp_tool("mcp.trading_docs.get_article") == "requires_approval"
+    # ...and the label buys a real money tool nothing.
+    assert classify_mcp_tool("mcp.notes.transfer_funds") == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_catalog_offers_benign_tools_from_a_financially_named_server(
+    session_factory,
+):
+    from tests.conftest import make_user
+
+    user, _ = await make_user(session_factory)
+    await _make_mcp_connector(session_factory, user.id, display_name="Banking Orders")
+
+    transport = FakeTransport(
+        tools=[
+            {"name": "search_docs", "description": "Search the docs"},
+            {"name": "get_article", "description": "Read one article"},
+            {"name": "transfer_funds", "description": "Definitely fine"},
+        ]
+    )
+    catalog = MCPToolCatalog(
+        MCPConnectorLoader(session_factory),
+        client_factory=lambda ref: MCPClient(transport),
+    )
+    tools = await catalog.tools_for_user(str(user.id))
+
+    assert [t.name for t in tools] == [
+        "mcp.banking_orders.search_docs",
+        "mcp.banking_orders.get_article",
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Misconfigured credentials degrade gracefully
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_non_object_headers_do_not_break_tool_discovery(session_factory):
+    """``dict("Bearer x")`` raises, and discovery runs on every chat send:
+    one malformed connector used to fail every turn for that user."""
+    from tests.conftest import make_user
+
+    user, _ = await make_user(session_factory)
+    await _make_mcp_connector(
+        session_factory,
+        user.id,
+        credentials={"url": "https://mcp.example.com/mcp", "headers": "Bearer x"},
+    )
+
+    catalog = MCPToolCatalog(
+        MCPConnectorLoader(session_factory),
+        client_factory=lambda ref: MCPClient(
+            FakeTransport(tools=[{"name": "search_notes"}])
+        ),
+    )
+    assert await catalog.tools_for_user(str(user.id)) == []
+
+
+@pytest.mark.parametrize(
+    "credentials",
+    [
+        {"url": "https://mcp.example.com/mcp", "headers": "Bearer x"},
+        {"url": "https://mcp.example.com/mcp", "headers": ["X-Key", "k"]},
+        {"url": "https://mcp.example.com/mcp", "headers": {"X-Key": {"a": 1}}},
+    ],
+)
+@pytest.mark.asyncio
+async def test_loader_marks_unusable_header_credentials(session_factory, credentials):
+    from tests.conftest import make_user
+
+    user, _ = await make_user(session_factory)
+    await _make_mcp_connector(session_factory, user.id, credentials=credentials)
+
+    refs = await MCPConnectorLoader(session_factory).load_for_user(str(user.id))
+    assert len(refs) == 1
+    assert "headers" in (refs[0].config_error or "")
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_says_misconfigured_not_missing(session_factory):
+    """A broken connector sitting in the user's list must not be reported
+    as one that was never configured."""
+    from tests.conftest import make_user
+
+    user, _ = await make_user(session_factory)
+    await _make_mcp_connector(
+        session_factory,
+        user.id,
+        credentials={"url": "https://mcp.example.com/mcp", "headers": "Bearer x"},
+    )
+
+    dispatcher = MCPDispatcher(
+        MCPConnectorLoader(session_factory),
+        client_factory=lambda ref: MCPClient(FakeTransport()),
+    )
+    result = await dispatcher.execute(
+        "mcp.notes_server.search_notes", {}, str(user.id)
+    )
+    assert result["ok"] is False
+    assert "misconfigured" in result["error"]
+    assert "headers" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_undecryptable_credentials_report_the_real_reason(session_factory):
+    from models.connector import ConnectorConfig
+    from tests.conftest import make_user
+
+    user, _ = await make_user(session_factory)
+    connector_id = await _make_mcp_connector(session_factory, user.id)
+
+    async with session_factory() as session:
+        row = await session.get(ConnectorConfig, connector_id)
+        row.encrypted_credentials = b"not-a-fernet-token"
+        await session.commit()
+
+    refs = await MCPConnectorLoader(session_factory).load_for_user(str(user.id))
+    assert len(refs) == 1
+    assert "could not be read" in (refs[0].config_error or "")
+
+
+@pytest.mark.asyncio
+async def test_chat_send_survives_a_malformed_mcp_connector(client, session_factory):
+    """End to end: the turn completes, just without that server's tools."""
+    from main import app
+    from services.agent.runtime import AgentResponse
+    from tests.conftest import auth_headers, make_user
+
+    user, token = await make_user(session_factory)
+    await _make_mcp_connector(
+        session_factory,
+        user.id,
+        credentials={"url": "https://mcp.example.com/mcp", "headers": "Bearer x"},
+    )
+
+    captured: dict = {}
+
+    class FakeRuntime:
+        async def chat(self, messages, tools, user_id, conversation_id, **kwargs):
+            captured["tools"] = list(tools)
+            return AgentResponse(content="done")
+
+    catalog = MCPToolCatalog(
+        MCPConnectorLoader(session_factory),
+        client_factory=lambda ref: MCPClient(
+            FakeTransport(tools=[{"name": "search_notes"}])
+        ),
+    )
+
+    old_runtime = getattr(app.state, "agent_runtime", None)
+    old_catalog = getattr(app.state, "mcp_catalog", None)
+    app.state.agent_runtime = FakeRuntime()
+    app.state.mcp_catalog = catalog
+    try:
+        conv = await client.post(
+            "/api/agent/conversations",
+            headers=auth_headers(token),
+            json={"title": "MCP test"},
+        )
+        assert conv.status_code == 201
+        resp = await client.post(
+            f"/api/agent/conversations/{conv.json()['id']}/messages",
+            headers=auth_headers(token),
+            json={"content": "hi"},
+        )
+    finally:
+        app.state.agent_runtime = old_runtime
+        app.state.mcp_catalog = old_catalog
+
+    assert resp.status_code == 201
+    assert [t.name for t in captured["tools"] if t.name.startswith("mcp.")] == []
+
+
+@pytest.mark.asyncio
+async def test_connector_test_route_reports_malformed_headers(client, session_factory):
+    from tests.conftest import auth_headers, make_user
+
+    user, token = await make_user(session_factory)
+    connector_id = await _make_mcp_connector(
+        session_factory,
+        user.id,
+        credentials={"url": "https://mcp.example.com/mcp", "headers": "Bearer x"},
+    )
+
+    resp = await client.post(
+        f"/api/connectors/{connector_id}/test", headers=auth_headers(token)
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is False
+    assert "misconfigured" in body["detail"]
+
+
+@pytest.mark.asyncio
+async def test_connector_test_route_distinguishes_a_decryption_failure(
+    client, session_factory
+):
+    """A rotated encryption key is not fixed by re-entering credentials,
+    so it must not be reported the same way as a malformed blob."""
+    from models.connector import ConnectorConfig
+    from tests.conftest import auth_headers, make_user
+
+    user, token = await make_user(session_factory)
+    connector_id = await _make_mcp_connector(session_factory, user.id)
+
+    async with session_factory() as session:
+        row = await session.get(ConnectorConfig, connector_id)
+        row.encrypted_credentials = b"not-a-fernet-token"
+        await session.commit()
+
+    resp = await client.post(
+        f"/api/connectors/{connector_id}/test", headers=auth_headers(token)
+    )
+    assert resp.json()["ok"] is False
+    assert "encryption key has changed" in resp.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Name bindings survive a hostile server, not a user edit
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_updating_a_connector_clears_its_name_bindings(client, session_factory):
+    """Bindings are sticky so a server cannot rebind an approved name.
+    They must not outlive the user repointing the server, or every tool
+    name stays wedged until the process restarts."""
+    from services.mcp.integration import mcp_name_bindings
+    from tests.conftest import auth_headers, make_user
+
+    user, token = await make_user(session_factory)
+    connector_id = await _make_mcp_connector(session_factory, user.id)
+
+    catalog = MCPToolCatalog(
+        MCPConnectorLoader(session_factory),
+        client_factory=lambda ref: MCPClient(
+            FakeTransport(tools=[{"name": "search notes"}])
+        ),
+    )
+    mcp_name_bindings.reset()
+    try:
+        await catalog.tools_for_user(str(user.id))
+        assert mcp_name_bindings.resolve(connector_id, "search_notes") == "search notes"
+
+        resp = await client.patch(
+            f"/api/connectors/{connector_id}",
+            headers=auth_headers(token),
+            json={"credentials": {"url": "https://other.example.com/mcp"}},
+        )
+        assert resp.status_code == 200
+        assert mcp_name_bindings.resolve(connector_id, "search_notes") is None
+        # The cached tool list for that server is dropped with it.
+        assert connector_id not in catalog._cache
+    finally:
+        mcp_name_bindings.reset()
+
+
+@pytest.mark.asyncio
+async def test_deleting_a_connector_clears_its_name_bindings(client, session_factory):
+    from services.mcp.integration import mcp_name_bindings
+    from tests.conftest import auth_headers, make_user
+
+    user, token = await make_user(session_factory)
+    connector_id = await _make_mcp_connector(session_factory, user.id)
+
+    catalog = MCPToolCatalog(
+        MCPConnectorLoader(session_factory),
+        client_factory=lambda ref: MCPClient(
+            FakeTransport(tools=[{"name": "search notes"}])
+        ),
+    )
+    mcp_name_bindings.reset()
+    try:
+        await catalog.tools_for_user(str(user.id))
+        assert mcp_name_bindings.resolve(connector_id, "search_notes") is not None
+
+        resp = await client.delete(
+            f"/api/connectors/{connector_id}", headers=auth_headers(token)
+        )
+        assert resp.status_code == 204
+        assert mcp_name_bindings.resolve(connector_id, "search_notes") is None
+    finally:
+        mcp_name_bindings.reset()
+
+
+@pytest.mark.asyncio
+async def test_a_server_still_cannot_rebind_an_approved_name(session_factory):
+    """The sticky binding is against the *server*; invalidation is a user
+    action only. Re-discovery must not silently re-point a name."""
+    from services.mcp.integration import mcp_name_bindings
+    from tests.conftest import make_user
+
+    user, _ = await make_user(session_factory)
+    connector_id = await _make_mcp_connector(session_factory, user.id)
+
+    mcp_name_bindings.reset()
+    try:
+        first = MCPToolCatalog(
+            MCPConnectorLoader(session_factory),
+            client_factory=lambda ref: MCPClient(
+                FakeTransport(tools=[{"name": "search_notes"}])
+            ),
+            ttl_seconds=0.0,
+        )
+        await first.tools_for_user(str(user.id))
+
+        # The server now advertises a different remote tool that
+        # normalizes onto the already-approved exposed name.
+        second = MCPToolCatalog(
+            MCPConnectorLoader(session_factory),
+            client_factory=lambda ref: MCPClient(
+                FakeTransport(tools=[{"name": "search notes"}])
+            ),
+            ttl_seconds=0.0,
+        )
+        await second.tools_for_user(str(user.id))
+
+        assert mcp_name_bindings.resolve(connector_id, "search_notes") == "search_notes"
+    finally:
+        mcp_name_bindings.reset()

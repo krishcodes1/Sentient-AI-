@@ -50,6 +50,12 @@ function renderDialog(
 const confirmButton = () => screen.getByRole("button", { name: "Delete" });
 const cancelButton = () => screen.getByRole("button", { name: "Keep" });
 
+/**
+ * The scrim is the dialog's parent — it is what a click "outside" actually
+ * lands on, and it carries no role of its own because it is not the dialog.
+ */
+const backdrop = () => screen.getByRole("dialog").parentElement as HTMLElement;
+
 describe("ConfirmDialog", () => {
   it("renders nothing at all while closed", () => {
     renderDialog({ open: false });
@@ -63,7 +69,11 @@ describe("ConfirmDialog", () => {
 
     const dialog = screen.getByRole("dialog");
     expect(dialog).toHaveAttribute("aria-modal", "true");
-    expect(dialog).toHaveAttribute("aria-label", TITLE);
+    // Named and described by its own heading and body, whichever way the
+    // component wires that up — what matters is that a screen reader is
+    // told what this dialog is about before it reads the buttons.
+    expect(dialog).toHaveAccessibleName(TITLE);
+    expect(dialog).toHaveAccessibleDescription(MESSAGE);
     expect(screen.getByText(MESSAGE)).toBeInTheDocument();
     expect(confirmButton()).toBeEnabled();
     expect(cancelButton()).toBeEnabled();
@@ -167,7 +177,7 @@ describe("ConfirmDialog", () => {
     const user = userEvent.setup();
     const { onCancel, rerender } = renderDialog();
 
-    await user.click(screen.getByRole("dialog"));
+    await user.click(backdrop());
     expect(onCancel).toHaveBeenCalledOnce();
 
     rerender(
@@ -193,7 +203,7 @@ describe("ConfirmDialog", () => {
     const { onCancel } = renderDialog({ onConfirm: () => gate.promise });
 
     await user.click(confirmButton());
-    await user.click(screen.getByRole("dialog"));
+    await user.click(backdrop());
     await user.keyboard("{Escape}");
 
     expect(onCancel).not.toHaveBeenCalled();

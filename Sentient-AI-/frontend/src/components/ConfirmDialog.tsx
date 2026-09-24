@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { AlertTriangle, Loader2 } from "lucide-react";
+import { useFocusTrap } from "@/hooks/useFocusTrap";
 
 /**
  * Branded replacement for window.confirm(). Renders a modal with the
@@ -28,19 +29,24 @@ export default function ConfirmDialog({
 }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  const messageId = useId();
 
   useEffect(() => {
-    if (!open) {
-      setPending(false);
-      setError(null);
-      return;
-    }
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !pending) onCancel();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, pending, onCancel]);
+    if (open) return;
+    setPending(false);
+    setError(null);
+  }, [open]);
+
+  // Escape is suppressed while the destructive action is in flight, for the
+  // same reason the buttons are: the request cannot be taken back, so
+  // closing here would only hide its outcome.
+  const escape = useCallback(() => {
+    if (!pending) onCancel();
+  }, [pending, onCancel]);
+
+  useFocusTrap(open, panelRef, escape);
 
   if (!open) return null;
 
@@ -60,13 +66,15 @@ export default function ConfirmDialog({
   return (
     <div
       className="fixed inset-0 z-[60] flex items-center justify-center p-4"
-      style={{ background: "rgba(0,0,0,0.62)", backdropFilter: "blur(2px)" }}
+      style={{ background: "var(--scrim)", backdropFilter: "blur(2px)" }}
       onClick={() => !pending && onCancel()}
-      role="dialog"
-      aria-modal="true"
-      aria-label={title}
     >
       <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={messageId}
         className="w-full max-w-sm rounded-[16px] p-6"
         style={{
           background: "var(--claw-panel)",
@@ -88,8 +96,14 @@ export default function ConfirmDialog({
             </div>
           )}
           <div className="min-w-0">
-            <h3 style={{ color: "var(--text-primary)" }}>{title}</h3>
-            <p className="text-sm mt-1" style={{ color: "var(--text-secondary)" }}>
+            <h3 id={titleId} style={{ color: "var(--text-primary)" }}>
+              {title}
+            </h3>
+            <p
+              id={messageId}
+              className="text-sm mt-1"
+              style={{ color: "var(--text-secondary)" }}
+            >
               {message}
             </p>
           </div>
@@ -97,6 +111,7 @@ export default function ConfirmDialog({
 
         {error && (
           <p
+            role="alert"
             className="text-xs mb-3 px-3 py-2 rounded-[8px]"
             style={{
               background: "var(--fill-danger)",
@@ -127,7 +142,7 @@ export default function ConfirmDialog({
             disabled={pending}
             onClick={() => void handleConfirm()}
             className="inline-flex items-center gap-2 px-4 py-2 rounded-[10px] text-sm font-semibold disabled:opacity-50"
-            style={{ background: accent, color: "#0a0a0b" }}
+            style={{ background: accent, color: "var(--text-on-accent)" }}
           >
             {pending && <Loader2 className="w-4 h-4 animate-spin" />}
             {confirmLabel}

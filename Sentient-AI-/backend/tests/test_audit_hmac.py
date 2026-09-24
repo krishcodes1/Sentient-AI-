@@ -511,9 +511,10 @@ def test_hmac_differs_from_legacy_and_dedicated_key_changes_hash(monkeypatch):
 @pytest.mark.asyncio
 async def test_verify_endpoint_accepts_legacy_unkeyed_row(client, session_factory):
     """A row written before the keyed-hash upgrade carries an unkeyed
-    SHA-256. The endpoint must report it valid (flagged legacy), not
-    tampered — a false tamper alarm on the platform's own compliance
-    artifact teaches the user to ignore the integrity indicator."""
+    SHA-256. The endpoint must distinguish it from both a keyed-verified
+    row and a tampered one: it reports ``legacy`` (intact as far as an
+    unkeyed digest can show) without claiming ``valid``, which only the
+    keyed HMAC earns."""
     from core.security import compute_audit_hash_legacy
     from models.audit import AuditLog, AuditStatus
     from services.audit import build_hash_payload
@@ -555,8 +556,75 @@ async def test_verify_endpoint_accepts_legacy_unkeyed_row(client, session_factor
     resp = await client.get(f"/api/audit/{row_id}/verify", headers=auth_headers(token))
     assert resp.status_code == 200
     body = resp.json()
-    assert body["valid"] is True, "legacy row was falsely reported as tampered"
-    assert body["legacy"] is True
+    assert body["legacy"] is True, "legacy row was reported as tampered"
+    assert body["valid"] is False, "an unkeyed digest must not count as verified"
+
+
+@pytest.mark.asyncio
+async def test_verify_endpoint_rejects_a_forged_row_with_a_recomputed_unkeyed_hash(
+    client, session_factory
+):
+    """The downgrade that mattered: an adversary with database write access
+    invents a row, computes its UNKEYED digest (no key needed), and the
+    endpoint blesses it as verified history. The unkeyed path is gated on
+    ``seq IS NULL`` and never sets ``valid``, so neither shape passes."""
+    from core.security import compute_audit_hash_legacy
+    from models.audit import AuditLog, AuditStatus
+    from services.audit import build_hash_payload
+    from tests.conftest import auth_headers, make_user
+
+    user, token = await make_user(session_factory, "forger@example.com")
+
+    def _forged(seq, request_id):
+        payload = build_hash_payload(
+            user_id=str(user.id),
+            connector_name="canvas",
+            action="wire_transfer",
+            endpoint="/api/v1/transfer",
+            scope_used="courses.read",
+            status_value="approved",
+            request_id=request_id,
+            request_data=None,
+            response_summary="approved by owner",
+            previous_hash=None,
+        )
+        return AuditLog(
+            user_id=user.id,
+            connector_name="canvas",
+            action="wire_transfer",
+            endpoint="/api/v1/transfer",
+            scope_used="courses.read",
+            status=AuditStatus.approved,
+            request_id=request_id,
+            request_data=None,
+            response_summary="approved by owner",
+            previous_hash=None,
+            seq=seq,
+            integrity_hash=compute_audit_hash_legacy(payload),
+        )
+
+    # Two shapes: one that looks post-upgrade (has a seq) and one that
+    # clears seq to reach the legacy fallback.
+    async with session_factory() as session:
+        numbered = _forged(1, "req-forged-seq")
+        cleared = _forged(None, "req-forged-noseq")
+        session.add_all([numbered, cleared])
+        await session.commit()
+        numbered_id, cleared_id = str(numbered.id), str(cleared.id)
+
+    numbered_body = (
+        await client.get(
+            f"/api/audit/{numbered_id}/verify", headers=auth_headers(token)
+        )
+    ).json()
+    assert numbered_body == {"id": numbered_id, "valid": False, "legacy": False}
+
+    cleared_body = (
+        await client.get(f"/api/audit/{cleared_id}/verify", headers=auth_headers(token))
+    ).json()
+    # Reachable, but only as "cannot be verified by key" — never as valid.
+    assert cleared_body["valid"] is False
+    assert cleared_body["legacy"] is True
 
 
 @pytest.mark.asyncio

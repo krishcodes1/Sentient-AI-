@@ -1,10 +1,21 @@
 name: CI
 
+# Feature branches are where the work actually happens, and gating only on
+# `main` and open PRs meant a branch could accumulate days of commits with
+# nothing ever run against it — the first signal arrived when the PR opened,
+# which is the worst moment to learn the suite is red. Every pushed branch
+# is built; `concurrency` below throws away superseded runs so the extra
+# coverage does not cost a queue.
 on:
   push:
-    branches: [main]
+    branches: ["**"]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   # Static gates for the backend. Fast and independent of the test jobs, so
@@ -83,11 +94,44 @@ jobs:
       - name: Build
         run: npm run build
 
+      # --max-warnings is a ratchet, not a clean-tree claim: the 13 warnings
+      # below this line already existed (8 of them react-hooks correctness
+      # flags worth fixing). Pinning the count fails the build on the 14th
+      # without demanding a cleanup sprint first. Lower the number as the
+      # backlog shrinks; never raise it.
       - name: Lint
-        run: npm run lint
+        run: npx eslint . --max-warnings 13
 
-      - name: Unit tests
-        run: npm run test
+      - name: Unit tests with coverage
+        run: |
+          npm i -D --no-save @vitest/coverage-v8@3
+          npx vitest run --coverage --coverage.reporter=text-summary \
+            --coverage.reporter=lcov | tee coverage.txt
+
+      - name: Publish coverage summary
+        if: always()
+        run: |
+          {
+            echo '### Frontend coverage'
+            echo '```'
+            tail -n 20 coverage.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-coverage
+          path: Sentient-AI-/frontend/coverage
+          if-no-files-found: ignore
+
+      # Advisory, same reasoning as the backend's pip-audit: an advisory
+      # published upstream overnight must not block unrelated work. Scoped
+      # to high/critical so the signal stays readable.
+      - name: Dependency audit (npm audit)
+        continue-on-error: true
+        run: npm audit --audit-level=high
 
   backend:
     name: Backend (pytest)
@@ -112,8 +156,58 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-dev.txt
 
-      - name: Run tests
-        run: python -m pytest tests/ -v
+      # pytest-cov is installed here rather than pinned in
+      # requirements-dev.txt: coverage is a reporting concern for CI, and a
+      # developer running the suite locally should not have to carry the
+      # plugin to do it.
+      - name: Run tests with coverage
+        run: |
+          pip install pytest-cov
+          python -m pytest tests/ -v \
+            --cov=. --cov-report=term --cov-report=xml --cov-report=html \
+            | tee pytest.txt
+
+      - name: Publish coverage summary
+        if: always()
+        run: |
+          {
+            echo '### Backend coverage'
+            echo '```'
+            grep -E '^(TOTAL|Name|-+)' pytest.txt || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: |
+            Sentient-AI-/backend/coverage.xml
+            Sentient-AI-/backend/htmlcov
+          if-no-files-found: ignore
+
+  # Committed credentials are the one class of mistake that is not fixed by
+  # reverting: once pushed, the secret has to be rotated. Advisory for now —
+  # the tree has never been scanned, so the first runs establish what the
+  # rules flag (the .env.example placeholders among them) before anything is
+  # gated on a clean result.
+  secrets:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: a secret removed in a later commit is still in the
+          # objects an attacker can fetch.
+          fetch-depth: 0
+
+      - name: Scan working tree and history
+        continue-on-error: true
+        run: |
+          docker run --rm -v "$PWD:/repo" \
+            zricethezav/gitleaks:v8.21.2 \
+            detect --source=/repo --redact --verbose
 
   # Same suite against real Postgres, so Postgres-only behavior (native
   # enums, ALTER statements, asyncpg quirks) is exercised before it first

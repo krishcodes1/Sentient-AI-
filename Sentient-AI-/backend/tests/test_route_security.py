@@ -238,6 +238,118 @@ async def test_connector_create_validates_credentials(client, session_factory):
     assert "base_url" in response.json()["detail"]
 
 
+async def _create_canvas_connector(client, token):
+    response = await client.post(
+        "/api/connectors/",
+        headers=auth_headers(token),
+        json={
+            "connector_type": "canvas",
+            "display_name": "Canvas",
+            "auth_method": "bearer_token",
+            "credentials": {
+                "base_url": "https://school.instructure.com",
+                "access_token": "tok",
+            },
+        },
+    )
+    assert response.status_code == 201
+    return response.json()["id"]
+
+
+@pytest.mark.asyncio
+async def test_connector_update_validates_credentials(client, session_factory):
+    """PATCH stored whatever it was given. A blob the connector can never
+    use then failed at tool-call time, far from the edit that caused it."""
+    _, token = await make_user(session_factory)
+    connector_id = await _create_canvas_connector(client, token)
+
+    broken = await client.patch(
+        f"/api/connectors/{connector_id}",
+        headers=auth_headers(token),
+        json={"credentials": {"access_token": "tok"}},  # missing base_url
+    )
+    assert broken.status_code == 422
+    assert "base_url" in broken.json()["detail"]
+
+    scheme = await client.patch(
+        f"/api/connectors/{connector_id}",
+        headers=auth_headers(token),
+        json={
+            "credentials": {
+                "base_url": "school.instructure.com",
+                "access_token": "tok",
+            }
+        },
+    )
+    assert scheme.status_code == 422
+    assert "http" in scheme.json()["detail"]
+
+    ok = await client.patch(
+        f"/api/connectors/{connector_id}",
+        headers=auth_headers(token),
+        json={
+            "credentials": {
+                "base_url": "https://canvas.myschool.edu",
+                "access_token": "tok2",
+            }
+        },
+    )
+    assert ok.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_connector_update_rejects_non_object_mcp_headers(
+    client, session_factory
+):
+    _, token = await make_user(session_factory)
+    created = await client.post(
+        "/api/connectors/",
+        headers=auth_headers(token),
+        json={
+            "connector_type": "mcp",
+            "display_name": "Notes Server",
+            "auth_method": "bearer_token",
+            "credentials": {"url": "https://mcp.example.com/mcp"},
+        },
+    )
+    assert created.status_code == 201
+
+    response = await client.patch(
+        f"/api/connectors/{created.json()['id']}",
+        headers=auth_headers(token),
+        json={
+            "credentials": {
+                "url": "https://mcp.example.com/mcp",
+                "headers": "Bearer token",
+            }
+        },
+    )
+    assert response.status_code == 422
+    assert "headers" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_connector_create_rejects_non_object_mcp_headers(
+    client, session_factory
+):
+    _, token = await make_user(session_factory)
+    response = await client.post(
+        "/api/connectors/",
+        headers=auth_headers(token),
+        json={
+            "connector_type": "mcp",
+            "display_name": "Notes Server",
+            "auth_method": "bearer_token",
+            "credentials": {
+                "url": "https://mcp.example.com/mcp",
+                "headers": "Bearer token",
+            },
+        },
+    )
+    assert response.status_code == 422
+    assert "headers" in response.json()["detail"]
+
+
 @pytest.mark.asyncio
 async def test_audit_logs_scoped_and_verifiable(client, session_factory):
     from models.audit import AuditStatus

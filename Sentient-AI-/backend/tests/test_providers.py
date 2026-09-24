@@ -344,7 +344,13 @@ async def test_anthropic_sends_every_system_message_to_the_model(fake_anthropic)
     )
 
     kwargs = provider._client.create_calls[0]
-    assert kwargs["system"] == "POLICY: money never moves\n\nstray late instruction"
+    assert kwargs["system"] == [
+        {
+            "type": "text",
+            "text": "POLICY: money never moves\n\nstray late instruction",
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
     assert kwargs["messages"] == [
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "hi"},
@@ -377,6 +383,10 @@ def test_anthropic_tool_schema_conversion():
             "name": "ping",
             "description": "",
             "input_schema": {"type": "object", "properties": {}},
+            # Cache breakpoint on the last tool only — it covers the whole
+            # tool prefix, and Anthropic allows a handful of markers, not
+            # one per tool.
+            "cache_control": {"type": "ephemeral"},
         },
     ]
 
@@ -668,6 +678,9 @@ async def test_gemini_api_key_travels_in_header_never_in_url(transport):
     """Regression: the key must not reach request URLs, which land in
     access logs, proxies, and tracebacks."""
     api_key = "AIzaSy-DO-NOT-LEAK-ME"
+    transport.responder = lambda request: httpx.Response(
+        200, json={"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}
+    )
     provider = GeminiProvider(api_key=api_key)
 
     await provider.complete([{"role": "user", "content": "hi"}])
@@ -681,19 +694,55 @@ async def test_gemini_api_key_travels_in_header_never_in_url(transport):
 
 
 @pytest.mark.asyncio
-async def test_gemini_empty_candidates_returns_empty_response(transport):
-    """A safety-blocked prompt comes back with no candidates; that is an
-    empty answer, not a crash."""
+async def test_gemini_empty_candidates_raises_provider_error(transport):
+    """A safety-blocked prompt comes back with no candidates. Returning
+    blank content here used to be persisted as a permanent empty assistant
+    message (and cached); it must surface as a ProviderError that names
+    the block reason instead."""
     transport.responder = lambda request: httpx.Response(
         200, json={"promptFeedback": {"blockReason": "SAFETY"}}
     )
     provider = GeminiProvider(api_key="AIza-secret")
 
-    resp = await provider.complete([{"role": "user", "content": "hi"}])
+    with pytest.raises(ProviderError) as excinfo:
+        await provider.complete([{"role": "user", "content": "hi"}])
 
-    assert resp.content == ""
-    assert resp.tool_calls == []
-    assert resp.model == "gemini-2.5-flash"
+    assert "SAFETY" in str(excinfo.value)
+    await provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_gemini_textless_candidate_raises_provider_error(transport):
+    """A candidate with neither text nor tool calls (e.g. finishReason
+    RECITATION) is a failed completion, not a silent blank."""
+    transport.responder = lambda request: httpx.Response(
+        200,
+        json={"candidates": [{"content": {"parts": []}, "finishReason": "RECITATION"}]},
+    )
+    provider = GeminiProvider(api_key="AIza-secret")
+
+    with pytest.raises(ProviderError) as excinfo:
+        await provider.complete([{"role": "user", "content": "hi"}])
+
+    assert "RECITATION" in str(excinfo.value)
+    await provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_gemini_transport_error_becomes_provider_error(transport):
+    """Connect/read failures escape the request call itself, not
+    raise_for_status; they must still surface as ProviderError (the
+    blocking route's designed 502), never a raw 500."""
+    def _refuse(request):
+        raise httpx.ConnectError("connection refused")
+
+    transport.responder = _refuse
+    provider = GeminiProvider(api_key="AIza-secret")
+
+    with pytest.raises(ProviderError) as excinfo:
+        await provider.complete([{"role": "user", "content": "hi"}])
+
+    assert "could not reach the provider" in str(excinfo.value)
     await provider.aclose()
 
 
@@ -719,6 +768,9 @@ async def test_gemini_http_error_becomes_provider_error_without_url_or_key(trans
 
 @pytest.mark.asyncio
 async def test_gemini_payload_carries_all_system_messages_roles_and_tools(transport):
+    transport.responder = lambda request: httpx.Response(
+        200, json={"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}
+    )
     provider = GeminiProvider(api_key="AIza-secret")
 
     await provider.complete(
@@ -1010,4 +1062,255 @@ async def test_create_provider_builds_ollama_without_a_key(transport):
 
     assert isinstance(provider, OllamaProvider)
     assert provider._base_url == "http://ollama.internal:11434"
+    await provider.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Vision: multimodal content blocks
+# ---------------------------------------------------------------------------
+
+# One base64 pixel. Its content never matters to this layer — what matters
+# is that the bytes reach each vendor in the shape that vendor expects.
+PIXEL = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAE"
+
+VISION_MESSAGES = [
+    {"role": "system", "content": "POLICY: money never moves"},
+    {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "which shelf is this?"},
+            {"type": "image", "media_type": "image/jpeg", "data": PIXEL},
+        ],
+    },
+]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_sends_images_as_base64_source_blocks(fake_anthropic):
+    provider = AnthropicProvider(api_key="sk-ant-secret")
+
+    await provider.complete(VISION_MESSAGES)
+
+    kwargs = provider._client.create_calls[0]
+    assert kwargs["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "which shelf is this?"},
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/jpeg",
+                        "data": PIXEL,
+                    },
+                },
+            ],
+        }
+    ]
+    # The policy slot stays text: an image can never carry instruction
+    # authority.
+    assert kwargs["system"][0]["text"] == "POLICY: money never moves"
+
+
+@pytest.mark.asyncio
+async def test_openai_sends_images_as_image_url_parts(fake_openai):
+    provider = OpenAIProvider(api_key="sk-secret")
+
+    await provider.complete(VISION_MESSAGES)
+
+    sent = provider._client.create_calls[0]["messages"]
+    assert sent[1]["content"] == [
+        {"type": "text", "text": "which shelf is this?"},
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{PIXEL}"}},
+    ]
+    # A text-only message keeps the bare-string shape it always had;
+    # rewriting every message into parts would churn the prefix the
+    # automatic prompt cache matches on.
+    assert sent[0]["content"] == "POLICY: money never moves"
+
+
+@pytest.mark.asyncio
+async def test_gemini_sends_images_as_inline_data(transport):
+    provider = GeminiProvider(api_key="g-secret")
+    transport.responder = lambda request: httpx.Response(
+        200,
+        json={"candidates": [{"content": {"parts": [{"text": "A KALLAX."}]}}]},
+    )
+
+    resp = await provider.complete(VISION_MESSAGES)
+
+    assert resp.content == "A KALLAX."
+    payload = transport.last_payload
+    assert payload["contents"] == [
+        {
+            "role": "user",
+            "parts": [
+                {"text": "which shelf is this?"},
+                {"inlineData": {"mimeType": "image/jpeg", "data": PIXEL}},
+            ],
+        }
+    ]
+    assert payload["systemInstruction"] == {
+        "parts": [{"text": "POLICY: money never moves"}]
+    }
+    await provider.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda: DeepseekProvider(api_key="k"),
+        lambda: GroqProvider(api_key="k"),
+        lambda: OllamaProvider(),
+    ],
+)
+async def test_providers_without_vision_refuse_rather_than_drop_the_image(
+    factory, fake_openai, transport
+):
+    """Silently stripping the image would leave the model answering a
+    question about a picture it never saw, with nothing in the reply to
+    say so."""
+    provider = factory()
+
+    with pytest.raises(ProviderError) as excinfo:
+        await provider.complete(VISION_MESSAGES)
+
+    message = str(excinfo.value)
+    assert provider._provider_name in message
+    assert "image attachments" in message
+    # Actionable: it names what to switch to.
+    assert "Anthropic" in message
+    await provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_non_vision_provider_still_serves_a_text_only_turn(fake_openai):
+    provider = DeepseekProvider(api_key="k")
+    provider._client.response = _OAIResponse(
+        choices=[_OAIChoice(_OAIMessage(content="fine"))]
+    )
+
+    resp = await provider.complete([{"role": "user", "content": "hi"}])
+
+    assert resp.content == "fine"
+
+
+@pytest.mark.asyncio
+async def test_non_vision_refusal_also_covers_the_streaming_path(transport):
+    provider = OllamaProvider()
+
+    with pytest.raises(ProviderError):
+        async for _ in provider.stream(VISION_MESSAGES):
+            pass
+
+    # Nothing was put on the wire.
+    assert transport.requests == []
+    await provider.aclose()
+
+
+def test_vision_support_is_declared_per_provider():
+    """The runtime has to answer "can I send this photo?" before spending a
+    request, so the flag lives on the class."""
+    assert AnthropicProvider.supports_vision is True
+    assert OpenAIProvider.supports_vision is True
+    assert GeminiProvider.supports_vision is True
+    assert OpenAICompatibleProvider.supports_vision is False
+    assert DeepseekProvider.supports_vision is False
+    assert OllamaProvider.supports_vision is False
+
+
+# ---------------------------------------------------------------------------
+# Prompt caching
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_anthropic_marks_one_cache_breakpoint_on_system_and_on_tools(
+    fake_anthropic,
+):
+    """Cached input bills at roughly a tenth of fresh input, and the system
+    prompt plus tool schemas are re-sent verbatim on every turn."""
+    provider = AnthropicProvider(api_key="sk-ant-secret")
+
+    await provider.complete(
+        [{"role": "system", "content": "policy"}, {"role": "user", "content": "hi"}],
+        tools=TOOLS,
+    )
+
+    kwargs = provider._client.create_calls[0]
+    assert kwargs["system"][0]["cache_control"] == {"type": "ephemeral"}
+    # Exactly one marker on the tool array: Anthropic allows a handful of
+    # breakpoints, not one per tool, and the last one covers the prefix.
+    marked = [t for t in kwargs["tools"] if "cache_control" in t]
+    assert len(marked) == 1
+    assert marked[0] is kwargs["tools"][-1]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_reports_cache_token_counts_when_the_api_sends_them(
+    fake_anthropic,
+):
+    provider = AnthropicProvider(api_key="sk-ant-secret")
+    usage = _AnthropicUsage(input_tokens=40, output_tokens=9)
+    usage.cache_read_input_tokens = 610
+    usage.cache_creation_input_tokens = 0
+    provider._client.response = _AnthropicResponse(
+        content=[_TextBlock(text="hi")], usage=usage
+    )
+
+    resp = await provider.complete([{"role": "user", "content": "hi"}])
+
+    assert resp.usage["cache_read_input_tokens"] == 610
+    assert resp.usage["cache_creation_input_tokens"] == 0
+
+
+@pytest.mark.asyncio
+async def test_anthropic_omits_cache_counters_the_api_did_not_send(fake_anthropic):
+    """Reporting a zero the provider never sent would read as "nothing was
+    cached" when the truth is "this model does not tell us"."""
+    provider = AnthropicProvider(api_key="sk-ant-secret")
+
+    resp = await provider.complete([{"role": "user", "content": "hi"}])
+
+    assert "cache_read_input_tokens" not in resp.usage
+
+
+@pytest.mark.asyncio
+async def test_openai_surfaces_its_automatic_cache_counter(fake_openai):
+    provider = OpenAIProvider(api_key="sk-secret")
+    usage = _OAIUsage(prompt_tokens=1200, completion_tokens=8)
+    usage.prompt_tokens_details = SimpleNamespace(cached_tokens=1024)
+    provider._client.response = _OAIResponse(
+        choices=[_OAIChoice(_OAIMessage(content="hi"))], usage=usage
+    )
+
+    resp = await provider.complete([{"role": "user", "content": "hi"}])
+
+    assert resp.usage == {
+        "input_tokens": 1200,
+        "output_tokens": 8,
+        "cache_read_input_tokens": 1024,
+    }
+
+
+@pytest.mark.asyncio
+async def test_gemini_surfaces_its_implicit_cache_counter(transport):
+    provider = GeminiProvider(api_key="g-secret")
+    transport.responder = lambda request: httpx.Response(
+        200,
+        json={
+            "candidates": [{"content": {"parts": [{"text": "ok"}]}}],
+            "usageMetadata": {
+                "promptTokenCount": 900,
+                "candidatesTokenCount": 12,
+                "cachedContentTokenCount": 640,
+            },
+        },
+    )
+
+    resp = await provider.complete([{"role": "user", "content": "hi"}])
+
+    assert resp.usage["cache_read_input_tokens"] == 640
     await provider.aclose()

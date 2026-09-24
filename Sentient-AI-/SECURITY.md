@@ -49,6 +49,31 @@ in code, and what is still open.
   (`TRUSTED_PROXIES`, default loopback + private ranges), so a directly
   reachable client cannot spoof the header to mint a fresh bucket per
   request and defeat the throttle. `api/middleware/security.py`.
+
+  **The default `TRUSTED_PROXIES` is wide, and that is a real risk.** It
+  covers every RFC1918/ULA range because that is where nginx sits in the
+  shipped compose topology — which also means any host that can reach the
+  API from a private range (a sidecar container, a machine on the same
+  LAN, a neighbouring pod) is believed when it claims a client IP. Narrow
+  it to the proxy's own address where the deployment allows; the app logs
+  a startup warning in production while it is wider than loopback.
+- **Per-account lockout** — per-IP limits leave the attacker holding the
+  denominator, because they choose the source addresses. Consecutive failed
+  sign-ins are therefore also counted per account and lock it for
+  `LOCKOUT_DURATION_MINUTES` after `LOCKOUT_THRESHOLD` failures (defaults 15
+  and 5). The lock is checked *before* the password is verified, so a locked
+  account does not open for a correct guess; a successful sign-in clears the
+  counter; and the counter is kept for addresses with no account too, so the
+  response does not reveal which addresses exist. State is process-local, so
+  a multi-worker deployment allows up to (workers x threshold) failures
+  before the lock engages — still a ceiling the attacker cannot widen.
+  `services/auth.py::AccountLockout`.
+- **Re-authentication for irreversible operations** — changing the account
+  email and deleting the account both require the current password, not just
+  a bearer token. A token is a capability that outlives the tab it was
+  minted in; without this, one leaked token converts into permanent
+  ownership (move the account to an attacker-controlled address) or total
+  loss. `api/routes/auth.py::_require_current_password`.
 - **Email normalization** — accounts are keyed on a trimmed, lowercased
   email, so casing cannot create duplicate accounts or lock a user out.
 
@@ -73,11 +98,15 @@ action (READ / WRITE / DELETE / EXECUTE / FINANCIAL) per connector:
 |------|---------|
 | `auto_approve` | Runs immediately (read-only actions on trusted services) |
 | `user_confirm` | Parked until the user approves it |
-| `admin_only`   | Blocked for everyone until a role system lands |
+| `admin_only`   | Usable only by the deployment owner (`users.is_admin`); contributes no tools at all for anyone else |
 | `hard_blocked` | Never runs, not configurable |
 
 Robinhood reads are `user_confirm` — even *viewing* financial data requires
 consent per action. All FINANCIAL category actions are `hard_blocked`.
+
+The owner is the first account to register, which on a self-hosted install
+is whoever deployed it. There is no UI to transfer or grant the role; see
+"Known gaps" below.
 
 **Granted scopes** (least privilege) gate which actions exist at all:
 
@@ -191,6 +220,14 @@ every connector client (covers redirects too):
 - **SSRF protection** — outbound URLs resolve through a blocklist of private,
   loopback, link-local, CGN, multicast, and IPv4-mapped-IPv6 ranges; only
   http/https schemes are allowed. MCP requests get the same check.
+- **The checked address is the connected address.** Checking a hostname and
+  then letting the socket resolve it again leaves a window in which a
+  hostile DNS server answers with a public address for the check and an
+  internal one for the connection. MCP clients therefore *pin* the
+  addresses that passed the check and dial only those; a host with no
+  validated pin is refused rather than resolved, so the failure mode is
+  closed. `services/mcp/client.py`, covered by
+  `tests/test_mcp_dns_pinning.py`.
 - **Per-connector allowlists (deny-by-default)** — Canvas may reach only
   `*.instructure.com` `/api/v1/` and the OAuth token endpoint
   `/login/oauth2/token`, Google only the specific googleapis hosts and
@@ -203,6 +240,18 @@ every connector client (covers redirects too):
 
 - Every tool execution, block, pending approval, approval, denial, and
   expiry is written through one code path (`services/audit.py::append_audit_log`).
+- **Account events share the chain.** Sign-ins, failed sign-ins, lockouts,
+  account creation, sign-out, password changes (including refused ones) and
+  refused account deletions are written through
+  `services/audit.py::append_auth_event` under the `auth` connector name.
+  They get the same property as tool rows: an adversary with database write
+  access cannot quietly drop the failed attempts that preceded a successful
+  sign-in without breaking a chain link. The refusal rows are committed
+  before their HTTP error is raised, so the record does not roll back with
+  the request that produced it. The one event that cannot be chained is a
+  completed account deletion — the cascade that erases the account erases
+  its audit rows, which is the correct outcome for an erasure request, so
+  the durable record of it is the application log.
 - Rows carry an **HMAC-SHA256** `integrity_hash` over a canonical payload
   that includes `previous_hash`, forming a per-user chain: field tampering,
   row deletion, and reordering all surface as mismatches. The hash covers the
@@ -219,12 +268,17 @@ every connector client (covers redirects too):
   with DB write access could recompute the whole chain. Store the key
   separately from the database and its backups, or the guarantee is void.
   Set it before the first write: there is no key versioning.
-- **Legacy rows.** Entries written before this upgrade carry the old unkeyed
-  SHA-256. They still verify and are reported as `legacy: true` rather than
-  tampered — a false tamper alarm on the compliance artifact would just
-  teach users to ignore the indicator. Legacy rows are intact but *not*
-  forgery-resistant. Run the whole-table verifier with `--require-hmac` to
-  fail on any row that is not keyed.
+- **Legacy rows are not "verified".** Entries written before this upgrade
+  carry the old unkeyed SHA-256. `GET /api/audit/{id}/verify` reports them
+  as `legacy: true, valid: false` — a third state, distinct from both
+  keyed-verified and tampered. Calling them valid would have been a
+  downgrade with teeth: an adversary with database write access can
+  compute an unkeyed digest for a row they invent, so "valid" would have
+  been available to anyone who could write the row. Only the keyed HMAC
+  sets `valid`. The unkeyed path is additionally gated on `seq IS NULL`
+  (every post-upgrade row has a seq), so a forged row that keeps a seq
+  cannot reach the fallback at all. Run the whole-table verifier with
+  `--require-hmac` to fail on any row that is not keyed.
 - Verify per-row in the UI (expand a row → integrity check), via
   `GET /api/audit/{id}/verify`, or for the whole table with
   `python -m scripts.verify_audit_log` (add `--require-hmac` once every row
@@ -244,8 +298,20 @@ Users can register external MCP servers (Streamable HTTP). Trust posture:
 
 ## Operational hardening
 
-- Security headers on every response (CSP, HSTS, nosniff, frame-deny,
-  permissions-policy, no-store).
+- Security headers on every API response (CSP, HSTS, nosniff, frame-deny,
+  permissions-policy, no-store) — including throttled ones. The rate
+  limiter short-circuits with its own 429, so it is mounted *inside* the
+  header and request-id middleware; mounted outside, the one class of
+  response an attacker can provoke on demand would be the only one served
+  unhardened and untraceable. `backend/main.py`.
+- The production SPA carries its own headers: nginx sets CSP (with
+  `frame-ancestors 'none'`), `X-Frame-Options`, `nosniff`,
+  `Referrer-Policy` and `Permissions-Policy` on the document it serves.
+  That page is where a tool call gets approved, so a frameable UI is one
+  where a click aimed at something else approves an action. The directives
+  live in `location /` rather than at server level, because `add_header`
+  also appends to proxied responses and would otherwise emit a second CSP
+  next to the backend's on every `/api/` call. `docker/Dockerfile.frontend`.
 - CORS restricted to configured origins with enumerated methods/headers.
 - `X-Request-ID` correlation on every request; structured logging throughout.
 - Generic 500 handler that never leaks stack traces to clients.
@@ -274,15 +340,18 @@ Tracked honestly so nobody mistakes this for finished security work:
   workers. The per-connector rate limiters and the MCP tool cache are still
   per-process: behind multiple workers each enforces its own limit, so the
   effective ceiling is (workers x limit).
-- **MCP SSRF: DNS-rebinding TOCTOU** (deferred) — MCP server URLs are
-  SSRF-checked before each request, but a hostile DNS server could pass the
-  check and then re-resolve to an internal address for the actual connection.
-  Closing this requires pinning the resolved IP for the request.
-- **Sessions** — no refresh tokens (re-login after expiry), no MFA, no
-  password reset flow, and the SPA stores the JWT in `localStorage` (an XSS
-  foothold could exfiltrate it; CSP mitigates). Consider httpOnly cookies +
-  CSRF protection. Changing the password DOES revoke outstanding tokens
-  (each JWT carries a `token_epoch` claim checked against the user row).
+- **Sessions** — no MFA and no password reset flow, and the SPA stores the
+  JWT in `localStorage` (an XSS foothold could exfiltrate it; CSP
+  mitigates). Consider httpOnly cookies + CSRF protection. What is in
+  place: `POST /api/auth/refresh` renews a still-valid token in place, so a
+  session slides rather than dropping the user mid-sentence, bounded by
+  `SESSION_MAX_HOURS` (default 12) measured from the original login — past
+  that the user logs in again. It is deliberately not a refresh-token
+  scheme: there is no second, longer-lived credential to steal. Changing
+  the password revokes every outstanding token (each JWT carries a
+  `token_epoch` claim checked against the user row). Signing out is
+  client-side: the token stays technically valid until it expires, so
+  password change is the lever for revoking access across devices.
 - **OAuth UX** — Canvas/Google connectors accept pasted tokens; a proper
   redirect-based OAuth flow (the PKCE plumbing already exists in the
   connector classes) is the intended replacement.
@@ -302,6 +371,9 @@ Tracked honestly so nobody mistakes this for finished security work:
 - **X-Forwarded-For trust** — XFF is honored only when the direct peer is
   inside `TRUSTED_PROXIES` (see "Rate limiting" above), so a directly
   reachable client cannot spoof its way into fresh rate-limit buckets. The
+  shipped default still trusts every private range, which is wider than a
+  single proxy needs; the per-account lockout is what bounds sign-in
+  regardless, and narrowing the list is the follow-up. The
   production nginx proxy (`docker/Dockerfile.frontend`) additionally
   overwrites XFF with the real client address, and the prod compose does
   not publish the backend port at all — keep it that way; the nginx proxy

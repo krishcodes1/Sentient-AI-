@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import {
   Save,
   AlertTriangle,
@@ -7,17 +7,24 @@ import {
   CheckCircle2,
   XCircle,
   Download,
+  Send,
 } from "lucide-react";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import type { User } from "@/types";
 import {
   changePassword,
+  createTelegramLink,
   deleteAccount,
   exportAccount,
   getMe,
+  getTelegramStatus,
+  login,
   logout,
+  unlinkTelegram,
   updateProfile,
   updateSettings,
+  type TelegramLink,
+  type TelegramStatus,
 } from "@/services/api";
 
 // Backend uses the canonical enum from the permission engine. Keeping
@@ -57,6 +64,8 @@ const inputStyle = {
   color: "var(--text-primary)",
 };
 
+const labelCls = "block text-sm font-medium mb-1.5 text-[var(--text-secondary)]";
+
 type Feedback = { ok: boolean; text: string } | null;
 
 function FeedbackLine({ feedback }: { feedback: Feedback }) {
@@ -64,8 +73,15 @@ function FeedbackLine({ feedback }: { feedback: Feedback }) {
   const color = feedback.ok ? "var(--accent-success)" : "var(--accent-danger)";
   const Icon = feedback.ok ? CheckCircle2 : XCircle;
   return (
-    <span className="inline-flex items-center gap-1.5 text-xs" style={{ color }}>
-      <Icon className="w-3.5 h-3.5" />
+    // Saving is asynchronous and the only signal that it worked; without a
+    // live region the outcome lands silently for anyone not watching this
+    // corner of the form.
+    <span
+      role="status"
+      className="inline-flex items-center gap-1.5 text-xs"
+      style={{ color }}
+    >
+      <Icon className="w-3.5 h-3.5" aria-hidden />
       {feedback.text}
     </span>
   );
@@ -85,8 +101,12 @@ function SaveButton({
       type="button"
       onClick={onClick}
       disabled={saving}
-      className="flex items-center gap-2 px-4 py-2 rounded-[10px] text-sm font-semibold disabled:opacity-50"
-      style={{ background: "var(--accent-primary)", color: "#0a0a0b" }}
+      className="flex items-center gap-2 px-4 rounded-[10px] text-sm font-semibold disabled:opacity-50"
+      style={{
+        minHeight: 44,
+        background: "var(--accent-primary)",
+        color: "var(--text-on-accent)",
+      }}
     >
       {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
       {label}
@@ -95,9 +115,25 @@ function SaveButton({
 }
 
 export default function Settings() {
+  const ids = {
+    name: useId(),
+    email: useId(),
+    currentPassword: useId(),
+    newPassword: useId(),
+    tier: useId(),
+    tierHelp: useId(),
+    rateLimit: useId(),
+    provider: useId(),
+    model: useId(),
+    modelHelp: useId(),
+  };
   const [, setMe] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+
+  // The account's saved email (as opposed to the editable form field):
+  // needed to re-authenticate after a password change revokes every token.
+  const [accountEmail, setAccountEmail] = useState("");
 
   // Editable fields
   const [name, setName] = useState("");
@@ -123,6 +159,12 @@ export default function Settings() {
   const [exporting, setExporting] = useState(false);
   const [exportFeedback, setExportFeedback] = useState<Feedback>(null);
 
+  // Telegram approvals
+  const [tgStatus, setTgStatus] = useState<TelegramStatus | null>(null);
+  const [tgLink, setTgLink] = useState<TelegramLink | null>(null);
+  const [tgBusy, setTgBusy] = useState(false);
+  const [tgFeedback, setTgFeedback] = useState<Feedback>(null);
+
   useEffect(() => {
     let cancelled = false;
     getMe()
@@ -131,6 +173,7 @@ export default function Settings() {
         setMe(u);
         setName(u.name ?? "");
         setEmail(u.email ?? "");
+        setAccountEmail(u.email ?? "");
         if (u.default_permission_tier) setPermissionTier(u.default_permission_tier);
         if (typeof u.rate_limit === "number") setRateLimit(u.rate_limit);
         if (u.llm_provider) setLlmProvider(u.llm_provider);
@@ -173,13 +216,86 @@ export default function Settings() {
         current_password: currentPassword,
         new_password: newPassword,
       });
+      // The change revokes every outstanding token (token_epoch bump), so
+      // without re-authenticating the very next API call — a poll, a
+      // navigation — hard-logs the user out with no explanation.
+      try {
+        await login({ email: accountEmail, password: newPassword });
+        setPasswordFeedback({ ok: true, text: "Password changed" });
+      } catch {
+        setPasswordFeedback({
+          ok: true,
+          text: "Password changed — please sign in again with the new password",
+        });
+      }
       setCurrentPassword("");
       setNewPassword("");
-      setPasswordFeedback({ ok: true, text: "Password changed" });
     } catch (err) {
       setPasswordFeedback({ ok: false, text: (err as Error).message });
     } finally {
       setSavingPassword(false);
+    }
+  };
+
+  // Load Telegram status once; while a connect link is outstanding, poll
+  // every 3s so the page flips to "connected" the moment the user taps
+  // /start on their phone.
+  useEffect(() => {
+    let cancelled = false;
+    getTelegramStatus()
+      .then((s) => {
+        if (!cancelled) setTgStatus(s);
+      })
+      .catch(() => {
+        /* section renders the not-configured state */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!tgLink || tgStatus?.linked) return;
+    const id = window.setInterval(() => {
+      getTelegramStatus()
+        .then((s) => {
+          setTgStatus(s);
+          if (s.linked) {
+            setTgLink(null);
+            setTgFeedback({ ok: true, text: "Telegram connected" });
+          }
+        })
+        .catch(() => {});
+    }, 3000);
+    return () => window.clearInterval(id);
+  }, [tgLink, tgStatus?.linked]);
+
+  const handleTgConnect = async () => {
+    setTgBusy(true);
+    setTgFeedback(null);
+    try {
+      const link = await createTelegramLink();
+      setTgLink(link);
+      window.open(link.link_url, "_blank", "noopener");
+    } catch (err) {
+      setTgFeedback({ ok: false, text: (err as Error).message });
+    } finally {
+      setTgBusy(false);
+    }
+  };
+
+  const handleTgDisconnect = async () => {
+    setTgBusy(true);
+    setTgFeedback(null);
+    try {
+      await unlinkTelegram();
+      setTgLink(null);
+      setTgStatus((s) => (s ? { ...s, linked: false } : s));
+      setTgFeedback({ ok: true, text: "Disconnected" });
+    } catch (err) {
+      setTgFeedback({ ok: false, text: (err as Error).message });
+    } finally {
+      setTgBusy(false);
     }
   };
 
@@ -254,6 +370,7 @@ export default function Settings() {
       {loadError && (
         <div
           className="rounded-[12px] p-4 text-sm"
+          role="alert"
           style={{
             background: "var(--fill-danger)",
             border: "1px solid var(--border-danger)",
@@ -270,11 +387,13 @@ export default function Settings() {
         <h2 className="mb-4">Account details</h2>
         <div className="space-y-4">
           <div>
-            <label className="block text-sm font-medium mb-1.5" style={{ color: "var(--text-secondary)" }}>
+            <label htmlFor={ids.name} className={labelCls}>
               Name
             </label>
             <input
+              id={ids.name}
               type="text"
+              autoComplete="name"
               value={name}
               onChange={(e) => setName(e.target.value)}
               className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
@@ -283,11 +402,13 @@ export default function Settings() {
             />
           </div>
           <div>
-            <label className="block text-sm font-medium mb-1.5" style={{ color: "var(--text-secondary)" }}>
+            <label htmlFor={ids.email} className={labelCls}>
               Email
             </label>
             <input
+              id={ids.email}
               type="email"
+              autoComplete="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
@@ -307,13 +428,15 @@ export default function Settings() {
         <div className="eyebrow mb-1">Security</div>
         <h2 className="mb-4">Change password</h2>
         <div className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium mb-1.5" style={{ color: "var(--text-secondary)" }}>
+              <label htmlFor={ids.currentPassword} className={labelCls}>
                 Current Password
               </label>
               <input
+                id={ids.currentPassword}
                 type="password"
+                autoComplete="current-password"
                 value={currentPassword}
                 onChange={(e) => setCurrentPassword(e.target.value)}
                 className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
@@ -322,11 +445,13 @@ export default function Settings() {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium mb-1.5" style={{ color: "var(--text-secondary)" }}>
+              <label htmlFor={ids.newPassword} className={labelCls}>
                 New Password
               </label>
               <input
+                id={ids.newPassword}
                 type="password"
+                autoComplete="new-password"
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
                 className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
@@ -348,10 +473,12 @@ export default function Settings() {
         <h2 className="mb-4">Security settings</h2>
         <div className="space-y-4">
           <div>
-            <label className="block text-sm font-medium mb-1.5" style={{ color: "var(--text-secondary)" }}>
+            <label htmlFor={ids.tier} className={labelCls}>
               Default Permission Tier
             </label>
             <select
+              id={ids.tier}
+              aria-describedby={ids.tierHelp}
               value={permissionTier}
               onChange={(e) => setPermissionTier(e.target.value)}
               className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
@@ -363,17 +490,18 @@ export default function Settings() {
                 </option>
               ))}
             </select>
-            <p className="text-xs mt-1.5" style={{ color: "var(--text-muted)" }}>
+            <p id={ids.tierHelp} className="text-xs mt-1.5" style={{ color: "var(--text-muted)" }}>
               {PERMISSION_TIERS.find((t) => t.value === permissionTier)?.help}
               {" "}Hard-blocked scopes (like Robinhood trade execution) are
               enforced at the platform layer regardless of this setting.
             </p>
           </div>
           <div>
-            <label className="block text-sm font-medium mb-1.5" style={{ color: "var(--text-secondary)" }}>
+            <label htmlFor={ids.rateLimit} className={labelCls}>
               Rate Limit (requests/minute)
             </label>
             <input
+              id={ids.rateLimit}
               type="number"
               value={rateLimit}
               onChange={(e) => setRateLimit(Number(e.target.value))}
@@ -390,31 +518,145 @@ export default function Settings() {
         </div>
       </section>
 
+      {/* Telegram approvals */}
+      <section className="rounded-[14px] p-6" style={panelStyle}>
+        <div className="eyebrow mb-1">Approvals</div>
+        <h2 className="mb-4">Telegram approvals</h2>
+        <p className="text-sm mb-4" style={{ color: "var(--text-secondary)" }}>
+          Get approval requests on your phone with Approve / Deny buttons —
+          no need to be at a computer when the assistant asks for permission.
+        </p>
+        {tgStatus === null ? (
+          <p className="text-sm" style={{ color: "var(--text-muted)" }}>
+            Checking status…
+          </p>
+        ) : !tgStatus.configured ? (
+          <div
+            className="rounded-[10px] p-4 text-sm space-y-2"
+            style={{ background: "var(--bg-input)", border: "1px solid var(--claw-border)" }}
+          >
+            <p style={{ color: "var(--text-primary)" }}>
+              One-time server setup (about 2 minutes):
+            </p>
+            <ol className="list-decimal pl-5 space-y-1" style={{ color: "var(--text-secondary)" }}>
+              <li>
+                In Telegram, message{" "}
+                <a
+                  href="https://t.me/BotFather"
+                  target="_blank"
+                  rel="noreferrer"
+                  style={{ color: "var(--accent-primary)" }}
+                >
+                  @BotFather
+                </a>
+                , send <code>/newbot</code>, and pick any name.
+              </li>
+              <li>
+                Copy the token BotFather replies with into{" "}
+                <code style={{ color: "var(--accent-primary)" }}>
+                  TELEGRAM_BOT_TOKEN=
+                </code>{" "}
+                in <code>backend/.env</code>.
+              </li>
+              <li>Restart the backend, then come back here and tap Connect.</li>
+            </ol>
+          </div>
+        ) : tgStatus.linked ? (
+          <div className="flex items-center gap-3 flex-wrap">
+            <span
+              className="inline-flex items-center gap-1.5 text-sm"
+              style={{ color: "var(--accent-success)" }}
+            >
+              <CheckCircle2 className="w-4 h-4" />
+              Connected
+              {tgStatus.bot_username ? ` to @${tgStatus.bot_username}` : ""} —
+              approvals reach your Telegram.
+            </span>
+            <button
+              type="button"
+              onClick={() => void handleTgDisconnect()}
+              disabled={tgBusy}
+              className="px-4 py-2 rounded-[10px] text-sm font-semibold disabled:opacity-50"
+              style={{
+                background: "transparent",
+                border: "1px solid var(--claw-border)",
+                color: "var(--text-secondary)",
+              }}
+            >
+              Disconnect
+            </button>
+            <FeedbackLine feedback={tgFeedback} />
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <div className="flex items-center gap-3 flex-wrap">
+              <button
+                type="button"
+                onClick={() => void handleTgConnect()}
+                disabled={tgBusy}
+                className="flex items-center gap-2 px-4 py-2 rounded-[10px] text-sm font-semibold disabled:opacity-50"
+                style={{ background: "var(--accent-primary)", color: "#0a0a0b" }}
+              >
+                {tgBusy ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Send className="w-4 h-4" />
+                )}
+                Connect Telegram
+              </button>
+              <FeedbackLine feedback={tgFeedback} />
+            </div>
+            {tgLink && (
+              <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
+                Waiting for you to tap the link on your phone… If it didn&apos;t
+                open, use{" "}
+                <a
+                  href={tgLink.link_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  style={{ color: "var(--accent-primary)" }}
+                >
+                  {tgLink.link_url}
+                </a>{" "}
+                (valid {tgLink.expires_in_minutes} min).
+              </p>
+            )}
+          </div>
+        )}
+      </section>
+
       {/* LLM Provider */}
       <section className="rounded-[14px] p-6" style={panelStyle}>
         <div className="eyebrow mb-1">Runtime</div>
         <h2 className="mb-4">LLM provider</h2>
         <div className="space-y-4">
           <div>
-            <label className="block text-sm font-medium mb-1.5" style={{ color: "var(--text-secondary)" }}>
+            <span id={ids.provider} className={labelCls}>
               Provider
-            </label>
-            <div className="grid grid-cols-4 gap-3">
+            </span>
+            <div
+              role="radiogroup"
+              aria-labelledby={ids.provider}
+              className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3"
+            >
               {(["anthropic", "openai", "gemini", "grok", "deepseek", "groq", "mistral", "ollama"] as const).map((p) => {
                 const isActive = llmProvider === p;
                 return (
                   <button
                     key={p}
                     type="button"
+                    role="radio"
+                    aria-checked={isActive}
                     onClick={() => {
                       setLlmProvider(p);
-                      setLlmModel(LLM_MODELS[p][0]);
+                      setLlmModel(LLM_MODELS[p]?.[0] ?? "");
                     }}
                     className="px-4 py-3 rounded-[10px] text-sm font-medium capitalize transition-colors"
                     style={{
+                      minHeight: 44,
                       background: isActive ? "var(--accent-glow)" : "var(--claw-surface)",
                       border: isActive
-                        ? "1px solid rgba(34,211,238,0.35)"
+                        ? "1px solid var(--border-accent)"
                         : "1px solid var(--claw-border)",
                       color: isActive ? "var(--accent-primary)" : "var(--text-secondary)",
                     }}
@@ -431,22 +673,35 @@ export default function Settings() {
             </div>
           </div>
           <div>
-            <label className="block text-sm font-medium mb-1.5" style={{ color: "var(--text-secondary)" }}>
+            <label htmlFor={ids.model} className={labelCls}>
               Model
             </label>
             <select
+              id={ids.model}
+              aria-describedby={ids.modelHelp}
               value={llmModel}
               onChange={(e) => setLlmModel(e.target.value)}
               className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
               style={inputStyle}
             >
-              {LLM_MODELS[llmProvider].map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
+              {(() => {
+                // The hardcoded list is a convenience, not a contract: the
+                // account's current model (set server-side or by an older
+                // build) must stay selectable even when it isn't listed,
+                // and an unknown provider must not crash the page.
+                const known = LLM_MODELS[llmProvider] ?? [];
+                const options =
+                  llmModel && !known.includes(llmModel)
+                    ? [llmModel, ...known]
+                    : known;
+                return options.map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ));
+              })()}
             </select>
-            <p className="text-xs mt-1.5" style={{ color: "var(--text-muted)" }}>
+            <p id={ids.modelHelp} className="text-xs mt-1.5" style={{ color: "var(--text-muted)" }}>
               Takes effect on your next message. The server must have this
               provider's API key configured in{" "}
               <code style={{ color: "var(--accent-primary)" }}>backend/.env</code>{" "}
@@ -529,8 +784,12 @@ export default function Settings() {
           type="button"
           onClick={() => setConfirmDeleteOpen(true)}
           disabled={deleting}
-          className="flex items-center gap-2 px-4 py-2 rounded-[10px] text-sm font-semibold disabled:opacity-50"
-          style={{ background: "var(--accent-danger)", color: "#0a0a0b" }}
+          className="flex items-center gap-2 px-4 rounded-[10px] text-sm font-semibold disabled:opacity-50"
+          style={{
+            minHeight: 44,
+            background: "var(--accent-danger)",
+            color: "var(--text-on-accent)",
+          }}
         >
           {deleting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
           Delete Account
@@ -549,10 +808,11 @@ export default function Settings() {
 
       {loading && (
         <div
+          role="status"
           className="flex items-center gap-2 text-xs"
           style={{ color: "var(--text-muted)" }}
         >
-          <Loader2 className="w-3 h-3 animate-spin" />
+          <Loader2 className="w-3 h-3 animate-spin" aria-hidden />
           Loading account...
         </div>
       )}

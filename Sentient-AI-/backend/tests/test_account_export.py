@@ -187,4 +187,10 @@ async def test_export_with_an_empty_account_is_still_valid_json(client):
     assert data["conversations"] == []
     assert data["memories"] == []
     assert data["connectors"] == []
-    assert data["audit_logs"] == []
+    # Registering and logging in are themselves audited, so a brand-new
+    # account is not auditless — it holds exactly those account events and
+    # no agent activity.
+    assert {row["action"] for row in data["audit_logs"]} <= {
+        "account_created",
+        "login",
+    }

@@ -108,6 +108,108 @@ def test_canvas_policy_allows_api_and_token_endpoint_only(no_dns):
         assert check_network_policy(url, "canvas").safe is False, url
 
 
+def test_canvas_policy_allows_the_configured_self_hosted_host(no_dns):
+    """A self-hosted Canvas saved fine and then failed at every call,
+    because only *.instructure.com was reachable. The host the user
+    configured is allowlisted explicitly — and nothing else is."""
+    configured = ("canvas.myschool.edu",)
+
+    for url in (
+        "https://canvas.myschool.edu/api/v1/courses",
+        "https://canvas.myschool.edu/login/oauth2/token",
+    ):
+        result = check_network_policy(url, "canvas", extra_hosts=configured)
+        assert result.safe, f"{url} blocked: {result.reason}"
+
+    for url in (
+        # Same host, outside the API surface: a configured host does not
+        # widen which paths are reachable.
+        "https://canvas.myschool.edu/login/oauth2/auth",
+        "https://canvas.myschool.edu/files/1/download",
+        # A sibling host is not implied by the configured one.
+        "https://mail.myschool.edu/api/v1/courses",
+        "https://evil.example.com/api/v1/courses",
+    ):
+        assert (
+            check_network_policy(url, "canvas", extra_hosts=configured).safe is False
+        ), url
+
+    # And without the configuration it stays blocked outright.
+    assert (
+        check_network_policy(
+            "https://canvas.myschool.edu/api/v1/courses", "canvas"
+        ).safe
+        is False
+    )
+
+
+def test_canvas_configured_host_is_matched_case_and_form_insensitively(no_dns):
+    for configured in ("Canvas.MySchool.EDU", "https://canvas.myschool.edu/", "canvas.myschool.edu."):
+        result = check_network_policy(
+            "https://canvas.myschool.edu/api/v1/courses",
+            "canvas",
+            extra_hosts=(configured,),
+        )
+        assert result.safe, f"{configured} did not match: {result.reason}"
+
+
+def test_configured_host_does_not_bypass_the_ssrf_address_policy(monkeypatch):
+    """Allowlisting the user's own host widens the *name* check only.
+    A configured host that resolves into a private range stays refused."""
+    import socket
+
+    monkeypatch.setattr(
+        netsec.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.7", 443))
+        ],
+    )
+
+    result = check_network_policy(
+        "https://canvas.internal.example/api/v1/courses",
+        "canvas",
+        extra_hosts=("canvas.internal.example",),
+    )
+    assert result.safe is False
+    assert "private or internal" in (result.reason or "")
+
+
+def test_policies_without_instance_paths_ignore_extra_hosts(no_dns):
+    """Only a connector that has a self-hosted form accepts extra hosts;
+    for the rest an extra host must not open anything."""
+    assert (
+        check_network_policy(
+            "https://evil.example.com/gmail/v1/users/me/profile",
+            "google",
+            extra_hosts=("evil.example.com",),
+        ).safe
+        is False
+    )
+
+
+def test_factory_arms_the_configured_canvas_host():
+    from services.connectors.factory import create_connector
+
+    connector = create_connector(
+        "canvas",
+        {"base_url": "https://canvas.myschool.edu", "access_token": "t"},
+    )
+    try:
+        assert connector._policy_extra_hosts == ("canvas.myschool.edu",)
+    finally:
+        connector._network_policy_key = None
+
+
+def test_canvas_base_url_without_a_host_is_refused_at_creation():
+    from services.connectors.factory import validate_credentials
+
+    problems = validate_credentials(
+        "canvas", {"base_url": "https:///api", "access_token": "t"}
+    )
+    assert any("hostname" in p for p in problems)
+
+
 @pytest.mark.asyncio
 async def test_canvas_stores_refresh_token_and_refreshes_on_401():
     """A stored refresh_token is kept from credentials and used to renew

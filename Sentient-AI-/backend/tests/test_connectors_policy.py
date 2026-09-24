@@ -137,10 +137,36 @@ async def _health_entry(client, token, connector_id):
     return next(e for e in response.json() if e["id"] == str(connector_id))
 
 
+async def _make_canvas_connector(session_factory, user_id):
+    """A first-party connector, whose health comes from the audit log."""
+    import json as json_module
+
+    from core.security import encrypt_credentials
+    from models.connector import AuthMethod, ConnectorConfig, ConnectorType
+
+    credentials = {
+        "base_url": "https://school.instructure.com",
+        "access_token": "t",
+    }
+    async with session_factory() as session:
+        row = ConnectorConfig(
+            user_id=user_id,
+            connector_type=ConnectorType.canvas,
+            display_name="Canvas",
+            auth_method=AuthMethod.bearer_token,
+            encrypted_credentials=encrypt_credentials(
+                json_module.dumps(credentials)
+            ),
+            granted_scopes=["courses.read"],
+        )
+        session.add(row)
+        await session.flush()
+        await session.commit()
+    return row.id
+
+
 @pytest.mark.asyncio
-async def test_mcp_health_degraded_until_activity_then_healthy(
-    client, session_factory
-):
+async def test_mcp_health_tracks_observed_outcomes(client, session_factory):
     from services.mcp.activity import mcp_activity
 
     user, token = await make_user(session_factory)
@@ -148,24 +174,99 @@ async def test_mcp_health_degraded_until_activity_then_healthy(
 
     mcp_activity.reset()
     try:
-        # Fresh server: no recorded activity -> degraded / Never (same
-        # contract as any never-used connector type).
+        # Fresh server: nothing observed is not evidence of a problem, so
+        # it reports healthy with an explicit "no activity" detail rather
+        # than an invented failure.
         entry = await _health_entry(client, token, connector_id)
-        assert entry["status"] == "degraded"
+        assert entry["status"] == "healthy"
         assert entry["last_check"] == "Never"
+        assert entry["checks_24h"] == 0
+        assert "No activity" in entry["detail"]
 
-        # Errors alone do not make it healthy.
+        # An observed failure is what makes it degraded.
         mcp_activity.record_error(connector_id, "connection refused")
         entry = await _health_entry(client, token, connector_id)
         assert entry["status"] == "degraded"
 
-        # A successful call flips it to healthy with a real last_check.
+        # A later success flips it back, with a real last_check.
         mcp_activity.record_success(connector_id)
         entry = await _health_entry(client, token, connector_id)
         assert entry["status"] == "healthy"
         assert entry["last_check"] != "Never"
     finally:
         mcp_activity.reset()
+
+
+@pytest.mark.asyncio
+async def test_health_reports_measured_counts_not_constants(client, session_factory):
+    """Uptime used to be a hardcoded 95.0/100.0 rendered as telemetry.
+    Every number now comes from audit rows inside the 24h window."""
+    from models.audit import AuditStatus
+    from services.audit import append_audit_log
+
+    user, token = await make_user(session_factory)
+    connector_id = await _make_canvas_connector(session_factory, user.id)
+
+    async with session_factory() as session:
+        for row_status in (
+            AuditStatus.approved,
+            AuditStatus.approved,
+            AuditStatus.blocked,
+            # The intent row the runtime writes before each side effect.
+            # Counting it would double-count the action it precedes.
+            AuditStatus.pending,
+        ):
+            await append_audit_log(
+                session,
+                user_id=str(user.id),
+                connector_name="canvas",
+                action="get_courses",
+                endpoint="agent.tool_executed",
+                scope_used="courses.read",
+                status=row_status,
+                reasoning_chain={"event": "test"},
+            )
+        await session.commit()
+
+    entry = await _health_entry(client, token, connector_id)
+    assert entry["checks_24h"] == 3
+    assert entry["failures_24h"] == 1
+    assert entry["uptime"] == pytest.approx(66.7)
+    assert entry["status"] == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_health_ignores_activity_older_than_the_window(
+    client, session_factory
+):
+    """A refusal from last week must not hold a connector at 'degraded'
+    forever — the window is what makes the status current."""
+    from datetime import datetime, timedelta, timezone
+
+    from models.audit import AuditStatus
+    from services.audit import append_audit_log
+
+    user, token = await make_user(session_factory)
+    connector_id = await _make_canvas_connector(session_factory, user.id)
+
+    async with session_factory() as session:
+        entry_row = await append_audit_log(
+            session,
+            user_id=str(user.id),
+            connector_name="canvas",
+            action="submit_assignment",
+            endpoint="agent.tool_blocked",
+            scope_used="submissions.write",
+            status=AuditStatus.blocked,
+            reasoning_chain={"event": "test"},
+        )
+        entry_row.timestamp = datetime.now(timezone.utc) - timedelta(days=7)
+        await session.commit()
+
+    entry = await _health_entry(client, token, connector_id)
+    assert entry["status"] == "healthy"
+    assert entry["checks_24h"] == 0
+    assert entry["last_check"] != "Never"
 
 
 @pytest.mark.asyncio

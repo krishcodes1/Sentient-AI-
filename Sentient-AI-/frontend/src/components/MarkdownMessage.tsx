@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { memo, useState, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Copy, Check, ImageOff, ExternalLink } from "lucide-react";
@@ -66,7 +66,7 @@ function CodeBlock({ children }: { children: ReactNode }) {
         type="button"
         onClick={copy}
         aria-label="Copy code"
-        className="absolute top-2 right-2 p-1.5 rounded-[6px] opacity-0 group-hover:opacity-100 transition-opacity"
+        className="row-actions absolute top-2 right-2 p-1.5 rounded-[6px]"
         style={{ background: "var(--claw-panel)", border: "1px solid var(--claw-border)", color: "var(--text-muted)" }}
       >
         {copied ? <Check className="w-3.5 h-3.5" style={{ color: "var(--accent-success)" }} /> : <Copy className="w-3.5 h-3.5" />}
@@ -204,11 +204,15 @@ const components: Components = {
   },
 };
 
-export default function MarkdownMessage({ content }: { content: string }) {
+// Hoisted so the plugin array is referentially stable across renders —
+// a fresh array per render defeats react-markdown's internal caching.
+const remarkPlugins = [remarkGfm];
+
+function MarkdownMessage({ content }: { content: string }) {
   return (
     <div className="md-message" style={{ color: "var(--text-primary)" }}>
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={remarkPlugins}
         // No rehype-raw: raw HTML in the model output is not parsed, so it
         // cannot smuggle an <img>/<script> fetch past the img override.
         components={components}
@@ -218,3 +222,9 @@ export default function MarkdownMessage({ content }: { content: string }) {
     </div>
   );
 }
+
+// Memoized because Chat renders one of these per message and re-renders the
+// whole list on every streamed token: without memo, every historical
+// message re-parses its markdown per token (O(conversation × tokens)).
+// With memo, only the message whose `content` string changed re-parses.
+export default memo(MarkdownMessage);

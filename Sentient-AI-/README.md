@@ -137,9 +137,16 @@ Production checklist:
 
 2. **Create the database**
    ```bash
-   createdb sentientai
-   psql sentientai -c "CREATE USER sentientai WITH PASSWORD 'sentientai'; GRANT ALL PRIVILEGES ON DATABASE sentientai TO sentientai;"
+   psql postgres -c "CREATE ROLE sentientai LOGIN PASSWORD 'sentientai';"
+   createdb -O sentientai sentientai
    ```
+
+   > The role has to **own** the database. `GRANT ALL PRIVILEGES ON DATABASE`
+   > alone is not enough on PostgreSQL 15 and newer: PG15 revoked `CREATE` on
+   > schema `public` from `PUBLIC`, so the first migration dies with
+   > `permission denied for schema public`. If you already created the
+   > database the old way, fix it with
+   > `psql -d sentientai -c "GRANT ALL ON SCHEMA public TO sentientai;"`.
 
 3. **Set up the backend**
    ```bash
@@ -175,11 +182,17 @@ Production checklist:
 2. **Create the database** (open pgAdmin or Command Prompt)
    ```cmd
    psql -U postgres
-   CREATE DATABASE sentientai;
-   CREATE USER sentientai WITH PASSWORD 'sentientai';
-   GRANT ALL PRIVILEGES ON DATABASE sentientai TO sentientai;
+   CREATE ROLE sentientai LOGIN PASSWORD 'sentientai';
+   CREATE DATABASE sentientai OWNER sentientai;
    \q
    ```
+
+   > `OWNER` matters. `GRANT ALL PRIVILEGES ON DATABASE` alone is not enough
+   > on PostgreSQL 15 and newer: PG15 revoked `CREATE` on schema `public`
+   > from `PUBLIC`, so the first migration dies with `permission denied for
+   > schema public`. To fix a database you already created the old way, run
+   > `GRANT ALL ON SCHEMA public TO sentientai;` while connected **to that
+   > database** (`psql -U postgres -d sentientai`).
 
 3. **Set up the backend** (Command Prompt or PowerShell)
    ```cmd
@@ -219,10 +232,15 @@ Production checklist:
 
 2. **Create the database**
    ```bash
-   sudo -u postgres psql -c "CREATE DATABASE sentientai;"
-   sudo -u postgres psql -c "CREATE USER sentientai WITH PASSWORD 'sentientai';"
-   sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE sentientai TO sentientai;"
+   sudo -u postgres psql -c "CREATE ROLE sentientai LOGIN PASSWORD 'sentientai';"
+   sudo -u postgres psql -c "CREATE DATABASE sentientai OWNER sentientai;"
    ```
+
+   > `OWNER` matters. `GRANT ALL PRIVILEGES ON DATABASE` alone is not enough
+   > on PostgreSQL 15 and newer: PG15 revoked `CREATE` on schema `public`
+   > from `PUBLIC`, so the first migration dies with `permission denied for
+   > schema public`. To fix a database you already created the old way:
+   > `sudo -u postgres psql -d sentientai -c "GRANT ALL ON SCHEMA public TO sentientai;"`
 
 3. **Set up the backend**
    ```bash
@@ -291,13 +309,18 @@ Copy `backend/.env.example` to `backend/.env` and configure:
 | `OLLAMA_BASE_URL` | If using Ollama | Default: `http://localhost:11434` |
 | `RATE_LIMIT_PER_MINUTE` | No | General per-IP API rate limit (default 60) |
 | `AUTH_RATE_LIMIT_PER_MINUTE` | No | Stricter per-IP limit on login/register (default 10) |
+| `TRUSTED_PROXIES` | Review for prod | CIDRs whose `X-Forwarded-For` is believed for client-IP attribution. Default trusts loopback + all private ranges (where the compose nginx sits) — narrow it to your proxy's address if anything else can reach the API from a private network. |
+| `LOCKOUT_THRESHOLD` | No | Failed sign-ins before one account is locked (default 5) |
+| `LOCKOUT_DURATION_MINUTES` | No | How long that lock lasts (default 15) |
 | `TOKEN_EXPIRE_MINUTES` | No | JWT lifetime (default 60) |
+| `SESSION_MAX_HOURS` | No | Ceiling on how long refreshing can extend one session, measured from login (default 12) |
 | `APPROVAL_TTL_MINUTES` | No | How long a pending tool approval stays actionable (default 15) |
 | `CORS_ORIGINS` | No | Allowed browser origins (default localhost dev ports) |
 | `ALLOW_REGISTRATION` | No | Set `false` after creating your account so strangers can't register (default `true`) |
 | `PASSWORD_MIN_LENGTH` | No | Minimum password length, floor 8 (default 8) |
 | `ALLOWED_HOSTS` | No | Accepted `Host` headers; set your real hostname in production (default `["*"]`) |
 | `LOG_LEVEL` | No | Log verbosity; production emits JSON lines (default `INFO`) |
+| `ENVIRONMENT` | Recommended (prod) | `development` or `production`. `production` hides `/docs`, `/redoc` and the OpenAPI schema, makes an unreachable database fatal at boot instead of a warning, and turns on the startup config warnings (default `development`). |
 | `AUDIT_HMAC_KEY` | Recommended (prod) | Dedicated key for the tamper-evident audit log; see `.env.example` |
 
 **You only need ONE API key** — whichever provider you choose.
@@ -335,14 +358,16 @@ sentientai/
 │   │   ├── mcp/                # MCP client + server integration (experimental)
 │   │   ├── audit.py            # Tamper-evident audit logging (hash chain)
 │   │   └── auth.py             # JWT authentication
+│   ├── alembic/                # Schema migrations (see alembic/README.md)
 │   ├── api/                    # FastAPI routes + middleware
+│   ├── scripts/                # Operator tools (audit-log verifier)
 │   └── tests/                  # pytest suite (route security, executor, approvals, audit, MCP)
 ├── frontend/                   # React / TypeScript / Vite / Tailwind
 │   └── src/
-│       ├── pages/              # Dashboard, Chat, Connectors, Audit Logs, Settings
-│       ├── components/         # Layout, Sidebar
+│       ├── pages/              # Login, Dashboard, Chat, Connectors, Audit Logs, Memory, Settings
+│       ├── components/         # Brand, ConfirmDialog, ErrorBoundary, MarkdownMessage, layout/
 │       └── services/           # API client
-└── docker/                     # Docker Compose, Dockerfiles
+└── docker/                     # Docker Compose (dev + prod), Dockerfiles
 ```
 
 ### Security Features
@@ -391,7 +416,9 @@ SentientAI solves the token explosion problem seen in platforms like OpenClaw:
 
 - **Sliding window** — keeps last 12 messages in full, summarizes older ones
 - **Tool result compression** — truncates large API responses to 2000 chars
-- **Dynamic tool selection** — sends only relevant tool schemas instead of all 50+
+- **Dynamic tool selection** — sends only the relevant schemas rather than the
+  whole catalog (17 built-in connector actions today, plus every tool exposed
+  by the MCP servers a user has registered, which is unbounded)
 - **Semantic caching** — caches identical queries to avoid duplicate API calls
 - **Accurate token estimation** — uses ~3.5 chars/token (not the broken 4.0 estimate that causes 47% undercounting)
 

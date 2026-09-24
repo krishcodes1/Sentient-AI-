@@ -12,6 +12,7 @@ from sqlalchemy import (
     Enum,
     Float,
     ForeignKey,
+    Index,
     String,
     Text,
     Uuid,
@@ -29,6 +30,10 @@ class AuditStatus(str, enum.Enum):
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
+    __table_args__ = (
+        Index("ix_audit_logs_user_id_seq", "user_id", "seq"),
+        Index("ix_audit_logs_user_id_timestamp", "user_id", "timestamp"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         Uuid(),

@@ -20,9 +20,11 @@ most conservative in the platform:
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 import uuid as uuid_module
+import weakref
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -39,10 +41,72 @@ MCP_PREFIX = "mcp"
 
 # Tool names that suggest money movement are refused outright — same
 # posture as the connector catalog's FINANCIAL category.
+#
+# Applied to a run-on name only; see ``is_financial_action``.
 _FINANCIAL_PATTERN = re.compile(
     r"(trade|buy|sell|transfer|withdraw|deposit|payment|\bpay\b|order|purchase|invest|wire)",
     re.IGNORECASE,
 )
+
+# The same vocabulary as tokens, with the inflections a tool name
+# actually uses. Spelled out rather than stemmed so the blocklist stays
+# auditable: every word here is one a reviewer can weigh.
+_FINANCIAL_TOKENS: frozenset[str] = frozenset(
+    {
+        "trade", "trades", "trading", "traded",
+        "buy", "buys", "buying", "bought",
+        "sell", "sells", "selling", "sold",
+        "transfer", "transfers", "transferring", "transferred",
+        "withdraw", "withdraws", "withdrawing", "withdrawal", "withdrawals",
+        "deposit", "deposits", "depositing", "deposited",
+        "payment", "payments", "pay", "pays", "paying", "paid",
+        "payout", "payouts",
+        "order", "orders", "ordering", "ordered", "reorder", "reorders",
+        "purchase", "purchases", "purchasing", "purchased",
+        "invest", "invests", "investing", "invested",
+        "investment", "investments",
+        "wire", "wires", "wiring", "wired",
+    }
+)
+
+_TOKEN_BOUNDARY = re.compile(r"[^A-Za-z0-9]+")
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+
+
+def action_tokens(action: str) -> list[str]:
+    """Split a tool's action name into lowercase words.
+
+    Handles both conventions MCP servers use: ``execute_trade`` and
+    ``executeTrade``.
+    """
+    words: list[str] = []
+    for chunk in _TOKEN_BOUNDARY.split(action):
+        if chunk:
+            words.extend(w.lower() for w in _CAMEL_BOUNDARY.split(chunk) if w)
+    return words
+
+
+def is_financial_action(action: str) -> bool:
+    """Whether *action* names a money-moving operation.
+
+    Matching is on the words of the ACTION name alone. The old substring
+    search ran over the whole ``mcp.<label>.<tool>`` string, so a server
+    the user labelled "Banking Orders" had every one of its benign tools
+    silently suppressed — and the user's only recourse was to guess that
+    the server's own name was the problem.
+
+    A name with no word boundaries at all ("executetrade") hides its
+    words from tokenization, so that single case still gets the substring
+    search: it is exactly the shape an evasive server would choose, and
+    refusing it keeps the control at least as tight as before.
+    """
+    tokens = action_tokens(action)
+    if any(token in _FINANCIAL_TOKENS for token in tokens):
+        return True
+    if len(tokens) <= 1:
+        return bool(_FINANCIAL_PATTERN.search(action))
+    return False
+
 
 # -- Tool metadata sanitization ---------------------------------------------
 #
@@ -192,6 +256,10 @@ class MCPNameBindingRegistry:
     ) -> Optional[str]:
         return self._bindings.get(connector_id, {}).get(exposed_name)
 
+    def invalidate(self, connector_id: uuid_module.UUID) -> None:
+        """Drop every binding for one connector."""
+        self._bindings.pop(connector_id, None)
+
     def reset(self) -> None:
         """Clear all recorded bindings (test hygiene)."""
         self._bindings.clear()
@@ -200,6 +268,29 @@ class MCPNameBindingRegistry:
 # Process-wide singleton: the catalog writes it at discovery, the
 # dispatcher reads it at execution (the two are constructed separately).
 mcp_name_bindings = MCPNameBindingRegistry()
+
+# Every live catalog, so a connector edit can drop its cached tool list
+# as well as its name bindings. Weak so a discarded catalog is collected
+# normally; the catalog is constructed per executor, not per request, so
+# this set stays tiny.
+_live_catalogs: "weakref.WeakSet[MCPToolCatalog]" = weakref.WeakSet()
+
+
+def invalidate_mcp_connector(connector_id: uuid_module.UUID) -> None:
+    """Forget everything cached about one MCP server.
+
+    Bindings are deliberately sticky for the life of the process so a
+    server cannot rebind an approved name behind the user's back. That
+    protection is against the *server*, not the user: when the user
+    themselves repoints or deletes the connector, the old bindings
+    describe tools on a host that is no longer configured, and keeping
+    them wedges those names — every call answered with "no longer
+    advertises the tool approved as ..." until the process restarts.
+    The routes call this on update and delete.
+    """
+    mcp_name_bindings.invalidate(connector_id)
+    for catalog in list(_live_catalogs):
+        catalog.forget(connector_id)
 
 
 def _sanitize_schema_value(value: Any, depth: int = 0) -> Any:
@@ -270,25 +361,279 @@ def split_mcp_tool(tool_name: str) -> Optional[tuple[str, str]]:
 
 def classify_mcp_tool(tool_name: str) -> str:
     """Permission decision for an MCP tool: financial-looking names are
-    blocked, everything else requires explicit user approval."""
-    if _FINANCIAL_PATTERN.search(tool_name):
+    blocked, everything else requires explicit user approval.
+
+    Only the action component of a well-formed ``mcp.<label>.<tool>``
+    name is classified — the label is the user's own server name and says
+    nothing about what a tool does. A name that does not parse is judged
+    whole, since there is no component to trust.
+    """
+    parts = split_mcp_tool(tool_name)
+    action = parts[1] if parts else tool_name
+    if is_financial_action(action):
         return "blocked"
     return "requires_approval"
 
 
 @dataclass(frozen=True)
 class McpServerRef:
-    """Decrypted view of one registered MCP server."""
+    """Decrypted view of one registered MCP server.
+
+    A row whose credentials cannot be used carries ``config_error``
+    instead of being dropped. Dropping it made a misconfigured server
+    indistinguishable from one that was never registered, so the user was
+    told "no such server" about a server sitting right there in their
+    connector list.
+    """
 
     connector_id: uuid_module.UUID
     label: str
     url: str
     headers: dict[str, str]
     rate_limit_per_minute: int
+    config_error: Optional[str] = None
+
+
+class _PooledMCPClient(MCPClient):
+    """An ``MCPClient`` owned by :class:`MCPClientPool`.
+
+    Callers (catalog and dispatcher) follow a strict create → use →
+    ``close()`` pattern. For a pooled client ``close()`` is a release,
+    not a teardown: the MCP session (``Mcp-Session-Id`` + completed
+    ``initialize`` handshake) and any kept-alive HTTP connection survive
+    for the next call. Before pooling, every tool call paid a fresh
+    TCP+TLS connect plus the two-round-trip handshake on top of the
+    tools/list + tools/call it actually needed.
+
+    Any protocol or transport error evicts this client from the pool and
+    really closes it, so a wedged session (server restart, expired
+    session id) lasts at most one failed call — the next call starts
+    clean, exactly as it did before pooling.
+    """
+
+    def __init__(
+        self, transport: Any, pool: "MCPClientPool", key: tuple
+    ) -> None:
+        super().__init__(transport)
+        self._pool = pool
+        self._pool_key = key
+
+    async def close(self) -> None:  # release back to the pool
+        return None
+
+    async def force_close(self) -> None:
+        await super().close()
+
+    async def list_tools(self) -> list[MCPToolInfo]:
+        try:
+            return await super().list_tools()
+        except Exception:
+            await self._pool.discard(self._pool_key, self)
+            raise
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return await super().call_tool(name, arguments)
+        except Exception:
+            await self._pool.discard(self._pool_key, self)
+            raise
+
+
+class MCPClientPool:
+    """One live MCP client per registered server, per event loop.
+
+    Security semantics are unchanged by reuse: the SSRF check and DNS
+    address pinning are a *per-request* httpx event hook on the transport
+    (see ``HttpMCPTransport._check_ssrf``), so every request over a pooled
+    client is still validated and pinned exactly as it was when each call
+    built a throwaway client.
+
+    The key includes the connector id, URL, and headers, so rotating a
+    server's credentials or URL naturally stops hitting the old entry
+    (which then ages out of the LRU and is closed). The event-loop id is
+    in the key too because httpx clients bind to the loop that first uses
+    them — an entry from a dead loop must never be handed to a new one.
+    """
+
+    def __init__(self, max_clients: int = 32) -> None:
+        self._max = max_clients
+        self._clients: dict[tuple, _PooledMCPClient] = {}
+        # Fire-and-forget closes for LRU-evicted clients; referenced here
+        # so the tasks are not garbage-collected mid-close.
+        self._closing: set[asyncio.Task] = set()
+
+    @staticmethod
+    def _key(ref: McpServerRef) -> tuple:
+        try:
+            loop_id = id(asyncio.get_running_loop())
+        except RuntimeError:
+            loop_id = None
+        return (
+            loop_id,
+            ref.connector_id,
+            ref.url,
+            tuple(sorted(ref.headers.items())),
+        )
+
+    def get(self, ref: McpServerRef) -> MCPClient:
+        key = self._key(ref)
+        client = self._clients.get(key)
+        if client is not None:
+            # Refresh LRU position (dicts preserve insertion order).
+            del self._clients[key]
+            self._clients[key] = client
+            return client
+
+        client = _PooledMCPClient(
+            HttpMCPTransport(ref.url, headers=ref.headers), self, key
+        )
+        self._clients[key] = client
+        while len(self._clients) > self._max:
+            _, evicted = next(iter(self._clients.items()))
+            self._retire(evicted)
+        return client
+
+    def _retire(self, client: _PooledMCPClient) -> None:
+        self._clients.pop(client._pool_key, None)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(client.force_close())
+        self._closing.add(task)
+        task.add_done_callback(self._closing.discard)
+
+    async def discard(self, key: tuple, client: _PooledMCPClient) -> None:
+        """Drop *client* (if it is still the pooled entry) and close it."""
+        if self._clients.get(key) is client:
+            del self._clients[key]
+        await client.force_close()
+
+
+_client_pool = MCPClientPool()
+
+
+class _PooledMCPClient(MCPClient):
+    """An ``MCPClient`` owned by :class:`MCPClientPool`.
+
+    Callers (catalog and dispatcher) follow a strict create → use →
+    ``close()`` pattern. For a pooled client ``close()`` is a release,
+    not a teardown: the MCP session (``Mcp-Session-Id`` + completed
+    ``initialize`` handshake) and any kept-alive HTTP connection survive
+    for the next call. Before pooling, every tool call paid a fresh
+    TCP+TLS connect plus the two-round-trip handshake on top of the
+    tools/list + tools/call it actually needed.
+
+    Any protocol or transport error evicts this client from the pool and
+    really closes it, so a wedged session (server restart, expired
+    session id) lasts at most one failed call — the next call starts
+    clean, exactly as it did before pooling.
+    """
+
+    def __init__(
+        self, transport: Any, pool: "MCPClientPool", key: tuple
+    ) -> None:
+        super().__init__(transport)
+        self._pool = pool
+        self._pool_key = key
+
+    async def close(self) -> None:  # release back to the pool
+        return None
+
+    async def force_close(self) -> None:
+        await super().close()
+
+    async def list_tools(self) -> list[MCPToolInfo]:
+        try:
+            return await super().list_tools()
+        except Exception:
+            await self._pool.discard(self._pool_key, self)
+            raise
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return await super().call_tool(name, arguments)
+        except Exception:
+            await self._pool.discard(self._pool_key, self)
+            raise
+
+
+class MCPClientPool:
+    """One live MCP client per registered server, per event loop.
+
+    Security semantics are unchanged by reuse: the SSRF check and DNS
+    address pinning are a *per-request* httpx event hook on the transport
+    (see ``HttpMCPTransport._check_ssrf``), so every request over a pooled
+    client is still validated and pinned exactly as it was when each call
+    built a throwaway client.
+
+    The key includes the connector id, URL, and headers, so rotating a
+    server's credentials or URL naturally stops hitting the old entry
+    (which then ages out of the LRU and is closed). The event-loop id is
+    in the key too because httpx clients bind to the loop that first uses
+    them — an entry from a dead loop must never be handed to a new one.
+    """
+
+    def __init__(self, max_clients: int = 32) -> None:
+        self._max = max_clients
+        self._clients: dict[tuple, _PooledMCPClient] = {}
+        # Fire-and-forget closes for LRU-evicted clients; referenced here
+        # so the tasks are not garbage-collected mid-close.
+        self._closing: set[asyncio.Task] = set()
+
+    @staticmethod
+    def _key(ref: McpServerRef) -> tuple:
+        try:
+            loop_id = id(asyncio.get_running_loop())
+        except RuntimeError:
+            loop_id = None
+        return (
+            loop_id,
+            ref.connector_id,
+            ref.url,
+            tuple(sorted(ref.headers.items())),
+        )
+
+    def get(self, ref: McpServerRef) -> MCPClient:
+        key = self._key(ref)
+        client = self._clients.get(key)
+        if client is not None:
+            # Refresh LRU position (dicts preserve insertion order).
+            del self._clients[key]
+            self._clients[key] = client
+            return client
+
+        client = _PooledMCPClient(
+            HttpMCPTransport(ref.url, headers=ref.headers), self, key
+        )
+        self._clients[key] = client
+        while len(self._clients) > self._max:
+            _, evicted = next(iter(self._clients.items()))
+            self._retire(evicted)
+        return client
+
+    def _retire(self, client: _PooledMCPClient) -> None:
+        self._clients.pop(client._pool_key, None)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(client.force_close())
+        self._closing.add(task)
+        task.add_done_callback(self._closing.discard)
+
+    async def discard(self, key: tuple, client: _PooledMCPClient) -> None:
+        """Drop *client* (if it is still the pooled entry) and close it."""
+        if self._clients.get(key) is client:
+            del self._clients[key]
+        await client.force_close()
+
+
+_client_pool = MCPClientPool()
 
 
 def default_client_factory(ref: McpServerRef) -> MCPClient:
-    return MCPClient(HttpMCPTransport(ref.url, headers=ref.headers))
+    return _client_pool.get(ref)
 
 
 class MCPConnectorLoader:
@@ -298,11 +643,8 @@ class MCPConnectorLoader:
         self._session_factory = session_factory
 
     async def load_for_user(self, user_id: str) -> list[McpServerRef]:
-        import json
-
         from sqlalchemy import select
 
-        from core.security import decrypt_credentials
         from models.connector import ConnectorConfig, ConnectorType
 
         try:
@@ -320,29 +662,61 @@ class MCPConnectorLoader:
                 )
             )
             for row in result.scalars().all():
-                try:
-                    credentials = json.loads(
-                        decrypt_credentials(row.encrypted_credentials)
-                    )
-                except Exception:
-                    logger.error(
-                        "mcp_credential_decryption_failed",
-                        connector_id=str(row.id),
-                    )
-                    continue
-                url = str(credentials.get("url", "")).strip()
-                if not url:
-                    continue
-                refs.append(
-                    McpServerRef(
-                        connector_id=row.id,
-                        label=slugify_label(row.display_name),
-                        url=url,
-                        headers=dict(credentials.get("headers") or {}),
-                        rate_limit_per_minute=row.rate_limit_per_minute,
-                    )
-                )
+                refs.append(self._ref_for_row(row))
         return refs
+
+    @staticmethod
+    def _ref_for_row(row: Any) -> McpServerRef:
+        """Build a ref, recording why the row is unusable rather than
+        raising. This runs on every chat send, so one connector with a
+        malformed credential blob must not be able to fail the turn."""
+        import json
+
+        from core.security import decrypt_credentials
+        from services.connectors.factory import coerce_header_map
+
+        def broken(reason: str) -> McpServerRef:
+            mcp_activity.record_error(row.id, reason)
+            return McpServerRef(
+                connector_id=row.id,
+                label=slugify_label(row.display_name),
+                url="",
+                headers={},
+                rate_limit_per_minute=row.rate_limit_per_minute,
+                config_error=reason,
+            )
+
+        try:
+            credentials = json.loads(decrypt_credentials(row.encrypted_credentials))
+        except Exception:
+            logger.error(
+                "mcp_credential_decryption_failed", connector_id=str(row.id)
+            )
+            return broken(
+                "stored credentials could not be read; re-enter them to fix"
+            )
+        if not isinstance(credentials, dict):
+            return broken("stored credentials are not a JSON object")
+
+        url = str(credentials.get("url", "")).strip()
+        if not url:
+            return broken("no server URL is configured")
+
+        headers = coerce_header_map(credentials.get("headers"))
+        if headers is None:
+            logger.warning("mcp_headers_malformed", connector_id=str(row.id))
+            return broken(
+                "the 'headers' credential must be an object of "
+                "header name -> value"
+            )
+
+        return McpServerRef(
+            connector_id=row.id,
+            label=slugify_label(row.display_name),
+            url=url,
+            headers=headers,
+            rate_limit_per_minute=row.rate_limit_per_minute,
+        )
 
     async def find(self, user_id: str, label: str) -> Optional[McpServerRef]:
         for ref in await self.load_for_user(user_id):
@@ -365,6 +739,11 @@ class MCPToolCatalog:
         self._client_factory = client_factory
         self._ttl = ttl_seconds
         self._cache: dict[uuid_module.UUID, tuple[float, list[MCPToolInfo]]] = {}
+        _live_catalogs.add(self)
+
+    def forget(self, connector_id: uuid_module.UUID) -> None:
+        """Drop the cached tool list for one server."""
+        self._cache.pop(connector_id, None)
 
     async def _tools_for_server(self, ref: McpServerRef) -> list[MCPToolInfo]:
         cached = self._cache.get(ref.connector_id)
@@ -396,6 +775,13 @@ class MCPToolCatalog:
         """
         out: list[Tool] = []
         for ref in await self._loader.load_for_user(user_id):
+            if ref.config_error:
+                logger.warning(
+                    "mcp_server_misconfigured",
+                    server=ref.label,
+                    error=ref.config_error,
+                )
+                continue
             try:
                 infos = await self._tools_for_server(ref)
             except (MCPError, Exception) as exc:
@@ -414,7 +800,7 @@ class MCPToolCatalog:
                 # so normalization can never launder a financial tool.
                 if (
                     classify_mcp_tool(full_name) == "blocked"
-                    or _FINANCIAL_PATTERN.search(info.name)
+                    or is_financial_action(info.name)
                 ):
                     logger.info(
                         "mcp_tool_suppressed_financial",
@@ -493,6 +879,13 @@ class MCPDispatcher:
                 "ok": False,
                 "error": f"No active MCP server '{label}' is configured.",
             }
+        if ref.config_error:
+            return {
+                "ok": False,
+                "error": (
+                    f"MCP server '{label}' is misconfigured: {ref.config_error}."
+                ),
+            }
 
         limit_error = self._acquire_rate_limit(ref)
         if limit_error:
@@ -540,7 +933,7 @@ class MCPDispatcher:
                         f"'{remote_tool}'."
                     ),
                 }
-            if _FINANCIAL_PATTERN.search(remote_name):
+            if is_financial_action(remote_name):
                 return {
                     "ok": False,
                     "error": (

@@ -24,7 +24,7 @@ from api.middleware.security import (
     RequestIdMiddleware,
     SecurityHeadersMiddleware,
 )
-from api.routes import agent, audit, auth, connectors, memory
+from api.routes import agent, audit, auth, connectors, memory, reminders, telegram
 from services.agent.approvals import DbApprovalStore
 from services.agent.runtime import AgentRuntime
 from services.agent.tool_registry import (
@@ -33,6 +33,8 @@ from services.agent.tool_registry import (
 )
 from services.audit import RuntimeAuditLogger
 from services.mcp.integration import MCPConnectorLoader, MCPToolCatalog
+from services.notifications.reminders import ReminderService
+from services.notifications.telegram import NotifyingApprovalStore, TelegramService
 
 logger = structlog.get_logger(__name__)
 
@@ -59,6 +61,25 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             raise
         logger.warning("app_starting_without_database")
 
+    # Optional Telegram approval channel: when a bot token is configured,
+    # pending actions are pushed to each user's linked chat and the
+    # Approve/Deny press flows through the same decision pipeline as the
+    # web UI. Created before the runtime so the approval store can be
+    # wrapped with the notifier.
+    telegram_service = None
+    if settings.TELEGRAM_BOT_TOKEN:
+        telegram_service = TelegramService(
+            token=settings.TELEGRAM_BOT_TOKEN,
+            session_factory=async_session,
+        )
+    app.state.telegram = telegram_service
+
+    approval_store = DbApprovalStore(session_factory=async_session)
+    if telegram_service is not None:
+        approval_store = NotifyingApprovalStore(
+            approval_store, notify=telegram_service.notify_pending
+        )
+
     try:
         # All security-relevant services own short-lived sessions via the
         # application session factory: the executor decrypts credentials and
@@ -70,7 +91,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             permission_engine=RuntimePermissionAdapter(),
             tool_executor=ConnectorToolExecutor(session_factory=async_session),
             audit_service=RuntimeAuditLogger(session_factory=async_session),
-            approval_store=DbApprovalStore(session_factory=async_session),
+            approval_store=approval_store,
         )
         logger.info("agent_runtime_initialized", provider=settings.LLM_PROVIDER)
     except Exception as exc:
@@ -80,8 +101,28 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Tool discovery for user-registered MCP servers (short-TTL cache).
     app.state.mcp_catalog = MCPToolCatalog(MCPConnectorLoader(async_session))
 
+    if telegram_service is not None:
+        # The decision callback needs app.state (runtime + MCP catalog),
+        # so it is wired after both exist.
+        telegram_service.decide = agent.build_decision_applier(app)
+        await telegram_service.start()
+        logger.info("telegram_approvals_enabled")
+
+    # Reminders sweep regardless of whether a delivery channel exists — the
+    # rows are still user-visible in the API; only the out-of-band push
+    # needs Telegram.
+    reminder_service = ReminderService(
+        session_factory=async_session,
+        send=telegram_service.send_text if telegram_service is not None else None,
+    )
+    app.state.reminders = reminder_service
+    await reminder_service.start()
+
     yield
     logger.info("shutting_down_sentientai")
+    await reminder_service.stop()
+    if telegram_service is not None:
+        await telegram_service.stop()
     await engine.dispose()
 
 
@@ -99,16 +140,23 @@ app = FastAPI(
     openapi_url=None if _is_production else "/openapi.json",
 )
 
-# ── Middleware (applied bottom-to-top) ────────────────────────────────────────
+# ── Middleware (the LAST one added is the outermost) ──────────────────────────
+# Rate limiting is added before the header/request-id layers so it ends up
+# INSIDE them. A throttled request short-circuits with a 429 from the
+# limiter itself and never reaches anything further in, so anything that
+# must appear on every response — the security headers and the correlation
+# id — has to wrap the limiter, not sit under it. Otherwise exactly the
+# responses an attacker provokes are the ones served unhardened and
+# untraceable.
 if settings.ALLOWED_HOSTS and settings.ALLOWED_HOSTS != ["*"]:
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.ALLOWED_HOSTS)
-app.add_middleware(SecurityHeadersMiddleware)
-app.add_middleware(RequestIdMiddleware)
 app.add_middleware(
     RateLimitMiddleware,
     max_requests=settings.RATE_LIMIT_PER_MINUTE,
     auth_max_requests=settings.AUTH_RATE_LIMIT_PER_MINUTE,
 )
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(RequestIdMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
@@ -125,6 +173,8 @@ app.include_router(agent.router, prefix="/api")
 app.include_router(connectors.router, prefix="/api")
 app.include_router(audit.router, prefix="/api")
 app.include_router(memory.router, prefix="/api")
+app.include_router(reminders.router, prefix="/api")
+app.include_router(telegram.router, prefix="/api")
 
 
 @app.get("/")

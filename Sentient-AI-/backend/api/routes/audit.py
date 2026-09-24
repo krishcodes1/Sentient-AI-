@@ -48,11 +48,17 @@ class AuditLogResponse(BaseModel):
 
 class AuditIntegrityCheck(BaseModel):
     id: uuid.UUID
+    # True ONLY when the row matched the keyed (HMAC) hash. That is the
+    # single claim worth making: an adversary with database write access
+    # but without AUDIT_HMAC_KEY cannot produce a row that sets this.
     valid: bool
-    # True when the row verified only against the pre-upgrade UNKEYED hash.
-    # It is intact, but its integrity rests on a digest anyone with database
-    # write access could recompute — so the UI can say "verified (legacy)"
-    # rather than implying keyed, forgery-resistant protection.
+    # True when the row matched the pre-upgrade UNKEYED digest instead.
+    # Such a row is *unverifiable by key*, not verified: anyone who can
+    # write to the database can recompute an unkeyed digest, so reporting
+    # it as valid would let a forger mint "verified" history. The two flags
+    # are therefore three distinct states — (valid, legacy) is
+    # (True, False) keyed-verified, (False, True) legacy/unverifiable, and
+    # (False, False) tampered.
     legacy: bool = False
 
 
@@ -221,12 +227,19 @@ async def verify_audit_integrity(
     ``previous_hash``) so chain rotation, deletion, or field tampering
     all surface as a hash mismatch.
 
-    Rows written before the keyed-hash upgrade carry an unkeyed SHA-256, so
-    a failed HMAC check falls back to the legacy digest and reports
-    ``legacy: true`` rather than ``valid: false``. Without that fallback
-    every pre-upgrade row would show up in the UI as TAMPERED — a false
-    alarm on the platform's own compliance artifact, which is worse than
-    useless: it teaches the user to ignore the integrity indicator.
+    Only the keyed HMAC sets ``valid``. Rows written before that upgrade
+    carry an unkeyed SHA-256 and are reported as ``legacy`` — intact as far
+    as this route can tell, but carrying no forgery protection, because
+    anyone who can write to the database can recompute an unkeyed digest.
+    Calling those rows valid would hand a database-write adversary a way to
+    mint "verified" history: write the forged row, compute its unkeyed
+    hash, and this endpoint blesses it.
+
+    The unkeyed fallback is additionally gated on ``seq IS NULL``, matching
+    ``scripts/verify_audit_log.py``. Every row written since the upgrade
+    carries a seq, so a forged post-upgrade row cannot reach the fallback
+    at all; clearing seq to reach it is itself the legacy label, not a
+    verification.
     """
     entry = await _get_owned_log(log_id, current_user, db)
 
@@ -247,6 +260,8 @@ async def verify_audit_integrity(
     )
     if entry.integrity_hash == compute_audit_hash(hash_payload):
         return {"id": entry.id, "valid": True, "legacy": False}
-    if entry.integrity_hash == compute_audit_hash_legacy(hash_payload):
-        return {"id": entry.id, "valid": True, "legacy": True}
+    if entry.seq is None and entry.integrity_hash == compute_audit_hash_legacy(
+        hash_payload
+    ):
+        return {"id": entry.id, "valid": False, "legacy": True}
     return {"id": entry.id, "valid": False, "legacy": False}

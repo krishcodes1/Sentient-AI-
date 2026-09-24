@@ -8,6 +8,14 @@ Provides:
   back automatically to the original in-memory sliding-window limiter
   whenever Redis is unavailable — a Redis outage never takes the API down.
 - RequestIdMiddleware — unique request ID on every request/response
+
+All three are pure ASGI middleware rather than ``BaseHTTPMiddleware``
+subclasses. BaseHTTPMiddleware wraps every request in an anyio task group
+and pipes the response body through memory-object streams; stacked three
+deep that overhead was paid on every request, and it buffers/decouples
+streaming bodies — the agent chat endpoint streams SSE through this exact
+stack. The ASGI form adds headers on the ``http.response.start`` message
+and otherwise passes the stream through untouched.
 """
 
 from __future__ import annotations
@@ -18,12 +26,12 @@ import time
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Callable
 
 import structlog
-from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+from starlette.datastructures import Headers, MutableHeaders
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 try:  # pragma: no cover — exercised implicitly by the fallback path
     import redis.asyncio as _aioredis
@@ -37,7 +45,7 @@ logger = structlog.get_logger(__name__)
 # Security Headers
 # ------------------------------------------------------------------ #
 
-class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+class SecurityHeadersMiddleware:
     """
     Adds standard security headers to every response.
     """
@@ -63,26 +71,39 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         "Pragma": "no-cache",
     }
 
+    # Swagger UI and ReDoc require inline scripts/styles + CDN resources
+    _DOCS_CSP = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+        "img-src 'self' data: https://fastapi.tiangolo.com; "
+        "font-src 'self' https://cdn.jsdelivr.net; "
+        "frame-ancestors 'none'"
+    )
+
     # Swagger / ReDoc paths that need relaxed CSP
     _DOCS_PATHS = {"/docs", "/docs/", "/redoc", "/redoc/", "/openapi.json"}
 
-    async def dispatch(
-        self, request: Request, call_next: RequestResponseEndpoint
-    ) -> Response:
-        response = await call_next(request)
-        for header, value in self.SECURITY_HEADERS.items():
-            response.headers[header] = value
-        # Swagger UI and ReDoc require inline scripts/styles + CDN resources
-        if request.url.path in self._DOCS_PATHS:
-            response.headers["Content-Security-Policy"] = (
-                "default-src 'self'; "
-                "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
-                "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
-                "img-src 'self' data: https://fastapi.tiangolo.com; "
-                "font-src 'self' https://cdn.jsdelivr.net; "
-                "frame-ancestors 'none'"
-            )
-        return response
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        is_docs_path = scope["path"] in self._DOCS_PATHS
+
+        async def send_with_headers(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                for header, value in self.SECURITY_HEADERS.items():
+                    headers[header] = value
+                if is_docs_path:
+                    headers["Content-Security-Policy"] = self._DOCS_CSP
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
 
 
 # ------------------------------------------------------------------ #
@@ -95,7 +116,7 @@ class _RateBucket:
     timestamps: list[float] = field(default_factory=list)
 
 
-class RateLimitMiddleware(BaseHTTPMiddleware):
+class RateLimitMiddleware:
     """
     Per-IP rate limiter: Redis-backed when available, in-memory otherwise.
 
@@ -133,7 +154,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         redis_url: str | None = None,
         trusted_proxies: list[str] | None = None,
     ) -> None:
-        super().__init__(app)
+        self.app = app
         self.max_requests = max_requests
         self.window_seconds = window_seconds
         self.cleanup_interval = cleanup_interval
@@ -314,12 +335,16 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             bucket.timestamps.append(now)
             return True, 0
 
-    async def dispatch(
-        self, request: Request, call_next: RequestResponseEndpoint
-    ) -> Response:
-        client_ip = self._get_client_ip(request)
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
 
-        is_auth_path = request.url.path in self.AUTH_PATHS
+        # Request is a thin, lazy view over the scope — no body is read and
+        # nothing is copied, so building one here is cheap.
+        client_ip = self._get_client_ip(Request(scope))
+
+        is_auth_path = scope["path"] in self.AUTH_PATHS
         bucket_key = f"{client_ip}:auth" if is_auth_path else client_ip
         limit = self.auth_max_requests if is_auth_path else self.max_requests
 
@@ -329,7 +354,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         allowed, retry_after = verdict
 
         if not allowed:
-            return JSONResponse(
+            response = JSONResponse(
                 status_code=429,
                 content={
                     "detail": "Rate limit exceeded. Please try again later.",
@@ -337,15 +362,17 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 },
                 headers={"Retry-After": str(retry_after)},
             )
+            await response(scope, receive, send)
+            return
 
-        return await call_next(request)
+        await self.app(scope, receive, send)
 
 
 # ------------------------------------------------------------------ #
 # Request ID
 # ------------------------------------------------------------------ #
 
-class RequestIdMiddleware(BaseHTTPMiddleware):
+class RequestIdMiddleware:
     """
     Ensures every request/response carries a unique X-Request-ID header.
 
@@ -355,13 +382,26 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
 
     HEADER_NAME = "X-Request-ID"
 
-    async def dispatch(
-        self, request: Request, call_next: RequestResponseEndpoint
-    ) -> Response:
-        request_id = request.headers.get(self.HEADER_NAME) or str(uuid.uuid4())
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
 
-        # Attach to request state so downstream code can access it
-        request.state.request_id = request_id
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request_id = (
+            Headers(scope=scope).get(self.HEADER_NAME) or str(uuid.uuid4())
+        )
+
+        # Attach to request state so downstream code can access it via
+        # ``request.state.request_id`` (Request.state is backed by this dict).
+        scope.setdefault("state", {})["request_id"] = request_id
+
+        async def send_with_request_id(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                MutableHeaders(scope=message)[self.HEADER_NAME] = request_id
+            await send(message)
 
         # Bind into structlog's contextvars so every log line emitted while
         # handling this request carries the id (merge_contextvars is in the
@@ -369,8 +409,6 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
         structlog.contextvars.clear_contextvars()
         structlog.contextvars.bind_contextvars(request_id=request_id)
         try:
-            response = await call_next(request)
+            await self.app(scope, receive, send_with_request_id)
         finally:
             structlog.contextvars.clear_contextvars()
-        response.headers[self.HEADER_NAME] = request_id
-        return response

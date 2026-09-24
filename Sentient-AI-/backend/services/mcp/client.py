@@ -367,20 +367,30 @@ class MCPClient:
     def __init__(self, transport: MCPTransport) -> None:
         self._transport = transport
         self._initialized = False
+        # Clients can now be shared across concurrent tool calls (see the
+        # pool in services.mcp.integration). Without the lock, two callers
+        # both observe _initialized=False and run the handshake twice,
+        # racing their session ids; with it the handshake runs exactly once
+        # per client lifetime. A failed handshake still leaves
+        # _initialized=False so the next caller retries it.
+        self._init_lock = asyncio.Lock()
 
     async def initialize(self) -> None:
         if self._initialized:
             return
-        await self._transport.request(
-            "initialize",
-            {
-                "protocolVersion": MCP_PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": {"name": "sentientai", "version": "0.1.0"},
-            },
-        )
-        await self._transport.notify("notifications/initialized", {})
-        self._initialized = True
+        async with self._init_lock:
+            if self._initialized:
+                return
+            await self._transport.request(
+                "initialize",
+                {
+                    "protocolVersion": MCP_PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {"name": "sentientai", "version": "0.1.0"},
+                },
+            )
+            await self._transport.notify("notifications/initialized", {})
+            self._initialized = True
 
     async def list_tools(self) -> list[MCPToolInfo]:
         """Advertised tools, or ``MCPError`` if the payload is unusable.

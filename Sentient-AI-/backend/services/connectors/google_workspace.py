@@ -24,6 +24,7 @@ from .base import (
     ConnectorError,
     PromptGuard,
     UserConfirmationRequired,
+    path_segment,
 )
 
 logger = structlog.get_logger(__name__)
@@ -160,6 +161,31 @@ class GoogleWorkspaceConnector(BaseConnector):
         self._log.info("authenticated_via_oauth", scopes=list(self._granted_scopes))
         return True
 
+    def updated_credentials(
+        self, original: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Return a credentials dict to persist when this session produced
+        tokens the stored credentials don't have — a refresh rotated the
+        access token, or a one-time OAuth code was exchanged. ``None`` when
+        nothing changed. Without persisting these, every refreshed token
+        died with the connector instance and the user had to re-paste a
+        fresh token every hour.
+        """
+        if not self._access_token:
+            return None
+        if self._access_token == original.get("access_token") and (
+            self._refresh_token or None
+        ) == (original.get("refresh_token") or None):
+            return None
+        updated = dict(original)
+        updated["access_token"] = self._access_token
+        if self._refresh_token:
+            updated["refresh_token"] = self._refresh_token
+        # A consumed one-time authorization code must never be replayed.
+        updated.pop("code", None)
+        updated.pop("code_verifier", None)
+        return updated
+
     async def _refresh_access_token(self) -> None:
         if not self._refresh_token:
             raise AuthenticationError("No refresh token available.")
@@ -272,7 +298,8 @@ class GoogleWorkspaceConnector(BaseConnector):
     async def get_message(self, message_id: str) -> dict[str, Any]:
         """Fetch a single Gmail message by ID with content sanitization."""
         raw = await self._gapi_get(
-            f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{message_id}",
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages/"
+            f"{path_segment(message_id)}",
             params={"format": "full"},
         )
         # Extract useful fields
@@ -454,13 +481,52 @@ class GoogleWorkspaceConnector(BaseConnector):
 
     # -- Health check --------------------------------------------------------
 
+    # (scope prefix, probe URL) pairs, cheapest first. The connector is
+    # healthy when the stored token can reach *any* surface it was granted:
+    # probing Gmail alone failed every calendar-only connector — an
+    # incremental-auth grant the platform explicitly supports — and told the
+    # user their credentials were invalid when they were merely narrower
+    # than the probe.
+    _HEALTH_PROBES: tuple[tuple[str, str], ...] = (
+        (
+            "https://www.googleapis.com/auth/gmail",
+            "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+        ),
+        (
+            "https://www.googleapis.com/auth/calendar",
+            "https://www.googleapis.com/calendar/v3/users/me/calendarList",
+        ),
+    )
+
+    def _ordered_health_probes(self) -> tuple[tuple[str, str], ...]:
+        """Probes to try, granted surfaces first.
+
+        ``_granted_scopes`` is only populated by the OAuth exchange; a
+        connector configured with a raw access token knows nothing about
+        its scopes, so every probe is tried in that case.
+        """
+        if not self._granted_scopes:
+            return self._HEALTH_PROBES
+        granted = tuple(
+            probe
+            for probe in self._HEALTH_PROBES
+            if any(s.startswith(probe[0]) for s in self._granted_scopes)
+        )
+        return granted or self._HEALTH_PROBES
+
     async def health_check(self) -> bool:
         try:
             client = self._get_client()
-            resp = await client.get(
-                "https://gmail.googleapis.com/gmail/v1/users/me/profile",
-                headers=self._headers(),
-            )
-            return resp.status_code == 200
+            for _, url in self._ordered_health_probes():
+                resp = await client.get(url, headers=self._headers())
+                if resp.status_code == 200:
+                    return True
+                if resp.status_code != 403:
+                    # 403 is "this token lacks that API's scope" — the only
+                    # answer worth trying another surface for. A 401 means
+                    # the token itself is bad and every surface will refuse
+                    # it, and a 5xx is an outage, not a scope question.
+                    return False
+            return False
         except Exception:
             return False
