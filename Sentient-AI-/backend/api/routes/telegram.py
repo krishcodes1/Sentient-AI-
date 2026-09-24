@@ -1,8 +1,11 @@
 """Telegram approval-channel linking endpoints.
 
-The bot token itself is server configuration (TELEGRAM_BOT_TOKEN) and is
-never exposed here; these routes only manage the per-user link between a
-Crawler AI account and a Telegram chat.
+The bot token itself is owner configuration (TELEGRAM_BOT_TOKEN, or the
+one saved in the setup wizard) and is never exposed here; these routes
+only manage the per-user link between a Crawler AI account and a Telegram
+chat. The poller behind them is started and stopped at runtime by the
+TelegramManager, so what they report follows the owner's settings without
+a restart.
 """
 
 from __future__ import annotations
@@ -33,7 +36,10 @@ class TelegramLinkResponse(BaseModel):
 
 
 def _service(request: Request):
-    return getattr(request.app.state, "telegram", None)
+    """The running TelegramService, or None while the manager has none
+    (no token, Telegram switched off, or the app never wired one)."""
+    manager = getattr(request.app.state, "telegram_manager", None)
+    return getattr(manager, "current", None) if manager is not None else None
 
 
 @router.get("/status", response_model=TelegramStatus)
@@ -62,8 +68,9 @@ async def create_telegram_link(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=(
-                "Telegram is not configured on this server. Set "
-                "TELEGRAM_BOT_TOKEN in backend/.env and restart."
+                "Telegram is not configured on this server. Add a bot token "
+                "in Settings → Telegram (or TELEGRAM_BOT_TOKEN in backend/.env) "
+                "and make sure Telegram is turned on in Settings → Permissions."
             ),
         )
     link = await service.create_link_code(str(current_user.id))

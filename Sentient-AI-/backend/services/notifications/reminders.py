@@ -129,8 +129,11 @@ class ReminderService:
         sent = 0
         for user_id, text in claimed:
             try:
-                await self.send(user_id, text)
-                sent += 1
+                # The Telegram manager answers False while no poller runs
+                # (or the user has no linked chat); that reminder is not
+                # delivered, and is not retried either — same as a failure.
+                if await self.send(user_id, text) is not False:
+                    sent += 1
             except Exception as exc:
                 # The row is already claimed; log loudly rather than retry,
                 # so a broken channel cannot turn into a delivery storm.

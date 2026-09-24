@@ -50,9 +50,12 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 import structlog
+
+if TYPE_CHECKING:
+    from services.capabilities.base import CapabilityStatus
 
 logger = structlog.get_logger(__name__)
 
@@ -219,7 +222,10 @@ class SystemToolkit:
 
     ``runner`` replaces the subprocess layer and ``detector`` the
     installed-check so tests exercise the allowlist and the control flow
-    without installing anything.
+    without installing anything. ``report_source`` returns the owner's
+    capability report (``InstallationService.report``); when wired,
+    ``capabilities`` includes it so the agent can say what is switched
+    off or blocked, and why, instead of guessing.
     """
 
     def __init__(
@@ -228,10 +234,12 @@ class SystemToolkit:
         runner: Optional[StepRunner] = None,
         detector: Optional[Callable[[str], bool]] = None,
         timeout_s: float = INSTALL_TIMEOUT_S,
+        report_source: Optional[Callable[[], Awaitable[list["CapabilityStatus"]]]] = None,
     ) -> None:
         self._runner = runner or _run_step
         self._detector = detector
         self._timeout_s = timeout_s
+        self._report_source = report_source
         # Two approvals for the same capability arriving together must not
         # race two pip processes; the second waits and finds it installed.
         self._lock = asyncio.Lock()
@@ -267,8 +275,9 @@ class SystemToolkit:
     # -- Actions -------------------------------------------------------------
 
     async def capabilities(self) -> dict[str, Any]:
-        """Every known capability and whether it is installed right now."""
-        return {
+        """Every installable capability and whether it is installed right
+        now, plus (when wired) the owner's permission switches."""
+        result: dict[str, Any] = {
             "ok": True,
             "capabilities": [
                 {
@@ -280,6 +289,15 @@ class SystemToolkit:
                 for name, capability in ALLOWLIST.items()
             ],
         }
+        if self._report_source is not None:
+            try:
+                result["permissions"] = [s.to_dict() for s in await self._report_source()]
+            except Exception as exc:
+                # The install list is still useful on its own; say the
+                # switches could not be read rather than fail the call.
+                logger.warning("capability_report_failed", error_type=type(exc).__name__)
+                result["permissions_error"] = "Could not read the permission switches."
+        return result
 
     async def install_capability(self, name: str) -> dict[str, Any]:
         """Install one allowlisted capability.
