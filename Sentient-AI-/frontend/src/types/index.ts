@@ -339,3 +339,33 @@ export interface CapabilityStatus {
   when_denied: string;
   tools: string[];
 }
+
+// First-run setup (GET /api/setup/status and the /api/setup/* writes).
+export interface SetupStatus {
+  needs_setup: boolean;
+  has_owner: boolean;
+  provider_configured: boolean;
+  setup_completed: boolean;
+}
+
+export interface SetupProvider {
+  name: string;
+  /** The key comes from the server's .env, which always wins over the DB. */
+  key_from_env: boolean;
+  /** A key was already saved through the wizard and is held encrypted. */
+  key_stored: boolean;
+  /** Suggested model ids, best default first. */
+  models: string[];
+}
+
+export interface SetupProviders {
+  providers: SetupProvider[];
+  current: { provider: string; model: string };
+}
+
+export interface ProviderChoice {
+  provider: string;
+  model: string;
+  /** Omitted when the server already holds the key. */
+  api_key?: string;
+}
