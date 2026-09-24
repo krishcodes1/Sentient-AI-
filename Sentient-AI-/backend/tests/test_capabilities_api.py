@@ -9,6 +9,7 @@ transport never runs the lifespan.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -32,10 +33,19 @@ async def installation(session_factory):
 
     service = InstallationService(session_factory)
     app.state.installation = service
+    # The capabilities routes write audit rows through app.state.session_factory
+    # (falling back to the real core.database.async_session otherwise); the
+    # client fixture only overrides get_db, so without this the routes'
+    # short-lived audit sessions would miss the test's in-memory database.
+    app.state.session_factory = session_factory
     capabilities.clear_probe_cache()
     yield service
     try:
         del app.state.installation
+    except AttributeError:
+        pass
+    try:
+        del app.state.session_factory
     except AttributeError:
         pass
     capabilities.clear_probe_cache()
@@ -259,6 +269,77 @@ async def test_request_access_unknown_capability_is_404(client, owner):
     assert resp.status_code == 404
 
 
+@pytest.mark.asyncio
+async def test_request_access_when_switched_off_is_409_and_skips_request(
+    client, owner, monkeypatch
+):
+    """A capability the owner never turned on has nothing to request, even
+    though it is otherwise available: the old guard only checked
+    ``available``, so it would have called request_access() here."""
+    headers, _ = owner
+    _force_native_mac(monkeypatch, granted=False)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        screen.macos, "screen_capture_request", lambda: calls.append("request") or True
+    )
+    monkeypatch.setattr(
+        screen.macos, "open_settings", lambda *a, **k: calls.append("settings") or True
+    )
+
+    resp = await client.post("/api/capabilities/screen/request-access", headers=headers)
+    assert resp.status_code == 409
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_request_access_when_already_granted_is_409(client, owner, monkeypatch):
+    headers, _ = owner
+    _force_native_mac(monkeypatch, granted=True)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        screen.macos, "screen_capture_request", lambda: calls.append("request") or True
+    )
+    monkeypatch.setattr(
+        screen.macos, "open_settings", lambda *a, **k: calls.append("settings") or True
+    )
+
+    await client.put(
+        "/api/capabilities", json={"capabilities": {"screen": True}}, headers=headers
+    )
+    resp = await client.post("/api/capabilities/screen/request-access", headers=headers)
+    assert resp.status_code == 409
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_request_access_failure_is_audited_with_generic_error(
+    client, owner, session_factory, monkeypatch
+):
+    headers, user_id = owner
+    _force_native_mac(monkeypatch, granted=False)
+
+    def boom() -> None:
+        raise RuntimeError("permission daemon exploded")
+
+    monkeypatch.setattr(screen.macos, "screen_capture_request", boom)
+
+    await client.put(
+        "/api/capabilities", json={"capabilities": {"screen": True}}, headers=headers
+    )
+    resp = await client.post("/api/capabilities/screen/request-access", headers=headers)
+    assert resp.status_code == 500
+    assert resp.json() == {"detail": "Could not open the permission prompt."}
+    assert "exploded" not in resp.text
+
+    failed = [
+        row
+        for row in await _audit_rows(session_factory, user_id)
+        if row.action == "capability_access_request_failed"
+    ]
+    assert len(failed) == 1
+    assert failed[0].request_data == {"capability": "screen", "error_type": "RuntimeError"}
+
+
 # ── POST /{key}/install ──────────────────────────────────────────────────────
 
 
@@ -318,6 +399,97 @@ async def test_install_failure_is_passed_through_and_audited(
         if row.action == "capability_install_finished"
     ]
     assert finished and finished[0].request_data["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_install_uses_app_state_system_toolkit_when_set(client, owner, monkeypatch):
+    """A wired app hands the route a shared toolkit through app.state; the
+    route must use that one instead of the module-level fallback."""
+    from main import app
+
+    headers, _ = owner
+    calls: list[str] = []
+
+    class FakeToolkit:
+        async def install_capability(self, name: str) -> dict[str, Any]:
+            calls.append(name)
+            return {"ok": True, "name": name, "installed_now": True}
+
+    async def must_not_run(self, name: str) -> dict[str, Any]:  # pragma: no cover
+        raise AssertionError("the module-level toolkit must not be used")
+
+    monkeypatch.setattr(SystemToolkit, "install_capability", must_not_run)
+    app.state.system_toolkit = FakeToolkit()
+    try:
+        resp = await client.post("/api/capabilities/site_screenshots/install", headers=headers)
+    finally:
+        del app.state.system_toolkit
+
+    assert resp.status_code == 200, resp.text
+    assert calls == ["browser"]
+
+
+@pytest.mark.asyncio
+async def test_duplicate_install_is_rejected_without_audit_rows(
+    client, owner, session_factory, monkeypatch
+):
+    headers, user_id = owner
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_install(self, name: str) -> dict[str, Any]:
+        started.set()
+        await release.wait()
+        return {"ok": True, "name": name, "installed_now": True}
+
+    monkeypatch.setattr(SystemToolkit, "install_capability", fake_install)
+
+    first = asyncio.create_task(
+        client.post("/api/capabilities/site_screenshots/install", headers=headers)
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    second = await client.post("/api/capabilities/site_screenshots/install", headers=headers)
+    assert second.status_code == 409
+    assert second.json() == {"detail": "An install for this capability is already running."}
+
+    release.set()
+    first_resp = await first
+    assert first_resp.status_code == 200, first_resp.text
+
+    rows = await _audit_rows(session_factory, user_id)
+    actions = [row.action for row in rows]
+    # The rejected second request must not have added any audit rows.
+    assert actions.count("capability_install_started") == 1
+    assert actions.count("capability_install_finished") == 1
+
+
+@pytest.mark.asyncio
+async def test_install_crash_returns_generic_error_and_audits(
+    client, owner, session_factory, monkeypatch
+):
+    headers, user_id = owner
+
+    async def fake_install(self, name: str) -> dict[str, Any]:
+        raise RuntimeError("pip exploded in a way nobody should see")
+
+    monkeypatch.setattr(SystemToolkit, "install_capability", fake_install)
+
+    resp = await client.post("/api/capabilities/site_screenshots/install", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": False, "error": "The install failed unexpectedly."}
+    assert "exploded" not in resp.text
+
+    finished = [
+        row
+        for row in await _audit_rows(session_factory, user_id)
+        if row.action == "capability_install_finished"
+    ]
+    assert finished and finished[0].request_data == {
+        "capability": "site_screenshots",
+        "install": "browser",
+        "ok": False,
+    }
 
 
 @pytest.mark.asyncio
