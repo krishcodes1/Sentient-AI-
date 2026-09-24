@@ -38,8 +38,10 @@ through the approval card, and the executor refuses it unapproved.
 
 Every built-in tool belongs to a capability (``services/capabilities``)
 the owner can switch off, except the few in ``ALWAYS_ON_TOOLS``. That
-switch is enforced twice: ``build_tools`` does not offer a tool whose
-capability is off, and the executor refuses it at dispatch.
+switch is enforced three times, always by the canonical ``type.action``
+name: ``build_tools`` does not offer a tool whose capability is off, the
+permission adapter blocks it (audited as ``capability_off``) before
+anything runs, and the executor refuses it at dispatch as the backstop.
 """
 
 from __future__ import annotations
@@ -59,7 +61,7 @@ from services.agent.permissions import (
     UserTier,
     is_hard_blocked_action,
 )
-from services.agent.runtime import Tool
+from services.agent.runtime import CAPABILITY_OFF_POLICY, Tool
 from services.tools.desktop import DesktopToolkit
 from services.tools.reminders import ReminderToolkit
 from services.tools.system import ALLOWLIST as SYSTEM_CAPABILITIES
@@ -387,7 +389,8 @@ CONNECTOR_CATALOG: dict[str, list[ToolSpec]] = {
             "capabilities",
             "List the optional capabilities this installation can add (e.g. "
             "'browser', which web.screenshot needs) and whether each is "
-            "installed right now.",
+            "installed right now, and the owner's permission switches (what "
+            "is on, off or blocked and why).",
             ActionCategory.READ,
         ),
         ToolSpec(
@@ -573,8 +576,9 @@ def resolve_tool(tool_name: str) -> Optional[ResolvedTool]:
     off the connector type either way, so two rows of the same type can
     never resolve to different tiers.
 
-    Returns None for malformed names or unknown connector/action, so
-    callers can fail safe (default-deny) rather than raise.
+    Returns None for malformed names, unknown connector/action, and a slug
+    on a built-in type, so callers can fail safe (default-deny) rather
+    than raise.
     """
     if "." not in tool_name:
         return None
@@ -587,6 +591,12 @@ def resolve_tool(tool_name: str) -> Optional[ResolvedTool]:
             c in "0123456789abcdef" for c in slug
         ):
             return None
+        if connector_type in BUILTIN_CONNECTOR_TYPES:
+            # Built-ins have no connector rows, so nothing is ever offered
+            # under a slug. Accepting one would hand the model a second
+            # spelling (``desktop__deadbeef.screenshot``) that capability
+            # lookups keyed on the plain name do not recognise.
+            return None
 
     specs = CONNECTOR_CATALOG.get(connector_type)
     if not specs:
@@ -595,6 +605,24 @@ def resolve_tool(tool_name: str) -> Optional[ResolvedTool]:
         if spec.action == action:
             return ResolvedTool(connector_type, action, spec, slug)
     return None
+
+
+def _default_enabled_capabilities() -> frozenset[str]:
+    """The registry defaults: what an unwired gate treats as on, so a
+    caller that forgets to pass the owner's set can never switch on an
+    off-by-default capability (``screen``)."""
+    from services import capabilities as capability_registry
+
+    return frozenset(k for k, on in capability_registry.default_switches().items() if on)
+
+
+def _capability_of(connector_type: str, action: str):
+    """The capability gating one built-in action, looked up by its
+    canonical ``type.action`` name — never by whatever spelling the model
+    used — so every gate agrees on which switch applies."""
+    from services import capabilities as capability_registry
+
+    return capability_registry.capability_for_tool(f"{connector_type}.{action}")
 
 
 # Map a PermissionDecision to the string the runtime's check() returns.
@@ -747,12 +775,12 @@ def build_tools(
     appended for every user: they hold no credentials, so there is no
     connector row to gate them on. They are still held to the user's
     account-level tier, which is a floor over everything the agent may do
-    unattended. The
-    account tier can only tighten what the static policy grants: an
-    action the policy auto-approves (web reads, reminder writes) stays
-    unattended under the default ``user_confirm``, exactly as connector
-    reads do. The ``system`` install stays approval-gated even under an
-    ``auto_approve`` account default (see ``_BUILTIN_STANCE``).
+    unattended. The account tier can only tighten what the static policy
+    grants: an action the policy auto-approves (web reads, reminder
+    writes) stays unattended under the default ``user_confirm``, exactly
+    as connector reads do. The ``system`` install stays approval-gated
+    even under an ``auto_approve`` account default (see
+    ``_BUILTIN_STANCE``).
 
     Hard-blocked actions and actions outside the connector's granted
     scopes are omitted entirely so the LLM is never offered a tool it
@@ -775,15 +803,11 @@ def build_tools(
     - ``user_confirm`` (default): static policy applies unchanged —
       write-scope tools require explicit approval.
     """
-    from services import capabilities as capability_registry
-
     if enabled_capabilities is None:
         # No wiring supplied: fall back to the registry defaults so a caller
         # that forgets the argument can never switch on an off-by-default
         # capability (screen). Wired callers pass the owner's effective set.
-        enabled_capabilities = frozenset(
-            k for k, on in capability_registry.default_switches().items() if on
-        )
+        enabled_capabilities = _default_enabled_capabilities()
     engine = engine or PermissionEngine()
     # The static policy already distinguishes admins (ADMIN_ONLY actions
     # require their confirmation instead of being refused outright); it had
@@ -836,10 +860,10 @@ def build_tools(
                 and not is_hard_blocked_action(spec.action)
             ):
                 runtime_decision = "approved"
-            tool_name = f"{offer.namespace}.{spec.action}"
-            cap = capability_registry.capability_for_tool(tool_name)
+            cap = _capability_of(offer.connector_type, spec.action)
             if cap is not None and cap.key not in enabled_capabilities:
                 continue
+            tool_name = f"{offer.namespace}.{spec.action}"
             tools.append(
                 Tool(
                     name=tool_name,
@@ -868,15 +892,36 @@ class RuntimePermissionAdapter:
     The runtime calls these with ``(user_id, tool_name, arguments)``; we
     resolve the tool name to its policy key + category and delegate to the
     real engine. Unknown tools are denied (blocked), which is default-deny.
+
+    A built-in tool whose capability the owner has not got on (see
+    ``capability_gate``; the registry defaults when unwired) is "blocked"
+    here with policy ``capability_off``. Refusing at this seam rather than
+    only in the executor means the runtime records ``tool_blocked`` before
+    any ``tool_executing`` intent row and shows the user a blocked card;
+    the executor's own gate stays as the backstop.
     """
 
     def __init__(
         self,
         engine: Optional[PermissionEngine] = None,
         user_tier: UserTier = UserTier.STANDARD,
+        capability_gate: Optional[Callable[[], Awaitable[frozenset[str]]]] = None,
     ) -> None:
         self._engine = engine or PermissionEngine()
         self._user_tier = user_tier
+        self._capability_gate = capability_gate
+
+    async def _capability_off(self, resolved: ResolvedTool):
+        """The capability refusing *resolved*, or None when it may run."""
+        cap = _capability_of(resolved.connector_type, resolved.action)
+        if cap is None:
+            return None
+        enabled = (
+            await self._capability_gate()
+            if self._capability_gate is not None
+            else _default_enabled_capabilities()
+        )
+        return None if cap.key in enabled else cap
 
     async def check(self, user_id: str, tool_name: str, arguments: dict[str, Any]) -> str:
         from services.mcp.integration import classify_mcp_tool, is_mcp_tool
@@ -888,6 +933,8 @@ class RuntimePermissionAdapter:
         resolved = resolve_tool(tool_name)
         if resolved is None:
             return "blocked"  # default-deny unknown tools
+        if await self._capability_off(resolved) is not None:
+            return "blocked"
         decision = self._engine.check_permission(
             connector_type=resolved.policy_key,
             action=resolved.action,
@@ -909,6 +956,9 @@ class RuntimePermissionAdapter:
         resolved = resolve_tool(tool_name)
         if resolved is None:
             return f"Unknown tool '{tool_name}' is denied by default."
+        cap = await self._capability_off(resolved)
+        if cap is not None:
+            return cap.when_denied
         decision = self._engine.check_permission(
             connector_type=resolved.policy_key,
             action=resolved.action,
@@ -929,12 +979,33 @@ class RuntimePermissionAdapter:
         resolved = resolve_tool(tool_name)
         if resolved is None:
             return "default-deny"
+        if await self._capability_off(resolved) is not None:
+            return CAPABILITY_OFF_POLICY
         return f"{resolved.policy_key}:{resolved.spec.category.value}"
 
 
 # ---------------------------------------------------------------------------
 # Connector tool executor
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Builtin:
+    """How the executor dispatches one built-in tool family.
+
+    ``call(action, params, user_id, approved)`` runs the action on the
+    family's toolkit. ``allowed`` is every category the family may run at
+    all (the policy hard-blocks the rest; a spec in another category
+    reaching here means the catalog gained an action the policy was never
+    written for). ``confirm`` is the subset that runs only with
+    ``approved=True``, with ``confirm_note`` saying why in the refusal.
+    """
+
+    label: str
+    call: Callable[[str, dict[str, Any], str, bool], Awaitable[dict[str, Any]]]
+    allowed: frozenset[ActionCategory]
+    confirm: frozenset[ActionCategory] = frozenset()
+    confirm_note: str = "changes something"
 
 
 class ConnectorToolExecutor:
@@ -981,10 +1052,43 @@ class ConnectorToolExecutor:
         capability_gate: Optional[Callable[[], Awaitable[frozenset[str]]]] = None,
     ) -> None:
         self._session_factory = session_factory
-        self._web = web_toolkit or WebToolkit()
-        self._reminders = reminder_toolkit or ReminderToolkit(session_factory)
-        self._system = system_toolkit or SystemToolkit()
-        self._desktop = desktop_toolkit or DesktopToolkit()
+        web = web_toolkit or WebToolkit()
+        reminders = reminder_toolkit or ReminderToolkit(session_factory)
+        system = system_toolkit or SystemToolkit()
+        desktop = desktop_toolkit or DesktopToolkit()
+        read, write = ActionCategory.READ, ActionCategory.WRITE
+        # One entry per built-in family (see services/capabilities/README.md).
+        # Only the reminder toolkit is handed the caller's identity: it is
+        # the only one that stores anything per user.
+        self._builtins: dict[str, _Builtin] = {
+            "web": _Builtin(
+                "Web",
+                lambda a, p, uid, ok: web.execute(a, p),
+                frozenset({read}),
+            ),
+            "reminders": _Builtin(
+                "Reminder",
+                lambda a, p, uid, ok: reminders.execute(a, p, uid),
+                frozenset({read, write}),
+            ),
+            # Installing software is never done on the model's say-so. The
+            # runtime parks the call for the user and re-dispatches it with
+            # approved=True once they say yes; anything else reaching here
+            # unapproved is refused, the same contract a connector's
+            # per-call confirmation uses.
+            "system": _Builtin(
+                "System",
+                lambda a, p, uid, ok: system.execute(a, p),
+                frozenset({read, write}),
+                confirm=frozenset({write}),
+                confirm_note="installs software on this machine",
+            ),
+            "desktop": _Builtin(
+                "Desktop",
+                lambda a, p, uid, ok: desktop.execute(a, p),
+                frozenset({read}),
+            ),
+        }
         # Returns the owner's effective capability set. Unwired, the
         # registry defaults apply (see _enabled_capabilities), so an
         # off-by-default capability stays refused.
@@ -997,9 +1101,7 @@ class ConnectorToolExecutor:
     async def _enabled_capabilities(self) -> frozenset[str]:
         if self._capability_gate is not None:
             return await self._capability_gate()
-        from services import capabilities as capability_registry
-
-        return frozenset(k for k, on in capability_registry.default_switches().items() if on)
+        return _default_enabled_capabilities()
 
     def _get_mcp_dispatcher(self):
         if self._mcp_dispatcher is None:
@@ -1047,69 +1149,34 @@ class ConnectorToolExecutor:
         # model. Strip any attempt to smuggle it through tool arguments.
         arguments = {k: v for k, v in arguments.items() if k != "user_confirmed"}
 
-        from services import capabilities as capability_registry
-
-        cap = capability_registry.capability_for_tool(tool_name)
+        cap = _capability_of(resolved.connector_type, resolved.action)
         if cap is not None and cap.key not in await self._enabled_capabilities():
             # Second gate, independent of the offer: a tool the owner turned
-            # off is refused even if the model somehow names it.
+            # off is refused even if the model somehow names it. Looked up
+            # by the canonical name, so no alternate spelling slips past.
             logger.info("tool_capability_off", tool=tool_name, capability=cap.key, user_id=user_id)
-            return {
-                "ok": False,
-                "capability": cap.key,
-                "error": f"{cap.label} is turned off. {cap.when_denied}",
-            }
+            return {"ok": False, "capability": cap.key, "error": cap.when_denied}
 
-        if resolved.connector_type == "web":
-            if resolved.spec.category != ActionCategory.READ:
-                # The web tools are read-only by construction; a non-read
-                # action reaching here means the catalog gained one.
+        builtin = self._builtins.get(resolved.connector_type)
+        if builtin is not None:
+            category = resolved.spec.category
+            if category not in builtin.allowed:
                 return {
                     "ok": False,
-                    "error": f"Web action '{resolved.action}' is not permitted.",
+                    "error": f"{builtin.label} action '{resolved.action}' is not permitted.",
                 }
-            return await self._web.execute(resolved.action, dict(arguments))
-
-        if resolved.connector_type == "reminders":
-            if resolved.spec.category not in (ActionCategory.READ, ActionCategory.WRITE):
-                # The policy hard-blocks every other category for this
-                # type; a spec in one reaching here means the catalog
-                # gained an action the policy was never written for.
-                return {
-                    "ok": False,
-                    "error": f"Reminder action '{resolved.action}' is not permitted.",
-                }
-            return await self._reminders.execute(
-                resolved.action, dict(arguments), user_id
-            )
-
-        if resolved.connector_type == "system":
-            if resolved.spec.category not in (ActionCategory.READ, ActionCategory.WRITE):
-                return {
-                    "ok": False,
-                    "error": f"System action '{resolved.action}' is not permitted.",
-                }
-            if resolved.spec.category == ActionCategory.WRITE and not approved:
-                # Installing software is never done on the model's say-so.
-                # The runtime parks the call for the user and re-dispatches
-                # it with approved=True once they say yes; anything else
-                # reaching here unapproved is refused, the same contract a
-                # connector's per-call confirmation uses.
+            if category in builtin.confirm and not approved:
                 return {
                     "ok": False,
                     "requires_approval": True,
                     "error": (
-                        f"Action requires user confirmation: system.{resolved.action} "
-                        "installs software on this machine and runs only after "
-                        "the user approves it."
+                        f"Action requires user confirmation: "
+                        f"{resolved.connector_type}.{resolved.action} "
+                        f"{builtin.confirm_note} and runs only after the user "
+                        "approves it."
                     ),
                 }
-            return await self._system.execute(resolved.action, dict(arguments))
-
-        if resolved.connector_type == "desktop":
-            if resolved.spec.category != ActionCategory.READ:
-                return {"ok": False, "error": f"Desktop action '{resolved.action}' is not permitted."}
-            return await self._desktop.execute(resolved.action, dict(arguments))
+            return await builtin.call(resolved.action, dict(arguments), user_id, approved)
 
         if self._session_factory is None:
             return {

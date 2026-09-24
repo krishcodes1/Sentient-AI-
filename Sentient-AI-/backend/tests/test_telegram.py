@@ -270,7 +270,7 @@ async def test_status_and_link_routes(client, session_factory, fake_api):
     service; unlink always works."""
     user, token = await make_user(session_factory, email="tg-routes@example.com")
 
-    # No service on app.state (default in tests) → configured: false.
+    # No manager on app.state (default in tests) → configured: false.
     resp = await client.get("/api/telegram/status", headers=auth_headers(token))
     assert resp.status_code == 200
     assert resp.json() == {
@@ -282,11 +282,16 @@ async def test_status_and_link_routes(client, session_factory, fake_api):
     resp = await client.post("/api/telegram/link", headers=auth_headers(token))
     assert resp.status_code == 503
 
-    # With the service installed, status reports and link mints a URL.
+    # With a running service behind the manager, status reports and link
+    # mints a URL.
     from main import app
+    from services.notifications.telegram_manager import TelegramManager
 
     service = _make_service(session_factory)
-    app.state.telegram = service
+    manager = TelegramManager(session_factory)
+    manager.current = service
+    saved_manager = getattr(app.state, "telegram_manager", None)
+    app.state.telegram_manager = manager
     try:
         resp = await client.get(
             "/api/telegram/status", headers=auth_headers(token)
@@ -305,7 +310,7 @@ async def test_status_and_link_routes(client, session_factory, fake_api):
         )
         assert resp.status_code == 204
     finally:
-        app.state.telegram = None
+        app.state.telegram_manager = saved_manager
         await service._client.aclose()
 
 

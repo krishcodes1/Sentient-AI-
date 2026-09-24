@@ -28,7 +28,9 @@ from models.conversation import Conversation, Message, MessageRole
 from models.memory import Memory
 from models.pending_action import PendingAction
 from models.user import User
+from services import capabilities as capability_registry
 from services.auth import get_current_user
+from services.capabilities.prompt import render_permissions_block
 from services.memory import render_memory_block
 from services.agent.context_manager import compress_tool_result
 from services.agent.providers import ProviderError, ProviderNotConfigured
@@ -124,17 +126,15 @@ _user_rate_limiter = UserRateLimiter()
 def get_runtime(request: Request) -> AgentRuntime:
     """Return the singleton AgentRuntime stored on app.state.
 
-    Raises 503 if the runtime failed to initialize at startup (e.g. missing
-    API key for the configured LLM provider).
+    Raises 503 if the runtime failed to initialize at startup. A missing
+    provider key is not such a failure any more: the runtime resolves keys
+    per turn and a turn without one answers ProviderNotConfigured instead.
     """
     runtime: Optional[AgentRuntime] = getattr(request.app.state, "agent_runtime", None)
     if runtime is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=(
-                "Agent runtime is not available. Check the LLM provider configuration "
-                "(LLM_PROVIDER, LLM_MODEL, and the matching *_API_KEY env var)."
-            ),
+            detail="Agent runtime is not available. Check the server logs.",
         )
     return runtime
 
@@ -358,16 +358,38 @@ class ApprovalDecisionResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+async def _capability_view(installation: Any) -> tuple[frozenset[str], str]:
+    """The owner's effective capability set and the ``<permissions>`` block
+    describing it, both from ONE report so the tools offered and what the
+    agent is told about them can never disagree.
+
+    ``installation`` is ``app.state.installation``; unwired (a test app
+    that never ran the lifespan) the registry defaults stand in, so screen
+    capture stays off exactly as it would on a fresh install.
+    """
+    if installation is not None:
+        statuses = await installation.report()
+    else:
+        statuses = capability_registry.report(
+            capability_registry.default_switches(),
+            capability_registry.default_context(),
+        )
+    enabled = frozenset(s.key for s in statuses if s.effective == "on")
+    return enabled, render_permissions_block(statuses)
+
+
 async def _build_tools_and_memory(
     mcp_catalog: Any,
     current_user: User,
     db: AsyncSession,
-) -> tuple[list, Optional[str]]:
-    """Build the runtime tool list (connector + MCP tools) and the memory
-    block for a user. Shared by the blocking and streaming send paths so
-    both offer exactly the same tools and context. Takes the MCP catalog
-    directly (not a Request) so out-of-band callers — the Telegram approval
-    poller — can run the same pipeline without an HTTP request.
+    installation: Any = None,
+) -> tuple[list, Optional[str], str]:
+    """Build the runtime tool list (connector + MCP tools), the memory
+    block and the permissions block for a user. Shared by the blocking and
+    streaming send paths so both offer exactly the same tools and context.
+    Takes the MCP catalog and installation service directly (not a
+    Request) so out-of-band callers — the Telegram approval poller — can
+    run the same pipeline without an HTTP request.
     """
     conn_result = await db.execute(
         select(ConnectorConfig).where(
@@ -392,10 +414,12 @@ async def _build_tools_and_memory(
         )
         for c in connector_rows
     ]
+    enabled_capabilities, permissions_text = await _capability_view(installation)
     tools = build_tools(
         connector_specs,
         user_default_tier=current_user.default_permission_tier,
         is_admin=current_user.is_admin,
+        enabled_capabilities=enabled_capabilities,
     )
 
     if any(spec.connector_type == "mcp" for spec in connector_specs):
@@ -430,7 +454,7 @@ async def _build_tools_and_memory(
         )
         memory_block = render_memory_block(list(mem_result.scalars().all()))
 
-    return tools, memory_block
+    return tools, memory_block, permissions_text
 
 
 async def _get_owned_conversation(
@@ -749,8 +773,11 @@ async def send_message(
     #    runtime's permission adapter and executor (injected at startup)
     #    handle tiering, approval, and dispatch. A user with no connectors
     #    gets an empty list and simply chats with the LLM.
-    tools, memory_block = await _build_tools_and_memory(
-        getattr(request.app.state, "mcp_catalog", None), current_user, db
+    tools, memory_block, permissions_text = await _build_tools_and_memory(
+        getattr(request.app.state, "mcp_catalog", None),
+        current_user,
+        db,
+        getattr(request.app.state, "installation", None),
     )
 
     # Release the pooled connection before the LLM turn: committing ends
@@ -769,6 +796,7 @@ async def send_message(
             llm_provider=current_user.llm_provider,
             llm_model=current_user.llm_model,
             memory_block=memory_block,
+            permissions_text=permissions_text,
         )
     except ProviderNotConfigured as exc:
         # Not an upstream failure: this install has no key for the provider
@@ -946,8 +974,11 @@ async def stream_message(
         for m in history_result.scalars().all()
     ]
     _attach_images(history, body.images)
-    tools, memory_block = await _build_tools_and_memory(
-        getattr(request.app.state, "mcp_catalog", None), current_user, db
+    tools, memory_block, permissions_text = await _build_tools_and_memory(
+        getattr(request.app.state, "mcp_catalog", None),
+        current_user,
+        db,
+        getattr(request.app.state, "installation", None),
     )
     conv_id = conversation.id
     user_provider = current_user.llm_provider
@@ -992,6 +1023,7 @@ async def stream_message(
                     llm_model=user_model,
                     memory_block=memory_block,
                     on_orphaned=_persist_orphaned,
+                    permissions_text=permissions_text,
                 ):
                     etype = event.get("type", "message")
                     data = event.get("data", {})
@@ -1123,6 +1155,7 @@ async def _resume_after_approval(
     db: AsyncSession,
     runtime: AgentRuntime,
     conversation: Conversation,
+    installation: Any = None,
 ) -> Optional[Message]:
     """Run one more agent turn after an approved action executed.
 
@@ -1147,7 +1180,9 @@ async def _resume_after_approval(
     if not history:
         return None
 
-    tools, memory_block = await _build_tools_and_memory(mcp_catalog, current_user, db)
+    tools, memory_block, permissions_text = await _build_tools_and_memory(
+        mcp_catalog, current_user, db, installation
+    )
     # Return the pooled connection before the (potentially minutes-long)
     # resumed turn; everything written so far — the decision message — is
     # durable from here.
@@ -1160,6 +1195,7 @@ async def _resume_after_approval(
         llm_provider=current_user.llm_provider,
         llm_model=current_user.llm_model,
         memory_block=memory_block,
+        permissions_text=permissions_text,
     )
     if not (agent_response.content or "").strip():
         return None
@@ -1204,6 +1240,7 @@ async def _apply_decision(
     current_user: User,
     action_id: str,
     approved: bool,
+    installation: Any = None,
 ) -> Dict[str, Any]:
     """Decide a pending action, persist the outcome into its conversation,
     and (on approval) run the resumed agent turn. Shared by the HTTP route
@@ -1262,7 +1299,12 @@ async def _apply_decision(
                 if approved:
                     try:
                         resumed = await _resume_after_approval(
-                            mcp_catalog, current_user, db, runtime, conversation
+                            mcp_catalog,
+                            current_user,
+                            db,
+                            runtime,
+                            conversation,
+                            installation,
                         )
                         if resumed is not None:
                             db.add(resumed)
@@ -1296,7 +1338,13 @@ def build_decision_applier(app: Any):
             if user is None or not user.is_active:
                 return {"error": "Unknown account."}
             result = await _apply_decision(
-                db, runtime, mcp_catalog, user, action_id, approved
+                db,
+                runtime,
+                mcp_catalog,
+                user,
+                action_id,
+                approved,
+                getattr(app.state, "installation", None),
             )
             await db.commit()
 
@@ -1319,6 +1367,9 @@ def build_decision_applier(app: Any):
 # resumable from the web app like any other conversation.
 TELEGRAM_CONVERSATION_TITLE = "Telegram"
 
+# Most tool-captured images one channel turn delivers.
+MAX_CHANNEL_IMAGES = 3
+
 
 def build_chat_applier(app: Any, session_factory: Any = async_session):
     """Async callback for chat arriving over an out-of-band channel:
@@ -1338,6 +1389,7 @@ def build_chat_applier(app: Any, session_factory: Any = async_session):
         if not content:
             return {"error": "Message content cannot be empty."}
         mcp_catalog = getattr(app.state, "mcp_catalog", None)
+        installation = getattr(app.state, "installation", None)
 
         async with session_factory() as db:
             user = (
@@ -1390,8 +1442,8 @@ def build_chat_applier(app: Any, session_factory: Any = async_session):
                 {"role": m.role.value, "content": m.content}
                 for m in history_result.scalars().all()
             ]
-            tools, memory_block = await _build_tools_and_memory(
-                mcp_catalog, user, db
+            tools, memory_block, permissions_text = await _build_tools_and_memory(
+                mcp_catalog, user, db, installation
             )
             conversation_id = conversation.id
             provider, model = user.llm_provider, user.llm_model
@@ -1408,6 +1460,7 @@ def build_chat_applier(app: Any, session_factory: Any = async_session):
                 llm_provider=provider,
                 llm_model=model,
                 memory_block=memory_block,
+                permissions_text=permissions_text,
             )
         except ProviderNotConfigured as exc:
             # The channel sends "error" verbatim: the setup sentence.
@@ -1450,22 +1503,25 @@ def build_chat_applier(app: Any, session_factory: Any = async_session):
             conversation.updated_at = datetime.now(timezone.utc)
             await db.commit()
 
-        # Screenshots are delivered to the person as images; the model only
-        # ever saw a placeholder (see runtime.redact_binary_for_model).
-        images = []
+        # Images a tool captured (web.screenshot, desktop.screenshot, ...)
+        # are delivered to the person as photos; the model only ever saw a
+        # placeholder (see runtime.redact_binary_for_model). Capped so one
+        # turn that loops on a screenshot tool cannot flood the chat.
+        images: list[dict[str, str]] = []
         for tc in agent_response.tool_calls:
+            if len(images) >= MAX_CHANNEL_IMAGES:
+                break
             result = tc.get("result")
-            if (
-                str(tc.get("name", "")).endswith("web.screenshot")
-                and isinstance(result, dict)
+            if not (
+                isinstance(result, dict)
                 and str(result.get("image", "")).startswith("data:image/")
             ):
-                images.append(
-                    {
-                        "data_url": result["image"],
-                        "caption": str(result.get("final_url") or result.get("url") or ""),
-                    }
-                )
+                continue
+            name = str(tc.get("name", ""))
+            caption = result.get("final_url") or result.get("url") or (
+                "Your screen" if name.startswith("desktop.") else ""
+            )
+            images.append({"data_url": result["image"], "caption": str(caption)})
 
         return {
             "content": agent_response.content,
@@ -1507,6 +1563,7 @@ async def decide_approval(
         current_user,
         action_id,
         body.approved,
+        getattr(request.app.state, "installation", None),
     )
     if "error" in result:
         raise HTTPException(

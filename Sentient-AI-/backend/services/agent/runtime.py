@@ -275,6 +275,34 @@ def _stored_to_pending(action: StoredAction) -> PendingApproval:
     )
 
 
+# Policy recorded when a tool is refused because the owner has not got its
+# capability (services/capabilities) on. The permission adapter blocks with
+# it before execution; the executor's dispatch gate is the backstop, and a
+# refusal from there is recorded under the same name (_capability_refusal).
+CAPABILITY_OFF_POLICY = "capability_off"
+
+
+def _capability_refusal(tool_name: str, result: Any) -> Optional[str]:
+    """The refusal text when *result* is the executor's capability gate
+    turning *tool_name* away, else None.
+
+    Honoured only when the key in the result is the capability that
+    actually gates *tool_name*: a third-party tool returning the same
+    shape must not get its output filed as a capability refusal.
+    """
+    if not isinstance(result, dict) or result.get("ok") is not False:
+        return None
+    key = result.get("capability")
+    if not isinstance(key, str) or not key:
+        return None
+    from services import capabilities as capability_registry
+
+    cap = capability_registry.capability_for_tool(tool_name)
+    if cap is None or cap.key != key:
+        return None
+    return str(result.get("error") or cap.when_denied)
+
+
 # The event loop holds only a WEAK reference to a running task, so a task
 # nobody keeps can be garbage-collected mid-await and simply never finish.
 # Detached work is parked here until it completes.
@@ -1170,6 +1198,41 @@ class AgentRuntime:
                     logger.error("tool_execution_error", tool=tc.name, error=str(exc))
                     result = {"error": str(exc)}
 
+                refusal = _capability_refusal(tc.name, result)
+                if refusal is not None:
+                    # Backstop: the permission adapter blocks these before
+                    # the intent row; one that got past it (the switch
+                    # flipped mid-turn) is recorded and shown the same way.
+                    # Nothing ran, so the refusal stands whether or not the
+                    # audit write succeeds.
+                    blocked_actions.append(
+                        BlockedAction(
+                            tool_name=tc.name,
+                            reason=refusal,
+                            policy=CAPABILITY_OFF_POLICY,
+                        )
+                    )
+                    await emit({"type": "blocked", "data": {"tool": tc.name, "reason": refusal, "policy": CAPABILITY_OFF_POLICY}})
+                    try:
+                        await self._audit.log(
+                            {
+                                "event": "tool_blocked",
+                                "user_id": user_id,
+                                "tool": tc.name,
+                                "arguments": tc.arguments,
+                                "reason": refusal,
+                                "policy": CAPABILITY_OFF_POLICY,
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                            }
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            "audit_write_failed_capability_refusal",
+                            tool=tc.name,
+                            error=str(exc),
+                        )
+                    continue
+
                 # 3d. Scan tool response (per-item where the shape allows,
                 # so one bad email doesn't redact a whole inbox page).
                 result = await self._scan_and_redact_result(result, user_id)
@@ -1606,20 +1669,37 @@ class AgentRuntime:
         except Exception as exc:
             result = {"error": str(exc)}
 
-        # Best-effort: the tool already ran; failing the request now would
-        # consume the approval, hide the result, and record nothing.
+        # The owner may have switched the tool's capability off while the
+        # card waited; the executor then refused it, and the audit row must
+        # say so rather than record an approved action as executed.
+        refusal = _capability_refusal(action.tool_name, result)
+        if refusal is not None:
+            entry: dict[str, Any] = {
+                "event": "tool_blocked",
+                "user_id": user_id,
+                "tool": action.tool_name,
+                "arguments": action.arguments,
+                "reason": refusal,
+                "policy": CAPABILITY_OFF_POLICY,
+                "action_id": action_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        else:
+            entry = {
+                "event": "tool_approved_and_executed",
+                "user_id": user_id,
+                "tool": action.tool_name,
+                "arguments": action.arguments,
+                "result_summary": self._summarize_result(result),
+                "action_id": action_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+
+        # Best-effort: the tool already ran (or was refused); failing the
+        # request now would consume the approval, hide the result, and
+        # record nothing.
         try:
-            await self._audit.log(
-                {
-                    "event": "tool_approved_and_executed",
-                    "user_id": user_id,
-                    "tool": action.tool_name,
-                    "arguments": action.arguments,
-                    "result_summary": self._summarize_result(result),
-                    "action_id": action_id,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                }
-            )
+            await self._audit.log(entry)
         except Exception as exc:
             logger.error(
                 "audit_write_failed_post_execution",
