@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 import structlog
 from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
@@ -117,6 +118,56 @@ def _stamp_baseline() -> None:
     command.stamp(_alembic_config(), _BASELINE_REVISION)
 
 
+# The provider/model every account was created with before the server's own
+# configuration was consulted (the old column server default).
+_LEGACY_LLM_PAIR = ("anthropic", "claude-sonnet-4-20250514")
+
+
+async def backfill_user_llm_defaults(
+    conn: AsyncConnection, provider: Optional[str], model: Optional[str]
+) -> None:
+    """Turn inherited provider/model pairs into NULL ("follow the install").
+
+    Accounts used to be stamped at registration with the provider/model the
+    server ran that day, so a row that still holds the server's CURRENT
+    default pair almost always inherited it rather than chose it. Setting
+    it to NULL lets the account follow the install from now on — including
+    a provider the owner configures later through the setup wizard, which
+    a stamped row would never have reached.
+
+    Rows still on the historical hardcoded default are included only when
+    their ``updated_at`` equals ``created_at``: that account never touched
+    Settings, so it never chose the pair (anyone who did may have picked it
+    on purpose).
+
+    Values are bound parameters, never inlined into the SQL. Comparison is
+    case- and whitespace-insensitive on the provider, whitespace-insensitive
+    on the model. Idempotent; ``updated_at`` is left alone, because this is
+    not the user changing anything.
+    """
+    from sqlalchemy import text
+
+    provider = (provider or "").strip().lower()
+    model = (model or "").strip()
+    if provider and model:
+        await conn.execute(
+            text(
+                "UPDATE users SET llm_provider = NULL, llm_model = NULL "
+                "WHERE LOWER(TRIM(llm_provider)) = :provider "
+                "AND TRIM(llm_model) = :model"
+            ),
+            {"provider": provider, "model": model},
+        )
+    await conn.execute(
+        text(
+            "UPDATE users SET llm_provider = NULL, llm_model = NULL "
+            "WHERE llm_provider = :provider AND llm_model = :model "
+            "AND updated_at = created_at"
+        ),
+        {"provider": _LEGACY_LLM_PAIR[0], "model": _LEGACY_LLM_PAIR[1]},
+    )
+
+
 async def init_db(retries: int = 10, delay: float = 2.0) -> None:
     """Wait for the database, migrate it to head, then apply data fixes.
 
@@ -132,37 +183,7 @@ async def init_db(retries: int = 10, delay: float = 2.0) -> None:
     authenticated TCP connections, so a fresh ``docker compose up`` would
     otherwise lose the race and start the API without a database on first boot.
     """
-    import re
-
     from sqlalchemy import text
-
-    # Accounts still on the historical hardcoded provider default never chose
-    # it (choosing in Settings had no effect until per-user providers were
-    # wired), so move them to the provider this server actually runs. This
-    # stays here rather than becoming a migration: the target values come
-    # from runtime settings, so it cannot be expressed as static DDL. Values
-    # come from admin config; validate anyway since they are inlined in SQL.
-    #
-    # "Never chose it" is expressed as updated_at = created_at: any account
-    # that touched Settings since registration has a newer updated_at.
-    # Without that predicate this rewrite ran on EVERY boot and silently
-    # reverted users who deliberately picked this provider/model combination.
-    data_fixes: list[str] = []
-    if (settings.LLM_PROVIDER, settings.LLM_MODEL) != (
-        "anthropic",
-        "claude-sonnet-4-20250514",
-    ) and all(
-        re.fullmatch(r"[A-Za-z0-9._:-]+", v)
-        for v in (settings.LLM_PROVIDER, settings.LLM_MODEL)
-    ):
-        data_fixes.append(
-            "UPDATE users SET "
-            f"llm_provider = '{settings.LLM_PROVIDER}', "
-            f"llm_model = '{settings.LLM_MODEL}' "
-            "WHERE llm_provider = 'anthropic' "
-            "AND llm_model = 'claude-sonnet-4-20250514' "
-            "AND updated_at = created_at"
-        )
 
     last_exc: Exception | None = None
     for attempt in range(1, retries + 1):
@@ -185,9 +206,16 @@ async def init_db(retries: int = 10, delay: float = 2.0) -> None:
             await asyncio.to_thread(_run_alembic_upgrade)
             logger.info("database_schema_at_head")
 
-            for statement in data_fixes:
-                async with engine.begin() as conn:
-                    await conn.execute(text(statement))
+            # Data fix, after the schema allows NULL (0009): accounts that
+            # merely inherited the server's provider/model follow the
+            # install default instead. It stays here rather than in the
+            # migration because the target pair is runtime configuration,
+            # not static DDL (an offline `alembic upgrade --sql` would bake
+            # in whatever environment generated the script).
+            async with engine.begin() as conn:
+                await backfill_user_llm_defaults(
+                    conn, settings.LLM_PROVIDER, settings.LLM_MODEL
+                )
 
             if attempt > 1:
                 logger.info("database_ready_after_retry", attempts=attempt)

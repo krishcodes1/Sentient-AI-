@@ -130,9 +130,9 @@ class Settings(BaseSettings):
         description="LLM backend: anthropic, openai, gemini, grok, deepseek, groq, mistral, or ollama",
     )
     # Fallback when LLM_MODEL is unset. claude-sonnet-4-20250514 was retired
-    # on 2026-06-15; users.llm_model's server_default still names it (changing
-    # that needs a schema migration), and core/database.py moves untouched
-    # accounts off that default to this value at startup.
+    # on 2026-06-15; it was users.llm_model's server_default until migration
+    # 0009 made the column nullable, and core/database.py moves untouched
+    # accounts off it (to NULL, "follow the install default") at startup.
     LLM_MODEL: str = "claude-sonnet-5"
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     ANTHROPIC_API_KEY: Optional[str] = None

@@ -61,6 +61,18 @@ const LLM_MODELS: Record<string, string[]> = {
   ollama: ["llama3.2", "llama3.2:1b", "mistral", "codellama", "mixtral"],
 };
 
+// The provider radio group. `null` comes first and is what every account
+// starts on: follow the owner's setup, including any provider they switch
+// to later. Picking a provider pins the account to it.
+const PROVIDER_CHOICES: { value: string | null; label: string; hint?: string }[] = [
+  { value: null, label: "Use this Crawler's default", hint: "Whatever the owner set up" },
+  ...["anthropic", "openai", "gemini", "grok", "deepseek", "groq", "mistral"].map((p) => ({
+    value: p,
+    label: p,
+  })),
+  { value: "ollama", label: "ollama", hint: "Local / Self-hosted" },
+];
+
 const panelStyle = {
   background: "var(--claw-panel)",
   border: "1px solid var(--claw-border)",
@@ -151,8 +163,10 @@ export default function Settings() {
   const [newPassword, setNewPassword] = useState("");
   const [permissionTier, setPermissionTier] = useState("user_confirm");
   const [rateLimit, setRateLimit] = useState(60);
-  const [llmProvider, setLlmProvider] = useState("anthropic");
-  const [llmModel, setLlmModel] = useState(LLM_MODELS.anthropic[0]);
+  // null = "Use this Crawler's default": the account follows whatever
+  // provider/model the owner set up, now and after any later change.
+  const [llmProvider, setLlmProvider] = useState<string | null>(null);
+  const [llmModel, setLlmModel] = useState("");
 
   // Per-section saving + feedback
   const [savingProfile, setSavingProfile] = useState(false);
@@ -191,8 +205,8 @@ export default function Settings() {
         setAccountEmail(u.email ?? "");
         if (u.default_permission_tier) setPermissionTier(u.default_permission_tier);
         if (typeof u.rate_limit === "number") setRateLimit(u.rate_limit);
-        if (u.llm_provider) setLlmProvider(u.llm_provider);
-        if (u.llm_model) setLlmModel(u.llm_model);
+        setLlmProvider(u.llm_provider || null);
+        setLlmModel(u.llm_provider ? (u.llm_model ?? "") : "");
       })
       .catch((err: Error) => {
         if (!cancelled) setLoadError(err.message);
@@ -413,11 +427,14 @@ export default function Settings() {
     setSavingLlm(true);
     setLlmFeedback(null);
     try {
-      const updated = await updateSettings({
-        llm_provider: llmProvider,
-        llm_model: llmModel,
-      });
+      const updated = await updateSettings(
+        llmProvider === null
+          ? { llm_provider: null, llm_model: null }
+          : { llm_provider: llmProvider, llm_model: llmModel },
+      );
       setMe(updated);
+      setLlmProvider(updated.llm_provider || null);
+      setLlmModel(updated.llm_provider ? (updated.llm_model ?? "") : "");
       setLlmFeedback({ ok: true, text: "LLM settings saved" });
     } catch (err) {
       setLlmFeedback({ ok: false, text: (err as Error).message });
@@ -772,19 +789,21 @@ export default function Settings() {
               aria-labelledby={ids.provider}
               className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3"
             >
-              {(["anthropic", "openai", "gemini", "grok", "deepseek", "groq", "mistral", "ollama"] as const).map((p) => {
-                const isActive = llmProvider === p;
+              {PROVIDER_CHOICES.map(({ value, label, hint }) => {
+                const isActive = llmProvider === value;
                 return (
                   <button
-                    key={p}
+                    key={value ?? "default"}
                     type="button"
                     role="radio"
                     aria-checked={isActive}
                     onClick={() => {
-                      setLlmProvider(p);
-                      setLlmModel(LLM_MODELS[p]?.[0] ?? "");
+                      setLlmProvider(value);
+                      setLlmModel(value === null ? "" : (LLM_MODELS[value]?.[0] ?? ""));
                     }}
-                    className="px-4 py-3 rounded-[10px] text-sm font-medium capitalize transition-colors"
+                    className={`px-4 py-3 rounded-[10px] text-sm font-medium transition-colors${
+                      value === null ? "" : " capitalize"
+                    }`}
                     style={{
                       minHeight: 44,
                       background: isActive ? "var(--accent-glow)" : "var(--claw-surface)",
@@ -794,10 +813,10 @@ export default function Settings() {
                       color: isActive ? "var(--accent-primary)" : "var(--text-secondary)",
                     }}
                   >
-                    {p}
-                    {p === "ollama" && (
+                    {label}
+                    {hint && (
                       <span className="block text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>
-                        Local / Self-hosted
+                        {hint}
                       </span>
                     )}
                   </button>
@@ -805,43 +824,51 @@ export default function Settings() {
               })}
             </div>
           </div>
-          <div>
-            <label htmlFor={ids.model} className={labelCls}>
-              Model
-            </label>
-            <select
-              id={ids.model}
-              aria-describedby={ids.modelHelp}
-              value={llmModel}
-              onChange={(e) => setLlmModel(e.target.value)}
-              className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
-              style={inputStyle}
-            >
-              {(() => {
-                // The hardcoded list is a convenience, not a contract: the
-                // account's current model (set server-side or by an older
-                // build) must stay selectable even when it isn't listed,
-                // and an unknown provider must not crash the page.
-                const known = LLM_MODELS[llmProvider] ?? [];
-                const options =
-                  llmModel && !known.includes(llmModel)
-                    ? [llmModel, ...known]
-                    : known;
-                return options.map((m) => (
-                  <option key={m} value={m}>
-                    {m}
-                  </option>
-                ));
-              })()}
-            </select>
-            <p id={ids.modelHelp} className="text-xs mt-1.5" style={{ color: "var(--text-muted)" }}>
-              Takes effect on your next message. The server must have this
-              provider's API key configured in{" "}
-              <code style={{ color: "var(--accent-primary)" }}>backend/.env</code>{" "}
-              — if the key is missing, chat returns a clear error instead of
-              silently falling back to another provider.
+          {llmProvider === null ? (
+            <p className="text-xs" style={{ color: "var(--text-muted)" }}>
+              Your messages use the provider and model this Crawler was set up
+              with, and follow it if the owner changes it. Pick a provider
+              above to choose your own.
             </p>
-          </div>
+          ) : (
+            <div>
+              <label htmlFor={ids.model} className={labelCls}>
+                Model
+              </label>
+              <select
+                id={ids.model}
+                aria-describedby={ids.modelHelp}
+                value={llmModel}
+                onChange={(e) => setLlmModel(e.target.value)}
+                className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
+                style={inputStyle}
+              >
+                {(() => {
+                  // The hardcoded list is a convenience, not a contract: the
+                  // account's current model (set server-side or by an older
+                  // build) must stay selectable even when it isn't listed,
+                  // and an unknown provider must not crash the page.
+                  const known = LLM_MODELS[llmProvider] ?? [];
+                  const options =
+                    llmModel && !known.includes(llmModel)
+                      ? [llmModel, ...known]
+                      : known;
+                  return options.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ));
+                })()}
+              </select>
+              <p id={ids.modelHelp} className="text-xs mt-1.5" style={{ color: "var(--text-muted)" }}>
+                Takes effect on your next message. This Crawler must have an
+                API key for this provider (added during setup or in{" "}
+                <code style={{ color: "var(--accent-primary)" }}>backend/.env</code>)
+                — if it doesn't, chat says so instead of silently falling back
+                to another provider.
+              </p>
+            </div>
+          )}
           <div className="flex items-center gap-3">
             <SaveButton label="Save LLM Settings" onClick={handleSaveLlm} saving={savingLlm} />
             <FeedbackLine feedback={llmFeedback} />

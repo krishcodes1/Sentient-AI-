@@ -9,7 +9,8 @@ import json
 import re
 import secrets
 from collections import OrderedDict
-from collections.abc import AsyncGenerator, Awaitable, Coroutine
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Coroutine
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional, Protocol
@@ -238,6 +239,12 @@ class AgentResponse:
     pending_approvals: list[PendingApproval] = field(default_factory=list)
     blocked_actions: list[BlockedAction] = field(default_factory=list)
     usage: dict[str, int] = field(default_factory=dict)
+    # The (provider, model) pair this turn actually ran on — the user's
+    # pinned choice, or the install default when they follow it. Recorded on
+    # the stored message so its tokens can be priced; the account row cannot
+    # say, since NULL there means "whatever the install used at the time".
+    provider: str = ""
+    model: str = ""
 
 
 # Tool results may carry binary payloads (a screenshot as a data URL). Those
@@ -510,11 +517,23 @@ class AgentRuntime:
         # Bumped by invalidate_providers(); lets a resolution that was
         # awaiting the source notice its key may predate the change.
         self._provider_generation = 0
+        # Reference-counted leases (see _lease). A provider dropped from the
+        # cache while a turn still holds it waits in _retired and is closed
+        # when the last lease ends — closing it on the spot would pull the
+        # HTTP client out from under the turn's next model round. Keyed by
+        # id(): a leased or retired provider is strongly referenced, so its
+        # id cannot be reused while it is in either map.
+        self._leases: dict[int, int] = {}
+        self._retired: dict[int, LLMProvider] = {}
         # Upper bound on chained tool rounds within a single chat turn.
         self._max_tool_rounds: int = int(getattr(config, "MAX_TOOL_ROUNDS", 8) or 8)
 
     # Cap on cached per-user provider instances (see _provider_cache).
     _PROVIDER_CACHE_MAX = 32
+    # Key reads per provider build. Each retry means the owner changed
+    # provider settings while the key was being read; a source that keeps
+    # changing must not spin a turn forever.
+    _KEY_READ_ATTEMPTS = 3
 
     # ------------------------------------------------------------------
     # Message / schema helpers
@@ -537,27 +556,47 @@ class AgentRuntime:
             for t in tools
         ]
 
+    async def _source_defaults(self) -> tuple[str, str]:
+        """The install's default pair, normalized the same way a user's
+        choice is, so "Gemini" from a source and "gemini" from Settings
+        compare equal."""
+        default_provider, default_model = await self._source.llm_defaults()
+        return (
+            (default_provider or "").strip().lower(),
+            (default_model or "").strip(),
+        )
+
     async def _select_provider(
         self, provider_name: Optional[str], model: Optional[str]
     ) -> tuple[str, str]:
-        """The (provider, model) pair one turn runs on: the user's Settings
-        override where given, the source's defaults otherwise."""
-        default_provider, default_model = await self._source.llm_defaults()
-        name = (provider_name or default_provider or "").strip().lower()
+        """The (provider, model) pair one turn runs on.
+
+        A user with no provider of their own (NULL in Settings: "use this
+        Crawler's default") follows the source's defaults — and their model
+        column is ignored too, because a model only means something next to
+        the provider it was chosen for (gpt-4o sent to Gemini is a failed
+        turn). A pinned provider keeps its pinned model.
+        """
+        default_provider, default_model = await self._source_defaults()
+        name = (provider_name or "").strip().lower()
+        if not name:
+            return default_provider, default_model
         model_name = (model or default_model or "").strip()
         return name, model_name
 
     async def _resolve_provider(
         self, provider_name: Optional[str], model: Optional[str]
     ) -> LLMProvider:
-        """Return the LLM provider instance for one chat turn.
+        """Return the (unleased) LLM provider instance for a pair.
 
         Users pick ``llm_provider``/``llm_model`` on the Settings page;
         omitted, the source's defaults apply. Instances are built on first
         use with the key the settings source holds and cached per pair
         until :meth:`invalidate_providers`. A missing key raises
-        ``ProviderNotConfigured`` so the route can point at /setup instead
-        of silently falling back to the wrong provider.
+        ``ProviderNotConfigured`` so the route can point at setup (or at the
+        user's Settings) instead of silently falling back to the wrong
+        provider. Turns go through :meth:`_lease` instead, so the instance
+        cannot be closed while they use it.
         """
         name, model_name = await self._select_provider(provider_name, model)
         return await self._provider_for(name, model_name)
@@ -576,36 +615,49 @@ class AgentRuntime:
 
         # The lookup is awaited, which is a window for invalidate_providers():
         # a key read before the owner changed it must not be cached after,
-        # or the stale key would outlive the change. Read it again instead.
-        while True:
+        # or the stale key would outlive the change. Read it again instead —
+        # a bounded number of times. If the settings are still changing
+        # after that, the turn runs on the freshest key read, but the
+        # instance is not cached (a later save may already supersede it).
+        cacheable = False
+        api_key: Optional[str] = None
+        for _attempt in range(self._KEY_READ_ATTEMPTS):
             generation = self._provider_generation
             api_key = await self._source.llm_api_key(name)
             if generation == self._provider_generation:
+                cacheable = True
                 break
+        if not cacheable:
+            logger.warning(
+                "provider_settings_changing_during_resolution",
+                provider=name,
+                attempts=self._KEY_READ_ATTEMPTS,
+            )
         # Another turn may have built this pair while we were waiting.
         cached = self._cached_provider(cache_key)
         if cached is not None:
             return cached
 
         if api_key is None:
-            default_provider, _ = await self._source.llm_defaults()
+            default_provider, _ = await self._source_defaults()
             if (
                 name
                 and name != default_provider
                 and await self._source.llm_api_key(default_provider) is not None
             ):
                 # The install is set up; this user's Settings pick a provider
-                # it holds no key for. Say which one. (With no key anywhere
-                # the install simply is not set up yet — the setup sentence.)
+                # it holds no key for. Say which one — the fix is theirs, in
+                # Settings. (With no key anywhere the install simply is not
+                # set up yet — the setup sentence.)
                 raise ProviderNotConfigured(
                     name,
-                    (
+                    reason="user_provider_unavailable",
+                    detail=(
                         f"The '{name}' provider selected in your Settings is "
-                        "not configured on this server. Choose a different "
-                        "provider, or add its API key in Settings."
+                        "not configured on this server."
                     ),
                 )
-            raise ProviderNotConfigured(name or "unknown")
+            raise ProviderNotConfigured(name or "unknown", reason="not_set_up")
         try:
             provider = create_provider(
                 provider_name=name,
@@ -622,19 +674,74 @@ class AgentRuntime:
                     f"({exc}). Choose a different provider or add its API key."
                 ),
             ) from None
+        if not cacheable:
+            # Owned by nobody: retired from birth, so the lease that is about
+            # to take it closes it when the turn ends.
+            self._retired[id(provider)] = provider
+            return provider
         self._provider_cache[cache_key] = provider
         while len(self._provider_cache) > self._PROVIDER_CACHE_MAX:
             _evicted_key, evicted = self._provider_cache.popitem(last=False)
-            self._schedule_close(evicted)
+            self._retire(evicted)
         return provider
+
+    @asynccontextmanager
+    async def _lease(self, name: str, model_name: str) -> AsyncIterator[LLMProvider]:
+        """Hold the provider for ``(name, model_name)`` for one turn.
+
+        While any lease is open, eviction and :meth:`invalidate_providers`
+        only retire the instance; the last lease to end closes it. The count
+        is taken with no ``await`` between resolution and increment, so a
+        concurrent invalidation cannot slip in between the two.
+        """
+        provider = await self._provider_for(name, model_name)
+        key = id(provider)
+        self._leases[key] = self._leases.get(key, 0) + 1
+        try:
+            yield provider
+        finally:
+            remaining = self._leases.get(key, 1) - 1
+            if remaining > 0:
+                self._leases[key] = remaining
+            else:
+                self._leases.pop(key, None)
+                retired = self._retired.pop(key, None)
+                if retired is not None:
+                    self._schedule_close(retired)
+
+    def _retire(self, provider: LLMProvider) -> None:
+        """Drop ``provider`` from service: close it now if no turn holds it,
+        otherwise park it until the last lease ends."""
+        key = id(provider)
+        if self._leases.get(key):
+            self._retired[key] = provider
+        else:
+            self._schedule_close(provider)
 
     def invalidate_providers(self) -> None:
         """Forget every cached provider (the owner changed a key or the
-        default). The next turn rebuilds from the settings source."""
+        default). The next turn rebuilds from the settings source; turns
+        already running finish on the instance they hold, which is closed
+        when they end."""
         self._provider_generation += 1
-        for provider in self._provider_cache.values():
-            self._schedule_close(provider)
+        providers = list(self._provider_cache.values())
         self._provider_cache.clear()
+        for provider in providers:
+            self._retire(provider)
+
+    async def aclose(self) -> None:
+        """Close every provider this runtime owns — cached, and retired but
+        still leased. Called at shutdown, when in-flight turns are being
+        torn down anyway."""
+        self._provider_generation += 1
+        owned: dict[int, LLMProvider] = {
+            id(p): p for p in self._provider_cache.values()
+        }
+        owned.update(self._retired)
+        self._provider_cache.clear()
+        self._retired.clear()
+        for provider in owned.values():
+            await _close_quietly(provider)
 
     @staticmethod
     def _schedule_close(provider: LLMProvider) -> None:
@@ -691,23 +798,22 @@ class AgentRuntime:
         the tag (quotes, angle brackets, newlines are all stripped)."""
         return re.sub(r"[^A-Za-z0-9_.:-]", "_", str(value))[:128]
 
-    # Providers that accept image blocks. Others would raise on them, so a
-    # screenshot is text-redacted only for those and the model works from
-    # the fetched text instead.
-    _VISION_PROVIDERS = frozenset({"anthropic", "openai", "gemini"})
     _MAX_IMAGES_PER_FOLLOW_UP = 2
 
     def _images_for_model(
-        self, tool_results: list[dict[str, Any]], provider_name: str
+        self, tool_results: list[dict[str, Any]], provider: LLMProvider
     ) -> list[dict[str, Any]]:
         """Image blocks for screenshots this round, capped, vision providers
         only. An image is ~1k tokens where its base64 would be ~50k, and
         it is the only way the model can read a JavaScript results page.
 
-        ``provider_name`` is the provider this turn resolved to. It is a
-        parameter, not runtime state: one runtime serves concurrent turns
-        on different providers."""
-        if provider_name not in self._VISION_PROVIDERS:
+        ``provider`` is the instance this turn resolved to; its class
+        declares ``supports_vision``. Providers without it would reject an
+        image block, so for them the screenshot stays text-redacted and the
+        model works from the fetched text instead. It is a parameter, not
+        runtime state: one runtime serves concurrent turns on different
+        providers."""
+        if not getattr(provider, "supports_vision", False):
             return []
         blocks: list[dict[str, Any]] = []
         for tr in tool_results:
@@ -785,13 +891,13 @@ class AgentRuntime:
         messages: list[dict[str, Any]],
         llm_response: LLMResponse,
         tool_results: list[dict[str, Any]],
-        provider_name: str,
+        provider: LLMProvider,
     ) -> list[dict[str, Any]]:
         follow_up = list(messages)
         if llm_response.content.strip():
             follow_up.append({"role": "assistant", "content": llm_response.content})
         wrapped = self._wrap_tool_results(tool_results)
-        images = self._images_for_model(tool_results, provider_name)
+        images = self._images_for_model(tool_results, provider)
         if images:
             follow_up.append(
                 {
@@ -882,10 +988,39 @@ class AgentRuntime:
         saved-memory context (already screened) and ``permissions_text`` the
         owner's ``<permissions>`` block; both are folded into the system
         prompt. Raises ``ProviderNotConfigured`` when no key is available.
+
+        The provider is held on a lease for the whole turn, so an owner
+        saving a new key mid-turn (``invalidate_providers``) retires it
+        instead of closing it under the next model round. The returned
+        response names the (provider, model) pair that actually ran.
         """
         messages = self._with_system_prompt(messages, memory_block, permissions_text)
         turn_provider, turn_model = await self._select_provider(llm_provider, llm_model)
-        provider = await self._provider_for(turn_provider, turn_model)
+        async with self._lease(turn_provider, turn_model) as provider:
+            response = await self._run_turn(
+                provider,
+                turn_provider,
+                messages,
+                tools,
+                user_id,
+                conversation_id,
+                event_sink,
+            )
+        response.provider, response.model = turn_provider, turn_model
+        return response
+
+    async def _run_turn(
+        self,
+        provider: LLMProvider,
+        turn_provider: str,
+        messages: list[dict[str, Any]],
+        tools: list[Tool],
+        user_id: str,
+        conversation_id: Optional[str],
+        event_sink: Optional[Callable[[dict[str, Any]], Awaitable[None]]],
+    ) -> AgentResponse:
+        """The body of :meth:`chat`: scanning, context management and the
+        bounded tool loop, on a provider the caller holds a lease on."""
 
         async def emit(event: dict[str, Any]) -> None:
             """Best-effort progress emission for the streaming path. A sink
@@ -1285,7 +1420,7 @@ class AgentRuntime:
             # Feed the results back and loop — the next call still offers
             # tools (until the round budget runs out) so calls can chain.
             messages = self._follow_up_messages(
-                messages, llm_response, round_results, turn_provider
+                messages, llm_response, round_results, provider
             )
 
         if hit_round_limit:
@@ -1396,8 +1531,11 @@ class AgentRuntime:
         - ``blocked``: an action was blocked by policy
         - ``content_delta``: incremental chunk of the FINAL answer
         - ``error``: a provider failure (``code: provider_not_configured``
-          when no API key is available, so the caller can point at setup)
-        - ``done``: stream finished, carries usage + the full content
+          when the install has no API key, so the caller can point at setup;
+          ``code: user_provider_unavailable`` when only the user's own
+          Settings choice lacks one, so it can point at Settings)
+        - ``done``: stream finished, carries usage, the full content, and
+          the ``provider``/``model`` pair the turn ran on
 
         Implemented as an adapter over :meth:`chat` so every security layer —
         prompt-guard scanning (input, arguments, results, final output),
@@ -1468,10 +1606,14 @@ class AgentRuntime:
             try:
                 response = task.result()
             except ProviderNotConfigured as exc:
-                logger.warning("stream_chat_provider_not_configured", provider=exc.provider)
+                logger.warning(
+                    "stream_chat_provider_not_configured",
+                    provider=exc.provider,
+                    reason=exc.reason,
+                )
                 yield {
                     "type": "error",
-                    "data": {"reason": str(exc), "code": "provider_not_configured"},
+                    "data": {"reason": str(exc), "code": exc.code},
                 }
                 finished = True
                 yield {"type": "done", "data": {}}
@@ -1530,6 +1672,10 @@ class AgentRuntime:
             "data": {
                 "content": response.content or "",
                 "usage": response.usage,
+                # Which pair produced those tokens — persisted with the
+                # message so the turn can be priced.
+                "provider": response.provider,
+                "model": response.model,
                 "tool_calls": response.tool_calls,
                 "pending_approvals": [
                     {

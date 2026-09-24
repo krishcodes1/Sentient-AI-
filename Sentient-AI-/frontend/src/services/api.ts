@@ -51,6 +51,26 @@ class ApiError extends Error {
   }
 }
 
+/** Machine-readable parts of a "provider not available" failure — on an
+ *  HTTP error detail and on a stream `error` frame alike. */
+export interface ProviderErrorInfo {
+  code?: string;
+  setup_url?: string;
+  settings_url?: string;
+}
+
+function nonEmpty(value: unknown): value is string {
+  return typeof value === "string" && value.trim() !== "";
+}
+
+/** Append where to fix a provider failure: setup when the install is not
+ *  set up, Settings when only the user's own choice is unavailable. */
+function withFixPointer(message: string, info: ProviderErrorInfo | Record<string, unknown>): string {
+  if (nonEmpty(info.setup_url)) return `${message} Open ${info.setup_url} to finish setup.`;
+  if (nonEmpty(info.settings_url)) return `${message} Change it in Settings.`;
+  return message;
+}
+
 // FastAPI error bodies are not always strings: validation failures (422)
 // return an array of {loc, msg, ...} objects. Normalize everything to a
 // readable sentence so the UI never renders "[object Object]".
@@ -81,16 +101,15 @@ function errorDetailToMessage(detail: unknown, fallback: string): string {
     return fallback;
   }
   if (detail && typeof detail === "object") {
-    // A missing/misconfigured AI provider comes back as a structured 503
-    // body (`{ message, setup_url }`) rather than a plain string, so the
-    // user gets an actionable sentence instead of a raw JSON blob.
+    // A missing AI provider comes back as a structured body rather than a
+    // plain string: 503 `{ message, code, setup_url }` when this Crawler is
+    // not set up yet, 409 `{ message, code, settings_url }` when only the
+    // user's own provider choice has no key. The sentence carries no URL,
+    // so the pointer is added here and the user gets an actionable line
+    // instead of a raw JSON blob.
     const obj = detail as Record<string, unknown>;
     if (typeof obj.message === "string" && obj.message.trim()) {
-      const setupUrl = obj.setup_url;
-      if (typeof setupUrl === "string" && setupUrl.trim()) {
-        return `${obj.message} Open ${setupUrl} to finish setup.`;
-      }
-      return obj.message;
+      return withFixPointer(obj.message, obj);
     }
     try {
       return JSON.stringify(detail);
@@ -376,7 +395,10 @@ export interface StreamHandlers {
     blocked_actions?: BlockedAction[];
   }) => void;
   onSaved?: (assistant: Message | null) => void;
-  onError?: (reason: string) => void;
+  /** `reason` is ready to show (a provider failure's fix pointer already
+   *  appended); `info` carries the frame's code/setup_url/settings_url when
+   *  it had any. */
+  onError?: (reason: string, info?: ProviderErrorInfo) => void;
 }
 
 /**
@@ -474,10 +496,21 @@ export async function streamMessage(
       case "saved":
         handlers.onSaved?.((data.assistant_message ?? null) as Message | null);
         break;
-      case "error":
+      case "error": {
         sawTerminalEvent = true;
-        handlers.onError?.(String(data.reason ?? "Stream error"));
+        const reason = String(data.reason ?? "Stream error");
+        const info: ProviderErrorInfo = {};
+        if (nonEmpty(data.code)) info.code = data.code;
+        if (nonEmpty(data.setup_url)) info.setup_url = data.setup_url;
+        if (nonEmpty(data.settings_url)) info.settings_url = data.settings_url;
+        if (Object.keys(info).length > 0) {
+          // Same sentence the blocking route's 503/409 renders to.
+          handlers.onError?.(withFixPointer(reason, info), info);
+        } else {
+          handlers.onError?.(reason);
+        }
         break;
+      }
     }
   };
 
@@ -630,8 +663,9 @@ export async function changePassword(data: {
 export async function updateSettings(data: {
   default_permission_tier?: string;
   rate_limit?: number;
-  llm_provider?: string;
-  llm_model?: string;
+  // null = follow this Crawler's default provider/model.
+  llm_provider?: string | null;
+  llm_model?: string | null;
   memory_enabled?: boolean;
 }): Promise<User> {
   const user = await request<User>("/auth/settings", {

@@ -11,14 +11,6 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from core.database import Base
 
 
-def _server_llm_defaults() -> tuple[str, str]:
-    """Provider/model the server is configured for, resolved lazily so the
-    model module never imports settings at class-definition time."""
-    from core.config import settings
-
-    return settings.LLM_PROVIDER, settings.LLM_MODEL
-
-
 class User(Base):
     __tablename__ = "users"
     __table_args__ = (
@@ -88,19 +80,22 @@ class User(Base):
         server_default="60",
         nullable=False,
     )
-    # New accounts inherit the provider/model the server is actually
-    # configured for, so chat works before the user ever opens Settings.
-    llm_provider: Mapped[str] = mapped_column(
+    # The account's own provider/model, or NULL for both: "use this
+    # Crawler's default", resolved at turn time from the install settings
+    # (the setup wizard or .env). NULL is the default for new accounts, so a
+    # key the owner saves later — for any provider — reaches everyone who
+    # never picked one. Stamping the server's pair at registration used to
+    # pin accounts to whatever it was that day. When the provider is NULL
+    # the model is ignored (and the Settings route keeps it NULL too).
+    llm_provider: Mapped[Optional[str]] = mapped_column(
         String(32),
-        default=lambda: _server_llm_defaults()[0],
-        server_default="anthropic",
-        nullable=False,
+        default=None,
+        nullable=True,
     )
-    llm_model: Mapped[str] = mapped_column(
+    llm_model: Mapped[Optional[str]] = mapped_column(
         String(128),
-        default=lambda: _server_llm_defaults()[1],
-        server_default="claude-sonnet-4-20250514",
-        nullable=False,
+        default=None,
+        nullable=True,
     )
     # When enabled, saved memories are injected into the agent's system
     # prompt and the assistant may propose new ones (gated by approval).

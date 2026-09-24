@@ -197,7 +197,15 @@ It owns short-lived sessions from the application session factory, like the othe
 
 ### 6.1 Provider resolution
 
-`AgentRuntime` no longer builds a provider at startup (today `main.py` sets `agent_runtime = None` when the key is missing). It takes an `api_key_resolver: Callable[[str], Awaitable[str | None]]` and resolves the key when it builds a provider. Saving a new key calls `runtime.invalidate_providers()` through `on_change`. If no key resolves, the turn raises `ProviderNotConfigured` (a `ProviderError`); the HTTP route answers `503 {"detail": "No AI provider is configured yet.", "setup_url": "/setup"}` and the Telegram channel replies with the same sentence.
+`AgentRuntime` no longer builds a provider at startup (today `main.py` sets `agent_runtime = None` when the key is missing). It takes a `settings_source` (`ProviderSettingsSource`: `llm_defaults()` → the install's `(provider, model)`, `llm_api_key(provider)` → key, `""` for Ollama, `None` when missing; `InstallationService` implements it, and the default reads `.env`) and asks it at turn time. Providers are cached per `(provider, model)`; saving a new key calls `runtime.invalidate_providers()` through `on_change`. A turn holds its provider on a reference-counted lease, so invalidation or LRU eviction retires an in-use instance and closes it when the turn ends; `runtime.aclose()` closes everything at shutdown.
+
+Per-user choice: `users.llm_provider`/`llm_model` are nullable (Alembic `0009_user_llm_nullable`). `NULL` — the default for new accounts, and what the startup backfill sets on rows still holding the server's configured pair — means "use this Crawler's default": the turn takes the source's defaults and ignores the per-user model. `PATCH /auth/settings` accepts `null` for both; Settings offers it as "Use this Crawler's default". `AgentResponse.provider/model` (and the stream's `done` frame) name the pair that actually ran, and that is what the stored message records.
+
+If no key resolves, the turn raises `ProviderNotConfigured(provider, reason=...)` (a `ProviderError`) with a URL-free sentence:
+- `not_set_up` — the install has no usable key: `503 {"message", "code": "provider_not_configured", "setup_url": "/setup"}`.
+- `user_provider_unavailable` — the install works but the user's pinned provider has no key: `409 {"message", "code": "user_provider_unavailable", "settings_url": "/settings"}`.
+
+The stream `error` frame and the Telegram channel outcome carry the same `code` and URL; the web client appends "Open /setup to finish setup." or "Change it in Settings." to the sentence.
 
 ### 6.2 Telegram manager (`services/notifications/telegram_manager.py`)
 

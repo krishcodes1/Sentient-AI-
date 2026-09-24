@@ -41,10 +41,39 @@ logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
-# Where the web app finishes first-run setup (AI provider key). Every
-# ProviderNotConfigured answer — 503, stream error frame, channel reply —
-# carries it so the client can link straight to the fix.
+# Where each ProviderNotConfigured is fixed. "not_set_up" is the install's
+# gap (first-run setup: an AI provider key); "user_provider_unavailable" is
+# the user's own Settings choice. Every answer — the HTTP error, the stream
+# error frame, the channel reply — carries the matching code and URL so the
+# client can link straight to the fix.
 SETUP_URL = "/setup"
+SETTINGS_URL = "/settings"
+
+_NOT_CONFIGURED_POINTERS: dict[str, dict[str, str]] = {
+    "provider_not_configured": {"setup_url": SETUP_URL},
+    "user_provider_unavailable": {"settings_url": SETTINGS_URL},
+}
+
+
+def _not_configured_info(exc: ProviderNotConfigured) -> dict[str, str]:
+    """``{"code": ..., "<setup|settings>_url": ...}`` for one failure."""
+    return {"code": exc.code, **_NOT_CONFIGURED_POINTERS.get(exc.code, {})}
+
+
+def _not_configured_http_error(exc: ProviderNotConfigured) -> HTTPException:
+    """503 when the install is not set up (the service genuinely cannot
+    answer anyone yet); 409 when only this user's pinned provider lacks a
+    key — the request conflicts with their own Settings, which they can
+    change."""
+    status_code = (
+        status.HTTP_409_CONFLICT
+        if exc.reason == "user_provider_unavailable"
+        else status.HTTP_503_SERVICE_UNAVAILABLE
+    )
+    return HTTPException(
+        status_code=status_code,
+        detail={"message": str(exc), **_not_configured_info(exc)},
+    )
 
 
 class UserRateLimiter:
@@ -528,9 +557,12 @@ def _usage_columns(
     cost view would quietly understate it.
 
     Provider and model are required arguments so no persistence path can
-    forget them: without the model a turn's tokens cannot be priced. They
-    are resolved the way the runtime resolves them (user choice, else the
-    server default), so the row names the model that actually answered.
+    forget them: without the model a turn's tokens cannot be priced.
+    Callers pass the pair the runtime reports it ran on
+    (``AgentResponse.provider``/``model``, or the stream's done frame) —
+    never the account row, whose NULL means "whatever the install default
+    was", which is not a price. The server default is only a fallback for
+    a runtime that reported nothing.
     """
     usage = usage or {}
 
@@ -799,12 +831,16 @@ async def send_message(
             permissions_text=permissions_text,
         )
     except ProviderNotConfigured as exc:
-        # Not an upstream failure: this install has no key for the provider
-        # yet. 503 plus where to fix it, so the client can link to setup.
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"message": str(exc), "setup_url": SETUP_URL},
-        ) from None
+        # Not an upstream failure: no key for the provider this turn needs.
+        # 503 + setup_url when the install is not set up, 409 + settings_url
+        # when only the user's own choice is unavailable.
+        logger.warning(
+            "send_message_provider_not_configured",
+            conversation_id=str(conversation.id),
+            provider=exc.provider,
+            reason=exc.reason,
+        )
+        raise _not_configured_http_error(exc) from None
     except ProviderError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -820,7 +856,7 @@ async def send_message(
         content=agent_response.content,
         tool_calls=agent_response.tool_calls or None,
         **_usage_columns(
-            agent_response.usage, current_user.llm_provider, current_user.llm_model
+            agent_response.usage, agent_response.provider, agent_response.model
         ),
     )
     db.add(assistant_message)
@@ -999,8 +1035,8 @@ async def stream_message(
             response.content or "",
             response.tool_calls or None,
             response.usage,
-            user_provider,
-            user_model,
+            response.provider,
+            response.model,
         )
 
     async def event_stream():
@@ -1009,6 +1045,9 @@ async def stream_message(
         final_content = ""
         tool_calls_payload: list[dict[str, Any]] = []
         usage_payload: dict[str, Any] = {}
+        # The pair the turn actually ran on, from the done frame.
+        turn_provider: Optional[str] = None
+        turn_model: Optional[str] = None
         turn_done = False
         turn_errored = False
         saved_confirmed = False
@@ -1038,13 +1077,17 @@ async def stream_message(
                         # done frame; remember it so the failed turn is not
                         # persisted as an empty assistant message below.
                         turn_errored = True
-                        if data.get("code") == "provider_not_configured":
-                            # Same pointer the blocking route's 503 carries.
-                            data = {**data, "setup_url": SETUP_URL}
+                        pointer = _NOT_CONFIGURED_POINTERS.get(str(data.get("code")))
+                        if pointer:
+                            # Same pointer the blocking route's 503/409
+                            # carries (setup_url or settings_url).
+                            data = {**data, **pointer}
                     if etype == "done":
                         final_content = data.get("content", "")
                         tool_calls_payload = data.get("tool_calls", []) or []
                         usage_payload = data.get("usage", {}) or {}
+                        turn_provider = data.get("provider") or None
+                        turn_model = data.get("model") or None
                         turn_done = True
                     yield _sse(etype, data)
             except GeneratorExit:
@@ -1073,7 +1116,7 @@ async def stream_message(
                     role=MessageRole.assistant,
                     content=final_content,
                     tool_calls=tool_calls_payload or None,
-                    **_usage_columns(usage_payload, user_provider, user_model),
+                    **_usage_columns(usage_payload, turn_provider, turn_model),
                 )
                 db.add(assistant)
                 conversation.updated_at = datetime.now(timezone.utc)
@@ -1112,8 +1155,8 @@ async def stream_message(
                         final_content,
                         tool_calls_payload,
                         usage_payload,
-                        user_provider,
-                        user_model,
+                        turn_provider,
+                        turn_model,
                     )
                 )
 
@@ -1205,7 +1248,7 @@ async def _resume_after_approval(
         content=agent_response.content,
         tool_calls=agent_response.tool_calls or None,
         **_usage_columns(
-            agent_response.usage, current_user.llm_provider, current_user.llm_model
+            agent_response.usage, agent_response.provider, agent_response.model
         ),
     )
 
@@ -1463,16 +1506,17 @@ def build_chat_applier(app: Any, session_factory: Any = async_session):
                 permissions_text=permissions_text,
             )
         except ProviderNotConfigured as exc:
-            # The channel sends "error" verbatim: the setup sentence.
+            # The channel sends "error" verbatim: the bare sentence, with the
+            # code and the matching setup_url/settings_url alongside.
             logger.warning(
                 "channel_chat_provider_not_configured",
                 conversation_id=str(conversation_id),
                 provider=exc.provider,
+                reason=exc.reason,
             )
             return {
                 "error": str(exc),
-                "code": "provider_not_configured",
-                "setup_url": SETUP_URL,
+                **_not_configured_info(exc),
                 "conversation_id": str(conversation_id),
             }
         except ProviderError as exc:
@@ -1497,7 +1541,11 @@ def build_chat_applier(app: Any, session_factory: Any = async_session):
                     role=MessageRole.assistant,
                     content=agent_response.content,
                     tool_calls=agent_response.tool_calls or None,
-                    **_usage_columns(agent_response.usage, provider, model),
+                    **_usage_columns(
+                        agent_response.usage,
+                        agent_response.provider,
+                        agent_response.model,
+                    ),
                 )
             )
             conversation.updated_at = datetime.now(timezone.utc)

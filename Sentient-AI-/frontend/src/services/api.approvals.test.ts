@@ -187,6 +187,7 @@ describe("error detail normalization", () => {
       jsonResponse(503, {
         detail: {
           message: "No AI provider is configured.",
+          code: "provider_not_configured",
           setup_url: "/setup",
         },
       }),
@@ -197,10 +198,28 @@ describe("error detail normalization", () => {
     );
   });
 
-  it("uses the message field verbatim when the detail object has no setup_url", async () => {
+  it("points a 409 unavailable-personal-provider detail at Settings", async () => {
+    mockFetch(() =>
+      jsonResponse(409, {
+        detail: {
+          message: "The 'openai' provider selected in your Settings is not configured on this server.",
+          code: "user_provider_unavailable",
+          settings_url: "/settings",
+        },
+      }),
+    );
+
+    await expect(decideApproval("act-1", true)).rejects.toMatchObject({
+      message:
+        "The 'openai' provider selected in your Settings is not configured on this server. Change it in Settings.",
+      status: 409,
+    });
+  });
+
+  it("uses the message field verbatim when the detail object has no fix url", async () => {
     mockFetch(() =>
       jsonResponse(503, {
-        detail: { message: "No AI provider is configured." },
+        detail: { message: "No AI provider is configured.", code: "provider_not_configured" },
       }),
     );
 
