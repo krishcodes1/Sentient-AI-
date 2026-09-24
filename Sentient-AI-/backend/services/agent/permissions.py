@@ -112,6 +112,13 @@ _DEFAULT_POLICIES: dict[tuple[str, ActionCategory], PermissionTier] = {
     ("system", ActionCategory.DELETE): PermissionTier.HARD_BLOCKED,
     ("system", ActionCategory.EXECUTE): PermissionTier.HARD_BLOCKED,
     ("system", ActionCategory.FINANCIAL): PermissionTier.HARD_BLOCKED,
+    # desktop: a picture of the screen is a read; there is no write surface
+    # yet (input control is a later capability with its own rows).
+    ("desktop", ActionCategory.READ): PermissionTier.AUTO_APPROVE,
+    ("desktop", ActionCategory.WRITE): PermissionTier.HARD_BLOCKED,
+    ("desktop", ActionCategory.DELETE): PermissionTier.HARD_BLOCKED,
+    ("desktop", ActionCategory.EXECUTE): PermissionTier.HARD_BLOCKED,
+    ("desktop", ActionCategory.FINANCIAL): PermissionTier.HARD_BLOCKED,
     # Todoist
     ("todoist", ActionCategory.READ): PermissionTier.AUTO_APPROVE,
     ("todoist", ActionCategory.WRITE): PermissionTier.USER_CONFIRM,
