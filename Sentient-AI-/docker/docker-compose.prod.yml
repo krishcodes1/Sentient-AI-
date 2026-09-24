@@ -86,6 +86,9 @@ services:
       ENVIRONMENT: production
       DATABASE_URL: postgresql+asyncpg://sentientai:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the environment or docker/.env before deploying}@db:5432/sentientai
       REDIS_URL: redis://redis:6379/0
+      # Marks this as a container so the "See my screen" capability reports
+      # unavailable instead of failing (backend/services/capabilities/env.py).
+      CRAWLER_CONTAINER: "1"
     depends_on:
       db:
         condition: service_healthy

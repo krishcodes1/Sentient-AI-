@@ -116,7 +116,10 @@ Production checklist:
   `.env.example` placeholders or keys shorter than 32 chars, and with
   `ENVIRONMENT=production` it fails fast (instead of limping) when the
   database is unreachable.
-- After registering your own account, set `ALLOW_REGISTRATION=false` —
+- Registration closes on its own once setup completes (the wizard's
+  Summary step defaults "Allow other people to create accounts" to off).
+  If you skip the wizard and configure everything through `.env` instead,
+  set `ALLOW_REGISTRATION=false` yourself after creating your account —
   otherwise anyone who finds the URL can create accounts billed to your
   LLM API keys.
 - Set `CORS_ORIGINS` to your real frontend origin and `ALLOWED_HOSTS`
@@ -302,36 +305,116 @@ If you don't want to pay for API keys, use **Ollama** for free local AI:
    ```
 
 3. **Set in your `.env`**
+
+   Ollama runs on your host machine, not inside a container, so the URL
+   the backend needs depends on how the backend itself is running:
+
    ```env
    LLM_PROVIDER=ollama
    LLM_MODEL=llama3.2
+   # Native run (Option 2/3/4 above): the backend reaches Ollama directly.
    OLLAMA_BASE_URL=http://localhost:11434
+   # Docker (Option 1): `localhost` inside the backend container is the
+   # container itself, not your Mac/PC — use Docker's host alias instead:
+   # OLLAMA_BASE_URL=http://host.docker.internal:11434
    ```
 
 4. Run the backend and frontend as described above. No API key needed.
 
 ---
 
+## First run: the setup wizard
+
+The very first time you open the app — http://localhost:3000 — with no
+accounts created yet, every route redirects to `/setup` for a one-time
+wizard. It has five steps:
+
+1. **Owner account.** Create the first user. This account becomes the
+   deployment's **owner/admin** — there is no separate invite step, and no
+   UI to transfer or grant that role afterwards (edit the database directly
+   if you ever need to).
+2. **AI provider.** Choose a provider and model, paste an API key (skipped
+   if one is already `configured` from `backend/.env`), and click **Test**.
+   The key is verified with a real, tiny request before **Save** is even
+   enabled, so a bad key never gets silently stored.
+3. **Telegram (optional).** Paste a bot token from @BotFather, **Test** it,
+   save, then link your phone with the generated `t.me/<bot>?start=<code>`
+   link. Skip this step entirely if you don't want Telegram approvals.
+4. **Permissions.** Turn each capability on or off — see
+   [Permissions](#permissions) below for what each one does. You can revisit
+   these later in Settings.
+5. **Summary.** A "what works / what doesn't" table built from the actual
+   capability report, plus the **"Allow other people to create accounts"**
+   switch. It defaults to **off**: after setup, registration is closed
+   unless you turn it on here or later in Settings — otherwise anyone who
+   finds the URL could create an account billed to your LLM API keys.
+
+Anything you set with `.env` (`backend/.env.example`) takes precedence over
+whatever the wizard stores — see [Environment Variables](#environment-variables)
+below. If your `.env` already has a working provider key when the backend
+starts and an account exists, setup is considered already done and the
+wizard is skipped (useful when upgrading an existing Docker deployment).
+
+Building a new capability? See
+[`backend/services/capabilities/README.md`](backend/services/capabilities/README.md)
+for the five-step contributor guide.
+
+## Permissions
+
+Every tool the agent can use is gated by one of these switches. They are
+offered to the model only when on, refused again at dispatch if somehow
+requested while off, and summarized for the model in its own prompt so it
+can explain rather than guess. The owner sets them in the setup wizard's
+Permissions step or later in **Settings → Permissions**; everyone else sees
+them read-only.
+
+| Switch | Unlocks | Default |
+|--------|---------|---------|
+| **Browse the web** | Searching the public web and reading pages as text (`web.search`, `web.fetch_page`) | On |
+| **Screenshots of websites** | Opening a page in a hidden browser and capturing it as an image, for pages that don't read well as text — flights, products (`web.screenshot`). Needs the hidden browser installed (~150–300 MB); the wizard/Settings can install it for you. | On |
+| **See my screen** | Taking a picture of this computer's display when asked (`desktop.screenshot`). High risk, off by default, and audited on every capture. **Not available inside Docker** — the compose files set `CRAWLER_CONTAINER=1` so the capability reports "unavailable in this environment" instead of failing; it works when the backend runs directly on a Mac or Windows machine, and additionally needs the OS's screen-recording permission granted to the backend process. | Off |
+| **Reminders** | Setting, listing and cancelling reminders, delivered to you over Telegram when it's linked | On |
+| **Install optional software** | Installing optional components from a fixed list (e.g. the hidden browser above), asking you before every install | On |
+| **Telegram chat and approvals** | Chatting with Crawler from Telegram and approving pending actions from your phone. Needs a bot token configured (`.env` or the wizard's Telegram step). | On |
+
+See `backend/services/capabilities/README.md` if you're adding a new one —
+declaring a capability there is what drives the switch, the gating, and the
+prompt text; nothing else needs to change.
+
+---
+
 ## Environment Variables
 
-Copy `backend/.env.example` to `backend/.env` and configure:
+Copy `backend/.env.example` to `backend/.env` and configure. **`.env` values
+always override whatever the setup wizard has stored** — the precedence is
+`.env` > database (wizard) > built-in default. That means the AI provider
+keys and `TELEGRAM_BOT_TOKEN` below are **optional** if you plan to use the
+[setup wizard](#first-run-the-setup-wizard) instead: leave them blank, start
+the app, and add the provider and (optionally) Telegram from the wizard or
+Settings. Set them here instead when you want them fixed by deployment
+config (e.g. a shared server) rather than owner-editable at runtime. Either
+way, after editing `backend/.env` for a Docker deployment, apply it with
+`docker compose up -d backend` — a plain `docker compose restart` does not
+re-read the `.env` file, it only restarts the process with the environment
+it already has.
 
 | Variable | Required? | Description |
 |----------|-----------|-------------|
 | `SECRET_KEY` | Yes | Signs your login tokens. Generate with the command below. |
-| `ENCRYPTION_KEY` | Yes | Encrypts stored API keys in the database. Generate with the command below. |
+| `ENCRYPTION_KEY` | Yes | Encrypts stored API keys in the database, including provider keys and the Telegram bot token saved through the setup wizard. Generate with the command below. |
 | `DATABASE_URL` | Yes | PostgreSQL connection string. Default works with Docker. |
 | `REDIS_URL` | Recommended | Redis connection string (used for shared rate limiting; the API falls back to in-memory rate limiting if Redis is unreachable). Default works with Docker. |
-| `LLM_PROVIDER` | Yes | Which AI to use: `anthropic`, `openai`, `gemini`, `grok`, `deepseek`, `groq`, `mistral`, or `ollama` |
-| `LLM_MODEL` | Yes | Model name (e.g., `claude-sonnet-4-20250514`, `gpt-4o`, `gemini-2.5-flash`) |
-| `ANTHROPIC_API_KEY` | If using Anthropic | Get from [console.anthropic.com](https://console.anthropic.com) |
-| `OPENAI_API_KEY` | If using OpenAI | Get from [platform.openai.com](https://platform.openai.com/api-keys) |
-| `GEMINI_API_KEY` | If using Gemini | Get from [aistudio.google.com](https://aistudio.google.com/apikey) |
-| `GROK_API_KEY` | If using Grok | Get from [console.x.ai](https://console.x.ai) |
-| `DEEPSEEK_API_KEY` | If using Deepseek | Get from [platform.deepseek.com](https://platform.deepseek.com) |
-| `GROQ_API_KEY` | If using Groq | Get from [console.groq.com](https://console.groq.com) |
-| `MISTRAL_API_KEY` | If using Mistral | Get from [console.mistral.ai](https://console.mistral.ai) |
-| `OLLAMA_BASE_URL` | If using Ollama | Default: `http://localhost:11434` |
+| `LLM_PROVIDER` | Yes | Which AI to use: `anthropic`, `openai`, `gemini`, `grok`, `deepseek`, `groq`, `mistral`, or `ollama`. Optional when using the wizard, which can set this instead. |
+| `LLM_MODEL` | Yes | Model name (e.g., `claude-sonnet-4-20250514`, `gpt-4o`, `gemini-2.5-flash`). Optional when using the wizard. |
+| `ANTHROPIC_API_KEY` | If using Anthropic | Get from [console.anthropic.com](https://console.anthropic.com). Optional when using the wizard — see above. |
+| `OPENAI_API_KEY` | If using OpenAI | Get from [platform.openai.com](https://platform.openai.com/api-keys). Optional when using the wizard. |
+| `GEMINI_API_KEY` | If using Gemini | Get from [aistudio.google.com](https://aistudio.google.com/apikey). Optional when using the wizard. |
+| `GROK_API_KEY` | If using Grok | Get from [console.x.ai](https://console.x.ai). Optional when using the wizard. |
+| `DEEPSEEK_API_KEY` | If using Deepseek | Get from [platform.deepseek.com](https://platform.deepseek.com). Optional when using the wizard. |
+| `GROQ_API_KEY` | If using Groq | Get from [console.groq.com](https://console.groq.com). Optional when using the wizard. |
+| `MISTRAL_API_KEY` | If using Mistral | Get from [console.mistral.ai](https://console.mistral.ai). Optional when using the wizard. |
+| `OLLAMA_BASE_URL` | If using Ollama | Native run: `http://localhost:11434` (default). Under Docker, `localhost` means the backend container itself, not your host, so use `http://host.docker.internal:11434` instead. |
+| `TELEGRAM_BOT_TOKEN` | No | Bot token from @BotFather for Telegram chat and approvals. Optional when using the wizard, which can save and test it instead; see [Permissions](#permissions). |
 | `RATE_LIMIT_PER_MINUTE` | No | General per-IP API rate limit (default 60) |
 | `AUTH_RATE_LIMIT_PER_MINUTE` | No | Stricter per-IP limit on login/register (default 10) |
 | `TRUSTED_PROXIES` | Review for prod | CIDRs whose `X-Forwarded-For` is believed for client-IP attribution. Default trusts loopback + all private ranges (where the compose nginx sits) — narrow it to your proxy's address if anything else can reach the API from a private network. |
@@ -341,7 +424,7 @@ Copy `backend/.env.example` to `backend/.env` and configure:
 | `SESSION_MAX_HOURS` | No | Ceiling on how long refreshing can extend one session, measured from login (default 12) |
 | `APPROVAL_TTL_MINUTES` | No | How long a pending tool approval stays actionable (default 15) |
 | `CORS_ORIGINS` | No | Allowed browser origins (default localhost dev ports) |
-| `ALLOW_REGISTRATION` | No | Set `false` after creating your account so strangers can't register (default `true`) |
+| `ALLOW_REGISTRATION` | No | Applies only until setup completes (default `true`, so the owner can register). Afterwards, registration is governed by the switch stored by the setup wizard (Summary step) or Settings — see [First run: the setup wizard](#first-run-the-setup-wizard) — which defaults to **closed**. |
 | `PASSWORD_MIN_LENGTH` | No | Minimum password length, floor 8 (default 8) |
 | `ALLOWED_HOSTS` | No | Accepted `Host` headers; set your real hostname in production (default `["*"]`) |
 | `LOG_LEVEL` | No | Log verbosity; production emits JSON lines (default `INFO`) |
