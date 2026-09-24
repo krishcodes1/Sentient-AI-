@@ -19,6 +19,7 @@ function status(needsSetup: boolean, hasOwner: boolean): SetupStatus {
     has_owner: hasOwner,
     provider_configured: !needsSetup,
     setup_completed: !needsSetup,
+    secrets_unreadable: false,
   };
 }
 

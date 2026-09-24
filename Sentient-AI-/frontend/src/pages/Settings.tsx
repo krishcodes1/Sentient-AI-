@@ -147,6 +147,7 @@ export default function Settings() {
     provider: useId(),
     model: useId(),
     modelHelp: useId(),
+    deletePassword: useId(),
   };
   const [me, setMe] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
@@ -175,6 +176,7 @@ export default function Settings() {
   const [savingLlm, setSavingLlm] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const [deletePassword, setDeletePassword] = useState("");
   const [profileFeedback, setProfileFeedback] = useState<Feedback>(null);
   const [passwordFeedback, setPasswordFeedback] = useState<Feedback>(null);
   const [securityFeedback, setSecurityFeedback] = useState<Feedback>(null);
@@ -457,13 +459,19 @@ export default function Settings() {
   };
 
   const handleDeleteAccount = async () => {
+    if (!deletePassword) {
+      // Thrown (not just set as feedback) so ConfirmDialog's own inline
+      // error banner shows it — the dialog has no separate feedback slot.
+      throw new Error("Enter your current password to continue.");
+    }
     setDeleting(true);
     try {
-      await deleteAccount();
+      await deleteAccount({ current_password: deletePassword });
       logout();
     } catch (err) {
       setDeleting(false);
-      throw err; // ConfirmDialog surfaces the failure inline
+      throw err; // ConfirmDialog surfaces the failure inline (incl. the
+      // 409 "last owner" message the backend sends verbatim)
     }
   };
 
@@ -962,9 +970,35 @@ export default function Settings() {
         title="Delete your account?"
         message="This permanently removes your account, conversations, connectors (including their encrypted credentials), pending approvals, and audit logs. This cannot be undone."
         confirmLabel="Delete everything"
-        onCancel={() => setConfirmDeleteOpen(false)}
+        onCancel={() => {
+          setConfirmDeleteOpen(false);
+          setDeletePassword("");
+        }}
         onConfirm={handleDeleteAccount}
-      />
+      >
+        <label
+          htmlFor={ids.deletePassword}
+          className="block text-xs font-medium mb-1.5"
+          style={{ color: "var(--text-secondary)" }}
+        >
+          Current password
+        </label>
+        <input
+          id={ids.deletePassword}
+          type="password"
+          value={deletePassword}
+          onChange={(e) => setDeletePassword(e.target.value)}
+          autoComplete="current-password"
+          placeholder="Required to delete your account"
+          className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
+          style={{
+            background: "var(--bg-input)",
+            border: "1px solid var(--claw-border)",
+            color: "var(--text-primary)",
+          }}
+        />
+      </ConfirmDialog>
+
 
       {loading && (
         <div

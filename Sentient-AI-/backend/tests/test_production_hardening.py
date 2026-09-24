@@ -16,9 +16,12 @@ import base64
 import os
 import secrets
 
+import httpx
 import pytest
+import structlog
 from pydantic import ValidationError
 
+import main as main_module
 from core.config import Settings, settings
 from tests.conftest import auth_headers, make_user
 
@@ -239,3 +242,66 @@ async def test_legacy_token_without_epoch_claim_still_works(client, session_fact
     _user, token = await make_user(session_factory, email="legacy@example.com")
     resp = await client.get("/api/auth/me", headers=auth_headers(token))
     assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Global exception handler never logs raw exception text
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_global_exception_handler_never_logs_the_raw_exception_text(monkeypatch):
+    """An unhandled exception's ``str()`` can carry secrets (a bad API key
+    echoed back by a driver, a token embedded in a failed URL, ...). The
+    handler must log only the exception's type and the request's path and
+    method — never the exception text itself — while leaving the client
+    response body unchanged.
+
+    Uses a private ASGI transport (rather than the shared ``client``
+    fixture) with ``raise_app_exceptions=False``: Starlette's
+    ServerErrorMiddleware always re-raises after invoking the registered
+    handler so a real server (or a log shipper) still sees the traceback,
+    and httpx's default transport propagates that re-raise into the test
+    instead of returning the handler's response.
+    """
+    secret = "sk-SECRET-0123456789abcdef"
+
+    async def _boom():
+        raise RuntimeError(f"connection failed while using key {secret}")
+
+    main_module.app.add_api_route("/__test_only_explode__", _boom, methods=["GET"])
+    # Fresh logger instance so this test's capture isn't skipped because an
+    # earlier test already cached main's logger with different processors
+    # (structlog's cache_logger_on_first_use binds on first use).
+    monkeypatch.setattr(main_module, "logger", structlog.get_logger(main_module.__name__))
+
+    try:
+        transport = httpx.ASGITransport(
+            app=main_module.app, client=("192.0.2.99", 54321), raise_app_exceptions=False
+        )
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as http_client:
+            with structlog.testing.capture_logs() as logs:
+                resp = await http_client.get("/__test_only_explode__")
+    finally:
+        main_module.app.router.routes[:] = [
+            route
+            for route in main_module.app.router.routes
+            if getattr(route, "path", None) != "/__test_only_explode__"
+        ]
+
+    assert resp.status_code == 500
+    body = resp.json()
+    assert body["detail"] == "Internal server error"
+    assert "request_id" in body
+    assert secret not in resp.text
+
+    assert all(secret not in str(entry) for entry in logs)
+    events = {entry["event"]: entry for entry in logs}
+    entry = events["unhandled_exception"]
+    assert entry["error_type"] == "RuntimeError"
+    assert entry["path"] == "/__test_only_explode__"
+    assert entry["method"] == "GET"
+    assert "error" not in entry
+    assert secret not in repr(entry)

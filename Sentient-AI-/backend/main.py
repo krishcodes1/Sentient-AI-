@@ -347,8 +347,22 @@ async def validation_exception_handler(
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Catch-all for anything a route/dependency didn't handle.
+
+    Logs only the exception's type plus the request it happened on —
+    never ``str(exc)``, which can embed secrets from the very error that
+    triggered it (a bad API key echoed into a driver's error message, a
+    token in a failed URL, etc). The response body already withheld that
+    detail from the client; the log must too.
+    """
     request_id = getattr(request.state, "request_id", "unknown")
-    logger.error("unhandled_exception", request_id=request_id, error=str(exc))
+    logger.error(
+        "unhandled_exception",
+        request_id=request_id,
+        error_type=type(exc).__name__,
+        path=request.url.path,
+        method=request.method,
+    )
     return JSONResponse(
         status_code=500,
         content={"detail": "Internal server error", "request_id": request_id},

@@ -5,6 +5,7 @@ import CapabilityList from "@/components/CapabilityList";
 import { Wordmark } from "@/components/Brand";
 import ThemeToggle from "@/components/ThemeToggle";
 import {
+  clearStoredSecrets,
   completeSetup,
   createOwner,
   createTelegramLink,
@@ -87,6 +88,19 @@ export default function Setup() {
   const [view, setView] = useState<"loading" | "wizard" | "signin" | "done">("loading");
   const [step, setStep] = useState<StepId>("owner");
   const [provider, setProvider] = useState<ProviderChoice | null>(null);
+  // Stored provider/Telegram secrets that the current ENCRYPTION_KEY can no
+  // longer decrypt — the provider step offers "Clear stored keys" while
+  // this is true. Lifted here (rather than fetched again inside
+  // ProviderStep) so re-checking it after a clear is one status call, and
+  // reuses the same request the wizard already makes to pick its start step.
+  const [secretsUnreadable, setSecretsUnreadable] = useState(false);
+
+  const reloadSecretsStatus = () =>
+    getSetupStatus()
+      .then((s) => setSecretsUnreadable(s.secrets_unreadable))
+      // Leave the notice as it was; the Clear-keys button itself already
+      // reported success or failure.
+      .catch(() => {});
 
   useEffect(() => {
     let cancelled = false;
@@ -101,7 +115,10 @@ export default function Setup() {
       }
     };
     getSetupStatus()
-      .then((status) => begin(startFrom(status, hasSession)))
+      .then((status) => {
+        if (!cancelled) setSecretsUnreadable(status.secrets_unreadable);
+        begin(startFrom(status, hasSession));
+      })
       // Status unknown: fall back on the session. If an owner already
       // exists, the owner step's 409 says so in words.
       .catch(() => begin(hasSession ? "provider" : "owner"));
@@ -136,6 +153,8 @@ export default function Setup() {
   } else if (step === "provider") {
     content = (
       <ProviderStep
+        secretsUnreadable={secretsUnreadable}
+        onSecretsCleared={reloadSecretsStatus}
         onDone={(choice) => {
           setProvider(choice);
           setStep("telegram");
@@ -458,7 +477,15 @@ function initialChoice(data: SetupProviders): { name: string; model: string } {
   return { name: pick.name, model };
 }
 
-function ProviderStep({ onDone }: { onDone: (choice: ProviderChoice) => void }) {
+function ProviderStep({
+  secretsUnreadable,
+  onSecretsCleared,
+  onDone,
+}: {
+  secretsUnreadable: boolean;
+  onSecretsCleared: () => void;
+  onDone: (choice: ProviderChoice) => void;
+}) {
   const groupLabelId = useId();
   const modelId = useId();
   const modelListId = useId();
@@ -472,6 +499,8 @@ function ProviderStep({ onDone }: { onDone: (choice: ProviderChoice) => void }) 
   const [test, setTest] = useState<TestState>({ status: "idle" });
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
+  const [clearingSecrets, setClearingSecrets] = useState(false);
+  const [clearSecretsError, setClearSecretsError] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -546,6 +575,22 @@ function ProviderStep({ onDone }: { onDone: (choice: ProviderChoice) => void }) 
     }
   };
 
+  const handleClearSecrets = async () => {
+    setClearingSecrets(true);
+    setClearSecretsError("");
+    try {
+      await clearStoredSecrets();
+      onSecretsCleared();
+      // The keys just cleared are the same ones key_stored reflects, so
+      // reload the provider list too rather than leaving it stale.
+      setAttempt((n) => n + 1);
+    } catch (err) {
+      setClearSecretsError(errorText(err, "Could not clear the stored keys."));
+    } finally {
+      setClearingSecrets(false);
+    }
+  };
+
   return (
     <StepCard
       stepId="provider"
@@ -567,6 +612,31 @@ function ProviderStep({ onDone }: { onDone: (choice: ProviderChoice) => void }) 
         </>
       }
     >
+      {secretsUnreadable && (
+        <div
+          role="alert"
+          className="rounded-[10px] px-3.5 py-3 text-sm space-y-2 mb-4"
+          style={{ background: "var(--fill-danger)", border: "1px solid var(--border-danger)" }}
+        >
+          <p style={{ color: "var(--accent-danger)" }}>
+            Stored provider keys can&apos;t be read (the encryption key changed or was lost).
+            Saving will keep failing until they are cleared.
+          </p>
+          <button
+            type="button"
+            onClick={() => void handleClearSecrets()}
+            disabled={clearingSecrets}
+            className="inline-flex items-center gap-2 px-3.5 py-2 rounded-[10px] text-sm font-semibold disabled:opacity-50"
+            style={{ background: "var(--accent-danger)", color: "var(--text-on-accent)" }}
+          >
+            {clearingSecrets ? <Loader2 className="w-4 h-4 animate-spin" aria-hidden /> : null}
+            Clear stored keys
+          </button>
+          {clearSecretsError && (
+            <p style={{ color: "var(--accent-danger)" }}>{clearSecretsError}</p>
+          )}
+        </div>
+      )}
       {loadError && (
         <ErrorAlert>
           {loadError}{" "}
@@ -731,7 +801,14 @@ function TelegramStep({ onBack, onDone }: { onBack: () => void; onDone: () => vo
       const r = await saveTelegram(token.trim());
       setSavedBot(r.bot_username);
       setToken("");
-      setFeedback({ ok: true, text: `Saved. Crawler now answers as @${r.bot_username}.` });
+      // The token itself was accepted and stored either way; `running`
+      // reflects only whether the poller using it actually started (main.wire_services
+      // swallows a start failure rather than turning a saved token into a 500).
+      setFeedback(
+        r.running
+          ? { ok: true, text: `Saved. Crawler now answers as @${r.bot_username}.` }
+          : { ok: false, text: "Saved. The bot could not start yet — check the token or try again." },
+      );
     });
 
   const onLink = () =>

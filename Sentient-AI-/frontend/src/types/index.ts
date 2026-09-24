@@ -347,6 +347,9 @@ export interface SetupStatus {
   has_owner: boolean;
   provider_configured: boolean;
   setup_completed: boolean;
+  /** Stored secrets exist that the current ENCRYPTION_KEY cannot open;
+   * the provider step should offer to clear them (DELETE /setup/secrets). */
+  secrets_unreadable: boolean;
 }
 
 export interface SetupProvider {
