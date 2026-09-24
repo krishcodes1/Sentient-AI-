@@ -73,9 +73,11 @@ StepRunner = Callable[[list[str], float], Awaitable[tuple[int, str]]]
 
 
 @dataclass(frozen=True)
-class Capability:
-    """One installable capability. ``steps`` are complete argv lists run
-    with no shell; nothing is ever interpolated into them."""
+class Installable:
+    """One installable component in :data:`ALLOWLIST` (not to be confused
+    with ``services.capabilities.Capability``, the owner's on/off switch).
+    ``steps`` are complete argv lists run with no shell; nothing is ever
+    interpolated into them."""
 
     description: str
     size_hint: str
@@ -156,8 +158,8 @@ def _required_chromium_dirs(package_dir: Path) -> Optional[list[str]]:
 # requirement is pinned to the major line web.py was written against, and
 # ``sys.executable`` targets the interpreter running the backend, so the
 # package lands where the screenshot tool will import it from.
-ALLOWLIST: dict[str, Capability] = {
-    "browser": Capability(
+ALLOWLIST: dict[str, Installable] = {
+    "browser": Installable(
         description=(
             "Headless Chromium (via Playwright) for web.screenshot. On Linux "
             "the browser may also need system libraries the install does not add."

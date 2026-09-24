@@ -1,3 +1,10 @@
+"""Reminders: the reminders.* tools (create, list, cancel).
+
+reminders.now is not gated by this capability: it is the model's clock
+and is listed in ALWAYS_ON_TOOLS, which wins over the family prefix."""
+
+from __future__ import annotations
+
 from services.capabilities.base import Capability
 
 CAPABILITY = Capability(

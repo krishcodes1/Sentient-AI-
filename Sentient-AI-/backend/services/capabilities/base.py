@@ -3,9 +3,17 @@
 A capability is the unit the owner switches on or off. One declaration
 drives four things at once: the Permissions page and setup wizard, the
 tool gates (offer and dispatch), the agent's own <permissions> block, and
-`system.capabilities`. Keep this module free of OS and database access:
-availability and probe callables read only the ReportContext they are
-given, which is what makes every capability testable without a display.
+`system.capabilities`. Keep this module free of OS and database access.
+
+The two callables differ on purpose:
+
+- ``availability(ctx)`` reads only the ReportContext it is given — never
+  the OS. Environment facts are gathered once, in ``default_context()``,
+  which is what makes every availability rule testable without a display.
+- ``probe(ctx)`` may query the OS (e.g. the macOS Screen Recording
+  preflight). It runs only when the capability is on and available, its
+  answer is cached for 10 s per context, and one that raises reads as
+  ``denied``.
 """
 
 from __future__ import annotations
@@ -20,7 +28,12 @@ Risk = Literal["low", "medium", "high"]
 
 @dataclass(frozen=True)
 class ReportContext:
-    """Facts about the running environment, gathered once per report."""
+    """Facts about the running environment, gathered once per report by
+    ``default_context()``.
+
+    Also part of the probe-cache key, so every field must stay hashable.
+    New fields need a default, so existing callers keep working.
+    """
 
     in_container: bool
     platform: str

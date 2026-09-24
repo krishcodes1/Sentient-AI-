@@ -1,3 +1,11 @@
+"""See my screen: desktop.screenshot.
+
+Unavailable in a container and on Linux. On macOS the probe checks the
+Screen Recording permission of the running binary (via macos.py);
+Windows needs no grant. Off by default because it is high risk."""
+
+from __future__ import annotations
+
 from services.capabilities import macos
 from services.capabilities.base import Availability, Capability, ProbeResult, ReportContext
 
