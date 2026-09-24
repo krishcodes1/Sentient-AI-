@@ -1,4 +1,4 @@
-import { useEffect, useId, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Link, Navigate } from "react-router-dom";
 import { ArrowLeft, ArrowRight, CheckCircle2, Loader2, XCircle } from "lucide-react";
 import CapabilityList from "@/components/CapabilityList";
@@ -167,7 +167,17 @@ export default function Setup() {
             First-run setup
           </div>
         </div>
-        {view === "wizard" && <Progress current={step} />}
+        {view === "wizard" && (
+          <>
+            <Progress current={step} />
+            {/* Visually hidden; announces the new step to screen readers each
+                time `step` changes, since the visible content swap alone
+                does not. */}
+            <div aria-live="polite" className="sr-only">
+              {stepAnnouncement(step)}
+            </div>
+          </>
+        )}
         {content}
       </main>
     </div>
@@ -189,7 +199,7 @@ function Progress({ current }: { current: StepId }) {
               style={{ background: reached ? "var(--accent-primary)" : "var(--claw-border)" }}
             />
             <span
-              className={`text-xs truncate ${isCurrent ? "" : "hidden sm:block"}`}
+              className={`text-xs truncate ${isCurrent ? "" : "sr-only sm:not-sr-only"}`}
               style={{ color: isCurrent ? "var(--text-primary)" : "var(--text-muted)" }}
             >
               {s.label}
@@ -202,22 +212,41 @@ function Progress({ current }: { current: StepId }) {
 }
 
 function StepCard({
+  stepId,
   eyebrow,
   title,
   intro,
   children,
   footer,
 }: {
+  // The active step's id, so focus moves here again on every step change
+  // (see the effect below). Omitted for cards outside the wizard flow
+  // (e.g. the sign-in prompt), which only ever mount once anyway.
+  stepId?: StepId;
   eyebrow: string;
   title: string;
   intro?: string;
   children: ReactNode;
   footer?: ReactNode;
 }) {
+  const headingRef = useRef<HTMLHeadingElement>(null);
+
+  // Move focus to the new step's heading whenever the step changes, so
+  // screen-reader and keyboard users land on the new content instead of
+  // being left on a control that just disappeared. A step component with
+  // its own preferred focus target (e.g. the owner step's first field) can
+  // still take focus back afterwards, since its own effect runs after this
+  // one (child effects flush before the parent's).
+  useEffect(() => {
+    headingRef.current?.focus();
+  }, [stepId]);
+
   return (
     <section className="rounded-[14px] p-5 sm:p-7" style={panelStyle}>
       <div className="eyebrow mb-1">{eyebrow}</div>
-      <h2 className="mb-2">{title}</h2>
+      <h2 ref={headingRef} tabIndex={-1} className="mb-2">
+        {title}
+      </h2>
       {intro && (
         <p className="text-sm mb-5" style={{ color: "var(--text-secondary)" }}>
           {intro}
@@ -249,7 +278,10 @@ function ResultLine({ ok, children }: { ok: boolean; children: ReactNode }) {
   const Icon = ok ? CheckCircle2 : XCircle;
   return (
     <p
-      role="status"
+      // A failure needs an assertive announcement (role="alert") since it
+      // usually means the user must go fix something; a success is a
+      // low-priority status update.
+      role={ok ? "status" : "alert"}
       className="inline-flex items-start gap-1.5 text-sm"
       style={{ color: ok ? "var(--accent-success)" : "var(--accent-danger)" }}
     >
@@ -259,9 +291,25 @@ function ResultLine({ ok, children }: { ok: boolean; children: ReactNode }) {
   );
 }
 
-function BackButton({ onClick }: { onClick: () => void }) {
+function BackButton({
+  onClick,
+  disabled,
+  title,
+}: {
+  onClick?: () => void;
+  disabled?: boolean;
+  title?: string;
+}) {
   return (
-    <button type="button" onClick={onClick} className={secondaryCls} style={secondaryStyle}>
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      aria-disabled={disabled || undefined}
+      title={title}
+      className={secondaryCls}
+      style={secondaryStyle}
+    >
       <ArrowLeft className="w-4 h-4" aria-hidden />
       Back
     </button>
@@ -270,6 +318,12 @@ function BackButton({ onClick }: { onClick: () => void }) {
 
 function stepEyebrow(id: StepId): string {
   return `Step ${STEPS.findIndex((s) => s.id === id) + 1} of ${STEPS.length}`;
+}
+
+/** Text for the visually-hidden live region announcing a step change. */
+function stepAnnouncement(id: StepId): string {
+  const index = STEPS.findIndex((s) => s.id === id);
+  return `${stepEyebrow(id)}: ${STEPS[index].label}`;
 }
 
 // ---------------------------------------------------------------- owner
@@ -284,6 +338,15 @@ function OwnerStep({ onDone }: { onDone: () => void }) {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const nameRef = useRef<HTMLInputElement>(null);
+
+  // The owner step is the wizard's entry point, so send focus straight to
+  // its first field instead of the card heading StepCard focuses by
+  // default. This effect's cleanup-free mount-only run fires after
+  // StepCard's own (child effects flush before the parent's), so this wins.
+  useEffect(() => {
+    nameRef.current?.focus();
+  }, []);
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -300,6 +363,7 @@ function OwnerStep({ onDone }: { onDone: () => void }) {
 
   return (
     <StepCard
+      stepId="owner"
       eyebrow={stepEyebrow("owner")}
       title="Create the owner account"
       intro="The owner runs this Crawler: only this account can change permissions, the AI key and the Telegram bot."
@@ -312,6 +376,7 @@ function OwnerStep({ onDone }: { onDone: () => void }) {
           </label>
           <input
             id={nameId}
+            ref={nameRef}
             type="text"
             autoComplete="name"
             value={name}
@@ -483,12 +548,17 @@ function ProviderStep({ onDone }: { onDone: (choice: ProviderChoice) => void }) 
 
   return (
     <StepCard
+      stepId="provider"
       eyebrow={stepEyebrow("provider")}
       title="AI provider"
       intro="Crawler needs one AI model to think with. Pick a provider, test it, then save. The key stays on this server."
       footer={
         <>
-          <span />
+          {/* No real Back button here: the owner account was just created
+              and cannot be re-created, so there is no earlier step to
+              return to. A disabled one is rendered anyway so the footer's
+              buttons line up with every other step. */}
+          <BackButton disabled title="The owner account is already created" />
           <button type="button" onClick={() => void save()} disabled={!passed || saving} className={primaryCls} style={primaryStyle}>
             {saving ? <Loader2 className="w-4 h-4 animate-spin" aria-hidden /> : null}
             Save & continue
@@ -673,6 +743,7 @@ function TelegramStep({ onBack, onDone }: { onBack: () => void; onDone: () => vo
 
   return (
     <StepCard
+      stepId="telegram"
       eyebrow={`${stepEyebrow("telegram")} · optional`}
       title="Telegram (optional)"
       intro="Chat with Crawler from your phone and approve its actions with one tap."
@@ -799,6 +870,7 @@ function PermissionsStep({ onBack, onNext }: { onBack: () => void; onNext: () =>
 
   return (
     <StepCard
+      stepId="permissions"
       eyebrow={stepEyebrow("permissions")}
       title="Permissions"
       intro="Choose what Crawler may do. Anything you turn off, it tells you it cannot do instead of trying. You can change these later in Settings."
@@ -912,6 +984,7 @@ function SummaryStep({ provider, onBack }: { provider: ProviderChoice | null; on
 
   return (
     <StepCard
+      stepId="summary"
       eyebrow={stepEyebrow("summary")}
       title="Summary"
       footer={
@@ -974,7 +1047,9 @@ function SummaryStep({ provider, onBack }: { provider: ProviderChoice | null; on
         className="mt-5 rounded-[10px] p-4"
         style={{ background: "var(--bg-input)", border: "1px solid var(--claw-border)" }}
       >
-        <div className="flex items-start gap-3">
+        {/* The whole row — title and description both — toggles the
+            checkbox: it's all one <label>, not just the title text. */}
+        <label htmlFor={allowId} className="flex items-start gap-3 cursor-pointer">
           <input
             id={allowId}
             type="checkbox"
@@ -985,14 +1060,12 @@ function SummaryStep({ provider, onBack }: { provider: ProviderChoice | null; on
             style={{ accentColor: "var(--accent-primary)" }}
           />
           <div>
-            <label htmlFor={allowId} className="text-sm font-medium">
-              Allow other people to create accounts on this Crawler
-            </label>
+            <span className="text-sm font-medium">Allow other people to create accounts on this Crawler</span>
             <p id={allowHelpId} className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>
               Leave this off unless someone else on your network needs their own login.
             </p>
           </div>
-        </div>
+        </label>
       </div>
 
       <div className="mt-5">
