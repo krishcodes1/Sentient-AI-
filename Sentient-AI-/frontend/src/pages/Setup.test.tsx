@@ -14,6 +14,7 @@ vi.mock("@/services/api", () => ({
   saveTelegram: vi.fn(),
   createTelegramLink: vi.fn(),
   completeSetup: vi.fn(),
+  clearStoredSecrets: vi.fn(),
   getCapabilities: vi.fn(),
   updateCapabilities: vi.fn(),
   requestCapabilityAccess: vi.fn(),
@@ -99,6 +100,7 @@ function asSignedInOwner() {
     has_owner: true,
     provider_configured: false,
     setup_completed: false,
+    secrets_unreadable: false,
   });
 }
 
@@ -111,8 +113,8 @@ async function providerListLoaded() {
   await screen.findByRole("radiogroup", { name: "Provider" });
 }
 
-/** Walk from the provider step to the permissions step with an .env key. */
-async function goToPermissions(user: ReturnType<typeof userEvent.setup>) {
+/** Walk from the provider step to the telegram step with an .env key. */
+async function goToTelegram(user: ReturnType<typeof userEvent.setup>) {
   vi.mocked(api.getSetupProviders).mockResolvedValue(providers({ gemini: true }));
   renderSetup();
   await providerListLoaded();
@@ -121,6 +123,11 @@ async function goToPermissions(user: ReturnType<typeof userEvent.setup>) {
   await waitFor(() => expect(save).toBeEnabled());
   await user.click(save);
   await screen.findByRole("heading", { name: /telegram/i });
+}
+
+/** Walk from the provider step to the permissions step with an .env key. */
+async function goToPermissions(user: ReturnType<typeof userEvent.setup>) {
+  await goToTelegram(user);
   await user.click(screen.getByRole("button", { name: "Skip" }));
   await screen.findByRole("heading", { name: "Permissions" });
 }
@@ -135,6 +142,7 @@ describe("Setup wizard", () => {
       has_owner: false,
       provider_configured: false,
       setup_completed: false,
+      secrets_unreadable: false,
     });
     vi.mocked(api.createOwner).mockResolvedValue({ access_token: "t", token_type: "bearer" });
     vi.mocked(api.getSetupProviders).mockResolvedValue(providers());
@@ -145,6 +153,7 @@ describe("Setup wizard", () => {
       CAPS.map((c) => (c.key in patch ? { ...c, enabled: patch[c.key] } : c)),
     );
     vi.mocked(api.completeSetup).mockResolvedValue(undefined);
+    vi.mocked(api.clearStoredSecrets).mockResolvedValue(undefined);
   });
 
   it("(a) creates the owner account first, then moves on to the AI provider", async () => {
@@ -186,6 +195,7 @@ describe("Setup wizard", () => {
       has_owner: true,
       provider_configured: false,
       setup_completed: false,
+      secrets_unreadable: false,
     });
     renderSetup();
 
@@ -199,6 +209,7 @@ describe("Setup wizard", () => {
       has_owner: true,
       provider_configured: true,
       setup_completed: true,
+      secrets_unreadable: false,
     });
     renderSetup();
 
@@ -377,5 +388,89 @@ describe("Setup wizard", () => {
     expect(checkbox).not.toBeChecked();
     await user.click(screen.getByText(/leave this off unless someone else/i));
     expect(checkbox).toBeChecked();
+  });
+
+  it("(k) tells the owner the bot could not start yet when the save reports running: false", async () => {
+    asSignedInOwner();
+    vi.mocked(api.saveTelegram).mockResolvedValue({ bot_username: "crawler_bot", running: false });
+    const user = userEvent.setup();
+    await goToTelegram(user);
+
+    await user.type(screen.getByLabelText("Bot token"), "123456789:AA-fake-token");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    // The token was still accepted and stored (an alert, since it needs
+    // attention), so the wizard can still continue past this step.
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Saved. The bot could not start yet — check the token or try again.",
+    );
+    expect(screen.getByRole("button", { name: "Continue" })).toBeInTheDocument();
+  });
+
+  it("(l) shows the success message when the save reports running: true", async () => {
+    asSignedInOwner();
+    vi.mocked(api.saveTelegram).mockResolvedValue({ bot_username: "crawler_bot", running: true });
+    const user = userEvent.setup();
+    await goToTelegram(user);
+
+    await user.type(screen.getByLabelText("Bot token"), "123456789:AA-fake-token");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Saved. Crawler now answers as @crawler_bot.",
+    );
+  });
+
+  it("(m) offers to clear stored keys when the provider step reports secrets_unreadable, and reloads status after clearing", async () => {
+    localStorage.setItem("auth_token", "owner-token");
+    vi.mocked(api.getSetupStatus)
+      .mockResolvedValueOnce({
+        needs_setup: true,
+        has_owner: true,
+        provider_configured: false,
+        setup_completed: false,
+        secrets_unreadable: true,
+      })
+      .mockResolvedValueOnce({
+        needs_setup: true,
+        has_owner: true,
+        provider_configured: false,
+        setup_completed: false,
+        secrets_unreadable: false,
+      });
+    const user = userEvent.setup();
+    renderSetup();
+
+    await providerListLoaded();
+    expect(screen.getByRole("alert")).toHaveTextContent(/stored provider keys can.t be read/i);
+
+    await user.click(screen.getByRole("button", { name: "Clear stored keys" }));
+
+    expect(api.clearStoredSecrets).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(api.getSetupStatus).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(screen.queryByText(/stored provider keys can.t be read/i)).not.toBeInTheDocument(),
+    );
+  });
+
+  it("(n) surfaces a failure to clear stored keys inline instead of silently doing nothing", async () => {
+    localStorage.setItem("auth_token", "owner-token");
+    vi.mocked(api.getSetupStatus).mockResolvedValue({
+      needs_setup: true,
+      has_owner: true,
+      provider_configured: false,
+      setup_completed: false,
+      secrets_unreadable: true,
+    });
+    vi.mocked(api.clearStoredSecrets).mockRejectedValue(new Error("The server refused."));
+    const user = userEvent.setup();
+    renderSetup();
+
+    await providerListLoaded();
+    await user.click(screen.getByRole("button", { name: "Clear stored keys" }));
+
+    expect(await screen.findByText("The server refused.")).toBeInTheDocument();
+    // The notice itself is still up — clearing did not silently succeed.
+    expect(screen.getByRole("button", { name: "Clear stored keys" })).toBeInTheDocument();
   });
 });

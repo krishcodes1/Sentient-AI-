@@ -42,7 +42,7 @@ const AUTH_EXEMPT_FROM_REDIRECT = new Set<string>([
   "/auth/register",
 ]);
 
-class ApiError extends Error {
+export class ApiError extends Error {
   status: number;
   constructor(message: string, status: number) {
     super(message);
@@ -676,8 +676,11 @@ export async function updateSettings(data: {
   return user;
 }
 
-export async function deleteAccount(): Promise<void> {
-  return request<void>("/auth/account", { method: "DELETE" });
+export async function deleteAccount(data: { current_password: string }): Promise<void> {
+  return request<void>("/auth/account", {
+    method: "DELETE",
+    body: JSON.stringify(data),
+  });
 }
 
 // Capabilities / permissions
@@ -869,11 +872,19 @@ export async function testTelegram(
   });
 }
 
-export async function saveTelegram(token: string): Promise<{ bot_username: string }> {
-  return request<{ ok: boolean; bot_username: string }>("/setup/telegram", {
+export async function saveTelegram(
+  token: string,
+): Promise<{ bot_username: string; running: boolean }> {
+  return request<{ ok: boolean; bot_username: string; running: boolean }>("/setup/telegram", {
     method: "PUT",
     body: JSON.stringify({ token }),
   });
+}
+
+/** Clears the stored bot token (an environment one is untouched). Stops
+ * the poller through the installation's change listener. Admin only. */
+export async function removeTelegramToken(): Promise<void> {
+  await request<void>("/setup/telegram", { method: "DELETE" });
 }
 
 export async function completeSetup(body: { allow_registration: boolean }): Promise<void> {
@@ -881,4 +892,14 @@ export async function completeSetup(body: { allow_registration: boolean }): Prom
     method: "POST",
     body: JSON.stringify(body),
   });
+}
+
+/**
+ * Discards every stored provider key and the stored Telegram bot token —
+ * the way out after ENCRYPTION_KEY was rotated or lost and the setup
+ * status reports `secrets_unreadable`. Keys still supplied via the
+ * environment are untouched.
+ */
+export async function clearStoredSecrets(): Promise<void> {
+  await request<void>("/setup/secrets", { method: "DELETE" });
 }

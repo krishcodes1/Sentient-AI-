@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { AlertTriangle, Loader2 } from "lucide-react";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
 
@@ -15,6 +15,7 @@ export default function ConfirmDialog({
   confirmLabel = "Confirm",
   cancelLabel = "Cancel",
   danger = false,
+  children,
   onConfirm,
   onCancel,
 }: {
@@ -24,6 +25,11 @@ export default function ConfirmDialog({
   confirmLabel?: string;
   cancelLabel?: string;
   danger?: boolean;
+  /** Extra content rendered between the message and the inline error
+   * banner — e.g. a confirmation input a destructive action requires
+   * (the account-deletion password). Optional; most callers need only
+   * the message. */
+  children?: ReactNode;
   onConfirm: () => Promise<void> | void;
   onCancel: () => void;
 }) {
@@ -108,6 +114,8 @@ export default function ConfirmDialog({
             </p>
           </div>
         </div>
+
+        {children && <div className="mb-3">{children}</div>}
 
         {error && (
           <p

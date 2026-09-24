@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  deleteAccount,
   deleteConversation,
   getConversations,
   getUsageSummary,
@@ -391,5 +392,33 @@ describe("request error handling", () => {
     );
 
     await expect(deleteConversation("c1")).resolves.toBeUndefined();
+  });
+});
+
+describe("deleteAccount", () => {
+  beforeEach(() => {
+    stubLocation();
+    localStorage.clear();
+  });
+
+  it("sends the current password, since the backend requires it for this irreversible action", async () => {
+    const fetchFn = mockFetch(() => jsonResponse(204, {}));
+
+    await expect(deleteAccount({ current_password: "correct-horse-9" })).resolves.toBeUndefined();
+
+    const [url, init] = fetchFn.mock.calls[0];
+    expect(url).toBe("/api/auth/account");
+    expect(init?.method).toBe("DELETE");
+    expect(JSON.parse(String(init?.body))).toEqual({ current_password: "correct-horse-9" });
+  });
+
+  it("surfaces the backend's 409 message verbatim when the last owner tries to leave", async () => {
+    mockFetch(() =>
+      jsonResponse(409, { detail: "Transfer ownership before deleting the last owner account" }),
+    );
+
+    await expect(deleteAccount({ current_password: "correct-horse-9" })).rejects.toThrow(
+      "Transfer ownership before deleting the last owner account",
+    );
   });
 });
