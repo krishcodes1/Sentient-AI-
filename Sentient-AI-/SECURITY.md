@@ -1,6 +1,6 @@
-# SentientAI Security Model
+# Crawler AI Security Model
 
-SentientAI is a consent-based agent platform: the assistant can read and act
+Crawler AI is a consent-based agent platform: the assistant can read and act
 on a user's connected services, but **every capability is opt-in, scoped,
 rate-limited, logged, and — for anything sensitive — gated behind explicit
 user approval**. This document describes the layers, where each is enforced

@@ -198,7 +198,7 @@ export default function Login() {
               </div>
             </div>
 
-            {/* Deployment badges — static descriptions of how SentientAI is
+            {/* Deployment badges — static descriptions of how Crawler AI is
                 deployed, not live status checks. */}
             <div className="flex items-center gap-2 mt-1">
               <StatusPill tone="ok">

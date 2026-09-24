@@ -6,10 +6,10 @@
       name="viewport"
       content="width=device-width, initial-scale=1.0, viewport-fit=cover"
     />
-    <title>SentientAI - Secure Agentic AI Platform</title>
+    <title>Crawler AI - Secure Agentic AI Platform</title>
     <meta
       name="description"
-      content="SentientAI — a secure agentic AI platform with human-in-the-loop approvals, connector management, and tamper-evident audit logging."
+      content="Crawler AI — a secure agentic AI platform with human-in-the-loop approvals, connector management, and tamper-evident audit logging."
     />
     <meta name="theme-color" content="#0a0a0b" />
     <link rel="icon" type="image/png" href="/brand/sentientai-logo.png" />
@@ -18,10 +18,15 @@
       // light-dark() from the OS preference and React then corrects it a
       // frame later, which is a full-screen flash of the wrong theme for
       // anyone whose saved choice disagrees with their system. Key must
-      // match THEME_STORAGE_KEY in src/theme.tsx.
+      // match THEME_STORAGE_KEY in src/theme.tsx. Also checks the
+      // pre-rename key so a saved choice from before the Crawler AI
+      // rename still applies on first paint; src/theme.tsx migrates it
+      // to the new key once React mounts.
       (function () {
         try {
-          var saved = localStorage.getItem("sentientai_theme");
+          var saved =
+            localStorage.getItem("crawler.theme") ||
+            localStorage.getItem("sentientai_theme");
           if (saved === "light" || saved === "dark") {
             document.documentElement.setAttribute("data-theme", saved);
           }

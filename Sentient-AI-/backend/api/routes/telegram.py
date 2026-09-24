@@ -2,7 +2,7 @@
 
 The bot token itself is server configuration (TELEGRAM_BOT_TOKEN) and is
 never exposed here; these routes only manage the per-user link between a
-SentientAI account and a Telegram chat.
+Crawler AI account and a Telegram chat.
 """
 
 from __future__ import annotations

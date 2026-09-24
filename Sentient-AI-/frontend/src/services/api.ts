@@ -688,7 +688,7 @@ export async function exportAccount(): Promise<void> {
   link.download =
     response.headers
       .get("content-disposition")
-      ?.match(/filename="([^"]+)"/)?.[1] ?? "sentientai-export.json";
+      ?.match(/filename="([^"]+)"/)?.[1] ?? "crawler-ai-export.json";
   document.body.appendChild(link);
   link.click();
   link.remove();

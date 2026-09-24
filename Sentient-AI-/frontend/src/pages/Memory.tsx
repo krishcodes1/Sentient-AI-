@@ -237,7 +237,7 @@ export default function MemoryPage() {
           Memory
         </h1>
         <p className="text-sm mt-1.5" style={{ color: "var(--text-secondary)" }}>
-          Durable facts SentientAI remembers across every conversation. Saved
+          Durable facts Crawler AI remembers across every conversation. Saved
           memories are injected into the assistant's context — and screened for
           injection content before they are ever stored.
         </p>
@@ -465,7 +465,7 @@ export default function MemoryPage() {
 
         {!loading && !loadError && memories.length === 0 && !filtersActive && (
           <p className="text-sm text-center py-8" style={{ color: "var(--text-muted)" }}>
-            No memories yet. Add one above and SentientAI will remember it.
+            No memories yet. Add one above and Crawler AI will remember it.
           </p>
         )}
 

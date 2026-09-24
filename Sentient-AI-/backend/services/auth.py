@@ -1,5 +1,5 @@
 """
-Authentication service for SentientAI.
+Authentication service for Crawler AI.
 
 Uses the canonical User model from models.user and security utilities
 from core.security. Single source of truth for JWT and password handling.

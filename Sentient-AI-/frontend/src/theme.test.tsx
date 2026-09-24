@@ -106,6 +106,20 @@ describe("theme", () => {
     expect(localStorage.getItem(THEME_STORAGE_KEY)).toBeNull();
   });
 
+  it("migrates a theme saved under the pre-rename key", () => {
+    localStorage.setItem("sentientai_theme", "dark");
+    stubMatchMedia(true); // the OS disagrees — the legacy choice still wins
+
+    renderToggle();
+
+    expect(root()).toHaveAttribute("data-theme", "dark");
+    expect(option("Dark")).toBeChecked();
+    // Migrated onto the new key and the old one cleaned up, so a later
+    // read never has to consult the legacy key again.
+    expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe("dark");
+    expect(localStorage.getItem("sentientai_theme")).toBeNull();
+  });
+
   it("ignores a stored value that is not a theme", () => {
     localStorage.setItem(THEME_STORAGE_KEY, "solarized");
     stubMatchMedia(false);

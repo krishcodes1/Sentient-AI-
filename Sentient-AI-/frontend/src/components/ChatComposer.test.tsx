@@ -23,7 +23,7 @@ function renderComposer(
     <ChatComposer
       disabled={false}
       sending={false}
-      placeholder="Ask SentientAI anything..."
+      placeholder="Ask Crawler AI anything..."
       {...overrides}
       onSend={onSend}
       onStop={onStop}

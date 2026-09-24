@@ -425,7 +425,7 @@ const SERVICES: ServiceDef[] = [
         placeholder: "Without this, the connection stops working in ~1 hour",
         hint:
           "Google access tokens expire after about an hour. With a refresh " +
-          "token + client credentials, SentientAI renews and saves tokens " +
+          "token + client credentials, Crawler AI renews and saves tokens " +
           "automatically; without them you must paste a fresh token every hour.",
       },
       {
@@ -467,7 +467,7 @@ const SERVICES: ServiceDef[] = [
     readScopes: ["crypto.read"],
     writeScopes: [],
     notice:
-      "Read-only by design. SentientAI can review your portfolio but can never trade, transfer, or move money — those actions are permanently blocked on the server and cannot be enabled.",
+      "Read-only by design. Crawler AI can review your portfolio but can never trade, transfer, or move money — those actions are permanently blocked on the server and cannot be enabled.",
     noticeTone: "danger",
   },
   {

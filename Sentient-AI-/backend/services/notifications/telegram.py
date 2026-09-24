@@ -12,7 +12,7 @@ Design notes:
   started from the app lifespan.
 - Linking is one-time-code based: the Settings page mints a short-lived
   code and shows ``https://t.me/<bot>?start=<code>``; the /start message
-  the bot receives proves control of both the SentientAI session (which
+  the bot receives proves control of both the Crawler AI session (which
   minted the code) and the Telegram account (which sent it). Chat ids are
   never accepted from user input.
 - Only the linked chat can decide an approval, and the decision callback
@@ -46,7 +46,7 @@ logger = structlog.get_logger(__name__)
 LINK_CODE_TTL_MINUTES = 10
 
 _NOT_LINKED_TEXT = (
-    "This chat is not linked to a SentientAI account. Open SentientAI \u2192 "
+    "This chat is not linked to a Crawler AI account. Open Crawler AI \u2192 "
     "Settings \u2192 Telegram approvals and tap Connect."
 )
 
@@ -625,7 +625,7 @@ class TelegramService:
                 "sendMessage",
                 chat_id=chat_id,
                 text=(
-                    "To link this chat, open SentientAI \u2192 Settings \u2192 "
+                    "To link this chat, open Crawler AI \u2192 Settings \u2192 "
                     "Telegram approvals and tap Connect."
                 ),
             )
@@ -649,7 +649,7 @@ class TelegramService:
                     chat_id=chat_id,
                     text=(
                         "That link has expired. Generate a fresh one from "
-                        "SentientAI → Settings → Telegram approvals."
+                        "Crawler AI → Settings → Telegram approvals."
                     ),
                 )
                 return
@@ -709,7 +709,7 @@ class TelegramService:
             ).scalar_one_or_none()
             user_id = str(user.id) if user is not None else None
         if user_id is None:
-            await answer("This chat is not linked to a SentientAI account.")
+            await answer("This chat is not linked to a Crawler AI account.")
             return
         if self.decide is None:
             await answer("Approvals are not available right now.")

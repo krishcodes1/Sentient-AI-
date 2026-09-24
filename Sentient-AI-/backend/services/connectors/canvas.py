@@ -1,5 +1,5 @@
 """
-Canvas LMS connector for SentientAI.
+Canvas LMS connector for Crawler AI.
 
 Implements OAuth 2.0 + PKCE authentication and provides read/write
 access to courses, assignments, grades, calendar, and submissions

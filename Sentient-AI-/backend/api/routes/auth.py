@@ -738,7 +738,7 @@ async def export_account(
             yield chunk
         yield "}"
 
-    filename = f"sentientai-export-{datetime.now(timezone.utc):%Y%m%d}.json"
+    filename = f"crawler-ai-export-{datetime.now(timezone.utc):%Y%m%d}.json"
     return StreamingResponse(
         _generate(),
         media_type="application/json",

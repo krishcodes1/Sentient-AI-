@@ -115,7 +115,7 @@ class User(Base):
     # Chat this user linked for approval notifications; NULL = not linked.
     # Linking happens via a one-time /start code (see services/notifications/
     # telegram.py) so a chat can never be attached without proof of control
-    # of both the SentientAI session and the Telegram account.
+    # of both the Crawler AI session and the Telegram account.
     telegram_chat_id: Mapped[Optional[int]] = mapped_column(
         BigInteger,
         nullable=True,

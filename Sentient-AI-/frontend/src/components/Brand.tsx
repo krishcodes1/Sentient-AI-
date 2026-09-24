@@ -27,7 +27,7 @@ export default function Brand({
   size = 32,
   variant = "emblem",
   rounded = 8,
-  alt = "SentientAI",
+  alt = "Crawler AI",
 }: BrandProps) {
   const reducedMotion = useMediaQuery(REDUCED_MOTION_QUERY);
   const { resolved } = useTheme();
@@ -108,7 +108,7 @@ export default function Brand({
 export function Wordmark({
   height = 20,
   className,
-  alt = "SentientAI",
+  alt = "Crawler AI",
 }: {
   height?: number;
   className?: string;

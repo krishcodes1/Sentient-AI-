@@ -270,7 +270,7 @@ class MCPClient:
                 {
                     "protocolVersion": MCP_PROTOCOL_VERSION,
                     "capabilities": {},
-                    "clientInfo": {"name": "sentientai", "version": "0.1.0"},
+                    "clientInfo": {"name": "crawler-ai", "version": "0.1.0"},
                 },
             )
             await self._transport.notify("notifications/initialized", {})

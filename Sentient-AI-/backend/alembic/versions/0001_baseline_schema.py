@@ -8,7 +8,7 @@ Create Date: 2026-08-04
 OPERATORS — READ THIS BEFORE UPGRADING AN EXISTING DEPLOYMENT
 ===========================================================================
 
-This revision creates the schema that SentientAI already runs today: it is
+This revision creates the schema that Crawler AI already runs today: it is
 exactly what ``Base.metadata.create_all()`` plus every idempotent ALTER in
 the old ``core.database.init_db`` migration list produced. It is a starting
 point for migration history, not a change.

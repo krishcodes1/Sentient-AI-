@@ -1,5 +1,5 @@
 """
-Permission engine for SentientAI agent actions.
+Permission engine for Crawler AI agent actions.
 
 Enforces a tiered permission model across all connector types,
 with hard blocks on financial transactions and sensible defaults

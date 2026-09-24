@@ -1306,7 +1306,7 @@ def build_decision_applier(app: Any):
         if approved:
             reply = (result.get("assistant_reply") or "").strip()
             summary = reply[:1500] if reply else (
-                f"Executed '{result.get('tool', '')}'. Open SentientAI for the "
+                f"Executed '{result.get('tool', '')}'. Open Crawler AI for the "
                 "full result."
             )
         return {"status": "approved" if approved else "denied", "summary": summary}

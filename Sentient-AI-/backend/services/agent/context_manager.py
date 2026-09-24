@@ -1,5 +1,5 @@
 """
-Smart Context Manager for SentientAI.
+Smart Context Manager for Crawler AI.
 
 Solves the OpenClaw token explosion problem by implementing:
 1. Sliding window — keep only the last N messages in full
