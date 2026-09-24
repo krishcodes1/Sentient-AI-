@@ -14,8 +14,9 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -709,7 +710,7 @@ async def export_account(
         offset = 0
         first = True
         while True:
-            rows = (
+            rows: Sequence[Any] = (
                 (
                     await db.execute(
                         select(model)
