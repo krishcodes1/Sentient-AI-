@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from services.notifications.telegram_manager import TelegramManager
@@ -8,18 +10,26 @@ from services.notifications.telegram_manager import TelegramManager
 class FakeService:
     instances: list["FakeService"] = []
 
-    def __init__(self, token, session_factory, decide=None, chat=None):
+    def __init__(self, token, session_factory, decide=None, chat=None, start_error=None):
         self.token = token
         self.started = False
         self.stopped = False
         self.decide = decide
         self.chat = chat
+        self.start_error = start_error
         FakeService.instances.append(self)
 
     async def start(self):
+        # A real checkpoint (like the real service's network calls) so
+        # concurrent apply() calls actually interleave in tests instead
+        # of running to completion back-to-back.
+        await asyncio.sleep(0)
+        if self.start_error is not None:
+            raise self.start_error
         self.started = True
 
     async def stop(self):
+        await asyncio.sleep(0)
         self.stopped = True
 
     async def notify_pending(self, action):
@@ -65,3 +75,51 @@ async def test_proxies_noop_when_stopped_and_forward_when_running():
     assert await mgr.bot_username() == "crawler_bot"
     await mgr.stop()
     assert mgr.is_running is False
+
+
+@pytest.mark.asyncio
+async def test_concurrent_apply_is_serialized_with_no_orphans():
+    mgr = TelegramManager(session_factory=object(), service_factory=FakeService)
+    await asyncio.gather(mgr.apply("111:aaa", True), mgr.apply("222:bbb", True))
+
+    assert mgr.is_running is True
+    running = [svc for svc in FakeService.instances if not svc.stopped]
+    assert len(running) == 1
+    assert running[0] is mgr.current
+    for svc in FakeService.instances:
+        if svc is not mgr.current:
+            assert svc.stopped is True
+
+
+@pytest.mark.asyncio
+async def test_failed_start_cleans_up_and_propagates():
+    def make_failing(**kwargs):
+        return FakeService(**kwargs, start_error=RuntimeError("boom"))
+
+    mgr = TelegramManager(session_factory=object(), service_factory=make_failing)
+
+    with pytest.raises(RuntimeError):
+        await mgr.apply("111:aaa", True)
+
+    assert FakeService.instances[-1].stopped is True
+    assert mgr.is_running is False
+    assert mgr.current is None
+
+
+@pytest.mark.asyncio
+async def test_failed_restart_stops_old_service_and_leaves_manager_stopped():
+    def make_failing(**kwargs):
+        return FakeService(**kwargs, start_error=RuntimeError("boom"))
+
+    mgr = TelegramManager(session_factory=object(), service_factory=FakeService)
+    assert await mgr.apply("111:aaa", True) == "started"
+    first = mgr.current
+
+    mgr._factory = make_failing
+    with pytest.raises(RuntimeError):
+        await mgr.apply("222:bbb", True)
+
+    assert first.stopped is True
+    assert FakeService.instances[-1].stopped is True
+    assert mgr.is_running is False
+    assert mgr.current is None
