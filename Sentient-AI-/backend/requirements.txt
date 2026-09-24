@@ -28,6 +28,20 @@ playwright>=1.45.0,<2.0.0
 # Desktop capture for desktop.screenshot (capability "screen").
 mss>=9.0,<11
 Pillow>=10.0,<12
+# macOS backend of computer_control (services/tools/computer/backend_mac.py):
+# the accessibility tree and the Accessibility trust check
+# (ApplicationServices), synthetic mouse/keyboard/scroll events and the
+# window list (Quartz), app launch and activation (Cocoa's AppKit). The
+# markers keep Linux CI, the container image and Windows from installing
+# pyobjc, which only builds on macOS.
+pyobjc-framework-ApplicationServices>=10.0,<13; sys_platform == "darwin"
+pyobjc-framework-Quartz>=10.0,<13; sys_platform == "darwin"
+pyobjc-framework-Cocoa>=10.0,<13; sys_platform == "darwin"
+# Windows UI Automation for desktop.observe / desktop.act (capability
+# "computer_control"). Windows only: the marker keeps it off macOS, Linux
+# and the container image, and services/tools/computer/backend_windows.py
+# imports it lazily so the backend still loads everywhere else.
+uiautomation>=2.0,<3.0; sys_platform == "win32"
 # IANA timezone data for zoneinfo (GET /api/usage/summary?tz=). Slim
 # container images may ship without /usr/share/zoneinfo, and zoneinfo
 # falls back to this package — without it every named zone is "unknown".
