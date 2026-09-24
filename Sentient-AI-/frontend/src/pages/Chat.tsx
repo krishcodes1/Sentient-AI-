@@ -40,6 +40,7 @@ import {
 } from "@/services/api";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import MarkdownMessage from "@/components/MarkdownMessage";
+import ProviderErrorText from "@/components/ProviderErrorText";
 import ChatComposer from "@/components/ChatComposer";
 import { ConversationTokenTotal, MessageTokenCaption } from "@/components/TokenUsage";
 import { DESKTOP_QUERY, useMediaQuery } from "@/hooks/useMediaQuery";
@@ -786,11 +787,12 @@ export default function Chat() {
               );
             }
           },
-          onError: (reason) => {
+          onError: (reason, info) => {
             errored = true;
             patchAssistant({
               content: reason,
               error: true,
+              provider_error: info,
               retry_content: content,
               retry_images: images,
             });
@@ -1293,7 +1295,10 @@ export default function Chat() {
                       className="text-sm whitespace-pre-wrap"
                       style={{ color: "var(--accent-danger)" }}
                     >
-                      {msg.content || "The assistant failed to respond."}
+                      <ProviderErrorText
+                        text={msg.content || "The assistant failed to respond."}
+                        info={msg.provider_error}
+                      />
                     </p>
                     {Boolean(msg.retry_content || msg.retry_images?.length) && (
                       <button

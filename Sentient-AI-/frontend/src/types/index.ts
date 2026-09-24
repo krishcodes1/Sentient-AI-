@@ -186,6 +186,10 @@ export interface Message {
   /** Client-only: the attachments to resend with `retry_content`, so a
    *  retried turn carries the images the first attempt did. */
   retry_images?: string[];
+  /** Client-only: a failed turn's provider-error pointer (the stream error
+   *  frame's code and setup_url/settings_url), so the bubble can link to
+   *  where it is fixed. */
+  provider_error?: { code?: string; setup_url?: string; settings_url?: string };
 }
 
 export interface ToolCall {
@@ -337,6 +341,9 @@ export interface CapabilityStatus {
   reason: string;
   can_request_access: boolean;
   install: string | null;
+  /** What the install downloads, for the Install button's label
+   *  (e.g. "~150-300 MB download"); null when the server has no estimate. */
+  install_size_hint: string | null;
   when_denied: string;
   tools: string[];
 }
@@ -350,6 +357,11 @@ export interface SetupStatus {
   /** Stored secrets exist that the current ENCRYPTION_KEY cannot open;
    * the provider step should offer to clear them (DELETE /setup/secrets). */
   secrets_unreadable: boolean;
+  /** Whether anyone may create an account at /login right now. */
+  registration_open: boolean;
+  /** An explicit ALLOW_REGISTRATION=false in the server's .env keeps
+   * registration closed; PUT /setup/registration answers 409 while set. */
+  registration_env_locked: boolean;
 }
 
 export interface SetupProvider {

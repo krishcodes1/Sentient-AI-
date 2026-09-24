@@ -64,8 +64,10 @@ function nonEmpty(value: unknown): value is string {
 }
 
 /** Append where to fix a provider failure: setup when the install is not
- *  set up, Settings when only the user's own choice is unavailable. */
-function withFixPointer(message: string, info: ProviderErrorInfo | Record<string, unknown>): string {
+ *  set up, Settings when only the user's own choice is unavailable.
+ *  Exported so the chat bubble can find (and link) exactly the sentence
+ *  added here: `withFixPointer("", info)` is that sentence on its own. */
+export function withFixPointer(message: string, info: ProviderErrorInfo | Record<string, unknown>): string {
   if (nonEmpty(info.setup_url)) return `${message} Open ${info.setup_url} to finish setup.`;
   if (nonEmpty(info.settings_url)) return `${message} Change it in Settings.`;
   return message;
@@ -885,6 +887,18 @@ export async function saveTelegram(
  * the poller through the installation's change listener. Admin only. */
 export async function removeTelegramToken(): Promise<void> {
   await request<void>("/setup/telegram", { method: "DELETE" });
+}
+
+/**
+ * Open or close account sign-ups after setup (admin only). Answers 409 while
+ * an explicit ALLOW_REGISTRATION=false in the server's .env locks it closed
+ * (`registration_env_locked` in the setup status).
+ */
+export async function updateRegistration(allow: boolean): Promise<void> {
+  await request<{ ok: boolean }>("/setup/registration", {
+    method: "PUT",
+    body: JSON.stringify({ allow_registration: allow }),
+  });
 }
 
 export async function completeSetup(body: { allow_registration: boolean }): Promise<void> {

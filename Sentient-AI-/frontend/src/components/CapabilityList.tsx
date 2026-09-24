@@ -136,7 +136,9 @@ function CapabilityRow({ item, editable, busy, onToggle, onRequestAccess, onInst
               }}
             >
               <Download className="w-3.5 h-3.5" aria-hidden />
-              Install (~300 MB)
+              {/* The size comes from the server, which knows what this
+                  install actually fetches; no guess when it has none. */}
+              {item.install_size_hint ? `Install (${item.install_size_hint})` : "Install"}
             </button>
           )}
         </div>
