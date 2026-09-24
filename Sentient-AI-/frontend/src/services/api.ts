@@ -81,6 +81,17 @@ function errorDetailToMessage(detail: unknown, fallback: string): string {
     return fallback;
   }
   if (detail && typeof detail === "object") {
+    // A missing/misconfigured AI provider comes back as a structured 503
+    // body (`{ message, setup_url }`) rather than a plain string, so the
+    // user gets an actionable sentence instead of a raw JSON blob.
+    const obj = detail as Record<string, unknown>;
+    if (typeof obj.message === "string" && obj.message.trim()) {
+      const setupUrl = obj.setup_url;
+      if (typeof setupUrl === "string" && setupUrl.trim()) {
+        return `${obj.message} Open ${setupUrl} to finish setup.`;
+      }
+      return obj.message;
+    }
     try {
       return JSON.stringify(detail);
     } catch {
