@@ -129,7 +129,11 @@ class Settings(BaseSettings):
         pattern="^(anthropic|openai|gemini|grok|deepseek|groq|mistral|ollama)$",
         description="LLM backend: anthropic, openai, gemini, grok, deepseek, groq, mistral, or ollama",
     )
-    LLM_MODEL: str = "claude-sonnet-4-20250514"
+    # Fallback when LLM_MODEL is unset. claude-sonnet-4-20250514 was retired
+    # on 2026-06-15; users.llm_model's server_default still names it (changing
+    # that needs a schema migration), and core/database.py moves untouched
+    # accounts off that default to this value at startup.
+    LLM_MODEL: str = "claude-sonnet-5"
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     ANTHROPIC_API_KEY: Optional[str] = None
     OPENAI_API_KEY: Optional[str] = None
@@ -138,6 +142,10 @@ class Settings(BaseSettings):
     DEEPSEEK_API_KEY: Optional[str] = None
     GROQ_API_KEY: Optional[str] = None
     MISTRAL_API_KEY: Optional[str] = None
+
+    # Tool-call rounds one message may chain (search → open pages → act).
+    # Each round is another provider call, so this bounds cost and loops.
+    MAX_TOOL_ROUNDS: int = 8
 
     # ── Telegram approvals (optional) ─────────────────────────────────────
     # Bot token from @BotFather. When set, pending approvals are pushed to

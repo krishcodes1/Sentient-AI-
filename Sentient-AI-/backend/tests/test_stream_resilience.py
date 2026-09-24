@@ -125,6 +125,58 @@ async def test_completed_stream_does_not_invoke_on_orphaned():
 
 
 @pytest.mark.asyncio
+async def test_disconnect_while_sending_done_persists_the_turn_once():
+    """The consumer received ``done`` and then dropped before it finished
+    handling it (the route was still sending the frame to the client).
+
+    From the moment ``done`` is handed over the consumer owns persistence —
+    the route saves it from its own finally — so on_orphaned must NOT also
+    fire. When it did, the same turn was written twice and its tokens were
+    counted twice.
+    """
+    orphaned: list = []
+    consumer_persisted: list = []
+
+    async def on_orphaned(response):
+        orphaned.append(response.content)
+
+    runtime = _runtime(ScriptedProvider([LLMResponse(content="Hi there.")]))
+    agen = runtime.stream_chat(
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[],
+        user_id="u1",
+        on_orphaned=on_orphaned,
+    )
+    got_done = asyncio.Event()
+
+    async def route_like():
+        # Mirrors api/routes/agent.py event_stream: remember done, persist
+        # from finally when the saved frame never went out.
+        turn_done = saved = False
+        try:
+            async for event in agen:
+                if event["type"] == "done":
+                    turn_done = True
+                    got_done.set()
+                    await asyncio.sleep(10)  # stuck writing the frame
+            saved = True
+        finally:
+            if turn_done and not saved:
+                consumer_persisted.append(True)
+            await agen.aclose()
+
+    consumer = asyncio.create_task(route_like())
+    await asyncio.wait_for(got_done.wait(), timeout=5.0)
+    consumer.cancel()
+    await asyncio.gather(consumer, return_exceptions=True)
+    for _ in range(10):
+        await asyncio.sleep(0.02)  # let any stray orphan callback run
+
+    assert consumer_persisted == [True]
+    assert orphaned == []
+
+
+@pytest.mark.asyncio
 async def test_stream_disconnect_persists_turn_via_detached_session(
     client, session_factory, monkeypatch
 ):

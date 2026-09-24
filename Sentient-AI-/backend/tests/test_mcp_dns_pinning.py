@@ -249,10 +249,10 @@ async def test_unpinned_origin_is_refused_instead_of_resolved(resolver):
     redirect hop that is not re-checked), the socket layer must refuse
     rather than quietly fall back to DNS.
     """
-    from services.mcp.client import _PinnedResolutionBackend
+    from core.http_pinning import PinnedResolutionBackend
 
     inner = RecordingBackend(JSONRPC_OK)
-    pinned = _PinnedResolutionBackend({}, inner)
+    pinned = PinnedResolutionBackend({}, inner)
 
     with pytest.raises(httpcore.ConnectError, match="No validated address"):
         await pinned.connect_tcp(HOST, 443)
@@ -267,7 +267,7 @@ async def test_pinned_backend_falls_over_to_the_next_validated_address():
     Every pinned address already passed the policy, so trying the next
     one cannot reach anywhere the first was not allowed to reach.
     """
-    from services.mcp.client import _PinnedResolutionBackend
+    from core.http_pinning import PinnedResolutionBackend
 
     class HalfDeadBackend(RecordingBackend):
         async def connect_tcp(self, host, port, **kwargs):
@@ -278,7 +278,7 @@ async def test_pinned_backend_falls_over_to_the_next_validated_address():
 
     inner = HalfDeadBackend(JSONRPC_OK)
     pins = {(HOST, 443): (PUBLIC_IP, OTHER_PUBLIC_IP)}
-    pinned = _PinnedResolutionBackend(pins, inner)
+    pinned = PinnedResolutionBackend(pins, inner)
 
     await pinned.connect_tcp(HOST, 443)
 
@@ -288,9 +288,9 @@ async def test_pinned_backend_falls_over_to_the_next_validated_address():
 @pytest.mark.asyncio
 async def test_unix_socket_connections_are_refused():
     """No address to validate, and always local."""
-    from services.mcp.client import _PinnedResolutionBackend
+    from core.http_pinning import PinnedResolutionBackend
 
-    pinned = _PinnedResolutionBackend({}, RecordingBackend(JSONRPC_OK))
+    pinned = PinnedResolutionBackend({}, RecordingBackend(JSONRPC_OK))
 
     with pytest.raises(httpcore.ConnectError, match="Unix-socket"):
         await pinned.connect_unix_socket("/tmp/mcp.sock")

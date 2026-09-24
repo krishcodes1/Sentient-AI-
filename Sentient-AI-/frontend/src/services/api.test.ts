@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   deleteConversation,
   getConversations,
+  getUsageSummary,
   login,
   streamMessage,
   type StreamHandlers,
@@ -321,6 +322,29 @@ describe("request error handling", () => {
     await expect(getConversations()).rejects.toThrow("Token expired");
     expect(localStorage.getItem("auth_token")).toBeNull();
     expect(replace).toHaveBeenCalledWith("/login");
+  });
+
+  it("asks for usage in the browser's timezone", async () => {
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const fetchMock = mockFetch(() => jsonResponse(200, { windows: {} }));
+
+    await getUsageSummary();
+
+    const url = new URL(fetchMock.mock.calls[0][0], "http://localhost");
+    expect(url.pathname).toMatch(/\/usage\/summary$/);
+    expect(url.searchParams.get("tz")).toBe(zone);
+  });
+
+  it("falls back to the server's UTC day when it rejects the zone", async () => {
+    const fetchMock = mockFetch((input) =>
+      input.includes("tz=")
+        ? jsonResponse(422, { detail: "Unknown timezone" })
+        : jsonResponse(200, { windows: {} }),
+    );
+
+    await expect(getUsageSummary()).resolves.toEqual({ windows: {} });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1][0]).not.toContain("tz=");
   });
 
   it("does not try to parse a body on 204 responses", async () => {

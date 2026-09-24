@@ -18,6 +18,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Headless Chromium for the built-in web.screenshot tool ships IN the image:
+# a shipped capability must not depend on someone running an installer
+# inside a container later. A shared, world-readable browser path is
+# required because the prod stage runs as a non-root user and Playwright's
+# default cache lives under the installing user's home.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN python -m playwright install --with-deps chromium \
+    && chmod -R a+rX /ms-playwright \
+    && rm -rf /var/lib/apt/lists/*
+
 # ── Development ──────────────────────────────────────────────────────
 FROM base AS dev
 
@@ -34,12 +44,40 @@ RUN useradd --create-home --uid 1000 appuser
 
 COPY --chown=appuser:appuser . .
 
+# The probe goes through TrustedHostMiddleware like any request, so it has
+# to carry a Host the app accepts. In production ALLOWED_HOSTS lists the
+# public domain (nginx forwards the client's Host), and a probe addressed
+# as 127.0.0.1 is refused with 400: the backend never turns healthy and the
+# frontend, which waits for it, never starts. Reading the list through the
+# app's own settings keeps env vars and a mounted .env both in play. Inlined
+# because the build context is ../backend, which cannot COPY from docker/.
+COPY --chmod=0755 <<'EOF' /usr/local/bin/healthcheck
+#!/usr/bin/env python3
+import sys
+import urllib.request
+
+sys.path.insert(0, "/app")
+from core.config import settings  # noqa: E402
+
+hosts = [h for h in settings.ALLOWED_HOSTS if h != "*"]
+host = hosts[0].replace("*", "healthcheck", 1) if hosts else "localhost"
+request = urllib.request.Request(
+    "http://127.0.0.1:8000/api/health", headers={"Host": host}
+)
+try:
+    with urllib.request.urlopen(request, timeout=3) as response:
+        sys.exit(0 if response.status == 200 else 1)
+except Exception as exc:
+    print(f"healthcheck failed (Host: {host}): {exc}", file=sys.stderr)
+    sys.exit(1)
+EOF
+
 USER appuser
 
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD ["python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).status == 200 else 1)"]
+    CMD ["healthcheck"]
 
 # Migrate before serving, so the schema is at head exactly once per deploy
 # rather than being raced by however many workers start (init_db also

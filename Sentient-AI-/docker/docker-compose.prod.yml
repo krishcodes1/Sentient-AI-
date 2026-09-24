@@ -15,6 +15,13 @@
 # docker/.env file) — compose refuses to start without it rather than
 # silently deploying a publicly-known default password.
 #
+# ALLOWED_HOSTS (backend/.env) must list the public hostname(s) people
+# browse to, e.g. ["assistant.example.com"]. nginx forwards the client's
+# Host header to the backend unchanged, and the backend answers any Host
+# not on the list with 400 "Invalid host header" — add "localhost" too if
+# you smoke-test through http://localhost:3000. Don't use ["*"]: it turns
+# the check off.
+#
 # TLS: nothing in this stack terminates TLS. Do not expose port 3000 to
 # the internet directly — put a TLS-terminating reverse proxy (Caddy,
 # Traefik, nginx with certbot, or a cloud load balancer) in front of the
@@ -85,13 +92,8 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).status == 200 else 1)",
-        ]
+      # Sends a Host from ALLOWED_HOSTS; see the script in Dockerfile.backend.
+      test: ["CMD", "healthcheck"]
       interval: 30s
       timeout: 5s
       start_period: 20s

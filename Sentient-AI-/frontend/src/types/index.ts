@@ -146,6 +146,8 @@ export interface Conversation {
 
 export interface ConversationWithMessages extends Conversation {
   messages: Message[];
+  total_input_tokens?: number;
+  total_output_tokens?: number;
 }
 
 export interface Message {
@@ -162,6 +164,19 @@ export interface Message {
    * before that — and any server without it — simply have none.
    */
   images?: string[] | null;
+  /**
+   * What the provider billed for an assistant turn. Null when the turn
+   * reported nothing (a cached replay, a provider without counts) — not
+   * the same as zero, so the UI shows no caption rather than "0 in".
+   */
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  /** The part of `input_tokens` served from the provider's prompt cache
+   *  (included in it, not extra). Null where the provider never said. */
+  cache_read_tokens?: number | null;
+  cache_write_tokens?: number | null;
+  llm_provider?: string | null;
+  llm_model?: string | null;
   /** Client-only: this bubble is a failed turn (never persisted). */
   error?: boolean;
   /** Client-only: the user content to resend when Retry is clicked. */
@@ -236,6 +251,46 @@ export interface AuditStats {
   approved_24h: number;
   pending_approvals: number;
   by_day: AuditStatsDay[];
+}
+
+// GET /usage/summary. Costs are estimates at list prices; null means every
+// turn in that scope was on a model with no known price.
+export interface UsageWindow {
+  input_tokens: number;
+  output_tokens: number;
+  /** Parts of `input_tokens` read from / written to the prompt cache.
+   *  Optional so a server predating them still type-checks. */
+  cache_read_tokens?: number;
+  cache_write_tokens?: number;
+  total_tokens: number;
+  turns: number;
+  estimated_cost_usd: number | null;
+  /** Turns counted in the token totals but left out of the cost. */
+  unpriced_turns: number;
+}
+
+export interface ModelUsage {
+  provider: string | null;
+  model: string | null;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens?: number;
+  cache_write_tokens?: number;
+  total_tokens: number;
+  turns: number;
+  estimated_cost_usd: number | null;
+}
+
+export interface UsageSummary {
+  windows: {
+    today: UsageWindow;
+    last_7_days: UsageWindow;
+    last_30_days: UsageWindow;
+    all_time: UsageWindow;
+  };
+  by_model: ModelUsage[];
+  currency: "USD";
+  pricing_note: string;
 }
 
 export interface LoginCredentials {

@@ -71,11 +71,30 @@ flow for sensitive actions, and eight swappable LLM providers.
    cd docker
    docker compose up --build
    ```
+   Keep `--build` every time you pull changes. The source is bind-mounted,
+   so without it the code is current but the installed Python/npm
+   packages are whatever the images had when they were last built.
 
 5. **Open the app**
    - Frontend: http://localhost:3000
    - Backend API: http://localhost:8000
    - API Docs: http://localhost:8000/docs
+
+Docker notes:
+
+- Frontend `node_modules` lives in a Docker volume that survives rebuilds.
+  The dev container reinstalls into it on start whenever
+  `package-lock.json` changed, so a new dependency never goes missing. To
+  throw the volume away anyway: `docker compose up --build --renew-anon-volumes`.
+- The Vite proxy reaches the API as `backend:8000`, so the dev compose
+  adds `backend` to `ALLOWED_HOSTS` itself (this overrides the value in
+  `backend/.env` for the Docker stack only).
+- **One running deployment per Telegram bot token.** Telegram delivers
+  each update to only one poller, so two stacks on the same
+  `TELEGRAM_BOT_TOKEN` (say, the server and a dev stack on your laptop)
+  split approvals between them at random, and the backend logs
+  `telegram_poller_conflict`. Leave the token empty everywhere except the
+  deployment that owns the bot, or make a separate bot for development.
 
 **Production deployment:** the dev compose above runs hot-reload servers
 with the source bind-mounted. For production shape (non-root backend, no
@@ -104,6 +123,12 @@ Production checklist:
   to your hostname. `AUDIT_HMAC_KEY` should be a dedicated key stored
   away from the database. Startup logs a warning for each of these that
   is still on its development default.
+- `ALLOWED_HOSTS` must list the hostname people actually browse to, e.g.
+  `["assistant.example.com"]`: nginx (and a Caddy/Traefik proxy in front
+  of it) forwards the browser's `Host` header unchanged, and the backend
+  answers any other host with 400 `Invalid host header`. Add `"localhost"`
+  if you also test through http://localhost:3000. Don't use `["*"]`. The
+  backend's container healthcheck sends the first entry as its `Host`.
 - **TLS**: nothing in the stack terminates TLS. Put a TLS-terminating
   reverse proxy in front of port 3000 before exposing it beyond your
   LAN — e.g. [Caddy](https://caddyserver.com) with a two-line

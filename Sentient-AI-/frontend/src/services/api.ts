@@ -24,6 +24,7 @@ import type {
   Message,
   ToolCall,
   BlockedAction,
+  UsageSummary,
 } from "@/types";
 
 const API_BASE = "/api";
@@ -556,6 +557,36 @@ export async function verifyAuditLog(id: string): Promise<AuditIntegrityCheck> {
 
 export async function getAuditStats(): Promise<AuditStats> {
   return request<AuditStats>("/audit/stats");
+}
+
+/** The browser's IANA zone, or null where the runtime cannot say. */
+function browserTimeZone(): string | null {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Sends the viewer's timezone so "today" starts at THEIR midnight; without
+ * it the server counts from midnight UTC.
+ */
+export async function getUsageSummary(): Promise<UsageSummary> {
+  const tz = browserTimeZone();
+  if (!tz) return request<UsageSummary>("/usage/summary");
+  try {
+    return await request<UsageSummary>(
+      `/usage/summary?${new URLSearchParams({ tz }).toString()}`,
+    );
+  } catch (err) {
+    // 422: a zone the server's tz database does not know (a browser with
+    // newer tzdata). A UTC "today" beats losing the whole usage panel.
+    if (err instanceof ApiError && err.status === 422) {
+      return request<UsageSummary>("/usage/summary");
+    }
+    throw err;
+  }
 }
 
 // Settings

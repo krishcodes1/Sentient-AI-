@@ -83,19 +83,21 @@ async def _make_connector_row(
     connector_type="canvas",
     scopes=None,
     rate_limit=30,
+    access_token="secret-token",
+    display_name="Test connector",
 ):
     from core.security import encrypt_credentials
     from models.connector import AuthMethod, ConnectorConfig, ConnectorType
 
     credentials = {
         "base_url": "https://school.instructure.com",
-        "access_token": "secret-token",
+        "access_token": access_token,
     }
     async with session_factory() as session:
         row = ConnectorConfig(
             user_id=user_id,
             connector_type=ConnectorType(connector_type),
-            display_name="Test connector",
+            display_name=display_name,
             auth_method=AuthMethod.bearer_token,
             encrypted_credentials=encrypt_credentials(json.dumps(credentials)),
             granted_scopes=scopes if scopes is not None else [],
@@ -127,6 +129,56 @@ async def test_executor_decrypts_credentials_and_executes(
     fake = FakeConnector.instances[0]
     assert fake.auth_credentials == credentials  # decrypted round-trip
     assert fake.executed == [("get_courses", {})]
+
+
+@pytest.mark.asyncio
+async def test_each_of_two_rows_of_a_type_dispatches_to_its_own_credentials(
+    session_factory, fake_factory
+):
+    """The duplicate-connector fix, end to end.
+
+    Both rows used to collide on ``canvas.get_courses`` and only the
+    newest one could ever run. Each now has its own tool name, and the
+    slug in that name is what selects the row.
+    """
+    from services.agent.tool_registry import connector_slug
+
+    from tests.conftest import make_user
+
+    user, _ = await make_user(session_factory)
+    first, first_credentials = await _make_connector_row(
+        session_factory, user.id, scopes=["courses.read"], access_token="token-school"
+    )
+    second, second_credentials = await _make_connector_row(
+        session_factory, user.id, scopes=["courses.read"], access_token="token-work"
+    )
+
+    executor = ConnectorToolExecutor(session_factory=session_factory)
+    for row, credentials in ((first, first_credentials), (second, second_credentials)):
+        FakeConnector.instances = []
+        result = await executor.execute(
+            f"canvas__{connector_slug(str(row.id))}.get_courses", {}, str(user.id)
+        )
+        assert result["ok"] is True, result
+        assert FakeConnector.instances[0].auth_credentials == credentials
+
+
+@pytest.mark.asyncio
+async def test_unknown_slug_does_not_fall_back_to_the_newest_row(
+    session_factory, fake_factory
+):
+    # Falling back would run the call against an account the caller did
+    # not name — the collision bug with an extra step.
+    from tests.conftest import make_user
+
+    user, _ = await make_user(session_factory)
+    await _make_connector_row(session_factory, user.id, scopes=["courses.read"])
+
+    executor = ConnectorToolExecutor(session_factory=session_factory)
+    result = await executor.execute("canvas__deadbeef.get_courses", {}, str(user.id))
+
+    assert result["ok"] is False
+    assert FakeConnector.instances == []
 
 
 @pytest.mark.asyncio

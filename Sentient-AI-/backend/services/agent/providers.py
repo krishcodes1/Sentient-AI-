@@ -122,7 +122,25 @@ class ToolCall:
 
 @dataclass(frozen=True)
 class LLMResponse:
-    """Normalised response from any LLM provider."""
+    """Normalised response from any LLM provider.
+
+    ``usage`` carries the same keys whatever the vendor:
+
+    - ``input_tokens``: the WHOLE prompt, cached share included. Vendors
+      disagree on this (Anthropic's own ``input_tokens`` leaves cached
+      tokens out; OpenAI's and Gemini's prompt counts include them), and a
+      per-message counter that meant different things per provider could
+      not be compared or summed.
+    - ``output_tokens``: everything billed as output, including reasoning
+      ("thinking") tokens a vendor reports separately.
+    - ``cache_read_tokens``: the part of ``input_tokens`` served from the
+      prompt cache. Present only when the vendor reported it: a zero it
+      never sent would read as "nothing was cached" when the truth is
+      "this vendor does not say".
+    - ``cache_write_tokens``: the part of ``input_tokens`` written to the
+      cache at a surcharge. Only Anthropic bills cache writes; everyone
+      else reports a true 0.
+    """
     content: str
     tool_calls: list[ToolCall] = field(default_factory=list)
     model: str = ""
@@ -174,15 +192,15 @@ class LLMProvider(abc.ABC):
         silently stops matching looks exactly like a prefix that never
         cached, and both just show up as a larger bill.
         """
-        read = usage.get("cache_read_input_tokens")
-        created = usage.get("cache_creation_input_tokens")
-        if read is None and created is None:
+        read = usage.get("cache_read_tokens")
+        written = usage.get("cache_write_tokens") or 0
+        if read is None and not written:
             return
         logger.info(
             "provider_prompt_cache",
             provider=self._provider_name or type(self).__name__,
-            cache_read_input_tokens=read or 0,
-            cache_creation_input_tokens=created or 0,
+            cache_read_tokens=read or 0,
+            cache_write_tokens=written,
             input_tokens=usage.get("input_tokens", 0),
         )
 
@@ -319,20 +337,29 @@ class AnthropicProvider(LLMProvider):
 
     @staticmethod
     def _usage(raw: Any) -> dict[str, int]:
-        """Normalise SDK usage, including the cache counters when present.
+        """Normalise SDK usage to the cross-provider shape (see LLMResponse).
+
+        Anthropic's ``input_tokens`` counts only the prompt AFTER the last
+        cache breakpoint; the cached prefix is reported separately as reads
+        and creations. With breakpoints on the system prompt and the tools,
+        that prefix is most of every request, so the three are added back
+        together here — reading ``input_tokens`` alone undercounted the
+        prompt several times over on a warm cache.
 
         The cache fields only appear on responses from models that support
         prompt caching, so they are read defensively and omitted rather
         than reported as a misleading zero.
         """
+        read = getattr(raw, "cache_read_input_tokens", None)
+        written = getattr(raw, "cache_creation_input_tokens", None)
         usage = {
-            "input_tokens": raw.input_tokens,
+            "input_tokens": raw.input_tokens + (read or 0) + (written or 0),
             "output_tokens": raw.output_tokens,
         }
-        for field_name in ("cache_read_input_tokens", "cache_creation_input_tokens"):
-            value = getattr(raw, field_name, None)
-            if value is not None:
-                usage[field_name] = value
+        if read is not None:
+            usage["cache_read_tokens"] = read
+        if written is not None:
+            usage["cache_write_tokens"] = written
         return usage
 
     @staticmethod
@@ -470,23 +497,31 @@ class OpenAICompatibleProvider(LLMProvider):
 
     @staticmethod
     def _usage(raw: Any) -> dict[str, int]:
-        """Normalise usage, surfacing the automatic prompt-cache counter.
+        """Normalise usage to the cross-provider shape (see LLMResponse).
 
-        OpenAI reports cache hits under
-        ``usage.prompt_tokens_details.cached_tokens``; vendors that share
-        the schema but not the field simply omit it.
+        ``prompt_tokens`` already includes the cached share, and
+        ``completion_tokens`` already includes reasoning tokens, so both
+        are taken as-is. Cache hits are reported under
+        ``usage.prompt_tokens_details.cached_tokens`` (OpenAI, xAI, Groq);
+        DeepSeek reports the same fact as ``prompt_cache_hit_tokens``.
+        Vendors that share the schema but report neither simply omit it.
+        Automatic caching has no write surcharge on any of these vendors,
+        so the write count is a true zero.
         """
         if raw is None:
-            return {"input_tokens": 0, "output_tokens": 0}
+            return {"input_tokens": 0, "output_tokens": 0, "cache_write_tokens": 0}
         usage = {
             "input_tokens": raw.prompt_tokens,
             "output_tokens": raw.completion_tokens,
+            "cache_write_tokens": 0,
         }
         cached = getattr(
             getattr(raw, "prompt_tokens_details", None), "cached_tokens", None
         )
-        if cached is not None:
-            usage["cache_read_input_tokens"] = cached
+        if not isinstance(cached, int):
+            cached = getattr(raw, "prompt_cache_hit_tokens", None)
+        if isinstance(cached, int):
+            usage["cache_read_tokens"] = cached
         return usage
 
     @staticmethod
@@ -700,6 +735,31 @@ class GeminiProvider(LLMProvider):
             })
         return [{"functionDeclarations": function_declarations}]
 
+    @staticmethod
+    def _usage(usage_meta: Optional[dict[str, Any]]) -> dict[str, int]:
+        """Normalise ``usageMetadata`` to the cross-provider shape (see
+        LLMResponse).
+
+        ``promptTokenCount`` already includes the cached share. Output is
+        ``candidatesTokenCount`` PLUS ``thoughtsTokenCount``: 2.5+ models
+        think before answering, Google bills those tokens as output, and
+        the candidates count leaves them out — on a reasoning-heavy turn
+        they are most of the output bill. Implicit caching has no write
+        surcharge.
+        """
+        meta = usage_meta or {}
+        usage = {
+            "input_tokens": meta.get("promptTokenCount") or 0,
+            "output_tokens": (meta.get("candidatesTokenCount") or 0)
+            + (meta.get("thoughtsTokenCount") or 0),
+            "cache_write_tokens": 0,
+        }
+        # Absent on models or requests where nothing was cached.
+        cached = meta.get("cachedContentTokenCount")
+        if cached is not None:
+            usage["cache_read_tokens"] = cached
+        return usage
+
     async def complete(self, messages, tools=None) -> LLMResponse:
         system_instruction, contents = self._convert_messages(messages)
         payload: dict[str, Any] = {"contents": contents}
@@ -761,16 +821,7 @@ class GeminiProvider(LLMProvider):
                 f"provider returned an empty completion (finishReason: {finish})",
             )
 
-        usage_meta = data.get("usageMetadata", {})
-        usage = {
-            "input_tokens": usage_meta.get("promptTokenCount", 0),
-            "output_tokens": usage_meta.get("candidatesTokenCount", 0),
-        }
-        # Gemini's implicit caching reports the cached share of the prompt
-        # here; absent on models or requests where nothing was cached.
-        cached = usage_meta.get("cachedContentTokenCount")
-        if cached is not None:
-            usage["cache_read_input_tokens"] = cached
+        usage = self._usage(data.get("usageMetadata"))
         self._log_cache_usage(usage)
         return LLMResponse(
             content="".join(text_parts),
@@ -899,9 +950,11 @@ class OllamaProvider(LLMProvider):
             content=msg.get("content", ""),
             tool_calls=tool_calls,
             model=data.get("model", self._model),
+            # Ollama has no prompt cache to report and nothing to bill.
             usage={
                 "input_tokens": data.get("prompt_eval_count", 0),
                 "output_tokens": data.get("eval_count", 0),
+                "cache_write_tokens": 0,
             },
         )
 

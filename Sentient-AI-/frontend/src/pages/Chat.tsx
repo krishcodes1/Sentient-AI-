@@ -41,6 +41,7 @@ import {
 import ConfirmDialog from "@/components/ConfirmDialog";
 import MarkdownMessage from "@/components/MarkdownMessage";
 import ChatComposer from "@/components/ChatComposer";
+import { ConversationTokenTotal, MessageTokenCaption } from "@/components/TokenUsage";
 import { DESKTOP_QUERY, useMediaQuery } from "@/hooks/useMediaQuery";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
 
@@ -1140,9 +1141,10 @@ export default function Chat() {
       {/* Chat Area */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* The list is off-canvas below 1024px, so the thread carries its own
-            way back to it. */}
+            way back to it there. The header itself stays at every width: it
+            is where the thread's running token total lives. */}
         <div
-          className="lg:hidden flex items-center gap-2 px-3 py-2"
+          className="flex items-center gap-2 px-3 py-2 lg:px-4 min-h-[56px]"
           style={{ borderBottom: "1px solid var(--claw-border)" }}
         >
           <button
@@ -1151,17 +1153,20 @@ export default function Chat() {
             aria-label="Show conversations"
             aria-expanded={listOpen}
             aria-controls="conversation-list"
-            className="inline-flex items-center justify-center rounded-[8px] shrink-0"
+            className="lg:hidden inline-flex items-center justify-center rounded-[8px] shrink-0"
             style={{ width: 40, height: 40, color: "var(--text-secondary)" }}
           >
             <PanelLeft className="w-4 h-4" aria-hidden />
           </button>
           <span
-            className="text-sm font-medium truncate"
+            className="text-sm font-medium truncate flex-1 min-w-0"
             style={{ color: "var(--text-primary)" }}
           >
             {activeConv ? activeTitle : "No conversation"}
           </span>
+          {activeConv && !loadingMessages && !messagesError && (
+            <ConversationTokenTotal messages={messages} />
+          )}
         </div>
 
         {/* Messages */}
@@ -1344,6 +1349,7 @@ export default function Chat() {
                   </div>
                 )}
                 <MessageTime iso={msg.created_at} onAccent={msg.role === "user"} />
+                <MessageTokenCaption message={msg} />
               </div>
               {msg.role === "user" && (
                 <div

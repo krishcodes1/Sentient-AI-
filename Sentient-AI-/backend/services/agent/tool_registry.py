@@ -24,10 +24,21 @@ Tool names are namespaced ``<connector_type>.<action>`` (e.g.
 ``canvas.get_assignments``). The connector_type segment is the
 ``ConnectorType`` enum value (canvas / google_workspace / robinhood),
 NOT the connector class's category property ("lms"/"email"/"finance").
+When a user has two active connectors of the same type the segment
+carries a per-row slug as well — see ``build_tools``.
+
+``web``, ``reminders`` and ``system`` are built-in types rather than
+connectors: they hold no credentials and have no connector row, so every
+user is offered them. Reminders are owner-scoped, so the executor hands
+the toolkit the caller's identity rather than anything in the tool
+arguments. ``system`` installs optional software onto the host from a
+fixed allowlist; its install action is the one built-in that always goes
+through the approval card, and the executor refuses it unapproved.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid as uuid_module
 from dataclasses import dataclass, field
@@ -43,6 +54,10 @@ from services.agent.permissions import (
     is_hard_blocked_action,
 )
 from services.agent.runtime import Tool
+from services.tools.reminders import ReminderToolkit
+from services.tools.system import ALLOWLIST as SYSTEM_CAPABILITIES
+from services.tools.system import SystemToolkit
+from services.tools.web import WebToolkit
 
 logger = structlog.get_logger(__name__)
 
@@ -236,6 +251,172 @@ CONNECTOR_CATALOG: dict[str, list[ToolSpec]] = {
             required_scope="crypto.trade",
         ),
     ],
+    # Built-in: no credentials, no connector row, no scopes to grant, so
+    # every action here is deliberately scope-free. Read-only by
+    # construction — the permission engine hard-blocks every other
+    # category for "web" so a future non-READ entry cannot be reached
+    # even if it were added here by mistake.
+    "web": [
+        ToolSpec(
+            "search",
+            "Search the public web and return titles, URLs and snippets. "
+            "Use this to find pages; use web.fetch_page to read one.",
+            ActionCategory.READ,
+            _schema(
+                query={"type": "string", "description": "Search terms", "required": True},
+                max_results={
+                    "type": "integer",
+                    "description": "How many results to return (1-10, default 5)",
+                },
+            ),
+        ),
+        ToolSpec(
+            "fetch_page",
+            "Fetch a public web page and return its readable text. The text is "
+            "truncated; raise max_chars only when the answer was cut off.",
+            ActionCategory.READ,
+            _schema(
+                url={"type": "string", "description": "Absolute http(s) URL", "required": True},
+                max_chars={
+                    "type": "integer",
+                    "description": "Character budget for the extracted text (default 4000)",
+                },
+            ),
+        ),
+        ToolSpec(
+            "screenshot",
+            "Capture a screenshot of a public web page as an image data URL. "
+            "Prefer image_format 'jpeg' for full pages: a PNG of one often "
+            "exceeds the inline size limit and comes back without the image.",
+            ActionCategory.READ,
+            _schema(
+                url={"type": "string", "description": "Absolute http(s) URL", "required": True},
+                full_page={
+                    "type": "boolean",
+                    "description": "Capture the whole scrollable page instead of the viewport",
+                },
+                image_format={
+                    "type": "string",
+                    "enum": ["png", "jpeg"],
+                    "description": "Image encoding (default png)",
+                },
+            ),
+        ),
+    ],
+    # Built-in: reminders the agent sets for the user, delivered by the
+    # sweeper over whatever channel they linked. Scope-free like web.
+    # ``cancel`` is a WRITE (a status flip that keeps the row), not a
+    # DELETE — the permission engine hard-blocks DELETE for this type, so
+    # a genuinely destructive action could not be added here by mistake.
+    # ``now`` exists because a model cannot know today's date or the
+    # server's UTC offset; every description that takes a time says to
+    # call it first, otherwise "tomorrow at 9am" lands on a guessed day.
+    "reminders": [
+        ToolSpec(
+            "now",
+            "Current date/time: UTC, server-local with UTC offset, and "
+            "weekday. Call this FIRST whenever the user gives a relative "
+            "or clock time ('tomorrow at 9am', 'in 2 hours') before "
+            "computing due_at.",
+            ActionCategory.READ,
+        ),
+        ToolSpec(
+            "create",
+            "Set a reminder that is delivered to the user at a future "
+            "time. Give exactly one of due_at or delay_minutes. For a "
+            "relative or clock time, call reminders.now first and compute "
+            "due_at from it.",
+            ActionCategory.WRITE,
+            _schema(
+                title={
+                    "type": "string",
+                    "description": "What to remind the user about (1-200 chars)",
+                    "required": True,
+                },
+                note={
+                    "type": "string",
+                    "description": "Optional detail shown with the reminder (max 2000 chars)",
+                },
+                due_at={
+                    "type": "string",
+                    "description": (
+                        "ISO-8601 time with UTC offset, e.g. 2026-09-24T09:00:00-04:00 "
+                        "(naive = UTC). Use reminders.now for today's date and offset."
+                    ),
+                },
+                delay_minutes={
+                    "type": "integer",
+                    "description": "Minutes from now (1-525600), instead of due_at",
+                },
+            ),
+        ),
+        ToolSpec(
+            "list",
+            "List the user's scheduled reminders, soonest first (max 20).",
+            ActionCategory.READ,
+        ),
+        ToolSpec(
+            "cancel",
+            "Cancel one of the user's scheduled reminders by id (from "
+            "reminders.list or reminders.create).",
+            ActionCategory.WRITE,
+            _schema(
+                reminder_id={"type": "string", "description": "Reminder id", "required": True},
+            ),
+        ),
+    ],
+    # Built-in: the capability installer. The model may only *name* an
+    # entry of ``services.tools.system.ALLOWLIST``; every command that
+    # runs is spelled out there, so the schema's enum is the whole of what
+    # the model can ask for. ``install_capability`` is a WRITE the policy
+    # routes through the approval card and the executor refuses
+    # unapproved; DELETE/EXECUTE/FINANCIAL are hard-blocked for the type,
+    # so nothing that uninstalls or runs arbitrary commands could be added
+    # here by mistake. The descriptions carry the "ask, then install"
+    # rule because the system prompt only tells the model to say what is
+    # missing; this is how it learns there is a sanctioned way to fix it.
+    "system": [
+        ToolSpec(
+            "capabilities",
+            "List the optional capabilities this installation can add (e.g. "
+            "'browser', which web.screenshot needs) and whether each is "
+            "installed right now.",
+            ActionCategory.READ,
+        ),
+        ToolSpec(
+            "install_capability",
+            "Install one optional capability by name, from a fixed allowlist. "
+            "If a tool reports a missing capability (e.g. web.screenshot says "
+            "the browser is not installed), call this with its name; the user "
+            "will be asked to approve the install first, so tell them what it "
+            "is for and wait for the result. Only the listed names work: this "
+            "cannot install arbitrary packages.",
+            ActionCategory.WRITE,
+            _schema(
+                name={
+                    "type": "string",
+                    "enum": sorted(SYSTEM_CAPABILITIES),
+                    "description": "Capability name, e.g. 'browser'",
+                    "required": True,
+                },
+            ),
+        ),
+    ],
+}
+
+# Types offered to every user with no connector row and no credentials.
+BUILTIN_CONNECTOR_TYPES: tuple[str, ...] = ("web", "reminders", "system")
+
+# The tier each built-in stands in for the connector row it does not
+# have. web and reminders run unattended by policy, so an account whose
+# default is auto_approve changes nothing for them. system is different:
+# standing consent for emails and calendar entries is not consent to put
+# new software on the machine, so its install action keeps the approval
+# card under every account default rather than being downgraded to auto.
+_BUILTIN_STANCE: dict[str, str] = {
+    "web": "auto_approve",
+    "reminders": "auto_approve",
+    "system": "user_confirm",
 }
 
 
@@ -280,12 +461,42 @@ class ConnectorSpec:
     ``permission_tier`` is the user's per-connector approval policy
     (``auto_approve`` / ``user_confirm`` / ``admin_only``); it is combined
     with the user's account-level default via :func:`effective_tier`.
+
+    ``connector_id`` is the row's primary key. It is what tells two
+    active connectors of the same type apart, both in the tool name and
+    at dispatch; without it a second row of a type the registry already
+    saw cannot be addressed at all (see ``build_tools``).
+    ``display_name`` is the account label shown to the model alongside
+    the disambiguated name — a slug on its own says nothing about which
+    of two accounts is being picked.
     """
 
     connector_type: str
     is_active: bool = True
     granted_scopes: Optional[tuple[str, ...]] = None
     permission_tier: str = "user_confirm"
+    connector_id: Optional[str] = None
+    display_name: Optional[str] = None
+
+
+# Separator between a connector type and a per-row slug in a tool name.
+# Double, because connector types themselves contain single underscores
+# ("google_workspace") and the two must not be confusable.
+_SLUG_SEPARATOR = "__"
+_SLUG_HEX_LENGTH = 8
+
+
+def connector_slug(connector_id: str) -> str:
+    """Stable short handle for one connector row.
+
+    Derived from the row id rather than from its position, so the name a
+    tool is offered under does not change when an unrelated connector is
+    added or removed, and so the executor can map a name back to a row by
+    recomputing this.
+    """
+    return hashlib.blake2s(
+        connector_id.encode("utf-8"), digest_size=_SLUG_HEX_LENGTH // 2
+    ).hexdigest()
 
 
 # Ordering used to combine the per-connector tier with the user's account
@@ -323,6 +534,9 @@ class ResolvedTool:
     connector_type: str
     action: str
     spec: ToolSpec
+    # Which connector row the call names, when the user has more than one
+    # of this type. None means "the only row of this type".
+    slug: Optional[str] = None
 
     @property
     def policy_key(self) -> str:
@@ -332,18 +546,32 @@ class ResolvedTool:
 def resolve_tool(tool_name: str) -> Optional[ResolvedTool]:
     """Map a namespaced ``connector_type.action`` name back to its spec.
 
+    Accepts both the plain ``canvas.get_courses`` form and the
+    disambiguated ``canvas__1f2e3d4c.get_courses`` one. Permissions key
+    off the connector type either way, so two rows of the same type can
+    never resolve to different tiers.
+
     Returns None for malformed names or unknown connector/action, so
     callers can fail safe (default-deny) rather than raise.
     """
     if "." not in tool_name:
         return None
-    connector_type, _, action = tool_name.partition(".")
+    namespace, _, action = tool_name.partition(".")
+
+    connector_type, slug = namespace, None
+    if namespace not in CONNECTOR_CATALOG and _SLUG_SEPARATOR in namespace:
+        connector_type, _, slug = namespace.rpartition(_SLUG_SEPARATOR)
+        if len(slug) != _SLUG_HEX_LENGTH or not all(
+            c in "0123456789abcdef" for c in slug
+        ):
+            return None
+
     specs = CONNECTOR_CATALOG.get(connector_type)
     if not specs:
         return None
     for spec in specs:
         if spec.action == action:
-            return ResolvedTool(connector_type, action, spec)
+            return ResolvedTool(connector_type, action, spec, slug)
     return None
 
 
@@ -369,14 +597,133 @@ def _scope_allows(spec: ToolSpec, granted_scopes: Optional[tuple[str, ...]]) -> 
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class _Offer:
+    """One namespace the tool list is built under, with its tier resolved."""
+
+    namespace: str
+    connector_type: str
+    label: str
+    tier: str
+    granted_scopes: Optional[tuple[str, ...]] = None
+
+
+def _account_label(display_name: Optional[str]) -> str:
+    """Render a connector's display name for a tool description.
+
+    The name is user-supplied text heading into the model's tool list,
+    which is prompt surface: newlines and control characters are dropped
+    so it cannot open what looks like a new instruction block, and the
+    length is capped.
+    """
+    if not display_name:
+        return ""
+    cleaned = "".join(c if c.isprintable() else " " for c in display_name)
+    return " ".join(cleaned.split())[:40]
+
+
+def _offers_for(
+    connectors: Iterable[ConnectorSpec],
+    user_default_tier: str,
+    is_admin: bool,
+) -> list[_Offer]:
+    """Resolve a user's connectors to the namespaces tools are built under.
+
+    A single active row of a type keeps the plain ``canvas`` namespace.
+    Two rows of one type would otherwise emit the same tool names twice:
+    the model sees one entry, and whichever row the executor happened to
+    load (the newest) is the only one that could ever run. So each row of
+    a contested type gets its own ``canvas__<slug>`` namespace instead,
+    plus its display name in the description.
+
+    Disambiguation is decided before tier filtering, not after: a name
+    must identify the row it was built from even when its sibling is
+    filtered out, or the executor would fall back to "newest row" and
+    dispatch the call to a connector the user never offered it.
+
+    Rows of a contested type that carry no id cannot be told apart at
+    all, so the whole type is dropped with a logged error rather than
+    guessed at from row order.
+
+    Output is sorted, not in input order, because the caller's query has
+    no ORDER BY: the same set of connectors must always produce the same
+    tool list.
+    """
+    by_type: dict[str, list[ConnectorSpec]] = {}
+    for conn in connectors:
+        if not conn.is_active:
+            continue
+        if conn.connector_type not in CONNECTOR_CATALOG:
+            continue  # unknown connector type: skip safely
+        by_type.setdefault(conn.connector_type, []).append(conn)
+
+    offers: list[_Offer] = []
+    for connector_type in sorted(by_type):
+        rows = by_type[connector_type]
+        if len(rows) == 1:
+            namespaced = [(connector_type, rows[0], "")]
+        else:
+            identified = sorted(
+                (row for row in rows if row.connector_id),
+                key=lambda row: row.connector_id or "",
+            )
+            slugs = {connector_slug(row.connector_id or "") for row in identified}
+            if len(identified) != len(rows) or len(slugs) != len(rows):
+                logger.error(
+                    "connector_rows_indistinguishable",
+                    connector_type=connector_type,
+                    rows=len(rows),
+                    identified=len(identified),
+                    slugs=len(slugs),
+                )
+                continue
+            namespaced = [
+                (
+                    f"{connector_type}{_SLUG_SEPARATOR}"
+                    f"{connector_slug(row.connector_id or '')}",
+                    row,
+                    _account_label(row.display_name),
+                )
+                for row in identified
+            ]
+
+        for namespace, conn, label in namespaced:
+            tier = effective_tier(conn.permission_tier, user_default_tier)
+            if tier == "hard_blocked":
+                continue
+            if tier == "admin_only" and not is_admin:
+                # Only the deployment's admin may use an admin_only
+                # connector; for anyone else it contributes no tools at
+                # all. Gating here is what makes an approval-time admin
+                # check unnecessary: a non-admin can never get such an
+                # action parked for approval in the first place.
+                continue
+            offers.append(
+                _Offer(namespace, connector_type, label, tier, conn.granted_scopes)
+            )
+    return offers
+
+
 def build_tools(
     connectors: Iterable[ConnectorSpec],
     engine: Optional[PermissionEngine] = None,
     user_tier: UserTier = UserTier.STANDARD,
     user_default_tier: str = "user_confirm",
     is_admin: bool = False,
+    *,
+    include_builtins: bool = True,
 ) -> list[Tool]:
     """Produce the runtime ``Tool`` objects for a user's active connectors.
+
+    Built-in types (``web``, ``reminders``, ``system``) are appended for
+    every user: they hold no credentials, so there is no connector row to
+    gate them on. They are still held to the user's account-level tier,
+    which is a floor over everything the agent may do unattended. The
+    account tier can only tighten what the static policy grants: an
+    action the policy auto-approves (web reads, reminder writes) stays
+    unattended under the default ``user_confirm``, exactly as connector
+    reads do. The ``system`` install stays approval-gated even under an
+    ``auto_approve`` account default (see ``_BUILTIN_STANCE``).
 
     Hard-blocked actions and actions outside the connector's granted
     scopes are omitted entirely so the LLM is never offered a tool it
@@ -405,27 +752,26 @@ def build_tools(
     # simply never been handed one.
     if is_admin:
         user_tier = UserTier.ADMIN
-    tools: list[Tool] = []
-    for conn in connectors:
-        if not conn.is_active:
-            continue
-        tier = effective_tier(conn.permission_tier, user_default_tier)
-        if tier == "hard_blocked":
-            continue
-        if tier == "admin_only" and not is_admin:
-            # Only the deployment's admin may use an admin_only connector;
-            # for anyone else it contributes no tools at all. Gating here is
-            # what makes an approval-time admin check unnecessary: a
-            # non-admin can never get such an action parked for approval in
-            # the first place.
-            continue
-        specs = CONNECTOR_CATALOG.get(conn.connector_type)
-        if not specs:
-            continue  # unknown connector type: skip safely
-        for spec in specs:
-            if not _scope_allows(spec, conn.granted_scopes):
+    offers = _offers_for(connectors, user_default_tier, is_admin)
+    if include_builtins:
+        configured = {offer.connector_type for offer in offers}
+        for builtin in BUILTIN_CONNECTOR_TYPES:
+            if builtin in configured:
                 continue
-            policy_key = spec.policy_key or conn.connector_type
+            # No connector row means no per-connector tier, so the type's
+            # own stance stands in for one and the user's account default
+            # still floors it.
+            tier = effective_tier(_BUILTIN_STANCE[builtin], user_default_tier)
+            if tier == "hard_blocked" or (tier == "admin_only" and not is_admin):
+                continue
+            offers.append(_Offer(builtin, builtin, "", tier))
+
+    tools: list[Tool] = []
+    for offer in offers:
+        for spec in CONNECTOR_CATALOG[offer.connector_type]:
+            if not _scope_allows(spec, offer.granted_scopes):
+                continue
+            policy_key = spec.policy_key or offer.connector_type
             decision = engine.check_permission(
                 connector_type=policy_key,
                 action=spec.action,
@@ -446,7 +792,7 @@ def build_tools(
             # never financial/hard-blocked ones (those are filtered above,
             # but the guard is kept for defense in depth).
             if (
-                tier == "auto_approve"
+                offer.tier == "auto_approve"
                 and runtime_decision == "requires_approval"
                 and spec.category != ActionCategory.FINANCIAL
                 and not is_hard_blocked_action(spec.action)
@@ -454,10 +800,14 @@ def build_tools(
                 runtime_decision = "approved"
             tools.append(
                 Tool(
-                    name=f"{conn.connector_type}.{spec.action}",
-                    description=spec.description,
+                    name=f"{offer.namespace}.{spec.action}",
+                    description=(
+                        f"{spec.description} (account: {offer.label})"
+                        if offer.label
+                        else spec.description
+                    ),
                     parameters=spec.parameters or dict(_EMPTY_SCHEMA),
-                    connector_type=conn.connector_type,
+                    connector_type=offer.connector_type,
                     permission_tier="auto" if runtime_decision == "approved" else "approval",
                 )
             )
@@ -553,21 +903,40 @@ class ConnectorToolExecutor:
     instantiate the connector (which arms the deny-by-default network
     policy), authenticate, execute, and return the sanitized result.
 
+    Built-in tools (``web.*``, ``reminders.*``, ``system.*``) run here
+    too, but take none of that path: they have no credentials to decrypt,
+    no connector row to load and no scopes to check, so they dispatch
+    straight to their toolkit. The reminder toolkit shares this
+    executor's session factory and is handed the caller's ``user_id``,
+    which is the only identity it will write under.
+
     ``approved=True`` means the call already passed the explicit user
     approval flow; it unlocks connector actions that demand per-call
-    confirmation. The flag can never come from tool arguments — any
-    LLM-supplied ``user_confirmed`` value is stripped before dispatch.
+    confirmation, and it is the only thing that lets a ``system`` write
+    (installing software) run at all. The flag can never come from tool
+    arguments — any LLM-supplied ``user_confirmed`` value is stripped
+    before dispatch.
+
+    Whatever comes back is data, never instruction: the runtime scans
+    every tool result before it reaches the model, and fetched web pages
+    in particular are hostile input. Nothing here may shortcut that.
 
     Constructed without a session factory the executor cannot load
-    credentials and refuses to dispatch (fail closed); ``main.py`` wires
-    it with the application session factory at startup.
+    credentials and refuses to dispatch connector tools (fail closed);
+    ``main.py`` wires it with the application session factory at startup.
     """
 
     def __init__(
         self,
         session_factory: Optional[Callable[[], Any]] = None,
+        web_toolkit: Optional[WebToolkit] = None,
+        reminder_toolkit: Optional[ReminderToolkit] = None,
+        system_toolkit: Optional[SystemToolkit] = None,
     ) -> None:
         self._session_factory = session_factory
+        self._web = web_toolkit or WebToolkit()
+        self._reminders = reminder_toolkit or ReminderToolkit(session_factory)
+        self._system = system_toolkit or SystemToolkit()
         # Per connector-config sliding-window limiters. Persist across
         # calls (connector instances are per-call) within this process.
         self._limiters: dict[uuid_module.UUID, Any] = {}
@@ -619,6 +988,52 @@ class ConnectorToolExecutor:
         # model. Strip any attempt to smuggle it through tool arguments.
         arguments = {k: v for k, v in arguments.items() if k != "user_confirmed"}
 
+        if resolved.connector_type == "web":
+            if resolved.spec.category != ActionCategory.READ:
+                # The web tools are read-only by construction; a non-read
+                # action reaching here means the catalog gained one.
+                return {
+                    "ok": False,
+                    "error": f"Web action '{resolved.action}' is not permitted.",
+                }
+            return await self._web.execute(resolved.action, dict(arguments))
+
+        if resolved.connector_type == "reminders":
+            if resolved.spec.category not in (ActionCategory.READ, ActionCategory.WRITE):
+                # The policy hard-blocks every other category for this
+                # type; a spec in one reaching here means the catalog
+                # gained an action the policy was never written for.
+                return {
+                    "ok": False,
+                    "error": f"Reminder action '{resolved.action}' is not permitted.",
+                }
+            return await self._reminders.execute(
+                resolved.action, dict(arguments), user_id
+            )
+
+        if resolved.connector_type == "system":
+            if resolved.spec.category not in (ActionCategory.READ, ActionCategory.WRITE):
+                return {
+                    "ok": False,
+                    "error": f"System action '{resolved.action}' is not permitted.",
+                }
+            if resolved.spec.category == ActionCategory.WRITE and not approved:
+                # Installing software is never done on the model's say-so.
+                # The runtime parks the call for the user and re-dispatches
+                # it with approved=True once they say yes; anything else
+                # reaching here unapproved is refused, the same contract a
+                # connector's per-call confirmation uses.
+                return {
+                    "ok": False,
+                    "requires_approval": True,
+                    "error": (
+                        f"Action requires user confirmation: system.{resolved.action} "
+                        "installs software on this machine and runs only after "
+                        "the user approves it."
+                    ),
+                }
+            return await self._system.execute(resolved.action, dict(arguments))
+
         if self._session_factory is None:
             return {
                 "ok": False,
@@ -628,7 +1043,9 @@ class ConnectorToolExecutor:
                 ),
             }
 
-        config = await self._load_config(resolved.connector_type, user_id)
+        config = await self._load_config(
+            resolved.connector_type, user_id, resolved.slug
+        )
         if config is None:
             return {
                 "ok": False,
@@ -771,9 +1188,17 @@ class ConnectorToolExecutor:
     # -- helpers ------------------------------------------------------------
 
     async def _load_config(
-        self, connector_type: str, user_id: str
+        self, connector_type: str, user_id: str, slug: Optional[str] = None
     ) -> Optional[dict[str, Any]]:
-        """Fetch the newest active connector config + decrypted credentials.
+        """Fetch the named active connector config + decrypted credentials.
+
+        *slug* is the per-row handle a disambiguated tool name carries
+        (see ``build_tools``); it selects which of several active rows of
+        one type the call meant. A name without one is only ever offered
+        when the type has a single active row, so the newest row is the
+        right answer for it — and a slug that matches nothing returns
+        None rather than falling back to the newest, which would run the
+        call against an account the user did not name.
 
         Returns a plain dict (not the ORM row) so the session can close
         before any network I/O happens.
@@ -801,9 +1226,14 @@ class ConnectorToolExecutor:
                     ConnectorConfig.is_active.is_(True),
                 )
                 .order_by(ConnectorConfig.created_at.desc())
-                .limit(1)
             )
-            config = result.scalar_one_or_none()
+            rows = list(result.scalars().all())
+            if slug is None:
+                config = rows[0] if rows else None
+            else:
+                config = next(
+                    (row for row in rows if connector_slug(str(row.id)) == slug), None
+                )
             if config is None:
                 return None
 

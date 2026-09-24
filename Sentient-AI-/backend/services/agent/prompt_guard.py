@@ -213,7 +213,12 @@ class PromptGuard:
         (
             "jailbreak_keywords",
             re.compile(
-                r"(?:DAN|do\s+anything\s+now|jail\s*break|"
+                # The DAN jailbreak is the literal uppercase token; the
+                # whole pattern is case-insensitive, so it is scoped back to
+                # case-sensitive and word-bounded here — otherwise "Dan",
+                # "abundant", or any base64 payload containing "dan" trips
+                # a CRITICAL block.
+                r"(?:(?-i:\bDAN\b)|do\s+anything\s+now|jail\s*break|"
                 r"developer\s+mode|god\s+mode|unrestricted\s+mode|"
                 r"no\s+restrictions?\s+mode|unfiltered\s+mode)",
                 re.IGNORECASE,

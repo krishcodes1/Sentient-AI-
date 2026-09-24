@@ -10,6 +10,7 @@ import {
   ShieldQuestion,
   Loader2,
   RefreshCw,
+  Coins,
 } from "lucide-react";
 import {
   AreaChart,
@@ -25,6 +26,7 @@ import type {
   Connector,
   ConnectorHealthEntry,
   PendingApproval,
+  UsageSummary,
 } from "@/types";
 import {
   decideApproval,
@@ -33,7 +35,10 @@ import {
   getConnectorHealth,
   getConnectors,
   getPendingApprovals,
+  getUsageSummary,
 } from "@/services/api";
+import UsagePanel from "@/components/UsagePanel";
+import { formatCost, formatTokens } from "@/components/usageFormat";
 // Countdown logic lives beside Chat's ApprovalCard so both approval queues
 // expire in lockstep with the server-side TTL.
 import { formatCountdown, useCountdown } from "@/pages/approvalCountdown";
@@ -288,6 +293,7 @@ export default function Dashboard() {
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [health, setHealth] = useState<ConnectorHealthEntry[]>([]);
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
+  const [usage, setUsage] = useState<UsageSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -303,8 +309,14 @@ export default function Dashboard() {
       return empty;
     };
     try {
-      const [statsResult, logResult, connResult, healthResult, approvalResult] =
-        await Promise.all([
+      const [
+        statsResult,
+        logResult,
+        connResult,
+        healthResult,
+        approvalResult,
+        usageResult,
+      ] = await Promise.all([
           getAuditStats().catch(fallback("stats", null as AuditStats | null)),
           getAuditLogs({ limit: FEED_LIMIT }).catch(
             fallback("audit logs", [] as AuditLog[])
@@ -316,10 +328,12 @@ export default function Dashboard() {
           getPendingApprovals().catch(
             fallback("pending approvals", [] as PendingApproval[])
           ),
+          getUsageSummary().catch(fallback("usage", null as UsageSummary | null)),
         ]);
       // On a failed stats fetch keep the previous numbers on screen rather
       // than blanking them; the banner below reports the failure.
       if (statsResult) setStats(statsResult);
+      if (usageResult) setUsage(usageResult);
       setLogs(logResult);
       setConnectors(connResult);
       setHealth(healthResult);
@@ -486,7 +500,7 @@ export default function Dashboard() {
       )}
 
       {/* Stat cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
         <StatCard
           eyebrow="Connectors"
           label="Active"
@@ -514,6 +528,23 @@ export default function Dashboard() {
           value={loading ? "…" : stats ? stats.pending_approvals : "—"}
           icon={Clock}
           tone="warning"
+        />
+        <StatCard
+          eyebrow="Tokens today"
+          label={
+            usage
+              ? `Est. cost ${formatCost(usage.windows.today.estimated_cost_usd)}`
+              : "Est. cost —"
+          }
+          value={
+            loading && !usage
+              ? "…"
+              : usage
+                ? formatTokens(usage.windows.today.total_tokens)
+                : "—"
+          }
+          icon={Coins}
+          tone="accent"
         />
       </div>
 
@@ -646,6 +677,8 @@ export default function Dashboard() {
           </div>
         </div>
       </div>
+
+      <UsagePanel usage={usage} loading={loading} />
 
       {/* Connector Health */}
       <div

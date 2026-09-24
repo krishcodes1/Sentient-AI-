@@ -23,8 +23,37 @@ COPY . .
 # ── Development ──────────────────────────────────────────────────────
 FROM base AS dev
 
+# docker-compose.yml bind-mounts the source over /app and keeps
+# node_modules in an anonymous volume. Docker seeds that volume from this
+# image only when the volume is first created and then reuses it across
+# `up --build` and container recreation, so a dependency added to
+# package-lock.json afterwards never reaches it and Vite fails to resolve
+# the import. The entrypoint therefore compares the bind-mounted lockfile
+# with a stamp kept inside the volume and reinstalls when they differ. The
+# stamp is written only after `npm ci` succeeds, so a failed install is
+# retried on the next start. `npm ci` (npm 10, shipped with node:20)
+# empties node_modules rather than deleting the directory, which is what
+# lets it run against the volume's mount point.
+COPY --chmod=0755 <<'EOF' /usr/local/bin/sync-node-modules
+#!/bin/sh
+set -e
+stamp=node_modules/.package-lock.sha256
+want="$(sha256sum package-lock.json | cut -d ' ' -f 1)"
+if [ "$(cat "$stamp" 2>/dev/null)" != "$want" ]; then
+    echo "sync-node-modules: node_modules does not match package-lock.json; running npm ci" >&2
+    npm ci --no-audit --no-fund
+    echo "$want" > "$stamp"
+fi
+exec "$@"
+EOF
+
+# The image's own node_modules was just installed from this lockfile, so a
+# volume freshly seeded from it starts in sync and skips the reinstall.
+RUN sha256sum package-lock.json | cut -d ' ' -f 1 > node_modules/.package-lock.sha256
+
 EXPOSE 3000
 
+ENTRYPOINT ["/usr/local/bin/sync-node-modules"]
 CMD ["npx", "vite", "--host", "0.0.0.0"]
 
 # ── Production build ─────────────────────────────────────────────────
@@ -82,6 +111,9 @@ server {
     location /api/ {
         proxy_pass http://backend:8000;
         proxy_http_version 1.1;
+        # The client's Host, unchanged, so the backend's Host check still
+        # means something: its ALLOWED_HOSTS must list the public hostname
+        # (see docker-compose.prod.yml), not this proxy's upstream name.
         proxy_set_header Host $host;
         # Overwrite (never append) so clients cannot spoof the IP the
         # backend rate limiter reads from X-Forwarded-For.

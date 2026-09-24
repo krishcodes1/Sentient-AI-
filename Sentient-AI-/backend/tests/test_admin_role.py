@@ -142,20 +142,27 @@ def _canvas(tier: str) -> ConnectorSpec:
     )
 
 
+# These three are about what a *connector* contributes, so they build
+# without the built-in web tools, which every user gets regardless of any
+# connector's tier (the account-level floor over those is covered by
+# test_user_account_default_still_narrows_an_admin).
 def test_admin_only_connector_offers_no_tools_to_a_standard_user():
-    tools = build_tools([_canvas("admin_only")], is_admin=False)
+    tools = build_tools([_canvas("admin_only")], is_admin=False, include_builtins=False)
     assert tools == []
 
 
 def test_admin_only_connector_offers_tools_to_an_admin():
-    tools = build_tools([_canvas("admin_only")], is_admin=True)
+    tools = build_tools([_canvas("admin_only")], is_admin=True, include_builtins=False)
     assert [t.name for t in tools], "admin_only was still dead policy for an admin"
     assert all(t.connector_type == "canvas" for t in tools)
 
 
 def test_hard_blocked_stays_blocked_even_for_an_admin():
     """The tier that exists to be absolute must not gain an exception."""
-    assert build_tools([_canvas("hard_blocked")], is_admin=True) == []
+    assert (
+        build_tools([_canvas("hard_blocked")], is_admin=True, include_builtins=False)
+        == []
+    )
 
 
 def test_admin_does_not_widen_the_other_tiers():

@@ -73,6 +73,45 @@ _DEFAULT_POLICIES: dict[tuple[str, ActionCategory], PermissionTier] = {
     ("robinhood", ActionCategory.DELETE): PermissionTier.USER_CONFIRM,
     ("robinhood", ActionCategory.EXECUTE): PermissionTier.USER_CONFIRM,
     ("robinhood", ActionCategory.FINANCIAL): PermissionTier.HARD_BLOCKED,
+    # Built-in web tools — reading a public page is as harmless as the
+    # model reading its own context, so reads run unattended. Every other
+    # category is blocked outright rather than left to confirmation:
+    # these tools have no credentials and no write path, and an agent
+    # that could be talked into submitting a form from a fetched page is
+    # exactly the failure this platform exists to prevent.
+    ("web", ActionCategory.READ): PermissionTier.AUTO_APPROVE,
+    ("web", ActionCategory.WRITE): PermissionTier.HARD_BLOCKED,
+    ("web", ActionCategory.DELETE): PermissionTier.HARD_BLOCKED,
+    ("web", ActionCategory.EXECUTE): PermissionTier.HARD_BLOCKED,
+    ("web", ActionCategory.FINANCIAL): PermissionTier.HARD_BLOCKED,
+    # Built-in reminders — a reminder is a note from the user to their
+    # future self, delivered over a channel they linked. Nobody else
+    # receives anything and no third-party state changes; the worst case
+    # is an unwanted ping the user can cancel. An approval card for every
+    # "remind me at 9" would cost more attention than the reminder saves,
+    # which is the whole point of the feature, so create and cancel run
+    # unattended like reads do. DELETE and EXECUTE are blocked outright
+    # rather than left to confirmation: cancel is a status flip that keeps
+    # the row, and nothing in this type should ever run or destroy.
+    ("reminders", ActionCategory.READ): PermissionTier.AUTO_APPROVE,
+    ("reminders", ActionCategory.WRITE): PermissionTier.AUTO_APPROVE,
+    ("reminders", ActionCategory.DELETE): PermissionTier.HARD_BLOCKED,
+    ("reminders", ActionCategory.EXECUTE): PermissionTier.HARD_BLOCKED,
+    ("reminders", ActionCategory.FINANCIAL): PermissionTier.HARD_BLOCKED,
+    # Built-in capability installer — the one built-in that changes the
+    # host. Reading what is installed is as harmless as any other read.
+    # Installing runs pip and a browser download on the user's machine, so
+    # it goes through the approval card every time: the model may only
+    # name an allowlisted capability, but the user decides whether their
+    # computer gets new software. DELETE and EXECUTE are blocked outright
+    # rather than left to confirmation: nothing in this type uninstalls
+    # or runs arbitrary commands, and a spec in those categories reaching
+    # the engine would mean the catalog gained something it never should.
+    ("system", ActionCategory.READ): PermissionTier.AUTO_APPROVE,
+    ("system", ActionCategory.WRITE): PermissionTier.USER_CONFIRM,
+    ("system", ActionCategory.DELETE): PermissionTier.HARD_BLOCKED,
+    ("system", ActionCategory.EXECUTE): PermissionTier.HARD_BLOCKED,
+    ("system", ActionCategory.FINANCIAL): PermissionTier.HARD_BLOCKED,
     # Todoist
     ("todoist", ActionCategory.READ): PermissionTier.AUTO_APPROVE,
     ("todoist", ActionCategory.WRITE): PermissionTier.USER_CONFIRM,

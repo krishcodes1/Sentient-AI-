@@ -20,6 +20,7 @@ from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from core.config import settings
 from core.database import async_session, get_db
 from core.validation import SafeStr
 from models.connector import ConnectorConfig
@@ -267,6 +268,10 @@ class MessageResponse(BaseModel):
     attachments: Optional[List] = None
     input_tokens: Optional[int] = None
     output_tokens: Optional[int] = None
+    cache_read_tokens: Optional[int] = None
+    cache_write_tokens: Optional[int] = None
+    llm_provider: Optional[str] = None
+    llm_model: Optional[str] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -374,6 +379,11 @@ async def _build_tools_and_memory(
             permission_tier=(
                 c.permission_tier.value if c.permission_tier else "user_confirm"
             ),
+            # Two active rows of one type collide on tool name without
+            # these: the model sees a single entry and only the newest row
+            # is reachable (see build_tools).
+            connector_id=str(c.id),
+            display_name=c.display_name,
         )
         for c in connector_rows
     ]
@@ -475,13 +485,23 @@ def _attach_images(
     }
 
 
-def _usage_columns(usage: Optional[Dict[str, Any]]) -> dict[str, Optional[int]]:
-    """Map a runtime usage dict onto the Message columns.
+def _usage_columns(
+    usage: Optional[Dict[str, Any]],
+    provider: Optional[str],
+    model: Optional[str],
+) -> dict[str, Any]:
+    """Map a runtime usage dict, and the provider/model that ran the turn,
+    onto the Message columns.
 
     A turn that reported nothing (a replay-cache hit, a provider that does
     not return counts) stores NULL rather than 0 — "not billed" and "we
     never found out" are different facts, and summing a guessed zero into a
     cost view would quietly understate it.
+
+    Provider and model are required arguments so no persistence path can
+    forget them: without the model a turn's tokens cannot be priced. They
+    are resolved the way the runtime resolves them (user choice, else the
+    server default), so the row names the model that actually answered.
     """
     usage = usage or {}
 
@@ -492,6 +512,11 @@ def _usage_columns(usage: Optional[Dict[str, Any]]) -> dict[str, Optional[int]]:
     return {
         "input_tokens": _count("input_tokens"),
         "output_tokens": _count("output_tokens"),
+        "cache_read_tokens": _count("cache_read_tokens"),
+        "cache_write_tokens": _count("cache_write_tokens"),
+        "llm_provider": (provider or settings.LLM_PROVIDER or "").strip().lower()[:32]
+        or None,
+        "llm_model": (model or settings.LLM_MODEL or "").strip()[:128] or None,
     }
 
 
@@ -754,7 +779,9 @@ async def send_message(
         role=MessageRole.assistant,
         content=agent_response.content,
         tool_calls=agent_response.tool_calls or None,
-        **_usage_columns(agent_response.usage),
+        **_usage_columns(
+            agent_response.usage, current_user.llm_provider, current_user.llm_model
+        ),
     )
     db.add(assistant_message)
     conversation.updated_at = datetime.now(timezone.utc)
@@ -811,6 +838,8 @@ async def _persist_assistant_detached(
     content: str,
     tool_calls: Optional[list],
     usage: Optional[Dict[str, Any]] = None,
+    llm_provider: Optional[str] = None,
+    llm_model: Optional[str] = None,
 ) -> None:
     """Persist an assistant turn outside any request session.
 
@@ -827,7 +856,7 @@ async def _persist_assistant_detached(
                     role=MessageRole.assistant,
                     content=content,
                     tool_calls=tool_calls or None,
-                    **_usage_columns(usage),
+                    **_usage_columns(usage, llm_provider, llm_model),
                 )
             )
             conversation = await session.get(Conversation, conversation_id)
@@ -927,6 +956,8 @@ async def stream_message(
             response.content or "",
             response.tool_calls or None,
             response.usage,
+            user_provider,
+            user_model,
         )
 
     async def event_stream():
@@ -995,7 +1026,7 @@ async def stream_message(
                     role=MessageRole.assistant,
                     content=final_content,
                     tool_calls=tool_calls_payload or None,
-                    **_usage_columns(usage_payload),
+                    **_usage_columns(usage_payload, user_provider, user_model),
                 )
                 db.add(assistant)
                 conversation.updated_at = datetime.now(timezone.utc)
@@ -1030,7 +1061,12 @@ async def stream_message(
                 # done event are covered by on_orphaned above.)
                 asyncio.create_task(
                     _persist_assistant_detached(
-                        conv_id, final_content, tool_calls_payload, usage_payload
+                        conv_id,
+                        final_content,
+                        tool_calls_payload,
+                        usage_payload,
+                        user_provider,
+                        user_model,
                     )
                 )
 
@@ -1117,6 +1153,9 @@ async def _resume_after_approval(
         role=MessageRole.assistant,
         content=agent_response.content,
         tool_calls=agent_response.tool_calls or None,
+        **_usage_columns(
+            agent_response.usage, current_user.llm_provider, current_user.llm_model
+        ),
     )
 
 
@@ -1258,6 +1297,161 @@ def build_decision_applier(app: Any):
         return {"status": "approved" if approved else "denied", "summary": summary}
 
     return apply
+
+
+# Title of the conversation an out-of-band channel (Telegram) writes into.
+# One per user, reused across messages, so the transcript is visible and
+# resumable from the web app like any other conversation.
+TELEGRAM_CONVERSATION_TITLE = "Telegram"
+
+
+def build_chat_applier(app: Any, session_factory: Any = async_session):
+    """Async callback for chat arriving over an out-of-band channel:
+    (user_id, text, new_conversation=False) -> outcome dict. Runs the same
+    turn pipeline as POST /conversations/{id}/messages — rate limit,
+    persisted user message, tools + memory, runtime.chat (prompt guard,
+    tiering, approvals, audit), persisted assistant message with usage —
+    with its own DB session. Returns {"error": str} instead of raising."""
+
+    async def chat(
+        user_id: str, text: str, *, new_conversation: bool = False
+    ) -> Dict[str, Any]:
+        runtime: Optional[AgentRuntime] = getattr(app.state, "agent_runtime", None)
+        if runtime is None:
+            return {"error": "The assistant is not available right now."}
+        content = (text or "").strip()
+        if not content:
+            return {"error": "Message content cannot be empty."}
+        mcp_catalog = getattr(app.state, "mcp_catalog", None)
+
+        async with session_factory() as db:
+            user = (
+                await db.execute(select(User).where(User.id == uuid.UUID(user_id)))
+            ).scalar_one_or_none()
+            if user is None or not user.is_active:
+                return {"error": "Unknown account."}
+            if not _user_rate_limiter.allow(str(user.id), user.rate_limit):
+                return {
+                    "error": (
+                        f"Rate limit exceeded: your account allows "
+                        f"{user.rate_limit} agent messages per minute."
+                    )
+                }
+
+            conversation = None
+            if not new_conversation:
+                conversation = (
+                    await db.execute(
+                        select(Conversation)
+                        .where(
+                            Conversation.user_id == user.id,
+                            Conversation.title == TELEGRAM_CONVERSATION_TITLE,
+                        )
+                        .order_by(Conversation.updated_at.desc())
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+            if conversation is None:
+                conversation = Conversation(
+                    user_id=user.id, title=TELEGRAM_CONVERSATION_TITLE
+                )
+                db.add(conversation)
+                await db.flush()
+
+            db.add(
+                Message(
+                    conversation_id=conversation.id,
+                    role=MessageRole.user,
+                    content=content,
+                )
+            )
+            await db.flush()
+            history_result = await db.execute(
+                select(Message)
+                .where(Message.conversation_id == conversation.id)
+                .order_by(Message.created_at)
+            )
+            history = [
+                {"role": m.role.value, "content": m.content}
+                for m in history_result.scalars().all()
+            ]
+            tools, memory_block = await _build_tools_and_memory(
+                mcp_catalog, user, db
+            )
+            conversation_id = conversation.id
+            provider, model = user.llm_provider, user.llm_model
+            # The user message is durable from here; release the pooled
+            # connection for the (possibly long) turn.
+            await db.commit()
+
+        try:
+            agent_response = await runtime.chat(
+                messages=history,
+                tools=tools,
+                user_id=user_id,
+                conversation_id=str(conversation_id),
+                llm_provider=provider,
+                llm_model=model,
+                memory_block=memory_block,
+            )
+        except ProviderError as exc:
+            # The channel shows the user the error; without this line the
+            # server side had no record that an out-of-band turn failed.
+            logger.warning(
+                "channel_chat_provider_error",
+                conversation_id=str(conversation_id),
+                error=str(exc)[:200],
+            )
+            return {"error": str(exc), "conversation_id": str(conversation_id)}
+
+        async with session_factory() as db:
+            conversation = (
+                await db.execute(
+                    select(Conversation).where(Conversation.id == conversation_id)
+                )
+            ).scalar_one()
+            db.add(
+                Message(
+                    conversation_id=conversation.id,
+                    role=MessageRole.assistant,
+                    content=agent_response.content,
+                    tool_calls=agent_response.tool_calls or None,
+                    **_usage_columns(agent_response.usage, provider, model),
+                )
+            )
+            conversation.updated_at = datetime.now(timezone.utc)
+            await db.commit()
+
+        # Screenshots are delivered to the person as images; the model only
+        # ever saw a placeholder (see runtime.redact_binary_for_model).
+        images = []
+        for tc in agent_response.tool_calls:
+            result = tc.get("result")
+            if (
+                str(tc.get("name", "")).endswith("web.screenshot")
+                and isinstance(result, dict)
+                and str(result.get("image", "")).startswith("data:image/")
+            ):
+                images.append(
+                    {
+                        "data_url": result["image"],
+                        "caption": str(result.get("final_url") or result.get("url") or ""),
+                    }
+                )
+
+        return {
+            "content": agent_response.content,
+            "conversation_id": str(conversation_id),
+            "images": images,
+            "tool_calls": [tc.get("name", "") for tc in agent_response.tool_calls],
+            "pending_approvals": [
+                pa.tool_name for pa in agent_response.pending_approvals
+            ],
+            "blocked": [ba.tool_name for ba in agent_response.blocked_actions],
+            "usage": agent_response.usage,
+        }
+
+    return chat
 
 
 @router.post("/approvals/{action_id}", response_model=ApprovalDecisionResponse)

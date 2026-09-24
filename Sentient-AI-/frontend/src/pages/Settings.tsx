@@ -41,13 +41,17 @@ const PERMISSION_TIERS = [
   { value: "hard_blocked", label: "Hard Blocked", help: "Cannot be enabled by anyone." },
 ];
 
+// Current model ids per provider, checked 2026-09-23. Offering a retired id
+// here means a user can save a model the provider rejects on every turn.
+// Keep in step with backend/services/usage/pricing.py so what can be
+// picked can also be priced.
 const LLM_MODELS: Record<string, string[]> = {
-  anthropic: ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-haiku-4-5-20251001"],
-  openai: ["gpt-4o", "gpt-4o-mini", "o1-preview", "o1"],
-  gemini: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
-  grok: ["grok-3", "grok-3-mini"],
-  deepseek: ["deepseek-chat", "deepseek-reasoner"],
-  groq: ["llama-3.3-70b-versatile", "mixtral-8x7b-32768"],
+  anthropic: ["claude-sonnet-5", "claude-opus-5-5", "claude-haiku-4-5"],
+  openai: ["gpt-5.4-nano", "gpt-5-mini", "gpt-6-luna"],
+  gemini: ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.7-flash", "gemini-3.8-flash"],
+  grok: ["grok-4.3"],
+  deepseek: ["deepseek-flash"],
+  groq: ["openai/gpt-oss-120b"],
   mistral: ["mistral-large-latest", "mistral-small-latest"],
   ollama: ["llama3.2", "llama3.2:1b", "mistral", "codellama", "mixtral"],
 };
@@ -143,7 +147,7 @@ export default function Settings() {
   const [permissionTier, setPermissionTier] = useState("user_confirm");
   const [rateLimit, setRateLimit] = useState(60);
   const [llmProvider, setLlmProvider] = useState("anthropic");
-  const [llmModel, setLlmModel] = useState("claude-sonnet-4-20250514");
+  const [llmModel, setLlmModel] = useState(LLM_MODELS.anthropic[0]);
 
   // Per-section saving + feedback
   const [savingProfile, setSavingProfile] = useState(false);

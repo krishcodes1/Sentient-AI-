@@ -1,5 +1,6 @@
 import { Shield } from "lucide-react";
 import { REDUCED_MOTION_QUERY, useMediaQuery } from "@/hooks/useMediaQuery";
+import { useTheme } from "@/theme";
 
 type Variant = "emblem" | "animated" | "shield";
 
@@ -29,6 +30,7 @@ export default function Brand({
   alt = "SentientAI",
 }: BrandProps) {
   const reducedMotion = useMediaQuery(REDUCED_MOTION_QUERY);
+  const { resolved } = useTheme();
 
   const common: React.CSSProperties = {
     width: size,
@@ -43,7 +45,11 @@ export default function Brand({
 
   // A looping video that cannot be paused is exactly what a reduced-motion
   // preference is asking not to see, so it degrades to the still mark.
-  if (variant === "animated" && !reducedMotion) {
+  //
+  // The video is also the one asset with no alpha channel: it carries its
+  // own dark ground, which reads as a blank disc on a light surface. Only
+  // the dark theme gets the animation; light gets the transparent PNG.
+  if (variant === "animated" && !reducedMotion && resolved === "dark") {
     return (
       <div style={common}>
         <video

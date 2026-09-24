@@ -24,8 +24,17 @@ from api.middleware.security import (
     RequestIdMiddleware,
     SecurityHeadersMiddleware,
 )
-from api.routes import agent, audit, auth, connectors, memory, reminders, telegram
-from services.agent.approvals import DbApprovalStore
+from api.routes import (
+    agent,
+    audit,
+    auth,
+    connectors,
+    memory,
+    reminders,
+    telegram,
+    usage,
+)
+from services.agent.approvals import ApprovalStore, DbApprovalStore
 from services.agent.runtime import AgentRuntime
 from services.agent.tool_registry import (
     ConnectorToolExecutor,
@@ -74,7 +83,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
     app.state.telegram = telegram_service
 
-    approval_store = DbApprovalStore(session_factory=async_session)
+    approval_store: ApprovalStore = DbApprovalStore(session_factory=async_session)
     if telegram_service is not None:
         approval_store = NotifyingApprovalStore(
             approval_store, notify=telegram_service.notify_pending
@@ -105,6 +114,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # The decision callback needs app.state (runtime + MCP catalog),
         # so it is wired after both exist.
         telegram_service.decide = agent.build_decision_applier(app)
+        telegram_service.chat = agent.build_chat_applier(app)
         await telegram_service.start()
         logger.info("telegram_approvals_enabled")
 
@@ -175,6 +185,7 @@ app.include_router(audit.router, prefix="/api")
 app.include_router(memory.router, prefix="/api")
 app.include_router(reminders.router, prefix="/api")
 app.include_router(telegram.router, prefix="/api")
+app.include_router(usage.router, prefix="/api")
 
 
 @app.get("/")

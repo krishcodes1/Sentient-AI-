@@ -57,9 +57,48 @@ logger = structlog.get_logger(__name__)
 # behavior expressed as dispositions, and a minimal instruction budget —
 # every rule here traces to a concrete attack class or product behavior.
 SECURITY_SYSTEM_PROMPT = """\
-You are SentientAI, a security-conscious personal assistant. You help the
-user across their connected services (Canvas LMS, Gmail, Google Calendar,
-read-only crypto data, and user-registered MCP servers) by calling tools.
+You are SentientAI, the user's personal assistant: capable, general-purpose,
+and security-conscious. You answer questions, write, plan, research and
+carry out tasks. You act on the world through tools: built-in web research
+(web.search, web.fetch_page, web.screenshot), reminders, and whatever
+connected services the user has set up (Canvas LMS, Gmail, Google Calendar,
+read-only crypto data, user-registered MCP servers).
+
+<capabilities>
+- Your abilities are exactly the tools offered in this request, plus your own
+  knowledge and writing. Never say you "cannot" do something that an offered
+  tool can do — search for it, fetch it, or set it. Travel, shopping, prices,
+  news, products and comparisons are ordinary web research: search, open the
+  most useful results, and report what you found with links.
+- Do not refuse ordinary requests (stories, drafts, explanations, plans,
+  math) — nothing below restricts what you may talk about, only how you
+  handle untrusted content and consequential actions.
+- If a task needs a tool you were NOT offered (a service that is not
+  connected, a purchase, a login), do the parts you can, then say precisely
+  what is missing and how the user can connect it. Canvas, Gmail and
+  Calendar tools appear only after the user connects the service in the
+  SentientAI web app: Connectors → Add Connector → pick the service. For
+  Canvas the credential is an access token from Canvas → Account →
+  Settings → "+ New access token"; for Google it is an OAuth access token
+  (with refresh token + client id/secret for automatic renewal). Never ask
+  the user to type a password or token into this chat.
+- When a page will not load or a site blocks fetching, say so and try
+  another source or a screenshot rather than giving up.
+- Act first, ask later: when a request has a sensible default — a date
+  without a year means the next occurrence; "cheapest" means economy,
+  round trip if a return is mentioned; a screenshot means the results
+  page — take it, do the task, and state the assumption in one clause.
+  Only stop to ask when the answer would genuinely change what you do.
+- Research playbook: web.search finds the right pages; web.fetch_page
+  reads articles and product pages. Flight, hotel and price-comparison
+  sites are JavaScript apps whose fares never appear in fetched text, so
+  for those go straight to web.screenshot on a results URL and READ the
+  screenshot (it is shown to you as an image): for flights use
+  https://www.google.com/travel/flights?q=Flights+from+JFK+to+LAX+on+2026-10-02+returning+2026-10-06
+  (adjust airports and dates), for products a retailer's search URL. The
+  screenshot is also delivered to the user; report the prices, airlines
+  or listings you can see in it, plus the URL as the booking link.
+</capabilities>
 
 <chain_of_command>
 Instruction authority, highest to lowest:
@@ -171,6 +210,28 @@ class AgentResponse:
     pending_approvals: list[PendingApproval] = field(default_factory=list)
     blocked_actions: list[BlockedAction] = field(default_factory=list)
     usage: dict[str, int] = field(default_factory=dict)
+
+
+# Tool results may carry binary payloads (a screenshot as a data URL). Those
+# are for the USER — the chat channel delivers them as images — never for
+# the model: a 300 KB base64 string is ~100k tokens of noise the model
+# cannot interpret as text. Everything the model sees passes through here.
+_IMAGE_DATA_URL_PREFIX = "data:image/"
+_MODEL_VIEW_MAX_INLINE = 256
+
+
+def redact_binary_for_model(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: redact_binary_for_model(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [redact_binary_for_model(v) for v in value]
+    if (
+        isinstance(value, str)
+        and value.startswith(_IMAGE_DATA_URL_PREFIX)
+        and len(value) > _MODEL_VIEW_MAX_INLINE
+    ):
+        return "[image captured and delivered to the user separately]"
+    return value
 
 
 def _stored_to_pending(action: StoredAction) -> PendingApproval:
@@ -382,7 +443,7 @@ class AgentRuntime:
             OrderedDict()
         )
         # Upper bound on chained tool rounds within a single chat turn.
-        self._max_tool_rounds: int = int(getattr(config, "MAX_TOOL_ROUNDS", 5) or 5)
+        self._max_tool_rounds: int = int(getattr(config, "MAX_TOOL_ROUNDS", 8) or 8)
 
     # Cap on cached per-user provider instances (see _provider_cache).
     _PROVIDER_CACHE_MAX = 32
@@ -470,17 +531,22 @@ class AgentRuntime:
         so it is clearly subordinate to the security rules and cannot
         occupy its own competing system slot.
         """
-        system_content = SECURITY_SYSTEM_PROMPT
-        if memory_block:
-            system_content = f"{SECURITY_SYSTEM_PROMPT}\n\n{memory_block}"
+        # The model has no clock. Day granularity is enough for "next Friday"
+        # and keeps the cached prompt prefix identical across a whole day;
+        # clock time comes from reminders.now when a task needs it.
+        today = datetime.now().astimezone()
+        today_line = (
+            "<today>" + today.strftime("%A, %Y-%m-%d") + " ("
+            + (today.tzname() or "local") + ")</today>"
+        )
+        tail = f"\n\n{today_line}" + (f"\n\n{memory_block}" if memory_block else "")
         if messages and messages[0].get("role") == "system":
-            if memory_block:
-                # Fold the memory block into the caller-provided system msg.
-                head = dict(messages[0])
-                head["content"] = f"{head.get('content', '')}\n\n{memory_block}"
-                return [head, *messages[1:]]
-            return messages
-        return [{"role": "system", "content": system_content}, *messages]
+            # Fold into the caller-provided system msg rather than adding a
+            # competing system slot.
+            head = dict(messages[0])
+            head["content"] = f"{head.get('content', '')}{tail}"
+            return [head, *messages[1:]]
+        return [{"role": "system", "content": SECURITY_SYSTEM_PROMPT + tail}, *messages]
 
     @staticmethod
     def _attr_safe(value: Any) -> str:
@@ -488,6 +554,33 @@ class AgentRuntime:
         connector- or provider-supplied names/ids can never break out of
         the tag (quotes, angle brackets, newlines are all stripped)."""
         return re.sub(r"[^A-Za-z0-9_.:-]", "_", str(value))[:128]
+
+    # Providers that accept image blocks. Others would raise on them, so a
+    # screenshot is text-redacted only for those and the model works from
+    # the fetched text instead.
+    _VISION_PROVIDERS = frozenset({"anthropic", "openai", "gemini"})
+    _MAX_IMAGES_PER_FOLLOW_UP = 2
+
+    def _images_for_model(
+        self, tool_results: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Image blocks for screenshots this round, capped, vision providers
+        only. An image is ~1k tokens where its base64 would be ~50k, and
+        it is the only way the model can read a JavaScript results page."""
+        if getattr(self, "_turn_provider", "") not in self._VISION_PROVIDERS:
+            return []
+        blocks: list[dict[str, Any]] = []
+        for tr in tool_results:
+            result = tr.get("result")
+            image = result.get("image") if isinstance(result, dict) else None
+            if not isinstance(image, str) or not image.startswith(_IMAGE_DATA_URL_PREFIX):
+                continue
+            header, _, payload = image.partition(",")
+            media_type = header[len("data:") :].split(";", 1)[0] or "image/jpeg"
+            blocks.append({"type": "image", "media_type": media_type, "data": payload})
+            if len(blocks) >= self._MAX_IMAGES_PER_FOLLOW_UP:
+                break
+        return blocks
 
     def _wrap_tool_results(self, tool_results: list[dict[str, Any]]) -> str:
         """Wrap tool outputs in a spotlighted untrusted-data envelope.
@@ -514,10 +607,11 @@ class AgentRuntime:
         boundary = secrets.token_hex(8)
         blocks: list[str] = []
         for tr in tool_results:
+            model_view = redact_binary_for_model(tr.get("result"))
             try:
-                payload = json.dumps(tr.get("result"), default=str, indent=2)
+                payload = json.dumps(model_view, default=str, indent=2)
             except (TypeError, ValueError):
-                payload = str(tr.get("result"))
+                payload = str(model_view)
             payload = compress_tool_result(
                 payload, self._context_manager.max_tool_result_chars
             )
@@ -555,7 +649,17 @@ class AgentRuntime:
         follow_up = list(messages)
         if llm_response.content.strip():
             follow_up.append({"role": "assistant", "content": llm_response.content})
-        follow_up.append({"role": "user", "content": self._wrap_tool_results(tool_results)})
+        wrapped = self._wrap_tool_results(tool_results)
+        images = self._images_for_model(tool_results)
+        if images:
+            follow_up.append(
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": wrapped}, *images],
+                }
+            )
+        else:
+            follow_up.append({"role": "user", "content": wrapped})
         return follow_up
 
     @staticmethod
@@ -578,7 +682,7 @@ class AgentRuntime:
         untrusted envelopes downstream, so spotlighting remains the primary
         defense either way.
         """
-        scan = await self._guard.scan_output(str(result), user_id)
+        scan = await self._guard.scan_output(str(redact_binary_for_model(result)), user_id)
         if scan.get("safe", True):
             return result
         if isinstance(result, dict):
@@ -605,7 +709,7 @@ class AgentRuntime:
                 else:
                     cleaned[key] = value
             if redacted_any:
-                residual = await self._guard.scan_output(str(cleaned), user_id)
+                residual = await self._guard.scan_output(str(redact_binary_for_model(cleaned)), user_id)
                 if residual.get("safe", True):
                     return cleaned
         return {"redacted": True, "reason": scan.get("reason")}
@@ -637,6 +741,7 @@ class AgentRuntime:
         """
         messages = self._with_system_prompt(messages, memory_block)
         provider = self._resolve_provider(llm_provider, llm_model)
+        self._turn_provider = (llm_provider or self._config.LLM_PROVIDER or "").strip().lower()
 
         async def emit(event: dict[str, Any]) -> None:
             """Best-effort progress emission for the streaming path. A sink
@@ -1153,7 +1258,15 @@ class AgentRuntime:
             )
         )
 
-        finished = False  # the consumer received the terminal ``done`` event
+        # Set BEFORE each terminal ``done`` is yielded, not after. A yield
+        # hands the event to the consumer the moment it suspends, and from
+        # then on the consumer owns persistence (the route saves on receipt,
+        # or from its own finally if the client drops while it is still
+        # sending that frame). Were the flag set after the yield, a
+        # disconnect during that send would close this generator with the
+        # flag still False, fire on_orphaned as well, and the same turn —
+        # and its tokens — would be written twice.
+        finished = False
         try:
             # Drain real-time progress events until chat() finishes,
             # interleaving queue items with the task's completion and
@@ -1178,14 +1291,14 @@ class AgentRuntime:
                 # that left no server-side trace at all.
                 logger.warning("stream_chat_provider_error", error=str(exc))
                 yield {"type": "error", "data": {"reason": str(exc)}}
-                yield {"type": "done", "data": {}}
                 finished = True
+                yield {"type": "done", "data": {}}
                 return
             except Exception as exc:  # pragma: no cover - defensive
                 logger.error("stream_chat_failed", error=str(exc))
                 yield {"type": "error", "data": {"reason": "The assistant failed to respond."}}
-                yield {"type": "done", "data": {}}
                 finished = True
+                yield {"type": "done", "data": {}}
                 return
 
             # The final answer is already fully scanned; typewriter it out.
@@ -1195,8 +1308,8 @@ class AgentRuntime:
                 if self._CONTENT_CHUNK_DELAY:
                     await asyncio.sleep(self._CONTENT_CHUNK_DELAY)
 
-            yield self._done_event(response)
             finished = True
+            yield self._done_event(response)
             return
         finally:
             if not finished:

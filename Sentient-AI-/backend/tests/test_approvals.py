@@ -343,7 +343,10 @@ async def test_runtime_injects_system_prompt_and_wraps_tool_results(session_fact
 
     first_call, follow_up_call = seen_messages
     assert first_call[0]["role"] == "system"
-    assert first_call[0]["content"] == SECURITY_SYSTEM_PROMPT
+    # The policy leads the system message; the runtime appends the day so
+    # the model can resolve relative dates ("next Friday") without asking.
+    assert first_call[0]["content"].startswith(SECURITY_SYSTEM_PROMPT)
+    assert "<today>" in first_call[0]["content"]
 
     roles = [m["role"] for m in follow_up_call]
     assert "tool" not in roles

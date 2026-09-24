@@ -213,27 +213,72 @@ async def test_usage_accumulates_across_tool_rounds():
     assert response.usage == {"input_tokens": 1600, "output_tokens": 60}
 
 
-@pytest.mark.asyncio
-async def test_cache_counters_ride_along_in_usage():
-    provider = RecordingProvider(
+def _cached_rounds_provider():
+    from services.agent.providers import ToolCall
+
+    return RecordingProvider(
         [
             LLMResponse(
-                content="hi",
+                content="",
+                tool_calls=[ToolCall(id="t1", name="canvas.get_courses", arguments={})],
                 usage={
-                    "input_tokens": 80,
-                    "output_tokens": 5,
-                    "cache_read_input_tokens": 640,
+                    "input_tokens": 2000,
+                    "output_tokens": 30,
+                    "cache_read_tokens": 0,
+                    "cache_write_tokens": 1800,
                 },
-            )
+            ),
+            LLMResponse(
+                content="Here they are.",
+                usage={
+                    "input_tokens": 2400,
+                    "output_tokens": 50,
+                    "cache_read_tokens": 1800,
+                    "cache_write_tokens": 0,
+                },
+            ),
         ]
     )
-    runtime, _ = _runtime(provider, guard=RecordingGuard())
+
+
+_CACHED_TURN_TOTAL = {
+    "input_tokens": 4400,
+    "output_tokens": 80,
+    "cache_read_tokens": 1800,
+    "cache_write_tokens": 1800,
+}
+
+
+@pytest.mark.asyncio
+async def test_cache_counters_are_summed_across_tool_rounds():
+    """Round one writes the prefix to the cache, round two reads it back;
+    the turn's usage has to carry both, or its cost cannot be priced."""
+    runtime, _ = _runtime(_cached_rounds_provider(), guard=RecordingGuard())
 
     response = await runtime.chat(
-        messages=[{"role": "user", "content": "hi"}], tools=[], user_id="u1"
+        messages=[{"role": "user", "content": "my courses?"}],
+        tools=build_tools([ConnectorSpec("canvas")]),
+        user_id="u1",
     )
 
-    assert response.usage["cache_read_input_tokens"] == 640
+    assert response.usage == _CACHED_TURN_TOTAL
+
+
+@pytest.mark.asyncio
+async def test_stream_done_event_carries_the_cache_counters():
+    runtime, _ = _runtime(_cached_rounds_provider(), guard=RecordingGuard())
+
+    events = [
+        e
+        async for e in runtime.stream_chat(
+            messages=[{"role": "user", "content": "my courses?"}],
+            tools=build_tools([ConnectorSpec("canvas")]),
+            user_id="u1",
+        )
+    ]
+
+    assert events[-1]["type"] == "done"
+    assert events[-1]["data"]["usage"] == _CACHED_TURN_TOTAL
 
 
 @pytest.mark.asyncio

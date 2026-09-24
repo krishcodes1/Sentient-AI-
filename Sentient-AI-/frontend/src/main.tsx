@@ -4,7 +4,11 @@ import { BrowserRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import App from "./App";
 import ErrorBoundary from "./components/ErrorBoundary";
-import { ThemeProvider } from "./theme";
+// Imported through the alias, exactly as every consumer does: a relative
+// specifier here resolves to a second module instance, which means a
+// second React context — the provider fills one and useTheme reads the
+// other, so every consumer throws "must be used inside <ThemeProvider>".
+import { ThemeProvider } from "@/theme";
 // Self-hosted fonts (imported here, not in globals.css, because Tailwind v4
 // mangles CSS @import ordering). Weights match actual usage: Inter 400-700,
 // JetBrains Mono 400-600 (.mono-num, .mono-tag, .eyebrow/.metric).

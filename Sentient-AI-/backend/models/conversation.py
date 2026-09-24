@@ -137,6 +137,32 @@ class Message(Base):
         Integer,
         nullable=True,
     )
+    # The cached share of input_tokens (a subset, not an addition), and the
+    # share written to the cache. Kept apart because they bill at very
+    # different rates — a cache read is ~10% of fresh input, an Anthropic
+    # cache write 125% — so a cost estimate needs the split. NULL where the
+    # provider never reported it.
+    cache_read_tokens: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    cache_write_tokens: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    # The provider/model that produced an assistant turn. The user's
+    # Settings choice can change between turns, so pricing a past turn by
+    # the account's CURRENT model would misattribute it; NULL on rows
+    # written before this was recorded, which cost estimates treat as
+    # unpriced rather than guessing.
+    llm_provider: Mapped[Optional[str]] = mapped_column(
+        String(32),
+        nullable=True,
+    )
+    llm_model: Mapped[Optional[str]] = mapped_column(
+        String(128),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),

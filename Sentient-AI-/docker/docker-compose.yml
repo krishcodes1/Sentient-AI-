@@ -44,6 +44,12 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://sentientai:sentientai@db:5432/sentientai
       REDIS_URL: redis://redis:6379/0
+      # The frontend's Vite proxy rewrites Host to its target (changeOrigin),
+      # so /api requests arrive as `backend:8000`; without the service name
+      # here TrustedHostMiddleware answers every one with 400 "Invalid host
+      # header". This replaces any ALLOWED_HOSTS in backend/.env for this
+      # stack; localhost/127.0.0.1 keep the published :8000 port working.
+      ALLOWED_HOSTS: '["localhost","127.0.0.1","backend"]'
     depends_on:
       db:
         condition: service_healthy
@@ -67,6 +73,9 @@ services:
       - backend
     volumes:
       - ../frontend:/app
+      # Seeded from the image only when first created, then reused; the dev
+      # image's entrypoint reinstalls into it when package-lock.json changes
+      # (see Dockerfile.frontend).
       - /app/node_modules
 
 volumes:

@@ -454,7 +454,7 @@ async def test_openai_complete_normalises_content_model_and_usage(fake_openai):
     assert resp.content == "hello there"
     assert resp.tool_calls == []
     assert resp.model == "gpt-4o-2024-08-06"
-    assert resp.usage == {"input_tokens": 12, "output_tokens": 4}
+    assert resp.usage == {"input_tokens": 12, "output_tokens": 4, "cache_write_tokens": 0}
     # Messages are passed through untouched (the OpenAI schema already
     # carries the system role).
     assert provider._client.create_calls[0]["messages"] == [
@@ -520,7 +520,7 @@ async def test_openai_missing_usage_and_model_fall_back(fake_openai):
 
     resp = await provider.complete([{"role": "user", "content": "hi"}])
 
-    assert resp.usage == {"input_tokens": 0, "output_tokens": 0}
+    assert resp.usage == {"input_tokens": 0, "output_tokens": 0, "cache_write_tokens": 0}
     assert resp.model == "gpt-4o"
 
 
@@ -666,7 +666,7 @@ async def test_gemini_parses_candidates_parts_and_function_calls(transport):
         ToolCall(id="gemini_3", name="ping", arguments={}),
     ]
     assert resp.model == "gemini-2.5-flash"
-    assert resp.usage == {"input_tokens": 20, "output_tokens": 6}
+    assert resp.usage == {"input_tokens": 20, "output_tokens": 6, "cache_write_tokens": 0}
     assert str(transport.last_request.url).endswith(
         "/v1beta/models/gemini-2.5-flash:generateContent"
     )
@@ -906,7 +906,7 @@ async def test_ollama_complete_parses_message_and_tool_calls(transport):
         ToolCall(id="ollama_1", name="ping", arguments={}),
     ]
     assert resp.model == "llama3.2:latest"
-    assert resp.usage == {"input_tokens": 9, "output_tokens": 3}
+    assert resp.usage == {"input_tokens": 9, "output_tokens": 3, "cache_write_tokens": 0}
     await provider.aclose()
 
 
@@ -934,7 +934,7 @@ async def test_ollama_missing_message_fields_default_safely(transport):
     assert resp.content == ""
     assert resp.tool_calls == []
     assert resp.model == "llama3.2"
-    assert resp.usage == {"input_tokens": 0, "output_tokens": 0}
+    assert resp.usage == {"input_tokens": 0, "output_tokens": 0, "cache_write_tokens": 0}
     await provider.aclose()
 
 
@@ -1249,21 +1249,26 @@ async def test_anthropic_marks_one_cache_breakpoint_on_system_and_on_tools(
 
 
 @pytest.mark.asyncio
-async def test_anthropic_reports_cache_token_counts_when_the_api_sends_them(
-    fake_anthropic,
-):
+async def test_anthropic_input_count_includes_the_cached_prefix(fake_anthropic):
+    """Anthropic's own input_tokens is only the part after the last cache
+    breakpoint. The normalised count is the whole prompt, so it compares
+    with every other provider's and a warm cache does not hide the prompt."""
     provider = AnthropicProvider(api_key="sk-ant-secret")
     usage = _AnthropicUsage(input_tokens=40, output_tokens=9)
     usage.cache_read_input_tokens = 610
-    usage.cache_creation_input_tokens = 0
+    usage.cache_creation_input_tokens = 150
     provider._client.response = _AnthropicResponse(
         content=[_TextBlock(text="hi")], usage=usage
     )
 
     resp = await provider.complete([{"role": "user", "content": "hi"}])
 
-    assert resp.usage["cache_read_input_tokens"] == 610
-    assert resp.usage["cache_creation_input_tokens"] == 0
+    assert resp.usage == {
+        "input_tokens": 800,
+        "output_tokens": 9,
+        "cache_read_tokens": 610,
+        "cache_write_tokens": 150,
+    }
 
 
 @pytest.mark.asyncio
@@ -1274,7 +1279,8 @@ async def test_anthropic_omits_cache_counters_the_api_did_not_send(fake_anthropi
 
     resp = await provider.complete([{"role": "user", "content": "hi"}])
 
-    assert "cache_read_input_tokens" not in resp.usage
+    assert "cache_read_tokens" not in resp.usage
+    assert "cache_write_tokens" not in resp.usage
 
 
 @pytest.mark.asyncio
@@ -1288,11 +1294,29 @@ async def test_openai_surfaces_its_automatic_cache_counter(fake_openai):
 
     resp = await provider.complete([{"role": "user", "content": "hi"}])
 
+    # prompt_tokens already includes the cached share: taken as-is.
     assert resp.usage == {
         "input_tokens": 1200,
         "output_tokens": 8,
-        "cache_read_input_tokens": 1024,
+        "cache_read_tokens": 1024,
+        "cache_write_tokens": 0,
     }
+
+
+@pytest.mark.asyncio
+async def test_deepseek_cache_hit_counter_is_read_as_cache_reads(fake_openai):
+    """DeepSeek reports cache hits in its own field, not prompt_tokens_details."""
+    provider = OpenAIProvider(api_key="sk-secret")
+    usage = _OAIUsage(prompt_tokens=5000, completion_tokens=20)
+    usage.prompt_cache_hit_tokens = 4608
+    provider._client.response = _OAIResponse(
+        choices=[_OAIChoice(_OAIMessage(content="hi"))], usage=usage
+    )
+
+    resp = await provider.complete([{"role": "user", "content": "hi"}])
+
+    assert resp.usage["input_tokens"] == 5000
+    assert resp.usage["cache_read_tokens"] == 4608
 
 
 @pytest.mark.asyncio
@@ -1312,5 +1336,35 @@ async def test_gemini_surfaces_its_implicit_cache_counter(transport):
 
     resp = await provider.complete([{"role": "user", "content": "hi"}])
 
-    assert resp.usage["cache_read_input_tokens"] == 640
+    # promptTokenCount already includes the cached share.
+    assert resp.usage == {
+        "input_tokens": 900,
+        "output_tokens": 12,
+        "cache_read_tokens": 640,
+        "cache_write_tokens": 0,
+    }
+    await provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_gemini_thinking_tokens_count_as_output(transport):
+    """2.5+ models bill their thinking as output, but report it apart from
+    candidatesTokenCount."""
+    provider = GeminiProvider(api_key="g-secret")
+    transport.responder = lambda request: httpx.Response(
+        200,
+        json={
+            "candidates": [{"content": {"parts": [{"text": "ok"}]}}],
+            "usageMetadata": {
+                "promptTokenCount": 300,
+                "candidatesTokenCount": 40,
+                "thoughtsTokenCount": 1100,
+            },
+        },
+    )
+
+    resp = await provider.complete([{"role": "user", "content": "hi"}])
+
+    assert resp.usage["output_tokens"] == 1140
+    assert "cache_read_tokens" not in resp.usage
     await provider.aclose()

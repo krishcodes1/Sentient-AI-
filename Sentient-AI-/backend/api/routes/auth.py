@@ -382,19 +382,22 @@ async def logout(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    """Record that this session ended.
+    """End the session server-side and record that it ended.
 
-    Sessions are stateless JWTs, so the client discarding the token is what
-    ends the session in practice; this endpoint exists because the audit
-    chain needs the bookend. Without it a reviewer can see when an account
-    was signed into but never when the operator stepped away, which is half
-    of any "who had access, when" question.
+    Two things have to happen and neither substitutes for the other.
 
-    It does NOT revoke the token — the bearer still holds a signed
-    credential until it expires. Revocation across every device is what
-    changing the password does (it bumps ``token_epoch``); say so rather
-    than implying this button is more than it is.
+    Revocation: a client that merely forgets its token leaves a signed
+    credential valid for the rest of TOKEN_EXPIRE_MINUTES, which is the
+    window a copied token is used in. Bumping ``token_epoch`` invalidates
+    every outstanding JWT for the account immediately — so signing out on
+    one device signs out all of them, the right default for a single-token
+    scheme with no per-device sessions.
+
+    Audit: the chain needs the bookend. Without it a reviewer can see when
+    an account was signed into but never when the operator stepped away,
+    which is half of any "who had access, when" question.
     """
+    current_user.token_epoch = (current_user.token_epoch or 0) + 1
     await append_auth_event(
         db,
         user_id=current_user.id,
@@ -402,6 +405,7 @@ async def logout(
         status=AuditStatus.approved,
         endpoint="/api/auth/logout",
     )
+    await db.flush()
 
 
 @router.get("/me", response_model=UserResponse)
@@ -506,40 +510,6 @@ async def change_password(
         endpoint="/api/auth/password",
         reason="all outstanding tokens revoked",
     )
-    await db.flush()
-
-
-@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
-async def logout(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-) -> None:
-    """Sign out server-side by bumping ``token_epoch``.
-
-    Client-side sign-out alone leaves the access token valid until it
-    expires (up to TOKEN_EXPIRE_MINUTES); this revokes every outstanding
-    JWT for the account the same way a password change does. Signing out
-    on one device therefore signs out all of them — the right default for
-    a single-token scheme with no per-device sessions.
-    """
-    current_user.token_epoch = (current_user.token_epoch or 0) + 1
-    await db.flush()
-
-
-@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
-async def logout(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-) -> None:
-    """Sign out server-side by bumping ``token_epoch``.
-
-    Client-side sign-out alone leaves the access token valid until it
-    expires (up to TOKEN_EXPIRE_MINUTES); this revokes every outstanding
-    JWT for the account the same way a password change does. Signing out
-    on one device therefore signs out all of them — the right default for
-    a single-token scheme with no per-device sessions.
-    """
-    current_user.token_epoch = (current_user.token_epoch or 0) + 1
     await db.flush()
 
 
