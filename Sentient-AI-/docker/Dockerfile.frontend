@@ -1,14 +1,145 @@
-FROM node:20-alpine
+# syntax=docker/dockerfile:1
+# Builds the frontend image: node:20-alpine after `npm ci`, split into a `dev` stage (Vite
+# dev server with an entrypoint that resyncs the node_modules volume), a `build` stage
+# (`npm run build`) and a `prod` stage (nginx serving dist/ with an /api reverse proxy).
+#
+# Why it exists: dev and prod share one dependency install so they cannot drift, and the
+# nginx config with its security headers and the sync-node-modules script are inlined
+# here because the build context is ../frontend, which cannot COPY files from docker/.
+#
+# Multi-stage frontend image.
+#   dev  — Vite dev server, source bind-mounted by docker-compose.yml
+#   prod — `npm run build` output served by nginx with an /api reverse
+#          proxy to the backend service
+# The dev compose builds `target: dev`; docker-compose.prod.yml builds
+# `target: prod`. The nginx config is inlined below (heredoc) because the
+# build context is ../frontend, which cannot COPY files from docker/.
+
+FROM node:20-alpine AS base
 
 WORKDIR /app
 
-# Install dependencies
-COPY package.json package-lock.json* ./
-RUN npm install
+# Install dependencies. `npm ci` against the committed lockfile makes the
+# image reproducible; a plain `npm install` could silently resolve
+# different versions on every build.
+COPY package.json package-lock.json ./
+RUN npm ci
 
 # Copy application code
 COPY . .
 
+# ── Development ──────────────────────────────────────────────────────
+FROM base AS dev
+
+# docker-compose.yml bind-mounts the source over /app and keeps
+# node_modules in an anonymous volume. Docker seeds that volume from this
+# image only when the volume is first created and then reuses it across
+# `up --build` and container recreation, so a dependency added to
+# package-lock.json afterwards never reaches it and Vite fails to resolve
+# the import. The entrypoint therefore compares the bind-mounted lockfile
+# with a stamp kept inside the volume and reinstalls when they differ. The
+# stamp is written only after `npm ci` succeeds, so a failed install is
+# retried on the next start. `npm ci` (npm 10, shipped with node:20)
+# empties node_modules rather than deleting the directory, which is what
+# lets it run against the volume's mount point.
+COPY --chmod=0755 <<'EOF' /usr/local/bin/sync-node-modules
+#!/bin/sh
+set -e
+stamp=node_modules/.package-lock.sha256
+want="$(sha256sum package-lock.json | cut -d ' ' -f 1)"
+if [ "$(cat "$stamp" 2>/dev/null)" != "$want" ]; then
+    echo "sync-node-modules: node_modules does not match package-lock.json; running npm ci" >&2
+    npm ci --no-audit --no-fund
+    echo "$want" > "$stamp"
+fi
+exec "$@"
+EOF
+
+# The image's own node_modules was just installed from this lockfile, so a
+# volume freshly seeded from it starts in sync and skips the reinstall.
+RUN sha256sum package-lock.json | cut -d ' ' -f 1 > node_modules/.package-lock.sha256
+
 EXPOSE 3000
 
+ENTRYPOINT ["/usr/local/bin/sync-node-modules"]
 CMD ["npx", "vite", "--host", "0.0.0.0"]
+
+# ── Production build ─────────────────────────────────────────────────
+FROM base AS build
+
+RUN npm run build
+
+# ── Production runtime ───────────────────────────────────────────────
+FROM nginx:1.27-alpine AS prod
+
+COPY --from=build /app/dist /usr/share/nginx/html
+
+COPY <<'EOF' /etc/nginx/conf.d/default.conf
+server {
+    listen 80;
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # SPA fallback — client-side routing
+    location / {
+        try_files $uri $uri/ /index.html;
+
+        # The API hardens its own responses; the document nginx serves was
+        # getting nothing, and it is the surface that matters most — the
+        # approval UI is where a tool call is authorised, so a page that
+        # can be framed is a page where a click meant for something else
+        # approves an action.
+        #
+        # These live in `location /` rather than at server level on
+        # purpose: add_header appends to PROXIED responses too, so a
+        # server-level copy would emit a second Content-Security-Policy
+        # alongside the backend's on every /api/ response, and browsers
+        # enforce the intersection of the two.
+        #
+        # `always` because nginx otherwise drops add_header on error
+        # responses — precisely the ones an attack provokes.
+        add_header X-Frame-Options "DENY" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+        # Mirrors the API's policy with the differences a built SPA needs:
+        # the bundler inlines a style block, and connect-src has to allow
+        # the browser to call the API and hold the SSE stream open on this
+        # same origin (the /api/ proxy below). frame-ancestors is the real
+        # clickjacking control; X-Frame-Options above is its legacy twin.
+        # HSTS is deliberately absent: this container is reached over plain
+        # HTTP inside the compose network, so the TLS terminator in front
+        # of it is what should assert it.
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'" always;
+    }
+
+    # Reverse proxy to the FastAPI backend
+    location /api/ {
+        proxy_pass http://backend:8000;
+        proxy_http_version 1.1;
+        # The client's Host, unchanged, so the backend's Host check still
+        # means something: its ALLOWED_HOSTS must list the public hostname
+        # (see docker-compose.prod.yml), not this proxy's upstream name.
+        proxy_set_header Host $host;
+        # Overwrite (never append) so clients cannot spoof the IP the
+        # backend rate limiter reads from X-Forwarded-For.
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # SSE agent streams: the backend heartbeats every 15s, but a slow
+        # turn must survive longer gaps than nginx's 60s default, and the
+        # stream must not be buffered (the backend also sends
+        # X-Accel-Buffering: no).
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+        proxy_buffering off;
+    }
+}
+EOF
+
+EXPOSE 80
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+    CMD wget -q -O /dev/null http://127.0.0.1/ || exit 1

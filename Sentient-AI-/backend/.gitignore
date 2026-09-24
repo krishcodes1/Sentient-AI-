@@ -1,0 +1,4 @@
+# Local SQLite databases used for ad-hoc verification runs (the real
+# deployment uses Postgres via docker compose).
+*.db
+dev_verify.db

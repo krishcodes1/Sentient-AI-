@@ -1,3 +1,13 @@
+"""Declares the ``audit_logs`` table: one row per audited connector or tool
+action with its status, reasoning, request data and the hash-chain fields
+(``seq``, ``integrity_hash``, ``previous_hash``).
+
+Why it exists: The audit chain's tamper evidence depends on these exact
+columns, a monotonic per-user ``seq`` for deterministic order and a keyed hash
+linked to the previous row, so services.audit, the audit routes and
+scripts/verify_audit_log all read and write the same mapping.
+"""
+
 from __future__ import annotations
 
 import enum
@@ -5,8 +15,18 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
 
-from sqlalchemy import DateTime, Enum, Float, ForeignKey, String, Text
-from sqlalchemy.dialects.postgresql import JSON, UUID
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    DateTime,
+    Enum,
+    Float,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    Uuid,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from core.database import Base
@@ -20,14 +40,18 @@ class AuditStatus(str, enum.Enum):
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
+    __table_args__ = (
+        Index("ix_audit_logs_user_id_seq", "user_id", "seq"),
+        Index("ix_audit_logs_user_id_timestamp", "user_id", "timestamp"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
+        Uuid(),
         primary_key=True,
         default=uuid.uuid4,
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
+        Uuid(),
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
@@ -36,6 +60,17 @@ class AuditLog(Base):
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
         nullable=False,
+        index=True,
+    )
+    # Monotonic per-user sequence number assigned at append time. The hash
+    # chain needs a deterministic order: two rows written in the same
+    # millisecond make ORDER BY timestamp ambiguous, which both weakens
+    # verification and can produce spurious chain failures. Nullable because
+    # rows written before this column existed have no seq (those are also
+    # the rows carrying legacy unkeyed hashes); every new write sets it.
+    seq: Mapped[Optional[int]] = mapped_column(
+        BigInteger,
+        nullable=True,
         index=True,
     )
     connector_name: Mapped[str] = mapped_column(

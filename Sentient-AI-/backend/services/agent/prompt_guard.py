@@ -1,8 +1,20 @@
-"""
-Multi-layer prompt injection defense for SentientAI.
+"""Scans text for prompt-injection patterns, on the raw bytes and on a de-
+obfuscated form, and reports a threat level.
+
+Why it exists: The runtime scans user input, tool output and model output, and
+the memory service screens saved facts; keeping the patterns and the
+normalisation in one place means every path sees the same defenses.
+
+Multi-layer prompt injection defense for Crawler AI.
 
 Provides pattern matching, heuristic analysis, and output validation
 to detect and block prompt injection attacks across all agent interactions.
+
+Every scan also runs against a canonical (normalized) form of the input:
+regex guards are bypassed in practice via ENCODING tricks (zero-width
+splices, homoglyphs, fullwidth forms, separator-spliced letters, base64)
+rather than novel phrasing, so the same pattern families must see the
+de-obfuscated text as well as the raw bytes.
 """
 
 from __future__ import annotations
@@ -49,6 +61,16 @@ _HOMOGLYPH_MAP: dict[str, str] = {
     "\u0392": "B", "\u0395": "E", "\u0397": "H", "\u039a": "K",
     "\u039c": "M", "\u039d": "N", "\u039f": "O", "\u03a1": "P",
     "\u03a4": "T", "\u03a7": "X", "\u0391": "A",
+    # Lowercase confusables that allow a WHOLE word to be spelled in
+    # Cyrillic (e.g. "skip" or "mode" with every letter swapped). The
+    # mixed-script detector requires Latin inside the same word, so
+    # whole-word substitutions were invisible to it -- only the
+    # normalization fold brings them back in range of the phrase regexes.
+    "\u043a": "k", "\u043c": "m", "\u0456": "i", "\u0455": "s",
+    "\u0458": "j", "\u04bb": "h", "\u0501": "d", "\u051b": "q",
+    "\u051d": "w",
+    # Greek omicron renders identically to Latin o in common fonts.
+    "\u03bf": "o",
 }
 
 # Zero-width and invisible Unicode characters
@@ -57,6 +79,62 @@ _INVISIBLE_CHARS = re.compile(
     r"\ufeff\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5"
     r"\u180e\u2000-\u200a\u202a-\u202e\u2066-\u2069\ufff9-\ufffb]"
 )
+
+# Separator characters used to splice a word ("i-g-n-o-r-e") so a literal
+# phrase regex never sees it assembled. Only runs of SINGLE letters joined
+# by these characters are collapsed; multi-letter segments ("study-group",
+# "e-mail", "TCP/IP") stay untouched so ordinary hyphenated prose cannot be
+# rewritten into an attack phrase.
+_WORD_SPLICE_RUN = re.compile(
+    r"(?:[A-Za-z][\-\u2010\u2011\u2012\u2013\u2014._\u00b7\u2022*+|/\\]){2,}[A-Za-z]"
+)
+_NON_LETTER = re.compile(r"[^A-Za-z]")
+
+# Long encoded runs worth opportunistically decoding. 20+ base64 chars /
+# 32+ hex chars is enough to carry a real instruction while staying above
+# the noise of short identifiers.
+_B64_RUN = re.compile(r"[A-Za-z0-9+/]{20,}={0,2}")
+_HEX_RUN = re.compile(r"\b(?:[0-9a-fA-F]{2}){16,}\b")
+
+
+def normalize_for_scan(content: str) -> str:
+    """Produce the canonical form of *content* used by the evasion pre-pass.
+
+    The regex layers match literal English phrases, so any encoding that
+    changes the byte sequence without changing what a human reads
+    (fullwidth forms, zero-width splices, Cyrillic lookalikes, hyphen/dot
+    splicing) bypasses them when only the raw text is scanned. Scanning
+    this canonical form alongside the raw text closes that gap.
+    """
+    # NFKC first: folds fullwidth/compatibility forms and converts exotic
+    # spaces (en/em space, ideographic space) to ASCII before anything else.
+    text = unicodedata.normalize("NFKC", content)
+    # Zero-width and bidi-control characters survive NFKC; strip them so a
+    # splice like "ig<ZWSP>nore" reassembles into the literal word.
+    text = _INVISIBLE_CHARS.sub("", text)
+    # Fold confusable Cyrillic/Greek onto Latin. Pure non-Latin text stays
+    # non-matching (English phrase regexes cannot fire on it), so folding
+    # unconditionally is safe for legitimate Cyrillic/Greek prose.
+    text = "".join(_HOMOGLYPH_MAP.get(ch, ch) for ch in text)
+    # Reassemble separator-spliced words.
+    text = _WORD_SPLICE_RUN.sub(lambda m: _NON_LETTER.sub("", m.group()), text)
+    # Collapse horizontal whitespace runs but KEEP newlines: the heuristic
+    # layer splits sentences on newlines, and merging lines would change
+    # its verdicts between the raw and normalized passes.
+    text = re.sub(r"[^\S\n]+", " ", text)
+    return text
+
+
+def _mostly_printable(text: str) -> bool:
+    """True when decoded bytes look like text rather than binary noise.
+
+    Hashes and random blobs also match the encoded-run regexes; scanning
+    their garbage decodings would only add noise, so they are skipped.
+    """
+    if not text:
+        return False
+    printable = sum(1 for ch in text if ch.isprintable() or ch.isspace())
+    return printable / len(text) >= 0.85
 
 
 class PromptGuard:
@@ -80,10 +158,17 @@ class PromptGuard:
         (
             "role_hijack",
             re.compile(
+                # "switch to/enter/activate X mode" is only hostile for modes
+                # that target the ASSISTANT's behavior. The old catch-all
+                # (?:\w+\s+)?mode blocked everyday sentences like "switch to
+                # dark mode" and "how do I enter focus mode on iPhone?".
                 r"(?:you\s+are\s+now|from\s+now\s+on\s+you\s+are|"
                 r"act\s+as\s+if\s+you\s+are|you\s+have\s+been\s+reprogrammed|"
-                r"new\s+instructions?:\s*you\s+are|switch\s+to\s+(?:\w+\s+)?mode|"
-                r"enter\s+(?:\w+\s+)?mode|activate\s+(?:\w+\s+)?mode)",
+                r"new\s+instructions?:\s*you\s+are|"
+                r"(?:switch\s+to|enter|activate)\s+"
+                r"(?:developer|debug|admin|root|sudo|god|dan|evil|opposite|"
+                r"unrestricted|unfiltered|uncensored|unsafe|jailbreak|bypass|"
+                r"override)\s+mode)",
                 re.IGNORECASE,
             ),
             "critical",
@@ -91,10 +176,19 @@ class PromptGuard:
         (
             "system_prompt_extract",
             re.compile(
-                r"(?:reveal|show|display|print|output|repeat|echo|leak|expose|dump)"
-                r"\s+(?:your\s+)?(?:system\s+prompt|instructions?|initial\s+prompt|"
+                r"(?:reveal|show|display|print|output|repeat|echo|leak|expose|"
+                r"dump|tell|give)"
+                # Allow up to four filler words (e.g. "me your full verbatim")
+                # between the verb and the target so "print your full system
+                # prompt" is caught, not just "print your system prompt".
+                r"\s+(?:(?:your|the|me|us|entire|full|complete|exact|verbatim|raw|"
+                r"initial|original|hidden|secret|base|actual)\s+){0,4}"
+                r"(?:system\s+prompt|instructions?|initial\s+prompt|"
                 r"hidden\s+prompt|secret\s+prompt|original\s+prompt|base\s+prompt|"
-                r"pre-?prompt|meta-?prompt)",
+                r"pre-?prompt|meta-?prompt|"
+                # Only the full "guidelines and rules" phrasing, so ordinary
+                # requests mentioning "rules" or "guidelines" alone are safe.
+                r"guidelines?\s+and\s+rules?|rules?\s+and\s+guidelines?)",
                 re.IGNORECASE,
             ),
             "high",
@@ -125,7 +219,12 @@ class PromptGuard:
         (
             "jailbreak_keywords",
             re.compile(
-                r"(?:DAN|do\s+anything\s+now|jail\s*break|"
+                # The DAN jailbreak is the literal uppercase token; the
+                # whole pattern is case-insensitive, so it is scoped back to
+                # case-sensitive and word-bounded here — otherwise "Dan",
+                # "abundant", or any base64 payload containing "dan" trips
+                # a CRITICAL block.
+                r"(?:(?-i:\bDAN\b)|do\s+anything\s+now|jail\s*break|"
                 r"developer\s+mode|god\s+mode|unrestricted\s+mode|"
                 r"no\s+restrictions?\s+mode|unfiltered\s+mode)",
                 re.IGNORECASE,
@@ -135,10 +234,24 @@ class PromptGuard:
         (
             "data_exfiltration",
             re.compile(
-                r"(?:send|post|transmit|exfiltrate|forward|upload|email)\s+"
-                r"(?:to|the|all|my|user|this)\s*"
-                r"(?:data|info(?:rmation)?|credentials?|tokens?|keys?|passwords?|secrets?|"
-                r"api[\s_-]?keys?|results?)",
+                # Two hostile shapes, chosen so everyday requests ("export
+                # all my data as JSON", "send me the information") pass:
+                # (a) moving SENSITIVE material (credentials/tokens/keys/
+                #     passwords/secrets) with any transfer verb;
+                # (b) moving generic data/info/results to an EXTERNAL
+                #     destination (URL, email address, or an explicitly
+                #     external/remote/third-party target).
+                # "share" and "export" were dropped from the verb set: export
+                # is a first-class feature of this app and both verbs are
+                # ordinary conversation.
+                r"(?:(?:send|post|transmit|exfiltrate|forward|upload|email|leak)\s+"
+                r"(?:(?:to|the|all|my|your|user|this)\s+){0,4}"
+                r"(?:credentials?|tokens?|keys?|passwords?|secrets?|api[\s_-]?keys?))"
+                r"|"
+                r"(?:(?:send|post|transmit|exfiltrate|forward|upload|email|leak)\s+"
+                r"(?:(?:the|all|my|your|user|this)\s+){0,4}"
+                r"(?:data|info(?:rmation)?|results?)\s+to\s+"
+                r"(?:https?://|\S+@|(?:an?\s+)?(?:external|remote|third[-\s]?party)))",
                 re.IGNORECASE,
             ),
             "high",
@@ -157,11 +270,45 @@ class PromptGuard:
     ]
 
     def scan(self, content: str) -> ScanResult:
-        """Run all defense layers and return a consolidated scan result."""
-        detections: list[Detection] = []
+        """Run all defense layers and return a consolidated scan result.
 
-        detections.extend(self._layer1_pattern_matching(content))
-        detections.extend(self._layer2_heuristic_analysis(content))
+        Layers run against both the raw text and its canonical
+        (``normalize_for_scan``) form, plus the decodings of any long
+        base64/hex runs. Detections are de-duplicated so a plain attack is
+        not reported twice; anything found only after normalization keeps a
+        ``:normalized`` layer suffix (and decoded findings a
+        ``:decoded`` layer) so attempted evasion stays visible downstream.
+        """
+        detections: list[Detection] = []
+        seen: set[tuple[str, str]] = set()
+
+        def _dedup_key(det: Detection) -> tuple[str, str]:
+            # Whitespace-insensitive key: the raw and normalized passes can
+            # match the same span with different internal spacing.
+            return (det.pattern_name, re.sub(r"\s+", " ", det.matched_text).lower())
+
+        def _collect(found: list[Detection], evaded: bool = False) -> None:
+            for det in found:
+                key = _dedup_key(det)
+                if key in seen:
+                    continue
+                seen.add(key)
+                if evaded:
+                    det.layer = f"{det.layer}:normalized"
+                detections.append(det)
+
+        _collect(self._layer1_pattern_matching(content))
+        _collect(self._layer2_heuristic_analysis(content))
+
+        normalized = normalize_for_scan(content)
+        if normalized != content:
+            # The text changed under normalization, i.e. something stood
+            # between the reader and the bytes. Re-scan the canonical form
+            # so spliced/confusable phrasings hit the same patterns.
+            _collect(self._layer1_pattern_matching(normalized), evaded=True)
+            _collect(self._layer2_heuristic_analysis(normalized), evaded=True)
+
+        _collect(self._scan_decoded_payloads(content, normalized))
 
         if not detections:
             return ScanResult(
@@ -283,6 +430,59 @@ class PromptGuard:
                         severity="critical",
                     )
                 )
+
+        return detections
+
+    def _scan_decoded_payloads(self, *texts: str) -> list[Detection]:
+        """Decode long base64/hex runs and give the decoded text the full
+        pattern treatment.
+
+        ``_detect_base64_instructions`` only keyword-matches decoded bytes,
+        so an encoded injection phrased without its keyword list (e.g.
+        "disregard all prior rules") slips through. Here every decoded
+        candidate is normalized and run against the real regex families.
+        Candidates are gathered from both the raw and normalized text so a
+        zero-width-spliced encoded run still gets decoded.
+        """
+        detections: list[Detection] = []
+        candidates: dict[tuple[str, str], str] = {}
+
+        for text in texts:
+            for match in _B64_RUN.finditer(text):
+                run = match.group()
+                try:
+                    padded = run + "=" * (-len(run) % 4)
+                    decoded = base64.b64decode(padded).decode("utf-8", errors="ignore")
+                except Exception:
+                    continue
+                candidates.setdefault(("base64", run), decoded)
+            for match in _HEX_RUN.finditer(text):
+                run = match.group()
+                try:
+                    decoded = bytes.fromhex(run).decode("utf-8", errors="ignore")
+                except ValueError:
+                    continue
+                candidates.setdefault(("hex", run), decoded)
+
+        for (encoding, run), decoded in candidates.items():
+            if len(decoded) < 8 or not _mostly_printable(decoded):
+                continue
+            canonical = normalize_for_scan(decoded)
+            for pattern_name, regex, _severity in self._INJECTION_PATTERNS:
+                for match in regex.finditer(canonical):
+                    detections.append(
+                        Detection(
+                            layer="pattern_matching:decoded",
+                            pattern_name=pattern_name,
+                            matched_text=(
+                                f"{encoding}: {run[:48]}... -> {match.group()[:120]}"
+                            ),
+                            # Wrapping a working injection in an encoding is
+                            # deliberate evasion, so the floor is critical
+                            # regardless of the underlying family's rating.
+                            severity="critical",
+                        )
+                    )
 
         return detections
 

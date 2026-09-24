@@ -1,4 +1,12 @@
-"""Tests for the audit-log verifier.
+"""Tests for the audit-log verifier: per-row hash verification catches field,
+status, and previous-hash tampering, and that chain verification detects
+deletion, reordering, and per-user chain isolation, including on legacy rows
+with a null previous hash.
+
+Why it exists: Pure-Python coverage, no database required, of the verifier
+every tamper-evidence guarantee in the audit chain rests on.
+
+Tests for the audit-log verifier.
 
 Pure-Python tests that build AuditLog-like SimpleNamespace objects and
 exercise the verifier helpers directly. No database is required.
@@ -30,6 +38,9 @@ def make_row(
     request_id: Optional[str] = None,
     request_data: Optional[dict[str, Any]] = None,
     response_summary: Optional[str] = None,
+    reasoning_chain: Any = None,
+    detection_method: Optional[str] = None,
+    confidence_score: Optional[float] = None,
     timestamp: Optional[datetime] = None,
     previous_hash: Optional[str] = None,
 ) -> SimpleNamespace:
@@ -49,6 +60,9 @@ def make_row(
         "request_id": request_id,
         "request_data": request_data,
         "response_summary": response_summary,
+        "reasoning_chain": reasoning_chain,
+        "detection_method": detection_method,
+        "confidence_score": confidence_score,
         "previous_hash": previous_hash,
     }
     return SimpleNamespace(
@@ -62,6 +76,9 @@ def make_row(
         request_id=request_id,
         request_data=request_data,
         response_summary=response_summary,
+        reasoning_chain=reasoning_chain,
+        detection_method=detection_method,
+        confidence_score=confidence_score,
         timestamp=timestamp,
         integrity_hash=compute_audit_hash(payload),
         previous_hash=previous_hash,
@@ -281,6 +298,9 @@ def test_verify_rows_handles_enum_status():
         "request_id": "rid",
         "request_data": None,
         "response_summary": None,
+        "reasoning_chain": None,
+        "detection_method": None,
+        "confidence_score": None,
         "previous_hash": None,
     }
     row = SimpleNamespace(
@@ -294,9 +314,37 @@ def test_verify_rows_handles_enum_status():
         request_id="rid",
         request_data=None,
         response_summary=None,
+        reasoning_chain=None,
+        detection_method=None,
+        confidence_score=None,
         timestamp=datetime.now(timezone.utc),
         integrity_hash=compute_audit_hash(payload),
         previous_hash=None,
     )
     is_valid, _ = verify_row(row)
     assert is_valid is True
+
+
+def test_tampering_reasoning_chain_is_detected():
+    """The security-semantic columns are covered by the integrity hash, so a
+    DB-write adversary cannot rewrite why an action was blocked."""
+    row = make_row(
+        status="blocked",
+        reasoning_chain={"event": "tool_blocked", "reason": "critical threat"},
+        detection_method="prompt_guard",
+        confidence_score=0.99,
+    )
+    assert verify_row(row)[0] is True
+
+    # Forge the reasoning to look benign; the stored hash must no longer match.
+    row.reasoning_chain = {"event": "tool_executed", "reason": "looked benign"}
+    assert verify_row(row)[0] is False
+
+    # Restore and confirm it verifies again; then tamper the other two columns.
+    row.reasoning_chain = {"event": "tool_blocked", "reason": "critical threat"}
+    assert verify_row(row)[0] is True
+    row.detection_method = "FORGED"
+    assert verify_row(row)[0] is False
+    row.detection_method = "prompt_guard"
+    row.confidence_score = 0.01
+    assert verify_row(row)[0] is False

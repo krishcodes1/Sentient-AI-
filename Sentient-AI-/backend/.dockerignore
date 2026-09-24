@@ -1,0 +1,22 @@
+# Secrets reach the container at runtime (compose env_file, or the
+# orchestrator's secret store). COPY . . would otherwise bake them into an
+# image layer, readable by anyone who can pull the image, and they would
+# outlive any later rotation.
+.env
+.env.*
+!.env.example
+
+# Host-side caches and virtualenvs: built for the host's platform, not the
+# image's, and they only slow the build context down.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.venv/
+venv/
+*.db
+.claude/

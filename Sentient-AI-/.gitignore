@@ -2,6 +2,11 @@
 backend/.env
 .env
 *.env.local
+# Backups the installer keeps when it replaces keys (they hold the old keys)
+backend/.env.bak-*
+
+# Installer log (installer/bootstrap.py)
+installer/bootstrap.log*
 
 # Python
 __pycache__/
@@ -28,3 +33,6 @@ docker/data/
 
 # Claude
 .claude/
+
+# TypeScript incremental build state
+frontend/tsconfig.tsbuildinfo

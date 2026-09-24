@@ -1,0 +1,1137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="referrer" content="same-origin">
+<title>Install Crawler AI</title>
+<link rel="icon" href="data:,">
+<style nonce="__CSP_NONCE__">
+  :root {
+    color-scheme: dark;
+    --bg: #0a0a0b;
+    --panel: #141416;
+    --surface: #1c1c1f;
+    --inset: #0f0f10;
+    --border: rgba(84, 84, 88, 0.48);
+    --border-subtle: rgba(84, 84, 88, 0.28);
+    --text: #f4f4f5;
+    --text-2: #c9c9d1;
+    --text-3: #9d9da8;
+    --accent: #22d3ee;
+    --accent-hover: #67e8f9;
+    --accent-bright: #5eead4;
+    --accent-glow: rgba(34, 211, 238, 0.12);
+    --border-accent: rgba(34, 211, 238, 0.35);
+    --ink-on-accent: #0a0a0b;
+    --ok: #34d399;
+    --ok-fill: rgba(52, 211, 153, 0.15);
+    --warn: #fbbf24;
+    --warn-fill: rgba(251, 191, 36, 0.15);
+    --bad: #f87171;
+    --bad-fill: rgba(248, 113, 113, 0.15);
+    --neutral-fill: rgba(148, 163, 184, 0.12);
+    --radius: 14px;
+    --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background:
+      radial-gradient(1100px 420px at 50% -120px, rgba(34, 211, 238, 0.09), transparent 70%),
+      var(--bg);
+    color: var(--text);
+    font: 15px/1.55 var(--font);
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); text-underline-offset: 3px; }
+  code { font: 13px/1 var(--mono); color: var(--text); background: var(--surface); padding: 2px 6px; border-radius: 6px; }
+  a:hover { color: var(--accent-hover); }
+  [hidden] { display: none !important; }
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+
+  .wrap { max-width: 720px; margin: 0 auto; padding: 48px 20px 72px; }
+
+  /* Header */
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .mark {
+    width: 32px; height: 32px; border-radius: 9px; flex-shrink: 0;
+    display: grid; place-items: center;
+    background: linear-gradient(135deg, var(--accent), var(--accent-bright));
+    color: var(--ink-on-accent);
+  }
+  .mark svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2.25; stroke-linecap: round; stroke-linejoin: round; }
+  .brand-name { font-weight: 650; font-size: 16px; letter-spacing: -0.01em; }
+  .badge {
+    font-size: 11.5px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
+    color: var(--accent); background: var(--accent-glow); border: 1px solid var(--border-accent);
+    padding: 2px 8px; border-radius: 999px;
+  }
+  h1 { font-size: 28px; line-height: 1.2; letter-spacing: -0.02em; margin: 28px 0 8px; font-weight: 700; }
+  .sub { margin: 0; color: var(--text-2); max-width: 56ch; }
+
+  /* Fatal banner */
+  .banner {
+    margin-top: 24px; padding: 14px 16px; border-radius: 12px;
+    background: var(--bad-fill); border: 1px solid rgba(248, 113, 113, 0.35);
+    display: grid; gap: 2px;
+  }
+  .banner strong { color: var(--text); font-size: 15px; }
+  .banner span { color: var(--text-2); }
+  .banner:focus { outline: none; }
+
+  /* Stepper */
+  .stepper { list-style: none; margin: 36px 0 0; padding: 0; }
+  .step { display: grid; grid-template-columns: 36px minmax(0, 1fr); column-gap: 16px; position: relative; padding-bottom: 18px; }
+  .step:last-child { padding-bottom: 0; }
+  .step:not(:last-child)::before {
+    content: ""; position: absolute; left: 17px; top: 42px; bottom: 6px; width: 2px;
+    background: var(--border-subtle); border-radius: 2px;
+  }
+  .step[data-state="done"]:not(:last-child)::before { background: rgba(52, 211, 153, 0.4); }
+  .dot {
+    width: 36px; height: 36px; border-radius: 50%; margin-top: 12px;
+    display: grid; place-items: center;
+    border: 2px solid var(--border); background: var(--bg); color: var(--text-3);
+    font-weight: 650; font-size: 14px; font-variant-numeric: tabular-nums;
+    transition: border-color 0.2s, background-color 0.2s, color 0.2s, box-shadow 0.2s;
+  }
+  .dot svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; display: none; }
+  .step[data-state="active"] .dot { border-color: var(--accent); color: var(--accent); box-shadow: 0 0 0 5px var(--accent-glow); }
+  .step[data-state="done"] .dot { border-color: var(--ok); background: var(--ok); color: var(--ink-on-accent); }
+  .step[data-state="done"] .dot .num { display: none; }
+  .step[data-state="done"] .dot svg { display: block; }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--border-subtle); border-radius: var(--radius);
+    padding: 16px 22px; transition: border-color 0.2s, background-color 0.2s;
+  }
+  .step[data-state="active"] .card { border-color: var(--border-accent); padding-bottom: 22px; }
+  .step[data-state="locked"] .card { background: transparent; }
+  .card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 30px; }
+  .card-head h2 { margin: 0; font-size: 17px; font-weight: 650; letter-spacing: -0.01em; }
+  .card-head h2:focus { outline: none; }
+  .step[data-state="locked"] h2 { color: var(--text-3); font-weight: 600; }
+  .summary { margin: 2px 0 0; color: var(--text-2); font-size: 14px; }
+  .card-body { margin-top: 10px; }
+  .lede { margin: 0 0 16px; color: var(--text-2); }
+
+  /* Buttons */
+  .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 18px; }
+  .btn {
+    appearance: none; -webkit-appearance: none;
+    min-height: 44px; padding: 0 18px; border-radius: 10px;
+    font: 600 15px/1 var(--font); cursor: pointer;
+    border: 1px solid transparent; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    transition: background-color 0.15s, border-color 0.15s, color 0.15s, opacity 0.15s;
+  }
+  .btn-primary { background: var(--accent); color: var(--ink-on-accent); }
+  .btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
+  .btn-secondary { background: var(--surface); color: var(--text); border-color: var(--border); }
+  .btn-secondary:hover:not(:disabled) { border-color: var(--border-accent); }
+  .btn-ghost { background: transparent; color: var(--text-2); border-color: var(--border-subtle); }
+  .btn-ghost:hover:not(:disabled) { color: var(--text); border-color: var(--border); }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .btn-small { min-height: 36px; padding: 0 12px; font-size: 13.5px; }
+  .btn-link {
+    appearance: none; background: none; border: 0; padding: 6px 2px; min-height: 32px;
+    color: var(--accent); font: 500 14px/1 var(--font); cursor: pointer; text-decoration: underline; text-underline-offset: 3px;
+  }
+  .btn-link:hover { color: var(--accent-hover); }
+  .btn .spinner { width: 14px; height: 14px; border-width: 2px; }
+
+  /* Check list */
+  .checks { list-style: none; margin: 0; padding: 0; border: 1px solid var(--border-subtle); border-radius: 12px; overflow: hidden; }
+  .check { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 12px; padding: 12px 14px; background: var(--inset); }
+  .check + .check { border-top: 1px solid var(--border-subtle); }
+  .check-icon {
+    width: 22px; height: 22px; border-radius: 50%; margin-top: 1px;
+    display: grid; place-items: center; background: var(--neutral-fill); color: var(--text-3);
+  }
+  .check-icon svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+  .check[data-state="ok"] .check-icon { background: var(--ok-fill); color: var(--ok); }
+  .check[data-state="bad"] .check-icon { background: var(--bad-fill); color: var(--bad); }
+  .check[data-state="warn"] .check-icon { background: var(--warn-fill); color: var(--warn); }
+  .check[data-state="info"] .check-icon { background: var(--accent-glow); color: var(--accent); }
+  .check-title { margin: 0; font-weight: 600; font-size: 14.5px; }
+  .check-detail, .check-fix { margin: 2px 0 0; font-size: 13.5px; color: var(--text-2); }
+  .check[data-state="bad"] .check-fix { color: var(--text); }
+  .check .btn { margin-top: 10px; }
+
+  .note { margin: 14px 0 0; font-size: 14px; color: var(--text-2); }
+  .note[data-tone="ok"] { color: var(--ok); }
+  .note[data-tone="bad"] { color: var(--bad); }
+  .fine { font-size: 13px; color: var(--text-3); margin: 14px 0 0; }
+
+  /* Key choice */
+  .choice { border: 0; margin: 0; padding: 0; display: grid; gap: 10px; }
+  .option {
+    display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: 12px; align-items: start;
+    padding: 14px 16px; border-radius: 12px; cursor: pointer;
+    background: var(--inset); border: 1px solid var(--border-subtle);
+    transition: border-color 0.15s, background-color 0.15s;
+  }
+  .option:hover { border-color: var(--border); }
+  .option:has(input:checked) { border-color: var(--border-accent); background: rgba(34, 211, 238, 0.05); }
+  .option input { margin: 3px 0 0; width: 18px; height: 18px; accent-color: var(--accent); }
+  .option strong { display: block; font-size: 14.5px; }
+  .option small { display: block; color: var(--text-2); font-size: 13.5px; margin-top: 2px; }
+
+  .fields { margin-top: 14px; display: grid; gap: 16px; }
+  .field label { display: block; font: 600 13px/1.4 var(--mono); color: var(--text); margin-bottom: 6px; }
+  .input-row { display: flex; gap: 8px; }
+  .input-row input {
+    flex: 1; min-width: 0; min-height: 44px; padding: 0 12px; border-radius: 10px;
+    background: var(--inset); color: var(--text); border: 1px solid var(--border);
+    font: 14px/1 var(--mono);
+  }
+  .input-row input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
+  .input-row input[aria-invalid="true"] { border-color: var(--bad); }
+  .hint { margin: 6px 0 0; font-size: 13px; color: var(--text-3); }
+  .field-error { margin: 6px 0 0; font-size: 13px; color: var(--bad); }
+
+  .msg { margin: 16px 0 0; font-size: 14.5px; font-weight: 550; }
+  .msg[data-tone="ok"] { color: var(--ok); }
+  .msg[data-tone="bad"] { color: var(--bad); }
+  .msg[data-tone="info"] { color: var(--text-2); font-weight: 500; }
+
+  /* Build */
+  .facts { margin: 0 0 4px; padding: 0; list-style: none; display: grid; gap: 6px; }
+  .facts li { color: var(--text-2); font-size: 14px; padding-left: 16px; position: relative; }
+  .facts li::before { content: ""; position: absolute; left: 2px; top: 0.65em; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); }
+  .progress { margin-top: 18px; }
+  .phase { display: flex; align-items: center; gap: 10px; font-weight: 600; min-height: 24px; }
+  .phase .elapsed { margin-left: auto; font: 500 13px/1 var(--mono); color: var(--text-3); font-variant-numeric: tabular-nums; }
+  .progress[data-state="healthy"] .phase { color: var(--ok); }
+  .progress[data-state="failed"] .phase { color: var(--bad); }
+  .progress[data-state="healthy"] .spinner,
+  .progress[data-state="failed"] .spinner { display: none; }
+  .log {
+    margin: 12px 0 0; height: 280px; overflow: auto; padding: 12px 14px;
+    background: var(--inset); border: 1px solid var(--border-subtle); border-radius: 10px;
+    font: 12px/1.55 var(--mono); color: var(--text-2);
+    white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  .failure {
+    margin-top: 16px; padding: 14px 16px; border-radius: 12px;
+    background: var(--bad-fill); border: 1px solid rgba(248, 113, 113, 0.35);
+  }
+  .failure-title { margin: 0; font-weight: 650; }
+  .failure p { margin: 4px 0 0; color: var(--text); }
+  .failure .tail-label { margin-top: 12px; font-size: 13px; color: var(--text-2); }
+  .failure pre {
+    margin: 6px 0 0; max-height: 260px; overflow: auto; padding: 10px 12px;
+    background: rgba(10, 10, 11, 0.6); border-radius: 8px;
+    font: 12px/1.5 var(--mono); color: var(--text-2); white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+
+  .spinner {
+    width: 16px; height: 16px; border-radius: 50%; flex-shrink: 0;
+    border: 2px solid rgba(34, 211, 238, 0.25); border-top-color: var(--accent);
+    animation: spin 0.9s linear infinite;
+  }
+  .check-icon .spinner { width: 14px; height: 14px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Open */
+  .url { font: 500 14px/1 var(--mono); }
+  .closed { margin-top: 36px; }
+
+  /* Dialog */
+  dialog {
+    width: min(460px, calc(100vw - 32px)); padding: 22px; border-radius: var(--radius);
+    background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+  }
+  dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
+  dialog h3 { margin: 0 0 8px; font-size: 17px; }
+  dialog p { margin: 0 0 8px; color: var(--text-2); }
+  dialog .warn-text { color: var(--warn); }
+  dialog .actions { justify-content: flex-end; }
+
+  body.is-stopped .stepper { opacity: 0.55; }
+
+  @media (max-width: 560px) {
+    .wrap { padding: 32px 16px 56px; }
+    h1 { font-size: 24px; }
+    .step { grid-template-columns: 28px minmax(0, 1fr); column-gap: 12px; }
+    .dot { width: 28px; height: 28px; font-size: 13px; margin-top: 14px; }
+    .step:not(:last-child)::before { left: 13px; top: 46px; }
+    .card { padding: 14px 16px; }
+    .step[data-state="active"] .card { padding-bottom: 18px; }
+    .actions .btn { flex: 1 1 auto; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { transition: none !important; }
+    .spinner { animation-duration: 2.4s; }
+  }
+</style>
+</head>
+<body>
+<main class="wrap">
+  <header>
+    <div class="brand">
+      <span class="mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></svg></span>
+      <span class="brand-name">Crawler AI</span>
+      <span class="badge">Installer</span>
+    </div>
+    <h1 id="headline">Set up Crawler AI on this computer</h1>
+    <p class="sub">Four steps, all buttons. The first install takes 10&ndash;20 minutes, mostly downloading.</p>
+  </header>
+
+  <div id="fatal" class="banner" role="alert" tabindex="-1" hidden>
+    <strong id="fatal-title">The installer window was closed</strong>
+    <span id="fatal-text">Double-click the Crawler AI installer again to pick up where you left off.</span>
+  </div>
+
+  <ol class="stepper" id="stepper">
+    <!-- 1 -->
+    <li class="step" id="step1" data-state="active" aria-current="step">
+      <div class="rail" aria-hidden="true">
+        <span class="dot"><span class="num">1</span><svg viewBox="0 0 20 20"><path d="M5 10.5l3.2 3.2L15 6.8"/></svg></span>
+      </div>
+      <section class="card" aria-labelledby="s1-title">
+        <div class="card-head">
+          <div>
+            <h2 id="s1-title" tabindex="-1">Check your computer</h2>
+            <p class="summary" id="s1-summary" hidden></p>
+          </div>
+        </div>
+        <div class="card-body">
+          <p class="lede">Crawler AI runs inside <a id="dd-link" href="https://www.docker.com/products/docker-desktop/" target="_blank" rel="noopener noreferrer">Docker Desktop</a> (free for personal use). This checks that it&rsquo;s installed and running, and that there&rsquo;s room to work.</p>
+          <p class="lede" id="wsl-note" hidden>On Windows, Docker Desktop needs WSL 2 (Windows Subsystem for Linux). Its installer turns WSL 2 on for you; restart when it asks, then open Docker Desktop once.</p>
+          <ul class="checks" id="checks" aria-live="polite" aria-busy="true"></ul>
+          <p class="note" id="s1-note" role="status"></p>
+          <div class="actions">
+            <button type="button" class="btn btn-primary" id="s1-continue" disabled>Continue</button>
+            <button type="button" class="btn btn-ghost" id="s1-recheck">Re-check</button>
+          </div>
+        </div>
+      </section>
+    </li>
+
+    <!-- 2 -->
+    <li class="step" id="step2" data-state="locked">
+      <div class="rail" aria-hidden="true">
+        <span class="dot"><span class="num">2</span><svg viewBox="0 0 20 20"><path d="M5 10.5l3.2 3.2L15 6.8"/></svg></span>
+      </div>
+      <section class="card" aria-labelledby="s2-title">
+        <div class="card-head">
+          <div>
+            <h2 id="s2-title" tabindex="-1">Security keys</h2>
+            <p class="summary" id="s2-summary" hidden></p>
+          </div>
+          <button type="button" class="btn-link" id="s2-change" hidden>Replace keys</button>
+        </div>
+        <div class="card-body" hidden>
+          <p class="lede">Two secret keys protect your install: one signs sign-ins, the other encrypts the credentials you save. They go into <code>backend/.env</code> on this computer.</p>
+          <fieldset class="choice">
+            <legend class="sr-only">How to create the keys</legend>
+            <label class="option">
+              <input type="radio" name="keymode" value="generate" checked>
+              <span><strong>Generate for me</strong><small>Recommended. Two strong random keys, written straight to backend/.env.</small></span>
+            </label>
+            <label class="option">
+              <input type="radio" name="keymode" value="custom">
+              <span><strong>Use my own</strong><small>Paste keys you already have, for example to restore an older install.</small></span>
+            </label>
+          </fieldset>
+          <div class="fields" id="custom-keys" hidden>
+            <div class="field">
+              <label for="k-secret">SECRET_KEY</label>
+              <div class="input-row">
+                <input id="k-secret" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="h-secret e-secret">
+                <button type="button" class="btn btn-secondary btn-small" data-toggle="k-secret" aria-controls="k-secret" aria-pressed="false">Show</button>
+              </div>
+              <p class="hint" id="h-secret">At least 32 characters with no spaces, quotes, backslashes, $ or #.</p>
+              <p class="field-error" id="e-secret" hidden></p>
+            </div>
+            <div class="field">
+              <label for="k-enc">ENCRYPTION_KEY</label>
+              <div class="input-row">
+                <input id="k-enc" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="h-enc e-enc">
+                <button type="button" class="btn btn-secondary btn-small" data-toggle="k-enc" aria-controls="k-enc" aria-pressed="false">Show</button>
+              </div>
+              <p class="hint" id="h-enc">Base64 of exactly 32 bytes: 44 characters ending in =. Standard or URL-safe alphabet.</p>
+              <p class="field-error" id="e-enc" hidden></p>
+            </div>
+          </div>
+          <p class="fine">The keys never leave this computer. The installer doesn&rsquo;t show them again and never writes them to its log.</p>
+          <p class="msg" id="s2-msg" role="status" hidden></p>
+          <div class="actions">
+            <button type="button" class="btn btn-primary" id="s2-save">Save keys</button>
+            <button type="button" class="btn btn-primary" id="s2-next" hidden>Next</button>
+          </div>
+        </div>
+      </section>
+    </li>
+
+    <!-- 3 -->
+    <li class="step" id="step3" data-state="locked">
+      <div class="rail" aria-hidden="true">
+        <span class="dot"><span class="num">3</span><svg viewBox="0 0 20 20"><path d="M5 10.5l3.2 3.2L15 6.8"/></svg></span>
+      </div>
+      <section class="card" aria-labelledby="s3-title">
+        <div class="card-head">
+          <div>
+            <h2 id="s3-title" tabindex="-1">Build &amp; start</h2>
+            <p class="summary" id="s3-summary" hidden></p>
+          </div>
+        </div>
+        <div class="card-body" hidden>
+          <ul class="facts">
+            <li>The first build downloads about 3.6&nbsp;GB (database, Python and Node images plus Crawler AI&rsquo;s dependencies).</li>
+            <li>Expect 5&ndash;20 minutes depending on your connection. Later starts take seconds.</li>
+            <li>You can leave this page open and do something else while it runs.</li>
+          </ul>
+          <p class="msg" id="s3-msg" role="status" hidden></p>
+          <div class="actions" id="s3-start-row">
+            <button type="button" class="btn btn-primary" id="s3-build">Build &amp; start Crawler AI</button>
+          </div>
+          <div class="progress" id="s3-progress" data-state="building" hidden>
+            <div class="phase" aria-live="polite">
+              <span class="spinner" aria-hidden="true"></span>
+              <span id="s3-phase">Building images&hellip;</span>
+              <span class="elapsed" id="s3-elapsed" aria-label="Elapsed time">0:00</span>
+            </div>
+            <pre class="log" id="s3-log" tabindex="0" aria-label="Docker output"></pre>
+          </div>
+          <div class="failure" id="s3-failure" role="alert" hidden>
+            <p class="failure-title">The build stopped</p>
+            <p id="s3-error"></p>
+            <p class="tail-label">Last 30 lines of output:</p>
+            <pre id="s3-tail"></pre>
+            <div class="actions">
+              <button type="button" class="btn btn-primary" id="s3-retry">Retry</button>
+            </div>
+          </div>
+          <div class="actions" id="s3-next-row" hidden>
+            <button type="button" class="btn btn-primary" id="s3-next">Next</button>
+          </div>
+        </div>
+      </section>
+    </li>
+
+    <!-- 4 -->
+    <li class="step" id="step4" data-state="locked">
+      <div class="rail" aria-hidden="true">
+        <span class="dot"><span class="num">4</span><svg viewBox="0 0 20 20"><path d="M5 10.5l3.2 3.2L15 6.8"/></svg></span>
+      </div>
+      <section class="card" aria-labelledby="s4-title">
+        <div class="card-head">
+          <div>
+            <h2 id="s4-title" tabindex="-1">Open Crawler AI</h2>
+            <p class="summary" id="s4-summary" hidden></p>
+          </div>
+        </div>
+        <div class="card-body" hidden>
+          <p class="lede">Crawler AI is running on this computer.</p>
+          <div class="actions">
+            <button type="button" class="btn btn-primary" id="s4-open">Open Crawler AI</button>
+            <a class="url" href="http://localhost:3000" target="_blank" rel="noopener noreferrer">http://localhost:3000</a>
+          </div>
+          <p class="msg" id="s4-msg" role="status" hidden></p>
+          <p class="note">The setup wizard in the app takes it from here: owner account, AI key, Telegram, permissions.</p>
+          <div class="actions">
+            <button type="button" class="btn btn-ghost" id="s4-close">Close installer</button>
+          </div>
+          <p class="fine">Crawler AI keeps running in Docker Desktop after the installer closes. To stop it, quit Docker Desktop or stop the &ldquo;crawler-ai&rdquo; app in its Containers list.</p>
+        </div>
+      </section>
+    </li>
+  </ol>
+
+  <section class="card closed" id="closed" hidden>
+    <div class="card-head"><h2 id="closed-title" tabindex="-1">The installer has stopped</h2></div>
+    <p class="lede">You can close this tab. Crawler AI keeps running in Docker Desktop; bookmark the address you opened. To run the installer again, double-click <span id="closed-launcher">the installer file</span>.</p>
+  </section>
+</main>
+
+<dialog id="confirm" aria-labelledby="confirm-title">
+  <h3 id="confirm-title">Replace the keys?</h3>
+  <p>A .env already exists. Replace only the two keys (a backup is kept)?</p>
+  <p class="warn-text" id="confirm-extra" hidden>Anything the app already encrypted with the old key, such as saved AI keys or connector sign-ins, will need to be entered again.</p>
+  <div class="actions">
+    <button type="button" class="btn btn-ghost" id="confirm-cancel">Cancel</button>
+    <button type="button" class="btn btn-primary" id="confirm-ok">Replace keys</button>
+  </div>
+</dialog>
+
+<template id="tpl-ok"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 10.5l3.2 3.2L15 6.8"/></svg></template>
+<template id="tpl-bad"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6.5 6.5l7 7M13.5 6.5l-7 7"/></svg></template>
+<template id="tpl-warn"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 5.5v5.5M10 14.3v.2"/></svg></template>
+<template id="tpl-info"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 9.2v5M10 5.8v.2"/></svg></template>
+<template id="tpl-skip"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6.5 10h7"/></svg></template>
+
+<script nonce="__CSP_NONCE__">
+(function () {
+  'use strict';
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
+  var $ = function (id) { return document.getElementById(id); };
+  function sleep(ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); }
+  function el(tag, cls, text) {
+    var node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text != null) node.textContent = text;
+    return node;
+  }
+  function show(id, visible) { $(id).hidden = !visible; }
+  function message(id, text, tone) {
+    var node = $(id);
+    node.textContent = text || '';
+    node.dataset.tone = tone || 'info';
+    node.hidden = !text;
+  }
+  function busy(button, isBusy, label) {
+    if (isBusy) {
+      if (!button.dataset.label) button.dataset.label = button.textContent;
+      button.disabled = true;
+      button.textContent = '';
+      button.appendChild(el('span', 'spinner'));
+      button.appendChild(document.createTextNode(label || 'Working…'));
+    } else {
+      button.disabled = false;
+      if (button.dataset.label) button.textContent = button.dataset.label;
+      delete button.dataset.label;
+    }
+  }
+  function formatElapsed(seconds) {
+    var s = Math.max(0, Math.floor(seconds || 0));
+    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+    var mm = h ? String(m).padStart(2, '0') : String(m);
+    return (h ? h + ':' : '') + mm + ':' + String(r).padStart(2, '0');
+  }
+
+  // ── Platform wording ──────────────────────────────────────────────────────
+  // The browser runs on the same machine as the installer, so its platform
+  // is a good first guess; /api/check's "os" field confirms it.
+  var PLATFORM = {
+    mac: { launcher: 'Install Crawler AI.command', docker: 'Docker Desktop for Mac', headline: 'Set up Crawler AI on this Mac' },
+    windows: { launcher: 'Install Crawler AI.bat', docker: 'Docker Desktop for Windows', headline: 'Set up Crawler AI on this PC' },
+    linux: { launcher: 'the installer (python3 installer/bootstrap.py)', docker: 'Docker Desktop', headline: 'Set up Crawler AI on this computer' }
+  };
+  var OS = (function () {
+    var hint = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || navigator.userAgent || '';
+    if (/win/i.test(hint)) return 'windows';
+    if (/mac/i.test(hint)) return 'mac';
+    return 'linux';
+  })();
+  function platform() { return PLATFORM[OS] || PLATFORM.linux; }
+  function applyOs(os) {
+    if (PLATFORM[os]) OS = os;
+    var p = platform();
+    $('headline').textContent = p.headline;
+    $('dd-link').textContent = p.docker;
+    $('wsl-note').hidden = OS !== 'windows';
+    $('closed-launcher').textContent = p.launcher;
+    if (!stopped) $('fatal-text').textContent = 'Double-click ' + p.launcher + ' again to pick up where you left off.';
+  }
+
+  // ── Token + API ───────────────────────────────────────────────────────────
+  var TOKEN_KEY = 'crawler-installer-token';
+  var TOKEN = (function () {
+    var params = new URLSearchParams(location.search);
+    var token = params.get('t') || '';
+    try {
+      if (token) sessionStorage.setItem(TOKEN_KEY, token);
+      else token = sessionStorage.getItem(TOKEN_KEY) || '';
+    } catch (e) { /* storage blocked: the URL token still works for this load */ }
+    if (params.has('t')) {
+      // Keep the token out of the address bar, history and screenshots.
+      try { history.replaceState(null, '', location.pathname); } catch (e) { /* ignore */ }
+    }
+    return token;
+  })();
+
+  function NetworkError() { this.name = 'NetworkError'; }
+  NetworkError.prototype = Object.create(Error.prototype);
+  function StoppedError() { this.name = 'StoppedError'; }
+  StoppedError.prototype = Object.create(Error.prototype);
+
+  var stopped = false;
+  var quitting = false;
+
+  async function api(method, path, body) {
+    if (stopped) throw new StoppedError();
+    var init = {
+      method: method,
+      cache: 'no-store',
+      credentials: 'omit',
+      referrerPolicy: 'same-origin',
+      headers: { 'X-Bootstrap-Token': TOKEN }
+    };
+    if (method !== 'GET') {
+      init.headers['Content-Type'] = 'application/json';
+      init.body = JSON.stringify(body || {});
+    }
+    var res;
+    try { res = await fetch(path, init); } catch (e) { throw new NetworkError(); }
+    if (res.status === 403) { fatal('expired'); throw new StoppedError(); }
+    var data = {};
+    try { data = (await res.json()) || {}; } catch (e) { data = {}; }
+    return { status: res.status, data: data };
+  }
+
+  // Button actions: if the server can't be reached, the installer is gone.
+  async function act(method, path, body) {
+    try { return await api(method, path, body); } catch (e) {
+      if (e instanceof NetworkError) fatal('closed');
+      throw e;
+    }
+  }
+
+  function guard(fn) {
+    return function () {
+      var args = arguments;
+      Promise.resolve().then(function () { return fn.apply(null, args); }).catch(function (e) {
+        if (!(e instanceof StoppedError) && !(e instanceof NetworkError) && window.console) console.error(e);
+      });
+    };
+  }
+
+  var FATAL = {
+    closed: ['The installer window was closed',
+      'Double-click {launcher} again to pick up where you left off.'],
+    expired: ['This installer page is out of date',
+      'The installer restarted since this page opened. Close this tab and double-click {launcher} again.'],
+    notoken: ['This page is missing its access code',
+      'Double-click {launcher}; it opens the right address for you.']
+  };
+
+  function fatal(kind) {
+    if (quitting || stopped) return;
+    stopped = true;
+    $('fatal-title').textContent = FATAL[kind][0];
+    $('fatal-text').textContent = FATAL[kind][1].replace('{launcher}', platform().launcher);
+    show('fatal', true);
+    document.body.classList.add('is-stopped');
+    Array.prototype.forEach.call(document.querySelectorAll('.stepper button, .stepper input'), function (node) {
+      node.disabled = true;
+    });
+    $('fatal').focus();
+    window.scrollTo(0, 0);
+  }
+
+  // ── Stepper ───────────────────────────────────────────────────────────────
+  function setStep(n, state, summary) {
+    var li = $('step' + n);
+    li.dataset.state = state;
+    if (state === 'active') li.setAttribute('aria-current', 'step'); else li.removeAttribute('aria-current');
+    li.querySelector('.card-body').hidden = state !== 'active';
+    var sum = $('s' + n + '-summary');
+    if (summary !== undefined) sum.textContent = summary;
+    sum.hidden = state !== 'done' || !sum.textContent;
+  }
+  function focusStep(n) {
+    var heading = $('s' + n + '-title');
+    heading.focus({ preventScroll: true });
+    $('step' + n).scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  // ── Step 1: check ─────────────────────────────────────────────────────────
+  var lastCheck = null;
+  var checking = false;
+  var dockerOpening = false;
+
+  function icon(state) {
+    var wrap = el('span', 'check-icon');
+    if (state === 'pending') { wrap.appendChild(el('span', 'spinner')); return wrap; }
+    var tpl = $('tpl-' + state);
+    if (tpl) wrap.appendChild(tpl.content.firstElementChild.cloneNode(true));
+    return wrap;
+  }
+
+  var STATE_WORDS = { ok: 'Passed: ', bad: 'Needs fixing: ', warn: 'Warning: ', info: 'Note: ', skip: 'Not checked yet: ', pending: 'Checking: ' };
+
+  function addCheck(list, state, title, detail, fixes, extra) {
+    var li = el('li', 'check');
+    li.dataset.state = state;
+    var body = el('div', 'check-body');
+    var heading = el('p', 'check-title');
+    heading.appendChild(el('span', 'sr-only', STATE_WORDS[state] || ''));
+    heading.appendChild(document.createTextNode(title));
+    body.appendChild(heading);
+    if (detail) body.appendChild(el('p', 'check-detail', detail));
+    (fixes || []).forEach(function (fix) {
+      var p = el('p', 'check-fix', fix.text);
+      if (fix.link && typeof fix.link.href === 'string' && fix.link.href.indexOf('https:') === 0) {
+        var a = el('a', null, fix.link.label || 'Learn more');
+        a.href = fix.link.href;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        p.appendChild(document.createTextNode(' '));
+        p.appendChild(a);
+      }
+      body.appendChild(p);
+    });
+    if (extra) body.appendChild(extra);
+    li.appendChild(icon(state));
+    li.appendChild(body);
+    list.appendChild(li);
+  }
+
+  function fixesById(list) {
+    var out = {};
+    (list || []).forEach(function (fix) { (out[fix.id] = out[fix.id] || []).push(fix); });
+    return out;
+  }
+
+  function startDockerButton() {
+    var button = el('button', 'btn btn-secondary btn-small', dockerOpening ? 'Waiting for Docker…' : 'Open Docker Desktop');
+    button.type = 'button';
+    button.disabled = dockerOpening;
+    button.addEventListener('click', guard(async function () {
+      dockerOpening = true;
+      button.disabled = true;
+      button.textContent = 'Opening…';
+      var res = await act('POST', '/api/start-docker');
+      button.textContent = res.data.ok ? 'Waiting for Docker…'
+        : (OS === 'windows' ? 'Open it from the Start menu' : 'Open it from Applications');
+      watchDocker();
+    }));
+    return button;
+  }
+
+  function renderPending() {
+    var list = $('checks');
+    list.textContent = '';
+    list.setAttribute('aria-busy', 'true');
+    addCheck(list, 'pending', 'Checking your Mac…', 'Asking Docker a few questions. This can take up to 30 seconds while Docker starts.');
+    message('s1-note', '', 'info');
+  }
+
+  function renderChecks(r) {
+    if (r.os && r.os !== OS) applyOs(r.os);
+    var list = $('checks');
+    list.textContent = '';
+    list.setAttribute('aria-busy', 'false');
+    var fixes = fixesById(r.fixes);
+    var installed = !!r.docker_installed;
+
+    addCheck(list, installed ? 'ok' : 'bad', 'Docker Desktop installed',
+      installed ? (r.docker_version || 'Installed.') : '', fixes.docker_installed);
+    addCheck(list, !installed ? 'skip' : (r.docker_running ? 'ok' : 'bad'), 'Docker is running',
+      !installed ? 'Checked once Docker Desktop is installed.' : (r.docker_running ? 'The Docker engine is answering.' : ''),
+      fixes.docker_running, installed && !r.docker_running ? startDockerButton() : null);
+    addCheck(list, !installed ? 'skip' : (r.compose_v2 ? 'ok' : 'bad'), 'Docker Compose (v2 or newer)',
+      !installed ? 'Comes with Docker Desktop.' : (r.compose_v2 ? 'Version ' + (r.compose_version || '2') + '.' : ''),
+      fixes.compose_v2);
+
+    var ports = r.ports || [];
+    var blocked = ports.filter(function (p) { return !p.free && !p.ours; });
+    var ours = ports.filter(function (p) { return !p.free && p.ours; });
+    addCheck(list, blocked.length ? 'warn' : 'ok', 'Ports 3000, 8000, 5432 and 6379',
+      blocked.length ? '' : (ours.length ? 'In use by your running Crawler AI, which is fine.' : 'All free.'),
+      fixes.ports);
+
+    var gb = r.disk_free_gb;
+    addCheck(list, gb < 0 ? 'info' : (gb >= 10 ? 'ok' : 'warn'), 'Disk space',
+      gb < 0 ? 'Couldn’t measure free space.' : gb + ' GB free.', fixes.disk);
+
+    var keyFixes = fixes.env || [{ text: 'Not created yet. The next step does it for you.' }];
+    addCheck(list, r.env_keys_set ? 'ok' : 'info', 'Security keys',
+      r.env_keys_set ? 'Keys already set — skip to Build.' : '', r.env_keys_set ? [] : keyFixes);
+
+    if (r.existing_stack) addCheck(list, 'info', 'Existing install', '', fixes.existing_stack);
+    if (r.stack_conflict) addCheck(list, 'warn', 'Another copy of Crawler AI', '', fixes.stack_conflict);
+
+    var cont = $('s1-continue');
+    cont.disabled = !r.ready;
+    cont.textContent = r.ready && r.env_keys_set ? 'Continue to Build' : 'Continue';
+    if (!r.ready) {
+      message('s1-note', 'Fix the red items above, then click Re-check.', 'bad');
+    } else if (r.env_keys_set) {
+      message('s1-note', 'Keys already set — skip to Build.', 'ok');
+    } else if (blocked.length || r.stack_conflict) {
+      message('s1-note', 'Docker is ready. The warnings above won’t stop you, but the build can fail until they’re sorted.', 'info');
+    } else {
+      message('s1-note', 'Everything looks good.', 'ok');
+    }
+    if (r.docker_running) dockerOpening = false;
+  }
+
+  async function runCheck(quiet) {
+    if (checking) return lastCheck;
+    checking = true;
+    var recheck = $('s1-recheck');
+    recheck.disabled = true;
+    if (!quiet) { $('s1-continue').disabled = true; renderPending(); }
+    try {
+      var res = await act('GET', '/api/check');
+      if (res.status !== 200) {
+        message('s1-note', 'The check didn’t finish. Click Re-check to try again.', 'bad');
+        return null;
+      }
+      lastCheck = res.data;
+      renderChecks(res.data);
+      return res.data;
+    } finally {
+      checking = false;
+      if (!stopped) recheck.disabled = false;
+    }
+  }
+
+  var watching = false;
+  async function watchDocker() {
+    if (watching) return;
+    watching = true;
+    var until = Date.now() + 3 * 60 * 1000;
+    try {
+      while (!stopped && Date.now() < until && $('step1').dataset.state === 'active') {
+        await sleep(5000);
+        var r = await runCheck(true);
+        if (r && r.docker_running) return;
+      }
+    } catch (e) { /* the banner already explains a lost server */ } finally {
+      watching = false;
+      dockerOpening = false;
+    }
+  }
+
+  function continueFromCheck() {
+    if (!lastCheck || !lastCheck.ready) return;
+    var summary = 'Docker Desktop is running' + (lastCheck.compose_version ? ' (Compose ' + lastCheck.compose_version + ')' : '') + '.';
+    setStep(1, 'done', summary);
+    if (lastCheck.env_keys_set) {
+      setStep(2, 'done', 'Keys already set in backend/.env.');
+      show('s2-change', true);
+      setStep(3, 'active');
+      focusStep(3);
+    } else {
+      setStep(2, 'active');
+      focusStep(2);
+    }
+  }
+
+  // ── Step 2: keys ──────────────────────────────────────────────────────────
+  var keysWereReal = false;
+
+  function keyMode() {
+    var checked = document.querySelector('input[name="keymode"]:checked');
+    return checked ? checked.value : 'generate';
+  }
+
+  function secretProblem(v) {
+    if (!v) return 'Enter a SECRET_KEY.';
+    if (/\s/.test(v)) return 'SECRET_KEY must not contain spaces or line breaks.';
+    if (v.length < 32) return 'SECRET_KEY must be at least 32 characters (this one has ' + v.length + ').';
+    if (v.length > 512) return 'SECRET_KEY must be at most 512 characters.';
+    if (/[^\x21-\x7e]/.test(v)) return 'SECRET_KEY must use plain letters, digits and symbols (ASCII).';
+    if (/["'`\\$#]/.test(v)) return 'SECRET_KEY must not contain quotes, backticks, backslashes, $ or #.';
+    if (/replace_me|changeme|change-me|your-secret/i.test(v)) return 'SECRET_KEY still looks like a placeholder; use a random value.';
+    return '';
+  }
+
+  function encryptionProblem(v) {
+    if (!v) return 'Enter an ENCRYPTION_KEY.';
+    if (/\s/.test(v)) return 'ENCRYPTION_KEY must not contain spaces or line breaks.';
+    if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(v)) return 'ENCRYPTION_KEY must be base64 text (A-Z, a-z, 0-9, + / or - _, with = padding).';
+    if (v.length % 4 !== 0) return 'ENCRYPTION_KEY isn’t valid base64; check the = padding at the end.';
+    var raw;
+    try { raw = atob(v.replace(/-/g, '+').replace(/_/g, '/')); } catch (e) {
+      return 'ENCRYPTION_KEY isn’t valid base64; check the = padding at the end.';
+    }
+    if (raw.length !== 32) return 'ENCRYPTION_KEY must decode to exactly 32 bytes (this one decodes to ' + raw.length + ').';
+    return '';
+  }
+
+  function fieldError(inputId, errorId, text) {
+    var node = $(errorId);
+    node.textContent = text || '';
+    node.hidden = !text;
+    $(inputId).setAttribute('aria-invalid', text ? 'true' : 'false');
+  }
+
+  function confirmReplace() {
+    var dialog = $('confirm');
+    $('confirm-extra').hidden = !keysWereReal;
+    if (typeof dialog.showModal !== 'function') {
+      return Promise.resolve(window.confirm('A .env already exists. Replace only the two keys (a backup is kept)?'));
+    }
+    return new Promise(function (resolve) {
+      function onClose() {
+        dialog.removeEventListener('close', onClose);
+        resolve(dialog.returnValue === 'replace');
+      }
+      dialog.returnValue = '';
+      dialog.addEventListener('close', onClose);
+      dialog.showModal();
+      $('confirm-cancel').focus();
+    });
+  }
+
+  async function saveKeys(overwrite) {
+    var mode = keyMode();
+    var body = { mode: mode, overwrite: !!overwrite };
+    message('s2-msg', '', 'info');
+    if (mode === 'custom') {
+      var secret = $('k-secret').value, enc = $('k-enc').value;
+      var ps = secretProblem(secret), pe = encryptionProblem(enc);
+      fieldError('k-secret', 'e-secret', ps);
+      fieldError('k-enc', 'e-enc', pe);
+      if (ps || pe) { $(ps ? 'k-secret' : 'k-enc').focus(); return; }
+      body.secret_key = secret;
+      body.encryption_key = enc;
+    }
+    var button = $('s2-save');
+    busy(button, true, 'Saving…');
+    var res;
+    try {
+      res = await act('POST', '/api/keys', body);
+    } finally {
+      busy(button, false);
+    }
+    var data = res.data;
+    if (data.ok) { keysSaved(data); return; }
+    if (data.reason === 'exists' && !overwrite) {
+      if (await confirmReplace()) { await saveKeys(true); return; }
+      message('s2-msg', 'Kept your existing backend/.env. Nothing was changed.', 'info');
+      return;
+    }
+    if (data.reason === 'invalid' && data.errors) {
+      fieldError('k-secret', 'e-secret', data.errors.secret_key);
+      fieldError('k-enc', 'e-enc', data.errors.encryption_key);
+      if (data.errors.mode) message('s2-msg', data.errors.mode, 'bad');
+      return;
+    }
+    if (data.reason === 'build_running') {
+      message('s2-msg', 'A build is running. Wait for it to finish before changing keys.', 'bad');
+    } else if (data.reason === 'no_example') {
+      message('s2-msg', 'backend/.env.example is missing from this folder. Download Crawler AI again, then retry.', 'bad');
+    } else {
+      message('s2-msg', 'Couldn’t write backend/.env. Make sure the folder isn’t read-only, then try again.', 'bad');
+    }
+  }
+
+  function keysSaved(data) {
+    $('k-secret').value = '';
+    $('k-enc').value = '';
+    keysWereReal = true;
+    var text = 'Saved to backend/.env ✓';
+    if (data.backup) text += ' (the previous file is kept as ' + data.backup + ')';
+    message('s2-msg', text, 'ok');
+    show('s2-save', false);
+    show('s2-next', true);
+    $('s2-next').focus();
+  }
+
+  function reopenKeys() {
+    setStep(2, 'active');
+    setStep(3, 'locked');
+    show('s2-change', false);
+    show('s2-save', true);
+    show('s2-next', false);
+    message('s2-msg', '', 'info');
+    focusStep(2);
+  }
+
+  // ── Step 3: build ─────────────────────────────────────────────────────────
+  var cursor = 0;
+  var logLines = [];
+  var polling = false;
+  var MAX_LOG_LINES = 2000;
+  var PAGE_LINES = 500;
+
+  function appendLog(lines) {
+    if (!lines || !lines.length) return;
+    var pre = $('s3-log');
+    var stick = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 48;
+    Array.prototype.push.apply(logLines, lines);
+    if (logLines.length > MAX_LOG_LINES) {
+      logLines.splice(0, logLines.length - MAX_LOG_LINES);
+      pre.textContent = logLines.join('\n') + '\n';
+    } else {
+      pre.appendChild(document.createTextNode(lines.join('\n') + '\n'));
+    }
+    if (stick) pre.scrollTop = pre.scrollHeight;
+  }
+
+  function showProgress() {
+    show('s3-start-row', false);
+    show('s3-progress', true);
+    show('s2-change', false);
+  }
+
+  function applyStatus(d) {
+    if (typeof d.next === 'number') {
+      if (d.next < cursor) { logLines = []; $('s3-log').textContent = ''; }
+      appendLog(d.lines);
+      cursor = d.next;
+    }
+    $('s3-elapsed').textContent = formatElapsed(d.elapsed_s);
+    $('s3-progress').dataset.state = d.state;
+    var phase = $('s3-phase');
+    if (d.state === 'building') {
+      phase.textContent = d.phase === 'starting_containers' ? 'Starting…' : 'Building images…';
+    } else if (d.state === 'starting') {
+      phase.textContent = d.phase === 'waiting_frontend' ? 'Waiting for the web app…' : 'Waiting for the backend…';
+    } else if (d.state === 'healthy') {
+      phase.textContent = 'Backend loaded ✓';
+      show('s3-failure', false);
+      show('s3-next-row', true);
+    } else if (d.state === 'failed') {
+      phase.textContent = 'Build stopped';
+      $('s3-error').textContent = d.error || 'Something went wrong. The output above says why.';
+      $('s3-tail').textContent = logLines.slice(-30).join('\n');
+      show('s3-failure', true);
+      $('s3-tail').scrollTop = $('s3-tail').scrollHeight;
+      show('s3-next-row', false);
+    }
+  }
+
+  async function pollBuild() {
+    if (polling) return;
+    polling = true;
+    var misses = 0;
+    try {
+      while (!stopped) {
+        var res;
+        try {
+          res = await api('GET', '/api/build/status?since=' + cursor);
+          misses = 0;
+        } catch (e) {
+          if (e instanceof NetworkError && ++misses < 4) { await sleep(1500); continue; }
+          if (e instanceof NetworkError) fatal('closed');
+          return;
+        }
+        var wasHealthy = $('s3-progress').dataset.state === 'healthy';
+        applyStatus(res.data);
+        var state = res.data.state;
+        var more = (res.data.lines || []).length >= PAGE_LINES;
+        if (state === 'healthy' || state === 'failed' || state === 'idle') {
+          if (more) continue;
+          if (state === 'healthy' && !wasHealthy) $('s3-next').focus();
+          return;
+        }
+        if (!more) await sleep(1000);
+      }
+    } finally {
+      polling = false;
+    }
+  }
+
+  async function startBuild() {
+    message('s3-msg', '', 'info');
+    show('s3-failure', false);
+    var button = $('s3-build');
+    busy(button, true, 'Starting…');
+    var res;
+    try { res = await act('POST', '/api/build'); } finally { busy(button, false); }
+    if (res.status === 202 || res.status === 409) {
+      showProgress();
+      $('s3-progress').dataset.state = 'building';
+      pollBuild();
+      return;
+    }
+    if (res.data.reason === 'keys_missing') {
+      message('s3-msg', 'The security keys aren’t set yet. Save them in step 2 first.', 'bad');
+      reopenKeys();
+      return;
+    }
+    message('s3-msg', 'The build couldn’t start. Click the button to try again.', 'bad');
+  }
+
+  function resume(d) {
+    setStep(1, 'done', 'Docker Desktop is running.');
+    setStep(2, 'done', 'Keys saved in backend/.env.');
+    setStep(3, 'active');
+    showProgress();
+    applyStatus(d);
+    if (d.state === 'building' || d.state === 'starting' || (d.lines || []).length >= PAGE_LINES) pollBuild();
+  }
+
+  // ── Step 4: open ──────────────────────────────────────────────────────────
+  async function openApp() {
+    var res = await act('POST', '/api/open');
+    message('s4-msg', res.data.ok
+      ? 'Opened Crawler AI in your browser.'
+      : 'Couldn’t open the browser automatically. Click the address above instead.', res.data.ok ? 'ok' : 'info');
+  }
+
+  async function closeInstaller() {
+    quitting = true;
+    busy($('s4-close'), true, 'Closing…');
+    try { await api('POST', '/api/quit'); } catch (e) { /* already gone is fine */ }
+    stopped = true;
+    show('stepper', false);
+    show('fatal', false);
+    show('closed', true);
+    $('closed-title').focus();
+  }
+
+  // ── Wiring ────────────────────────────────────────────────────────────────
+  function wire() {
+    $('s1-recheck').addEventListener('click', guard(function () { return runCheck(false); }));
+    $('s1-continue').addEventListener('click', continueFromCheck);
+
+    Array.prototype.forEach.call(document.querySelectorAll('input[name="keymode"]'), function (radio) {
+      radio.addEventListener('change', function () {
+        var custom = keyMode() === 'custom';
+        show('custom-keys', custom);
+        if (custom) $('k-secret').focus();
+      });
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-toggle]'), function (button) {
+      button.addEventListener('click', function () {
+        var input = $(button.getAttribute('data-toggle'));
+        var reveal = input.type === 'password';
+        input.type = reveal ? 'text' : 'password';
+        button.textContent = reveal ? 'Hide' : 'Show';
+        button.setAttribute('aria-pressed', reveal ? 'true' : 'false');
+      });
+    });
+    $('s2-save').addEventListener('click', guard(function () { return saveKeys(false); }));
+    $('s2-next').addEventListener('click', function () {
+      setStep(2, 'done', 'Keys saved to backend/.env.');
+      show('s2-change', true);
+      setStep(3, 'active');
+      focusStep(3);
+    });
+    $('s2-change').addEventListener('click', reopenKeys);
+    $('confirm-ok').addEventListener('click', function () { $('confirm').close('replace'); });
+    $('confirm-cancel').addEventListener('click', function () { $('confirm').close('cancel'); });
+
+    $('s3-build').addEventListener('click', guard(startBuild));
+    $('s3-retry').addEventListener('click', guard(startBuild));
+    $('s3-next').addEventListener('click', function () {
+      setStep(3, 'done', 'Crawler AI is built and running.');
+      setStep(4, 'active');
+      focusStep(4);
+    });
+
+    $('s4-open').addEventListener('click', guard(openApp));
+    $('s4-close').addEventListener('click', guard(closeInstaller));
+  }
+
+  async function init() {
+    applyOs(OS);
+    wire();
+    if (!TOKEN) { fatal('notoken'); return; }
+    try {
+      var res = await api('GET', '/api/build/status?since=0');
+      if (res.status === 200 && res.data.state && res.data.state !== 'idle') {
+        resume(res.data);
+        return;
+      }
+    } catch (e) {
+      if (e instanceof NetworkError) fatal('closed');
+      return;
+    }
+    try { await runCheck(false); } catch (e) { /* banner already shown */ }
+  }
+
+  guard(init)();
+})();
+</script>
+</body>
+</html>

@@ -1,5 +1,11 @@
-"""
-Robinhood Crypto connector for SentientAI.
+"""Implements the read-only Robinhood Crypto connector with HMAC-SHA256 request
+signing and a permanent block on every trading action.
+
+Why it exists: The factory constructs it for tool execution; keeping the hard-
+block list beside the API code guarantees no trade, transfer or withdrawal can
+be issued whatever the permission engine decides.
+
+Robinhood Crypto connector for Crawler AI.
 
 READ-ONLY access to Robinhood's official Crypto Trading API.
 All financial actions (trades, transfers, withdrawals) are
@@ -13,7 +19,6 @@ import hmac
 import time
 import uuid
 from typing import Any, Optional
-from urllib.parse import urlencode
 
 import httpx
 import structlog
@@ -103,11 +108,7 @@ class RobinhoodConnector(BaseConnector):
 
         # Validate credentials by making a lightweight API call
         try:
-            client = self._get_client(base_url=self.BASE_URL)
-            resp = await client.get(
-                "/api/v1/crypto/trading/accounts/",
-                headers=self._build_headers("GET", "/api/v1/crypto/trading/accounts/"),
-            )
+            resp = await self._send_signed("GET", "/api/v1/crypto/trading/accounts/")
             if resp.status_code == 401:
                 raise AuthenticationError("Invalid Robinhood API credentials.")
             resp.raise_for_status()
@@ -127,7 +128,6 @@ class RobinhoodConnector(BaseConnector):
         method: str,
         path: str,
         body: str = "",
-        query: str = "",
     ) -> dict[str, str]:
         """Build signed request headers using HMAC-SHA256.
 
@@ -135,6 +135,10 @@ class RobinhoodConnector(BaseConnector):
         - ``x-api-key``
         - ``x-timestamp`` (Unix epoch)
         - ``x-signature`` (HMAC of ``{api_key}{timestamp}{path}{method}{body}``)
+
+        *path* must be the path-and-query exactly as it goes on the wire;
+        see ``_send_signed``, which is the only caller that can guarantee
+        that.
         """
         timestamp = str(int(time.time()))
         message = f"{self._api_key}{timestamp}{path}{method.upper()}{body}"
@@ -153,6 +157,29 @@ class RobinhoodConnector(BaseConnector):
 
     # -- Internal HTTP helpers -----------------------------------------------
 
+    async def _send_signed(
+        self,
+        method: str,
+        path: str,
+        params: dict[str, Any] | None = None,
+    ) -> httpx.Response:
+        """Sign and send one request, over the exact bytes being sent.
+
+        The signature covers the path-and-query, so the string signed and
+        the string transmitted have to be identical byte for byte. Building
+        the query twice — once with ``urlencode`` for the HMAC and once by
+        handing ``params`` to httpx — meant trusting two encoders to agree;
+        they do not (booleans, ``None``, and repeated keys all differ), and
+        every disagreement is an opaque 401 from Robinhood. Building the
+        request first and signing ``raw_path`` off that same object removes
+        the second encoder entirely.
+        """
+        client = self._get_client(base_url=self.BASE_URL)
+        request = client.build_request(method, path, params=params)
+        signed_path = request.url.raw_path.decode("ascii")
+        request.headers.update(self._build_headers(method, signed_path))
+        return await client.send(request)
+
     async def _api_get(
         self,
         path: str,
@@ -170,11 +197,7 @@ class RobinhoodConnector(BaseConnector):
                 ),
             )
 
-        query = urlencode(params) if params else ""
-        full_path = f"{path}?{query}" if query else path
-        headers = self._build_headers("GET", full_path)
-        client = self._get_client(base_url=self.BASE_URL)
-        resp = await client.get(path, headers=headers, params=params)
+        resp = await self._send_signed("GET", path, params=params)
         resp.raise_for_status()
         return resp.json()
 
@@ -210,7 +233,7 @@ class RobinhoodConnector(BaseConnector):
         for symbol in symbols:
             pair = f"{symbol.upper()}-USD"
             data = await self._api_get(
-                f"/api/v1/crypto/marketdata/best_bid_ask/",
+                "/api/v1/crypto/marketdata/best_bid_ask/",
                 params={"symbol": pair},
                 user_confirmed=user_confirmed,
             )
@@ -278,10 +301,15 @@ class RobinhoodConnector(BaseConnector):
     # -- Health check --------------------------------------------------------
 
     async def health_check(self) -> bool:
-        """Check Robinhood API reachability (unauthenticated ping)."""
+        """Check Robinhood API reachability (unauthenticated ping).
+
+        Pings a read-only market-data endpoint that is inside the
+        connector's network-policy allowlist ("/" is not). An auth
+        error (401/403) still proves the service is reachable.
+        """
         try:
             client = self._get_client(base_url=self.BASE_URL)
-            resp = await client.get("/")
+            resp = await client.get("/api/v1/crypto/marketdata/best_bid_ask/")
             return resp.status_code < 500
         except Exception:
             return False

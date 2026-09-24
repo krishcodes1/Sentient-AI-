@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+/**
+ * Dashboard page: stat cards, the pending-approval queue, the security-events chart, the recent
+ * activity feed, token usage and connector health, polled every 30s.
+ *
+ * Why it exists: It is the first page after sign-in and the one place every source is loaded
+ * together, with each fetch failing independently so one dead source does not blank the others.
+ */
+
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Plug,
   Activity,
@@ -6,6 +14,12 @@ import {
   Clock,
   CheckCircle2,
   XCircle,
+  AlertTriangle,
+  ShieldQuestion,
+  Loader2,
+  RefreshCw,
+  Coins,
+  type LucideIcon,
 } from "lucide-react";
 import {
   AreaChart,
@@ -17,19 +31,30 @@ import {
 } from "recharts";
 import type {
   AuditLog,
+  AuditStats,
   Connector,
   ConnectorHealthEntry,
-  SecurityTimelineEntry,
+  PendingApproval,
+  UsageSummary,
 } from "@/types";
 import {
+  decideApproval,
   getAuditLogs,
+  getAuditStats,
   getConnectorHealth,
   getConnectors,
-  getMe,
+  getPendingApprovals,
+  getUsageSummary,
 } from "@/services/api";
+import UsagePanel from "@/components/UsagePanel";
+import { formatCost, formatTokens } from "@/components/usageFormat";
+// Countdown logic lives beside Chat's ApprovalCard so both approval queues
+// expire in lockstep with the server-side TTL.
+import { formatCountdown, useCountdown } from "@/pages/approvalCountdown";
+import { useResolvedColors } from "@/hooks/useResolvedColors";
 
-const TIMELINE_DAYS = 7;
 const FEED_LIMIT = 6;
+const POLL_INTERVAL_MS = 30_000;
 
 const statusColors = {
   approved: "var(--accent-success)",
@@ -42,32 +67,6 @@ const statusIcons = {
   blocked: XCircle,
   pending: Clock,
 };
-
-function bucketByDay(logs: AuditLog[], days: number): SecurityTimelineEntry[] {
-  const now = new Date();
-  const buckets: SecurityTimelineEntry[] = [];
-  const keyByDay = new Map<string, SecurityTimelineEntry>();
-
-  for (let i = days - 1; i >= 0; i--) {
-    const d = new Date(now);
-    d.setHours(0, 0, 0, 0);
-    d.setDate(d.getDate() - i);
-    const key = d.toISOString().slice(0, 10);
-    const label = d.toLocaleDateString(undefined, { month: "short", day: "2-digit" });
-    const entry: SecurityTimelineEntry = { date: label, approved: 0, blocked: 0 };
-    buckets.push(entry);
-    keyByDay.set(key, entry);
-  }
-
-  for (const log of logs) {
-    const key = new Date(log.timestamp).toISOString().slice(0, 10);
-    const bucket = keyByDay.get(key);
-    if (!bucket) continue;
-    if (log.status === "approved") bucket.approved += 1;
-    else if (log.status === "blocked") bucket.blocked += 1;
-  }
-  return buckets;
-}
 
 function formatRelative(iso: string): string {
   const then = new Date(iso).getTime();
@@ -83,26 +82,198 @@ function formatRelative(iso: string): string {
   return new Date(iso).toLocaleDateString();
 }
 
+function ApprovalRow({
+  approval,
+  onDecide,
+}: {
+  approval: PendingApproval;
+  onDecide: (approved: boolean) => Promise<void>;
+}) {
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const remaining = useCountdown(approval.expires_at);
+  // The server enforces the TTL, so a click after this point would 404 —
+  // disable the buttons instead of letting the user walk into that.
+  const expired = remaining !== null && remaining <= 0;
+
+  const decide = async (approved: boolean) => {
+    setPending(true);
+    setError(null);
+    try {
+      await onDecide(approved);
+    } catch (err) {
+      setError((err as Error).message);
+      setPending(false);
+    }
+  };
+
+  return (
+    <div
+      className="rounded-[10px] p-3"
+      style={{
+        background: "var(--claw-surface)",
+        border: "1px solid var(--claw-border)",
+        opacity: expired ? 0.75 : 1,
+      }}
+    >
+      {/* Backend-flagged risk: the request was shaped by external/untrusted
+          content. Danger colors, ABOVE the action row — placing it below the
+          buttons meant the reader reached Approve before the warning. */}
+      {approval.risk_note && (
+        <div
+          className="flex items-start gap-2 p-2.5 rounded-[8px] mb-3"
+          style={{
+            background: "var(--fill-danger)",
+            border: "1px solid var(--border-danger)",
+          }}
+        >
+          <AlertTriangle
+            className="w-4 h-4 mt-0.5 shrink-0"
+            style={{ color: "var(--accent-danger)" }}
+          />
+          <div className="min-w-0">
+            <div className="eyebrow" style={{ color: "var(--accent-danger)" }}>
+              Risk warning
+            </div>
+            <p className="text-xs mt-1" style={{ color: "var(--text-secondary)" }}>
+              {approval.risk_note}
+            </p>
+          </div>
+        </div>
+      )}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
+            <span className="mono-tag">{approval.tool_name}</span>
+            {remaining !== null && (
+              <span
+                className="mono-tag inline-flex items-center gap-1 ml-2"
+                style={{
+                  color: expired ? "var(--accent-danger)" : "var(--accent-warning)",
+                }}
+              >
+                <Clock className="w-3 h-3" />
+                {expired ? "expired" : `expires in ${formatCountdown(remaining)}`}
+              </span>
+            )}
+          </p>
+          <p className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>
+            {expired
+              ? "This request expired without a decision. Ask the agent again if the action is still needed."
+              : approval.reason}
+          </p>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            disabled={pending || expired}
+            onClick={() => void decide(true)}
+            className="px-3 rounded-[8px] text-xs font-semibold disabled:opacity-50 inline-flex items-center gap-1.5"
+            style={{
+              minHeight: 36,
+              background: "var(--accent-success)",
+              color: "var(--text-on-accent)",
+            }}
+          >
+            {pending ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
+            Approve
+          </button>
+          <button
+            type="button"
+            disabled={pending || expired}
+            onClick={() => void decide(false)}
+            className="px-3 rounded-[8px] text-xs font-medium disabled:opacity-50"
+            style={{
+              minHeight: 36,
+              border: "1px solid var(--border-danger)",
+              color: "var(--accent-danger)",
+            }}
+          >
+            Deny
+          </button>
+        </div>
+      </div>
+      {Object.keys(approval.arguments ?? {}).length > 0 && (
+        <pre
+          className="text-xs mt-2 p-2 rounded-[8px] overflow-x-auto"
+          style={{
+            background: "var(--bg-primary)",
+            color: "var(--text-secondary)",
+            border: "1px solid var(--border-subtle)",
+          }}
+        >
+          {JSON.stringify(approval.arguments, null, 2)}
+        </pre>
+      )}
+      {error && (
+        <p role="alert" className="text-xs mt-2" style={{ color: "var(--accent-danger)" }}>
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Status tints, as token triples. The previous version took a hex string and
+ * built its fill by appending an alpha suffix (`${color}1f`), which no
+ * custom property can survive — `var(--accent-success)1f` is not a color and
+ * the fill silently disappeared.
+ */
+const TONES = {
+  success: {
+    fg: "var(--accent-success)",
+    fill: "var(--fill-success)",
+    border: "var(--border-success)",
+  },
+  accent: {
+    fg: "var(--accent-primary)",
+    fill: "var(--accent-glow)",
+    border: "var(--border-accent)",
+  },
+  danger: {
+    fg: "var(--accent-danger)",
+    fill: "var(--fill-danger)",
+    border: "var(--border-danger)",
+  },
+  warning: {
+    fg: "var(--accent-warning)",
+    fill: "var(--fill-warning)",
+    border: "var(--border-warning)",
+  },
+} as const;
+
+type Tone = keyof typeof TONES;
+
 function StatCard({
   label,
   value,
   icon: Icon,
-  color,
+  tone,
   eyebrow,
 }: {
   label: string;
   value: number | string;
-  icon: any;
-  color: string;
+  icon: LucideIcon;
+  tone: Tone;
   eyebrow: string;
 }) {
+  const { fg, fill, border } = TONES[tone];
   return (
     <div
-      className="rounded-[14px] p-5"
+      className="rounded-[14px] p-5 transition-all duration-200"
       style={{
         background: "var(--claw-panel)",
         border: "1px solid var(--claw-border)",
         boxShadow: "var(--shadow-card)",
+      }}
+      onMouseOver={(e) => {
+        e.currentTarget.style.borderColor = "var(--border-accent-strong)";
+        e.currentTarget.style.transform = "translateY(-2px)";
+      }}
+      onMouseOut={(e) => {
+        e.currentTarget.style.borderColor = "var(--claw-border)";
+        e.currentTarget.style.transform = "translateY(0)";
       }}
     >
       <div className="flex items-start justify-between mb-3">
@@ -113,13 +284,11 @@ function StatCard({
           </span>
         </div>
         <div
-          className="w-8 h-8 rounded-[8px] flex items-center justify-center"
-          style={{
-            background: `${color}1f`,
-            border: `1px solid ${color}40`,
-          }}
+          aria-hidden
+          className="w-8 h-8 rounded-[8px] flex items-center justify-center shrink-0"
+          style={{ background: fill, border: `1px solid ${border}` }}
         >
-          <Icon size={16} strokeWidth={2} style={{ color }} />
+          <Icon size={16} strokeWidth={2} style={{ color: fg }} />
         </div>
       </div>
       <p className="metric">{value}</p>
@@ -128,96 +297,277 @@ function StatCard({
 }
 
 export default function Dashboard() {
+  const [stats, setStats] = useState<AuditStats | null>(null);
   const [logs, setLogs] = useState<AuditLog[]>([]);
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [health, setHealth] = useState<ConnectorHealthEntry[]>([]);
+  const [approvals, setApprovals] = useState<PendingApproval[]>([]);
+  const [usage, setUsage] = useState<UsageSummary | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const user = await getMe();
-        if (cancelled) return;
-        const [logResult, connResult, healthResult] = await Promise.all([
-          getAuditLogs(user.id, { limit: 500 }).catch((): AuditLog[] => []),
-          getConnectors(user.id).catch((): Connector[] => []),
-          getConnectorHealth(user.id).catch((): ConnectorHealthEntry[] => []),
-        ]);
-        if (cancelled) return;
-        setLogs(logResult);
-        setConnectors(connResult);
-        setHealth(healthResult);
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
+  // `background` refreshes (polling, post-approval) skip the loading state
+  // so the page does not flicker every 30 seconds. A foreground refresh is
+  // started by `reload` below, which raises the loading state in the click;
+  // on mount it already starts out true. Nothing here touches state before
+  // the first await, so the mount effect does not render twice.
+  const load = useCallback(async (background = false) => {
+    const failures: string[] = [];
+    const fallback = <T,>(label: string, empty: T) => (err: Error): T => {
+      failures.push(label);
+      console.error(`dashboard: ${label} failed`, err);
+      return empty;
     };
+    try {
+      const [
+        statsResult,
+        logResult,
+        connResult,
+        healthResult,
+        approvalResult,
+        usageResult,
+      ] = await Promise.all([
+          getAuditStats().catch(fallback("stats", null as AuditStats | null)),
+          getAuditLogs({ limit: FEED_LIMIT }).catch(
+            fallback("audit logs", [] as AuditLog[])
+          ),
+          getConnectors().catch(fallback("connectors", [] as Connector[])),
+          getConnectorHealth().catch(
+            fallback("connector health", [] as ConnectorHealthEntry[])
+          ),
+          getPendingApprovals().catch(
+            fallback("pending approvals", [] as PendingApproval[])
+          ),
+          getUsageSummary().catch(fallback("usage", null as UsageSummary | null)),
+        ]);
+      // On a failed stats fetch keep the previous numbers on screen rather
+      // than blanking them; the banner below reports the failure.
+      if (statsResult) setStats(statsResult);
+      if (usageResult) setUsage(usageResult);
+      setLogs(logResult);
+      setConnectors(connResult);
+      setHealth(healthResult);
+      setApprovals(approvalResult);
+      // Replaces the previous run's banner once this run has an answer, so a
+      // background poll against a still-failing source does not blink it off
+      // and back on.
+      setLoadError(
+        failures.length > 0
+          ? `Some data could not be loaded (${failures.join(", ")}).`
+          : null,
+      );
+    } finally {
+      if (!background) setLoading(false);
+    }
   }, []);
 
-  const timeline = useMemo(() => bucketByDay(logs, TIMELINE_DAYS), [logs]);
+  // Refresh and Retry: an explicit reload clears the banner and shows the
+  // loading state straight away, as the reader asked for it.
+  const reload = () => {
+    setLoading(true);
+    setLoadError(null);
+    void load();
+  };
+
+  useEffect(() => {
+    void load();
+    const interval = setInterval(() => void load(true), POLL_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [load]);
+
+  const handleApproval = async (actionId: string, approved: boolean) => {
+    await decideApproval(actionId, approved);
+    setApprovals((prev) => prev.filter((a) => a.action_id !== actionId));
+    // Refresh stats and the feed so the decided action shows up immediately.
+    void load(true);
+  };
+
+  const timeline = useMemo(
+    () =>
+      (stats?.by_day ?? []).map((d) => {
+        const parsed = new Date(`${d.date}T00:00:00`);
+        return {
+          date: Number.isNaN(parsed.getTime())
+            ? d.date
+            : parsed.toLocaleDateString(undefined, {
+                month: "short",
+                day: "2-digit",
+              }),
+          approved: d.approved,
+          blocked: d.blocked,
+        };
+      }),
+    [stats]
+  );
+  // recharts writes these onto SVG presentation attributes, which never
+  // substitute var(), so the tokens are resolved to real colors first and
+  // re-resolved whenever the theme changes.
+  const chart = useResolvedColors({
+    "--chart-ok": "#22d3ee",
+    "--chart-block": "#f87171",
+    "--chart-axis": "#a1a1aa",
+    "--claw-panel": "#131316",
+    "--claw-border": "rgba(63,63,70,0.65)",
+    "--text-primary": "#f4f4f5",
+  });
+
+  const timelineDays = stats?.by_day.length ?? 7;
   const recentActivity = useMemo(() => logs.slice(0, FEED_LIMIT), [logs]);
-  const counts24h = useMemo(() => {
-    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-    let total = 0;
-    let blocked = 0;
-    let pending = 0;
-    for (const l of logs) {
-      if (new Date(l.timestamp).getTime() < cutoff) continue;
-      total += 1;
-      if (l.status === "blocked") blocked += 1;
-      else if (l.status === "pending") pending += 1;
-    }
-    return { total, blocked, pending };
-  }, [logs]);
 
   const activeConnectors = connectors.filter((c) => c.is_active).length;
 
   return (
     <div className="space-y-6">
-      <div>
-        <div className="eyebrow mb-2">Control center</div>
-        <h1 style={{ color: "var(--text-primary)" }}>Gateway &amp; workspace</h1>
-        <p
-          className="text-sm mt-1.5 max-w-2xl"
-          style={{ color: "var(--text-secondary)" }}
+      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
+        <div>
+          <div className="eyebrow mb-2">Control center</div>
+          <h1 style={{ color: "var(--text-primary)" }}>Gateway &amp; workspace</h1>
+          <p
+            className="text-sm mt-1.5 max-w-2xl"
+            style={{ color: "var(--text-secondary)" }}
+          >
+            Live agent activity, blocked actions, pending approvals, and
+            connector health — everything the agent does flows through the
+            policy layer and lands here. Refreshes every{" "}
+            {POLL_INTERVAL_MS / 1000}s.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={reload}
+          disabled={loading}
+          className="inline-flex items-center justify-center gap-2 px-3.5 rounded-[10px] text-sm font-medium disabled:opacity-50 shrink-0 self-start"
+          style={{
+            minHeight: 44,
+            background: "var(--bg-input)",
+            border: "1px solid var(--claw-border)",
+            color: "var(--text-primary)",
+          }}
         >
-          Mirror of the native OpenClaw dashboard. Live agent activity, blocked
-          actions, and connector health — all flowing through the policy layer.
-        </p>
+          <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} aria-hidden />
+          Refresh
+        </button>
       </div>
 
+      {/* Load error banner */}
+      {loadError && (
+        <div
+          role="alert"
+          className="flex flex-wrap items-center justify-between gap-3 rounded-[12px] px-4 py-3"
+          style={{
+            background: "var(--fill-warning)",
+            border: "1px solid var(--border-warning)",
+          }}
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <AlertTriangle
+              className="w-4 h-4 shrink-0"
+              style={{ color: "var(--accent-warning)" }}
+            />
+            <span className="text-sm truncate" style={{ color: "var(--text-secondary)" }}>
+              {loadError}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={reload}
+            className="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-[8px] shrink-0"
+            style={{
+              border: "1px solid var(--border-warning)",
+              color: "var(--accent-warning)",
+            }}
+          >
+            <RefreshCw className="w-3 h-3" />
+            Retry
+          </button>
+        </div>
+      )}
+
+      {/* Pending approvals — the consent queue. Shown above everything
+          else because these are actions waiting on the user. */}
+      {approvals.length > 0 && (
+        <div
+          className="rounded-[14px] p-5"
+          style={{
+            background: "var(--claw-panel)",
+            border: "1px solid var(--border-warning)",
+            boxShadow: "var(--shadow-card)",
+          }}
+        >
+          <div className="flex items-center gap-2 mb-1">
+            <ShieldQuestion className="w-4 h-4" style={{ color: "var(--accent-warning)" }} />
+            <div className="eyebrow" style={{ color: "var(--accent-warning)" }}>
+              Awaiting your approval
+            </div>
+          </div>
+          <h2 className="mb-1">
+            {approvals.length} action{approvals.length === 1 ? "" : "s"} need
+            {approvals.length === 1 ? "s" : ""} a decision
+          </h2>
+          <p className="text-xs mb-4" style={{ color: "var(--text-muted)" }}>
+            The agent will not run these until you approve them. Undecided
+            requests expire automatically.
+          </p>
+          <div className="space-y-3">
+            {approvals.map((approval) => (
+              <ApprovalRow
+                key={approval.action_id}
+                approval={approval}
+                onDecide={(approved) =>
+                  handleApproval(approval.action_id, approved)
+                }
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Stat cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
         <StatCard
           eyebrow="Connectors"
           label="Active"
           value={loading ? "…" : activeConnectors}
           icon={Plug}
-          color="#34d399"
+          tone="success"
         />
         <StatCard
           eyebrow="Actions"
           label="Last 24h"
-          value={loading ? "…" : counts24h.total}
+          value={loading ? "…" : stats ? stats.total_actions_24h : "—"}
           icon={Activity}
-          color="#22d3ee"
+          tone="accent"
         />
         <StatCard
           eyebrow="Blocked"
           label="Last 24h"
-          value={loading ? "…" : counts24h.blocked}
+          value={loading ? "…" : stats ? stats.blocked_24h : "—"}
           icon={ShieldAlert}
-          color="#f87171"
+          tone="danger"
         />
         <StatCard
           eyebrow="Pending"
-          label="Last 24h"
-          value={loading ? "…" : counts24h.pending}
+          label="Awaiting approval"
+          value={loading ? "…" : stats ? stats.pending_approvals : "—"}
           icon={Clock}
-          color="#fbbf24"
+          tone="warning"
+        />
+        <StatCard
+          eyebrow="Tokens today"
+          label={
+            usage
+              ? `Est. cost ${formatCost(usage.windows.today.estimated_cost_usd)}`
+              : "Est. cost —"
+          }
+          value={
+            loading && !usage
+              ? "…"
+              : usage
+                ? formatTokens(usage.windows.today.total_tokens)
+                : "—"
+          }
+          icon={Coins}
+          tone="accent"
         />
       </div>
 
@@ -233,29 +583,29 @@ export default function Dashboard() {
           }}
         >
           <div className="eyebrow mb-1">Policy timeline</div>
-          <h2 className="mb-4">Security events · last {TIMELINE_DAYS} days</h2>
+          <h2 className="mb-4">Security events · last {timelineDays} days</h2>
           <ResponsiveContainer width="100%" height={260}>
             <AreaChart data={timeline}>
               <defs>
                 <linearGradient id="approvedGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#22d3ee" stopOpacity={0.3} />
-                  <stop offset="95%" stopColor="#22d3ee" stopOpacity={0} />
+                  <stop offset="5%" stopColor={chart["--chart-ok"]} stopOpacity={0.3} />
+                  <stop offset="95%" stopColor={chart["--chart-ok"]} stopOpacity={0} />
                 </linearGradient>
                 <linearGradient id="blockedGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#f87171" stopOpacity={0.3} />
-                  <stop offset="95%" stopColor="#f87171" stopOpacity={0} />
+                  <stop offset="5%" stopColor={chart["--chart-block"]} stopOpacity={0.3} />
+                  <stop offset="95%" stopColor={chart["--chart-block"]} stopOpacity={0} />
                 </linearGradient>
               </defs>
               <XAxis
                 dataKey="date"
-                stroke="#a1a1aa"
+                stroke={chart["--chart-axis"]}
                 fontSize={11}
                 tickLine={false}
                 axisLine={false}
                 style={{ fontFamily: "var(--font-mono)" }}
               />
               <YAxis
-                stroke="#a1a1aa"
+                stroke={chart["--chart-axis"]}
                 fontSize={11}
                 tickLine={false}
                 axisLine={false}
@@ -263,10 +613,10 @@ export default function Dashboard() {
               />
               <Tooltip
                 contentStyle={{
-                  backgroundColor: "#131316",
-                  border: "1px solid rgba(63,63,70,0.65)",
+                  backgroundColor: chart["--claw-panel"],
+                  border: `1px solid ${chart["--claw-border"]}`,
                   borderRadius: "10px",
-                  color: "#f4f4f5",
+                  color: chart["--text-primary"],
                   fontSize: "13px",
                   fontFamily: "var(--font-mono)",
                 }}
@@ -274,14 +624,14 @@ export default function Dashboard() {
               <Area
                 type="monotone"
                 dataKey="approved"
-                stroke="#22d3ee"
+                stroke={chart["--chart-ok"]}
                 fill="url(#approvedGrad)"
                 strokeWidth={2}
               />
               <Area
                 type="monotone"
                 dataKey="blocked"
-                stroke="#f87171"
+                stroke={chart["--chart-block"]}
                 fill="url(#blockedGrad)"
                 strokeWidth={2}
               />
@@ -302,7 +652,7 @@ export default function Dashboard() {
           <h2 className="mb-4">Recent activity</h2>
           <div className="space-y-3">
             {loading && (
-              <p className="text-sm" style={{ color: "var(--text-muted)" }}>
+              <p role="status" className="text-sm" style={{ color: "var(--text-muted)" }}>
                 Loading...
               </p>
             )}
@@ -351,6 +701,8 @@ export default function Dashboard() {
         </div>
       </div>
 
+      <UsagePanel usage={usage} loading={loading} />
+
       {/* Connector Health */}
       <div
         className="rounded-[14px] p-5"
@@ -373,7 +725,7 @@ export default function Dashboard() {
           </p>
         )}
         {!loading && health.length > 0 && (
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
             {health.map((c) => {
               const lastCheckLabel =
                 c.last_check === "Never"
@@ -400,10 +752,10 @@ export default function Dashboard() {
                       style={{
                         backgroundColor:
                           c.status === "healthy"
-                            ? "rgba(34,197,94,0.1)"
+                            ? "var(--fill-success)"
                             : c.status === "degraded"
-                            ? "rgba(245,158,11,0.1)"
-                            : "rgba(239,68,68,0.1)",
+                            ? "var(--fill-warning)"
+                            : "var(--fill-danger)",
                         color:
                           c.status === "healthy"
                             ? "var(--accent-success)"

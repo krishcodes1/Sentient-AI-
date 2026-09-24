@@ -3,3 +3,18 @@
 #   pip install -r requirements.txt -r requirements-dev.txt
 pytest>=8.0.0,<9.0.0
 pytest-asyncio>=0.23.0,<1.0.0
+# Async SQLite driver used by the test suite's in-memory database
+# (tests/conftest.py creates engines with "sqlite+aiosqlite://").
+aiosqlite>=0.20.0,<1.0.0
+# Lint + type gates. Both are configured in pyproject.toml and run in CI:
+#   python -m ruff check .        # lint
+#   python -m ruff format --check .   # formatting (advisory, see pyproject)
+#   python -m mypy .              # types
+# Ruff is pre-1.0 and adds/retunes rules in every minor, so the upper
+# bound is a minor: an unpinned bump would turn a green branch red without
+# a code change.
+ruff>=0.16.1,<0.17.0
+mypy>=2.3.0,<3.0.0
+# pip-audit is deliberately NOT listed here: it pulls its own resolver
+# stack and only ever runs as an advisory CI step, which installs it into
+# a throwaway environment.

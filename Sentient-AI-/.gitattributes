@@ -1,0 +1,5 @@
+# Double-click installers: cmd.exe needs CRLF and bash needs LF, whatever the
+# checkout platform or core.autocrlf says (git archive / GitHub ZIPs honour
+# this too).
+*.bat     text eol=crlf
+*.command text eol=lf

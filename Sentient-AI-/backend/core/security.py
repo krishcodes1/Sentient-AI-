@@ -1,7 +1,18 @@
+"""Provides the secret-handling primitives: bcrypt password hashing, session
+JWT creation and verification, AES-256-GCM credential encryption, the HMAC
+audit-log hash and a sanitizer that masks sensitive keys before logging.
+
+Why it exists: The auth routes, the connector routes, the installation service
+and the audit chain all need the same primitives keyed on ``settings``; keeping
+them in one module gives the AES key decoding and the audit HMAC key derivation
+a single definition to get right.
+"""
+
 from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
 import os
 import uuid
@@ -97,11 +108,50 @@ def generate_request_id() -> str:
     return str(uuid.uuid4())
 
 
-def compute_audit_hash(payload: dict[str, Any]) -> str:
-    """Produce a SHA-256 hex digest over a canonical JSON serialization.
+def _get_audit_hmac_key() -> bytes:
+    """Return the key for the audit-log integrity HMAC.
 
-    This makes audit rows tamper-evident: any modification to the stored
-    fields will invalidate the hash.
+    Prefers the dedicated ``AUDIT_HMAC_KEY`` setting; when unset, derives a
+    key from ``ENCRYPTION_KEY`` under a fixed domain-separation prefix so
+    existing deployments get keyed hashing without new configuration. A
+    dedicated key is strictly better: it can be stored and rotated
+    separately from the DB-encryption key, and the audit chain's guarantee
+    is exactly "an attacker with database write access but without this key
+    cannot forge history". With the derived fallback, an attacker who also
+    holds the app's ENCRYPTION_KEY can recompute the key and forge.
+    """
+    if settings.AUDIT_HMAC_KEY:
+        return settings.AUDIT_HMAC_KEY.encode("utf-8")
+    return hashlib.sha256(
+        b"sentientai.audit.hmac.v1:" + settings.ENCRYPTION_KEY.encode("utf-8")
+    ).digest()
+
+
+def compute_audit_hash(payload: dict[str, Any]) -> str:
+    """Produce an HMAC-SHA256 hex digest over a canonical JSON serialization.
+
+    Keyed on purpose: an unkeyed hash only detects *accidental* corruption,
+    because anyone who can write to the database can recompute an unkeyed
+    chain and forge history. With HMAC, forging or rewriting a row requires
+    the key, which lives outside the database (see
+    :func:`_get_audit_hmac_key`). Rows written before this upgrade used the
+    unkeyed digest and are verified via :func:`compute_audit_hash_legacy`.
+    """
+    canonical = json.dumps(payload, sort_keys=True, default=str)
+    return hmac.new(
+        _get_audit_hmac_key(), canonical.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+
+
+def compute_audit_hash_legacy(payload: dict[str, Any]) -> str:
+    """Unkeyed SHA-256 digest used by audit rows written before the HMAC
+    upgrade.
+
+    Verification-only — never used for new writes. Legacy rows (identified
+    by ``seq IS NULL``) are validated against this digest and reported as
+    'legacy': they remain readable and chain-checkable, but carry no
+    forgery protection against a database-write adversary, which is why the
+    verifier surfaces them separately instead of calling them tampered.
     """
     canonical = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

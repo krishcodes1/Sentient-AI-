@@ -1,5 +1,11 @@
-"""
-Google Workspace connector for SentientAI.
+"""Implements the Google Workspace connector: OAuth 2.0 + PKCE with incremental
+scopes, plus Gmail and Google Calendar actions.
+
+Why it exists: The factory constructs it for tool execution; Google endpoints,
+MIME encoding and email-body sanitisation stay here so the rest of the platform
+only sees ConnectorResponse.
+
+Google Workspace connector for Crawler AI.
 
 Provides Gmail and Google Calendar access via OAuth 2.0 + PKCE
 with incremental authorization.  All email body content is
@@ -24,6 +30,7 @@ from .base import (
     ConnectorError,
     PromptGuard,
     UserConfirmationRequired,
+    path_segment,
 )
 
 logger = structlog.get_logger(__name__)
@@ -160,6 +167,31 @@ class GoogleWorkspaceConnector(BaseConnector):
         self._log.info("authenticated_via_oauth", scopes=list(self._granted_scopes))
         return True
 
+    def updated_credentials(
+        self, original: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Return a credentials dict to persist when this session produced
+        tokens the stored credentials don't have — a refresh rotated the
+        access token, or a one-time OAuth code was exchanged. ``None`` when
+        nothing changed. Without persisting these, every refreshed token
+        died with the connector instance and the user had to re-paste a
+        fresh token every hour.
+        """
+        if not self._access_token:
+            return None
+        if self._access_token == original.get("access_token") and (
+            self._refresh_token or None
+        ) == (original.get("refresh_token") or None):
+            return None
+        updated = dict(original)
+        updated["access_token"] = self._access_token
+        if self._refresh_token:
+            updated["refresh_token"] = self._refresh_token
+        # A consumed one-time authorization code must never be replayed.
+        updated.pop("code", None)
+        updated.pop("code_verifier", None)
+        return updated
+
     async def _refresh_access_token(self) -> None:
         if not self._refresh_token:
             raise AuthenticationError("No refresh token available.")
@@ -173,7 +205,15 @@ class GoogleWorkspaceConnector(BaseConnector):
                 "refresh_token": self._refresh_token,
             },
         )
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            # Google answers a revoked or expired grant with 400
+            # invalid_grant. That is a re-auth prompt, not an outage, so it
+            # must not reach BaseConnector.execute as a bare HTTPStatusError.
+            raise AuthenticationError(
+                f"Google token refresh failed: {exc.response.status_code}"
+            ) from exc
         data = resp.json()
         self._access_token = data["access_token"]
 
@@ -216,27 +256,63 @@ class GoogleWorkspaceConnector(BaseConnector):
             messages.append(detail)
         return messages
 
+    # Order matters: the whole tree is searched for text/plain before
+    # text/html is considered at all, so a plain part buried three levels
+    # deep still wins over a top-level HTML alternative.
+    _BODY_MIME_PREFERENCE: tuple[str, ...] = ("text/plain", "text/html")
+
+    @staticmethod
+    def _decode_part_data(part: dict[str, Any]) -> str:
+        """Decode a MIME part's base64url body, tolerating missing padding."""
+        encoded = part.get("body", {}).get("data", "")
+        if not encoded:
+            return ""
+        return base64.urlsafe_b64decode(encoded + "==").decode("utf-8", errors="replace")
+
+    @classmethod
+    def _find_part(cls, part: dict[str, Any], mime_type: str) -> str:
+        """Depth-first search for the first *mime_type* part carrying data."""
+        if part.get("mimeType") == mime_type:
+            decoded = cls._decode_part_data(part)
+            if decoded:
+                return decoded
+        for child in part.get("parts", []):
+            found = cls._find_part(child, mime_type)
+            if found:
+                return found
+        return ""
+
+    @classmethod
+    def _extract_body(cls, payload: dict[str, Any]) -> str:
+        """Pull the readable text out of a Gmail ``payload`` MIME tree.
+
+        The walk has to recurse: Gmail wraps the text/plain part in a
+        multipart/alternative child as soon as the message carries an
+        attachment or is multipart/mixed, so scanning only the top level of
+        ``payload["parts"]`` returns an empty body for most real mail while
+        subject/from/snippet still populate — a silent truncation the caller
+        cannot detect. text/html is accepted only as a last resort: markup is
+        worse to read than plain text but far better than nothing, and the
+        body is sanitized by PromptGuard either way.
+        """
+        for mime_type in cls._BODY_MIME_PREFERENCE:
+            body = cls._find_part(payload, mime_type)
+            if body:
+                return body
+        return ""
+
     async def get_message(self, message_id: str) -> dict[str, Any]:
         """Fetch a single Gmail message by ID with content sanitization."""
         raw = await self._gapi_get(
-            f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{message_id}",
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages/"
+            f"{path_segment(message_id)}",
             params={"format": "full"},
         )
         # Extract useful fields
         headers_list = raw.get("payload", {}).get("headers", [])
         header_map = {h["name"].lower(): h["value"] for h in headers_list}
 
-        body_data = ""
-        payload = raw.get("payload", {})
-        # Try plain text part first
-        for part in payload.get("parts", [payload]):
-            if part.get("mimeType") == "text/plain":
-                encoded = part.get("body", {}).get("data", "")
-                if encoded:
-                    body_data = base64.urlsafe_b64decode(encoded + "==").decode(
-                        "utf-8", errors="replace"
-                    )
-                    break
+        body_data = self._extract_body(raw.get("payload", {}))
 
         # Sanitize email body before returning
         sanitized_body, _ = PromptGuard.scan(body_data)
@@ -261,39 +337,38 @@ class GoogleWorkspaceConnector(BaseConnector):
         *,
         user_confirmed: bool = False,
     ) -> dict[str, Any]:
-        """Create a draft and, if confirmed, send it.
+        """Send an email, gated behind explicit user confirmation.
 
-        **Requires USER_CONFIRM** -- a draft is always created first so
-        the user can review before sending.
+        **Requires USER_CONFIRM**. Without confirmation nothing leaves the
+        process: the preview handed to ``UserConfirmationRequired`` is built
+        from the arguments, and the message is only composed and sent once
+        ``user_confirmed`` is set.
+
+        No Gmail draft is staged for the preview, deliberately. The approval
+        flow re-invokes this method with the *same* arguments plus
+        ``user_confirmed=True`` (``ConnectorToolExecutor._dispatch``), so a
+        draft id minted here cannot survive the round-trip and the confirmed
+        send could never adopt it; and on denial nothing calls the connector
+        at all, so there is no point where a staged draft could be cleaned
+        up. Either way the draft would be orphaned in the user's real
+        mailbox — on approval alongside the sent copy, on denial forever.
         """
-        # Always create draft first
+        if not user_confirmed:
+            preview = body if len(body) <= 500 else body[:500] + "..."
+            raise UserConfirmationRequired(
+                action="send_email",
+                details=(
+                    f"Send email to '{to}' with subject '{subject}'?\n"
+                    f"Body:\n{preview}\n"
+                    "Nothing has been created or sent yet; confirm to send."
+                ),
+            )
+
         mime = MIMEText(body)
         mime["to"] = to
         mime["subject"] = subject
         raw_msg = base64.urlsafe_b64encode(mime.as_bytes()).decode()
 
-        draft_resp = await self._gapi_post(
-            "https://gmail.googleapis.com/gmail/v1/users/me/drafts",
-            json_body={"message": {"raw": raw_msg}},
-        )
-        draft_id = draft_resp.get("id")
-
-        if not user_confirmed:
-            raise UserConfirmationRequired(
-                action="send_email",
-                details=(
-                    f"Draft created (id={draft_id}). "
-                    f"Send email to '{to}' with subject '{subject}'? "
-                    "Please confirm to proceed."
-                ),
-            )
-
-        # Send the draft
-        send_resp = await self._gapi_post(
-            f"https://gmail.googleapis.com/gmail/v1/users/me/drafts/{draft_id}",
-            json_body={},
-        )
-        # Actually the send endpoint is different -- use messages.send
         send_resp = await self._gapi_post(
             "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
             json_body={"raw": raw_msg},
@@ -311,9 +386,16 @@ class GoogleWorkspaceConnector(BaseConnector):
     # -- Calendar methods ----------------------------------------------------
 
     async def get_events(
-        self, time_min: str, time_max: str
+        self,
+        time_min: Optional[str] = None,
+        time_max: Optional[str] = None,
     ) -> list[dict[str, Any]]:
-        """Fetch calendar events within a time window (RFC 3339 strings)."""
+        """Fetch calendar events within a time window (RFC 3339 strings).
+
+        Defaults to the next 7 days when no window is given, matching the
+        tool catalog where both parameters are optional.
+        """
+        time_min, time_max = self._default_window(time_min, time_max)
         data = await self._gapi_get(
             "https://www.googleapis.com/calendar/v3/calendars/primary/events",
             params={
@@ -353,10 +435,26 @@ class GoogleWorkspaceConnector(BaseConnector):
             json_body=event_data,
         )
 
+    @staticmethod
+    def _default_window(
+        time_min: Optional[str], time_max: Optional[str]
+    ) -> tuple[str, str]:
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+        return (
+            time_min or now.isoformat(),
+            time_max or (now + timedelta(days=7)).isoformat(),
+        )
+
     async def check_availability(
-        self, time_min: str, time_max: str
+        self,
+        time_min: Optional[str] = None,
+        time_max: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Check free/busy status for the primary calendar."""
+        """Check free/busy status for the primary calendar (defaults to the
+        next 7 days)."""
+        time_min, time_max = self._default_window(time_min, time_max)
         data = await self._gapi_post(
             "https://www.googleapis.com/calendar/v3/freeBusy",
             json_body={
@@ -389,13 +487,52 @@ class GoogleWorkspaceConnector(BaseConnector):
 
     # -- Health check --------------------------------------------------------
 
+    # (scope prefix, probe URL) pairs, cheapest first. The connector is
+    # healthy when the stored token can reach *any* surface it was granted:
+    # probing Gmail alone failed every calendar-only connector — an
+    # incremental-auth grant the platform explicitly supports — and told the
+    # user their credentials were invalid when they were merely narrower
+    # than the probe.
+    _HEALTH_PROBES: tuple[tuple[str, str], ...] = (
+        (
+            "https://www.googleapis.com/auth/gmail",
+            "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+        ),
+        (
+            "https://www.googleapis.com/auth/calendar",
+            "https://www.googleapis.com/calendar/v3/users/me/calendarList",
+        ),
+    )
+
+    def _ordered_health_probes(self) -> tuple[tuple[str, str], ...]:
+        """Probes to try, granted surfaces first.
+
+        ``_granted_scopes`` is only populated by the OAuth exchange; a
+        connector configured with a raw access token knows nothing about
+        its scopes, so every probe is tried in that case.
+        """
+        if not self._granted_scopes:
+            return self._HEALTH_PROBES
+        granted = tuple(
+            probe
+            for probe in self._HEALTH_PROBES
+            if any(s.startswith(probe[0]) for s in self._granted_scopes)
+        )
+        return granted or self._HEALTH_PROBES
+
     async def health_check(self) -> bool:
         try:
             client = self._get_client()
-            resp = await client.get(
-                "https://gmail.googleapis.com/gmail/v1/users/me/profile",
-                headers=self._headers(),
-            )
-            return resp.status_code == 200
+            for _, url in self._ordered_health_probes():
+                resp = await client.get(url, headers=self._headers())
+                if resp.status_code == 200:
+                    return True
+                if resp.status_code != 403:
+                    # 403 is "this token lacks that API's scope" — the only
+                    # answer worth trying another surface for. A 401 means
+                    # the token itself is bad and every surface will refuse
+                    # it, and a 5xx is an outage, not a scope question.
+                    return False
+            return False
         except Exception:
             return False

@@ -1,3 +1,12 @@
+"""Declares the ``connector_configs`` table and its enums: connector type, auth
+method and permission tier, with credentials stored as an AES-encrypted
+blob.
+
+Why it exists: The connector routes, the tool registry's tier gating and the
+MCP loader all key off the same ``ConnectorType`` and ``PermissionTier``
+values, so they are defined once beside the row that carries them.
+"""
+
 from __future__ import annotations
 
 import enum
@@ -5,6 +14,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     DateTime,
     Enum,
@@ -12,8 +22,8 @@ from sqlalchemy import (
     Integer,
     LargeBinary,
     String,
+    Uuid,
 )
-from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from core.database import Base
@@ -23,6 +33,7 @@ class ConnectorType(str, enum.Enum):
     canvas = "canvas"
     google_workspace = "google_workspace"
     robinhood = "robinhood"
+    mcp = "mcp"
     custom = "custom"
 
 
@@ -43,12 +54,12 @@ class ConnectorConfig(Base):
     __tablename__ = "connector_configs"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
+        Uuid(),
         primary_key=True,
         default=uuid.uuid4,
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
+        Uuid(),
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
         index=True,

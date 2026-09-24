@@ -1,0 +1,194 @@
+# Tooling config for the backend. Deliberately holds no [project] table:
+# the backend is deployed as a source tree, not installed as a package, so
+# this file exists purely to configure ruff and mypy.
+
+[tool.ruff]
+# CI pins Python 3.12; tell ruff so version-gated rules and syntax checks
+# match the runtime rather than whatever interpreter runs the linter.
+target-version = "py312"
+line-length = 100
+extend-exclude = [
+    "__pycache__",
+    # Alembic autogenerates these; they are machine-written and get
+    # rewritten wholesale on every revision, so linting them only produces
+    # noise nobody can act on.
+    "alembic",
+]
+
+[tool.ruff.lint]
+# Pragmatic starting set for an existing codebase: correctness (pyflakes),
+# style errors (pycodestyle), import hygiene (isort), likely-bug patterns
+# (bugbear) and comprehension cleanups. Deliberately excluded for now:
+#   UP  — 226 hits, almost all `Optional[X]` -> `X | None` rewrites. Pure
+#         churn across nearly every file; enable with `--fix` in a
+#         dedicated commit.
+#   ARG — 114 hits, dominated by interface-conformance parameters
+#         (FastAPI dependencies, ABC overrides) that must stay in the
+#         signature.
+select = ["E", "W", "F", "I", "B", "C4"]
+
+ignore = [
+    # Line length is the formatter's job (`ruff format` targets the
+    # line-length above). Keeping E501 on top of it only flags lines the
+    # formatter cannot split anyway — long string literals, URLs, and
+    # comments — so it would be permanently red instead of actionable.
+    "E501",
+    # `raise ... from err` inside except blocks. Worth doing, but the 5
+    # existing sites are all deliberate error-translation (config parse,
+    # auth, connector transport) where the chained traceback would leak
+    # internals into API responses. Left off the gate rather than silently
+    # changing exception behavior.
+    "B904",
+]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's entire DI mechanism is "call this in the default argument".
+# B008 exists to catch mutable defaults; these factories are the framework
+# contract, so allowlist them instead of blanket-ignoring the rule.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.params.Depends",
+    "fastapi.Query",
+    "fastapi.params.Query",
+    "fastapi.Path",
+    "fastapi.params.Path",
+    "fastapi.Body",
+    "fastapi.params.Body",
+    "fastapi.Header",
+    "fastapi.params.Header",
+    "fastapi.Form",
+    "fastapi.params.Form",
+    "fastapi.File",
+    "fastapi.params.File",
+    "fastapi.Security",
+    "fastapi.params.Security",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["api", "core", "models", "services", "scripts", "tests"]
+# The migrations live in ./alembic, which would otherwise make ruff infer
+# that the `alembic` package itself is first-party and sort every
+# `from alembic import ...` into the wrong block.
+known-third-party = ["alembic"]
+
+[tool.ruff.lint.per-file-ignores]
+# --- Structural, permanent ---------------------------------------------
+# main.py configures logging and validates settings before importing the
+# routers, so those imports genuinely cannot move to the top of the file.
+"main.py" = ["E402", "I001"]
+# The verifier defers the heavy `AuditLog` import into run() (its pure
+# helpers are unit-tested without a database). Annotations are strings via
+# `from __future__ import annotations`, so the name is never evaluated at
+# runtime — but F821 cannot see that. I001 is the same deferred import
+# block: isort wants to regroup imports that are intentionally function-local.
+"scripts/verify_audit_log.py" = ["F821", "I001"]
+# `LLMProvider.aclose` is an intentional optional hook: a concrete no-op
+# so providers that own no HTTP resources need not implement it. Marking
+# it abstract (what B027 asks for) would force every provider to write an
+# empty override.
+"services/agent/providers.py" = ["B027", "I001"]
+
+# Import *order* is not enforced in tests. They deliberately import inside
+# test bodies (to defer database/alembic setup) and grouped-by-purpose
+# rather than by isort's rules; conftest.py has to import after setting env
+# vars at all. Everything else — including unused imports — still applies.
+"tests/**" = ["I001"]
+
+# --- Existing debt ------------------------------------------------------
+# Everything below is auto-fixable (`ruff check --fix .`). The entries are
+# here so the gate can land without a repo-wide import rewrite in the same
+# change; delete a line once its file has been cleaned up. New files get
+# the full rule set.
+"api/middleware/security.py" = ["F401"]
+"api/routes/agent.py" = ["I001"]
+"api/routes/audit.py" = ["C416", "I001"]
+"api/routes/auth.py" = ["F401"]
+"api/routes/connectors.py" = ["I001"]
+"core/network_security.py" = ["B007"]
+"models/audit.py" = ["F401"]
+"models/memory.py" = ["F401"]
+"services/agent/approvals.py" = ["F401"]
+"services/agent/context_manager.py" = ["B007", "F401", "I001"]
+"services/agent/prompt_guard.py" = ["F401"]
+"services/agent/runtime.py" = ["F401", "I001"]
+"services/agent/tool_registry.py" = ["F401"]
+"services/auth.py" = ["F401"]
+"services/connectors/base.py" = ["F401"]
+"services/connectors/robinhood.py" = ["F401", "F541"]
+"tests/test_approvals.py" = ["F401"]
+"tests/test_executor_security.py" = ["F401"]
+
+[tool.mypy]
+python_version = "3.12"
+# Deliberately non-strict. The point of the first iteration is a gate that
+# is green today and catches outright type errors (bad attribute, wrong
+# argument count, unreachable code); tightening happens per-module once
+# the annotations exist.
+ignore_missing_imports = true
+follow_imports = "silent"
+check_untyped_defs = false
+disallow_untyped_defs = false
+warn_unused_ignores = false
+warn_return_any = false
+# Every module here is imported by path from the backend root, so mypy has
+# no installed package to anchor on.
+explicit_package_bases = true
+mypy_path = "."
+exclude = "(^|/)(alembic|__pycache__|\\.venv|venv)/"
+
+# SQLAlchemy declares relationships as string forward references
+# (`Mapped[list["AuditLog"]]`) that the mapper resolves at configuration
+# time; the target modules are imported by models/__init__.py, not by the
+# defining module. Same story in the audit verifier, which defers its
+# `AuditLog` import into run() so the pure helpers stay importable without
+# a database. Both are runtime-correct and invisible to mypy's name
+# resolution.
+[[tool.mypy.overrides]]
+module = ["models.*", "scripts.verify_audit_log"]
+disable_error_code = ["name-defined"]
+
+# `_aioredis = None` in the ImportError fallback. Typing it properly needs
+# a `ModuleType | None` annotation on the import site.
+[[tool.mypy.overrides]]
+module = "api.middleware.security"
+disable_error_code = ["assignment"]
+
+# socket.getaddrinfo's sockaddr is typed `tuple[str, int]`-ish in
+# typeshed, so `addrinfo[0][4][0]` widens to `str | int` even though index
+# 0 is always the address string for AF_INET/AF_INET6. The `matched_host`
+# complaint is the same class of thing: it is only reachable once
+# `host_allowed` is True, which mypy cannot infer across the two locals.
+[[tool.mypy.overrides]]
+module = "core.network_security"
+disable_error_code = ["arg-type"]
+
+# main.py constructs the AgentRuntime, which annotates its collaborators
+# with the concrete classes (PermissionEngine, ToolExecutor, AuditService)
+# but is wired with structurally-compatible adapters. The real fix is to
+# declare those parameters as Protocols; until then the mismatch is by
+# design. Scoped to the wiring site only: services.agent.runtime itself is
+# arg-type clean, and keeping it that way is what makes mypy catch a
+# coroutine-only API (asyncio.create_task) being handed a bare Awaitable.
+[[tool.mypy.overrides]]
+module = ["main"]
+disable_error_code = ["arg-type"]
+
+# `Result.rowcount` lives on CursorResult: annotation debt in code that
+# is correct at runtime.
+[[tool.mypy.overrides]]
+module = "services.agent.approvals"
+disable_error_code = ["union-attr"]
+
+# `self._session_factory()` in _load_config: the None guard lives in the
+# caller (execute), which mypy does not narrow across.
+[[tool.mypy.overrides]]
+module = "services.agent.tool_registry"
+disable_error_code = ["misc"]
+
+# Tests are intentionally untyped and lean on fakes, monkeypatching and
+# duck-typed doubles that static analysis cannot follow — pytest is their
+# correctness gate. Type-checking them would mostly produce complaints
+# about deliberate stand-ins.
+[[tool.mypy.overrides]]
+module = "tests.*"
+ignore_errors = true

@@ -1,0 +1,9 @@
+# The image installs its own dependencies with `npm ci`. A host
+# node_modules copied over them carries the host's native binaries
+# (esbuild, rollup) — darwin builds on a Mac — into a Linux image.
+node_modules/
+
+# Host build output and editor/agent state; the image builds its own dist.
+dist/
+tsconfig.tsbuildinfo
+.claude/

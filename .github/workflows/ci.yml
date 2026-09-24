@@ -1,14 +1,78 @@
 name: CI
 
+# Feature branches are where the work actually happens, and gating only on
+# `main` and open PRs meant a branch could accumulate days of commits with
+# nothing ever run against it — the first signal arrived when the PR opened,
+# which is the worst moment to learn the suite is red. Every pushed branch
+# is built; `concurrency` below throws away superseded runs so the extra
+# coverage does not cost a queue.
 on:
   push:
-    branches: [main]
+    branches: ["**"]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  # Static gates for the backend. Fast and independent of the test jobs, so
+  # a lint or type regression is reported even when the suite is red (and
+  # vice versa). Config lives in Sentient-AI-/backend/pyproject.toml.
+  lint:
+    name: Backend (ruff + mypy)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Sentient-AI-/backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: |
+            Sentient-AI-/backend/requirements.txt
+            Sentient-AI-/backend/requirements-dev.txt
+
+      # Runtime deps too: mypy resolves fastapi/sqlalchemy/pydantic types
+      # from the installed packages, so a lint-only environment would check
+      # strictly less than a developer's does.
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Lint (ruff)
+        run: python -m ruff check --output-format=github .
+
+      # Advisory until the tree has been run through `ruff format` once:
+      # today most files predate the formatter and would be rewritten. This
+      # step makes the drift visible without blocking merges on a
+      # repo-wide reformat.
+      - name: Format check (ruff format)
+        continue-on-error: true
+        run: python -m ruff format --check .
+
+      - name: Type check (mypy)
+        run: python -m mypy .
+
+      # Non-blocking: a CVE disclosed upstream must not stop unrelated work
+      # from merging. Audits the environment that was just installed, so it
+      # covers transitive pins as resolved, not just the direct entries in
+      # requirements.txt.
+      - name: Dependency audit (pip-audit)
+        continue-on-error: true
+        run: |
+          pip install pip-audit
+          pip-audit --progress-spinner off
+
   frontend:
-    name: Frontend (type check)
+    name: Frontend (build)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -26,8 +90,48 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Type check
-        run: npx tsc -b --noEmit
+      # Runs `tsc -b && vite build` — type check + production build
+      - name: Build
+        run: npm run build
+
+      # The warning backlog (react-hooks set-state-in-effect / purity, Fast
+      # Refresh exports, stray `any`s) has been cleared, so any warning now
+      # fails the build. Fix a new one rather than raising this budget; a
+      # genuine false positive gets a single-line
+      # `eslint-disable-next-line <rule> -- <reason>`.
+      - name: Lint
+        run: npx eslint . --max-warnings 0
+
+      - name: Unit tests with coverage
+        run: |
+          npm i -D --no-save @vitest/coverage-v8@3
+          npx vitest run --coverage --coverage.reporter=text-summary \
+            --coverage.reporter=lcov | tee coverage.txt
+
+      - name: Publish coverage summary
+        if: always()
+        run: |
+          {
+            echo '### Frontend coverage'
+            echo '```'
+            tail -n 20 coverage.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-coverage
+          path: Sentient-AI-/frontend/coverage
+          if-no-files-found: ignore
+
+      # Advisory, same reasoning as the backend's pip-audit: an advisory
+      # published upstream overnight must not block unrelated work. Scoped
+      # to high/critical so the signal stays readable.
+      - name: Dependency audit (npm audit)
+        continue-on-error: true
+        run: npm audit --audit-level=high
 
   backend:
     name: Backend (pytest)
@@ -51,6 +155,117 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-dev.txt
+
+      # pytest-cov is installed here rather than pinned in
+      # requirements-dev.txt: coverage is a reporting concern for CI, and a
+      # developer running the suite locally should not have to carry the
+      # plugin to do it.
+      - name: Run tests with coverage
+        run: |
+          pip install pytest-cov
+          python -m pytest tests/ -v \
+            --cov=. --cov-report=term --cov-report=xml --cov-report=html \
+            | tee pytest.txt
+
+      - name: Publish coverage summary
+        if: always()
+        run: |
+          {
+            echo '### Backend coverage'
+            echo '```'
+            grep -E '^(TOTAL|Name|-+)' pytest.txt || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: |
+            Sentient-AI-/backend/coverage.xml
+            Sentient-AI-/backend/htmlcov
+          if-no-files-found: ignore
+
+  # Committed credentials are the one class of mistake that is not fixed by
+  # reverting: once pushed, the secret has to be rotated. Advisory for now —
+  # the tree has never been scanned, so the first runs establish what the
+  # rules flag (the .env.example placeholders among them) before anything is
+  # gated on a clean result.
+  secrets:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: a secret removed in a later commit is still in the
+          # objects an attacker can fetch.
+          fetch-depth: 0
+
+      - name: Scan working tree and history
+        continue-on-error: true
+        run: |
+          docker run --rm -v "$PWD:/repo" \
+            zricethezav/gitleaks:v8.21.2 \
+            detect --source=/repo --redact --verbose
+
+  # Same suite against real Postgres, so Postgres-only behavior (native
+  # enums, ALTER statements, asyncpg quirks) is exercised before it first
+  # runs in production. The default job stays on in-memory SQLite for speed.
+  backend-postgres:
+    name: Backend (pytest, Postgres)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Sentient-AI-/backend
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql+asyncpg://test:test@localhost:5432/test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: |
+            Sentient-AI-/backend/requirements.txt
+            Sentient-AI-/backend/requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      # Migrations only ever meet real Postgres here: SQLite renders native
+      # ENUMs as VARCHAR, so the SQLite migration tests cannot prove the enum
+      # types (including connector_type's 'mcp' value) come out right.
+      # `alembic check` then fails if the models have drifted ahead of the
+      # migrations — the silent divergence the old inline-SQL list allowed.
+      - name: Migrate and check for model drift
+        env:
+          DATABASE_URL: postgresql+asyncpg://test:test@localhost:5432/test
+          SECRET_KEY: ci-only-secret-key-long-enough-to-pass-validation
+          # Decodes to exactly 32 bytes, as the settings validator requires.
+          # CI-only throwaway: it encrypts nothing that outlives the job.
+          ENCRYPTION_KEY: Y2ktb25seS1rZXktbm90LWEtcmVhbC1zZWNyZXQtMzI=
+        run: |
+          python -m alembic upgrade head
+          python -m alembic check
 
       - name: Run tests
         run: python -m pytest tests/ -v

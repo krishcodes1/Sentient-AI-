@@ -1,5 +1,11 @@
-"""
-Base connector framework for SentientAI.
+"""Defines BaseConnector and the response-sanitising, rate-limiting and error
+types every third-party connector builds on.
+
+Why it exists: Canvas, Google Workspace and Robinhood must scan responses,
+throttle requests and honour the network policy the same way; the factory and
+the tool executor rely on this shared contract.
+
+Base connector framework for Crawler AI.
 
 Provides abstract base class with built-in content sanitization,
 rate limiting, and timeout enforcement for all third-party connectors.
@@ -13,11 +19,26 @@ from abc import ABC, abstractmethod
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Optional
+from urllib.parse import quote
 
 import httpx
 import structlog
 
 logger = structlog.get_logger(__name__)
+
+
+def path_segment(value: Any) -> str:
+    """Percent-encode *value* for use as a single URL path segment.
+
+    Identifiers reaching a connector come from tool arguments the model
+    chose, which in turn can be shaped by untrusted content the model
+    read. Interpolating one raw lets ``../`` or a bare ``/`` inside it
+    add path segments, so ``/courses/{id}/assignments`` reaches any
+    sibling endpoint on the allowlisted host — outside whatever scopes
+    the user granted. ``safe=""`` keeps the separator itself encoded, so
+    the value can only ever be one segment.
+    """
+    return quote(str(value), safe="")
 
 # ---------------------------------------------------------------------------
 # Prompt injection / content sanitization
@@ -155,7 +176,7 @@ class ConnectorResponse:
 # ---------------------------------------------------------------------------
 
 class BaseConnector(ABC):
-    """Abstract base class for all SentientAI connectors.
+    """Abstract base class for all Crawler AI connectors.
 
     Subclasses MUST implement the abstract properties/methods.  The base
     class provides automatic content sanitization via ``PromptGuard``,
@@ -175,7 +196,51 @@ class BaseConnector(ABC):
         self._rate_limiter = RateLimiter(rate_limit or self.DEFAULT_RATE_LIMIT)
         self._authenticated = False
         self._http_client: httpx.AsyncClient | None = None
+        self._network_policy_key: Optional[str] = None
+        self._policy_extra_hosts: tuple[str, ...] = ()
         self._log = logger.bind(connector=self.name)
+
+    # -- Network policy --------------------------------------------------------
+
+    def set_network_policy(
+        self, policy_key: str, *, extra_hosts: tuple[str, ...] = ()
+    ) -> None:
+        """Enable deny-by-default outbound filtering for this connector.
+
+        Every HTTP request issued through ``_get_client()`` (including
+        redirect targets) is validated against
+        ``core.network_security.DEFAULT_POLICIES[policy_key]`` plus the SSRF
+        ranges. Must be called before the first request; the executor does
+        this for every connector it instantiates.
+
+        ``extra_hosts`` are the hosts the user configured for this specific
+        connector (a self-hosted Canvas domain, say). They widen the host
+        allowlist by exactly those names and nothing else, and remain
+        subject to the SSRF address policy.
+        """
+        self._network_policy_key = policy_key
+        self._policy_extra_hosts = tuple(extra_hosts)
+
+    async def _enforce_network_policy(self, request: httpx.Request) -> None:
+        if not self._network_policy_key:
+            return
+        from core.network_security import check_network_policy
+
+        result = check_network_policy(
+            str(request.url),
+            self._network_policy_key,
+            extra_hosts=self._policy_extra_hosts,
+        )
+        if not result.safe:
+            self._log.warning(
+                "network_policy_blocked",
+                url=str(request.url),
+                policy=self._network_policy_key,
+                reason=result.reason,
+            )
+            raise ConnectorError(
+                f"Outbound request blocked by network policy: {result.reason}"
+            )
 
     # -- Properties (abstract) -----------------------------------------------
 
@@ -219,10 +284,10 @@ class BaseConnector(ABC):
 
     # -- Concrete helpers ----------------------------------------------------
 
-    async def validate_scopes(self, requested: list[str]) -> bool:
-        """Return True when every *requested* scope is in ``required_scopes``."""
-        allowed = set(self.required_scopes)
-        return all(s in allowed for s in requested)
+    # NOTE: scope enforcement is NOT done here. The authoritative check is
+    # ConnectorToolExecutor._check_scope (services/agent/tool_registry.py),
+    # which validates the catalog's short scope names (e.g. "gmail.read")
+    # against the scopes granted on the ConnectorConfig row.
 
     async def execute(self, action: str, params: dict[str, Any]) -> ConnectorResponse:
         """Public entry point.  Enforces rate limiting, timeout, and
@@ -235,14 +300,28 @@ class BaseConnector(ABC):
 
         try:
             raw = await self._execute_action(action, params)
-        except (UserConfirmationRequired, HardBlockError):
+        except (UserConfirmationRequired, HardBlockError, AuthenticationError):
+            # These three carry semantics the executor branches on
+            # (ConnectorToolExecutor._dispatch): approval, permanent block,
+            # and "re-auth needed". Collapsing them into ConnectorError would
+            # strand the caller with an undifferentiated failure — an
+            # AuthenticationError raised inside _execute_action (e.g. a
+            # refresh attempted with no refresh token) must survive too.
             raise
         except httpx.TimeoutException:
             raise ConnectorError(f"Request timed out after {self._timeout}s")
         except httpx.HTTPStatusError as exc:
-            raise ConnectorError(
-                f"HTTP {exc.response.status_code} from {self.name}: {exc.response.text[:300]}"
+            detail = (
+                f"HTTP {exc.response.status_code} from {self.name}: "
+                f"{exc.response.text[:300]}"
             )
+            # 401/403 means the stored credentials are expired, revoked, or
+            # missing a scope — the user has to re-authorize. An upstream
+            # outage is not fixable by the user, so the two must not share an
+            # exception type or the UI can never offer the re-auth prompt.
+            if exc.response.status_code in (401, 403):
+                raise AuthenticationError(detail) from exc
+            raise ConnectorError(detail)
         except Exception as exc:
             self._log.error("connector_execute_error", action=action, error=str(exc))
             raise ConnectorError(str(exc)) from exc
@@ -263,10 +342,20 @@ class BaseConnector(ABC):
     # -- HTTP client management ----------------------------------------------
 
     def _get_client(self, **kwargs: Any) -> httpx.AsyncClient:
-        """Return a shared ``httpx.AsyncClient``, lazily created."""
+        """Return a shared ``httpx.AsyncClient``, lazily created.
+
+        When a network policy is set, a request hook validates every
+        outbound URL (initial requests and redirect hops alike) against the
+        connector's allowlist before it leaves the process.
+        """
         if self._http_client is None or self._http_client.is_closed:
+            event_hooks = kwargs.pop("event_hooks", {})
+            request_hooks = list(event_hooks.get("request", []))
+            request_hooks.append(self._enforce_network_policy)
+            event_hooks["request"] = request_hooks
             self._http_client = httpx.AsyncClient(
                 timeout=httpx.Timeout(self._timeout),
+                event_hooks=event_hooks,
                 **kwargs,
             )
         return self._http_client

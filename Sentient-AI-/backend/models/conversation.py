@@ -1,3 +1,13 @@
+"""Declares the ``conversations`` and ``messages`` tables: a user's chat
+threads and each turn's role, content, tool calls, image-attachment
+metadata, token usage and the provider/model that produced it.
+
+Why it exists: The agent routes rebuild history from these rows on every turn
+and the usage summary prices past turns from them, so the per-message token and
+model columns, and the raise-on-lazy-load relationships that keep list
+endpoints from dragging in every message, are defined here.
+"""
+
 from __future__ import annotations
 
 import enum
@@ -5,8 +15,17 @@ import uuid
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Union
 
-from sqlalchemy import DateTime, Enum, ForeignKey, String, Text
-from sqlalchemy.dialects.postgresql import JSON, UUID
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    Uuid,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from core.database import Base
@@ -20,14 +39,17 @@ class MessageRole(str, enum.Enum):
 
 class Conversation(Base):
     __tablename__ = "conversations"
+    __table_args__ = (
+        Index("ix_conversations_user_id_updated_at", "user_id", "updated_at"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
+        Uuid(),
         primary_key=True,
         default=uuid.uuid4,
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
+        Uuid(),
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
@@ -53,10 +75,16 @@ class Conversation(Base):
     user: Mapped["User"] = relationship(  # noqa: F821
         back_populates="conversations",
     )
+    # lazy="raise": only the conversation-detail endpoint wants the
+    # messages, and it asks for them explicitly with selectinload(). Left
+    # automatic, listing N conversations dragged in every message of all
+    # of them — and, via User.conversations, every message the user has
+    # ever sent on every authenticated request.
     messages: Mapped[list["Message"]] = relationship(
         back_populates="conversation",
-        lazy="selectin",
+        lazy="raise",
         order_by="Message.created_at",
+        passive_deletes=True,
     )
 
     def __repr__(self) -> str:
@@ -65,14 +93,17 @@ class Conversation(Base):
 
 class Message(Base):
     __tablename__ = "messages"
+    __table_args__ = (
+        Index("ix_messages_conversation_id_created_at", "conversation_id", "created_at"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
+        Uuid(),
         primary_key=True,
         default=uuid.uuid4,
     )
     conversation_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
+        Uuid(),
         ForeignKey("conversations.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
@@ -87,6 +118,59 @@ class Message(Base):
     )
     tool_calls: Mapped[Optional[Union[Dict, List]]] = mapped_column(
         JSON,
+        nullable=True,
+    )
+    # Image attachments sent with a user message, as METADATA only:
+    # [{"media_type": "image/jpeg", "size_bytes": 812345, "sha256": "..."}].
+    #
+    # The bytes themselves are deliberately not stored. A single turn may
+    # carry 20MB of photos; putting that in a row would bloat every
+    # transcript read (this table is fetched whole to rebuild history on
+    # each turn), blow past row-size limits, and land binary in database
+    # backups. Blobs belong in object storage with the row holding a key —
+    # until that exists, an attachment is replayed to the reader as a chip
+    # describing what was sent, and the model sees the image only on the
+    # turn it arrived.
+    attachments: Mapped[Optional[List]] = mapped_column(
+        JSON,
+        nullable=True,
+    )
+    # Tokens the provider billed for this turn. Recorded on assistant rows
+    # (the user row is an input to the same call, not a separate charge),
+    # so per-conversation cost is a SUM over this table instead of a number
+    # that existed only in a log line.
+    input_tokens: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    output_tokens: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    # The cached share of input_tokens (a subset, not an addition), and the
+    # share written to the cache. Kept apart because they bill at very
+    # different rates — a cache read is ~10% of fresh input, an Anthropic
+    # cache write 125% — so a cost estimate needs the split. NULL where the
+    # provider never reported it.
+    cache_read_tokens: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    cache_write_tokens: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    # The provider/model that produced an assistant turn. The user's
+    # Settings choice can change between turns, so pricing a past turn by
+    # the account's CURRENT model would misattribute it; NULL on rows
+    # written before this was recorded, which cost estimates treat as
+    # unpriced rather than guessing.
+    llm_provider: Mapped[Optional[str]] = mapped_column(
+        String(32),
+        nullable=True,
+    )
+    llm_model: Mapped[Optional[str]] = mapped_column(
+        String(128),
         nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
