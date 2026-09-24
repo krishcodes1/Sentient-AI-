@@ -138,7 +138,8 @@ async def request_access(
     cap = _capability(key)
     service = installation_service(request)
     current = capabilities.statuses_by_key(await service.report()).get(key)
-    if current is None or not current.can_request_access:
+    request_access_fn = cap.request_access
+    if current is None or not current.can_request_access or request_access_fn is None:
         detail = (current.availability_reason or current.reason) if current is not None else None
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -146,7 +147,7 @@ async def request_access(
         )
 
     try:
-        await asyncio.to_thread(cap.request_access)
+        await asyncio.to_thread(request_access_fn)
     except Exception as exc:
         logger.warning(
             "capability_request_access_failed", capability=key, error_type=type(exc).__name__

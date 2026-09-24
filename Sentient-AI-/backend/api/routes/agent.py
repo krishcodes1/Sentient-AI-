@@ -1621,7 +1621,7 @@ def build_chat_applier(app: Any, session_factory: Any = async_session):
             name = str(tc.get("name", ""))
             result = tc.get("result")
             data_url = _channel_image(name, result)
-            if data_url is None:
+            if data_url is None or not isinstance(result, dict):
                 continue
             caption = result.get("final_url") or result.get("url") or (
                 "Your screen" if name.startswith("desktop.") else ""

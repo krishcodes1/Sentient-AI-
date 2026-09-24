@@ -700,10 +700,13 @@ async def _gate_refusal(
         return None if cap.default_enabled else _off(cap)
     try:
         status = (await gate()).get(cap.key)
-        effective = status.effective if status is not None else "off"
-        if effective == "on":
+        if status is None:
+            # No entry for this capability in the report: treat as off,
+            # same as an explicit "off" - never crash on a missing status.
+            return _off(cap)
+        if status.effective == "on":
             return None
-        if effective == "blocked":
+        if status.effective == "blocked":
             return _CapabilityRefusal(
                 "blocked", _blocked_reason(status), CAPABILITY_BLOCKED_POLICY
             )

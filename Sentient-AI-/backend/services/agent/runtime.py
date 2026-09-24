@@ -325,7 +325,12 @@ def _capability_refusal(tool_name: str, result: Any) -> Optional[tuple[str, str]
     cap = capability_of_tool(tool_name)
     if cap is None or cap.key != key:
         return None
-    policy = _CAPABILITY_POLICY_BY_STATE.get(result.get("state"), CAPABILITY_OFF_POLICY)
+    state = result.get("state")
+    policy = (
+        _CAPABILITY_POLICY_BY_STATE.get(state, CAPABILITY_OFF_POLICY)
+        if isinstance(state, str)
+        else CAPABILITY_OFF_POLICY
+    )
     if policy == CAPABILITY_GATE_ERROR_POLICY:
         return CAPABILITY_GATE_ERROR_REASON, policy
     return str(result.get("error") or cap.when_denied), policy

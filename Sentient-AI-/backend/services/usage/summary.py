@@ -14,7 +14,7 @@ from datetime import datetime, time, timedelta, timezone
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import case, func, literal_column, or_, select
+from sqlalchemy import Integer, case, func, literal_column, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.conversation import Conversation, Message, MessageRole
@@ -86,7 +86,7 @@ async def usage_summary(
     now = now or datetime.now(timezone.utc)
     starts = _window_starts(now, tz)
 
-    zero = literal_column("0")
+    zero = literal_column("0", Integer())
     sums = {
         "in": Message.input_tokens,
         "out": Message.output_tokens,
