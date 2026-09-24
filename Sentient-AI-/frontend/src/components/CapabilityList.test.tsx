@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import CapabilityList from "@/components/CapabilityList";
+import CapabilityList, { CapabilityListError } from "@/components/CapabilityList";
 import { CAPS } from "@/test/capabilities";
 
 describe("CapabilityList", () => {
@@ -30,6 +30,20 @@ describe("CapabilityList", () => {
   it("is read-only for non-owners", () => {
     render(<CapabilityList items={CAPS} editable={false} onToggle={vi.fn()} onRequestAccess={vi.fn()} onInstall={vi.fn()} />);
     for (const sw of screen.getAllByRole("switch")) expect(sw).toBeDisabled();
+    for (const btn of screen.getAllByRole("button", { name: /grant access|install/i })) {
+      expect(btn).toBeDisabled();
+    }
     expect(screen.getByText(/only the owner can change/i)).toBeInTheDocument();
+  });
+});
+
+describe("CapabilityListError", () => {
+  it("renders the failure message and calls onRetry when clicked", async () => {
+    const onRetry = vi.fn();
+    render(<CapabilityListError message="Network request failed" onRetry={onRetry} />);
+    expect(screen.getByText(/couldn't load permissions/i)).toBeInTheDocument();
+    expect(screen.getByText("Network request failed")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /retry/i }));
+    expect(onRetry).toHaveBeenCalledTimes(1);
   });
 });

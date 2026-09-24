@@ -10,7 +10,7 @@ import {
   Send,
 } from "lucide-react";
 import ConfirmDialog from "@/components/ConfirmDialog";
-import CapabilityList from "@/components/CapabilityList";
+import CapabilityList, { CapabilityListError } from "@/components/CapabilityList";
 import type { CapabilityStatus, User } from "@/types";
 import {
   changePassword,
@@ -178,6 +178,7 @@ export default function Settings() {
   const [capabilities, setCapabilities] = useState<CapabilityStatus[] | null>(null);
   const [capabilitiesBusyKey, setCapabilitiesBusyKey] = useState<string | null>(null);
   const [capabilitiesFeedback, setCapabilitiesFeedback] = useState<Feedback>(null);
+  const [capabilitiesLoadError, setCapabilitiesLoadError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -320,15 +321,28 @@ export default function Settings() {
     let cancelled = false;
     getCapabilities()
       .then((caps) => {
-        if (!cancelled) setCapabilities(caps);
+        if (!cancelled) {
+          setCapabilities(caps);
+          setCapabilitiesLoadError(null);
+        }
       })
       .catch((err: Error) => {
-        if (!cancelled) setCapabilitiesFeedback({ ok: false, text: err.message });
+        if (!cancelled) setCapabilitiesLoadError(err.message);
       });
     return () => {
       cancelled = true;
     };
   }, []);
+
+  const handleRetryLoadCapabilities = () => {
+    setCapabilitiesLoadError(null);
+    getCapabilities()
+      .then((caps) => {
+        setCapabilities(caps);
+        setCapabilitiesLoadError(null);
+      })
+      .catch((err: Error) => setCapabilitiesLoadError(err.message));
+  };
 
   const handleToggleCapability = async (key: string, enabled: boolean) => {
     setCapabilitiesBusyKey(key);
@@ -339,7 +353,10 @@ export default function Settings() {
     } catch (err) {
       setCapabilitiesFeedback({ ok: false, text: (err as Error).message });
     } finally {
-      setCapabilitiesBusyKey(null);
+      // Only clear the busy flag if it still points at this request — an
+      // earlier, slower request finishing after a newer one started must
+      // not un-busy the newer one.
+      setCapabilitiesBusyKey((k) => (k === key ? null : k));
     }
   };
 
@@ -354,7 +371,7 @@ export default function Settings() {
     } catch (err) {
       setCapabilitiesFeedback({ ok: false, text: (err as Error).message });
     } finally {
-      setCapabilitiesBusyKey(null);
+      setCapabilitiesBusyKey((k) => (k === key ? null : k));
     }
   };
 
@@ -371,7 +388,7 @@ export default function Settings() {
     } catch (err) {
       setCapabilitiesFeedback({ ok: false, text: (err as Error).message });
     } finally {
-      setCapabilitiesBusyKey(null);
+      setCapabilitiesBusyKey((k) => (k === key ? null : k));
     }
   };
 
@@ -616,7 +633,9 @@ export default function Settings() {
             {capabilitiesFeedback.text}
           </div>
         )}
-        {capabilities === null ? (
+        {capabilitiesLoadError ? (
+          <CapabilityListError message={capabilitiesLoadError} onRetry={handleRetryLoadCapabilities} />
+        ) : capabilities === null ? (
           <p className="text-sm" style={{ color: "var(--text-muted)" }}>
             Loading permissions…
           </p>

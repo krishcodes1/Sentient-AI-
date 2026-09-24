@@ -182,6 +182,33 @@ describe("error detail normalization", () => {
     );
   });
 
+  it("uses the message field of a 503 not-configured detail and appends the setup url", async () => {
+    mockFetch(() =>
+      jsonResponse(503, {
+        detail: {
+          message: "No AI provider is configured.",
+          setup_url: "/setup",
+        },
+      }),
+    );
+
+    await expect(decideApproval("act-1", true)).rejects.toThrow(
+      "No AI provider is configured. Open /setup to finish setup.",
+    );
+  });
+
+  it("uses the message field verbatim when the detail object has no setup_url", async () => {
+    mockFetch(() =>
+      jsonResponse(503, {
+        detail: { message: "No AI provider is configured." },
+      }),
+    );
+
+    await expect(decideApproval("act-1", true)).rejects.toMatchObject({
+      message: "No AI provider is configured.",
+    });
+  });
+
   it("falls back to the status line when the body carries no usable detail", async () => {
     mockFetch(() => jsonResponse(500, {}));
     await expect(decideApproval("act-1", true)).rejects.toThrow(
