@@ -20,6 +20,7 @@ from services.agent.tool_registry import (
     RuntimePermissionAdapter,
     build_tools,
 )
+from tests.conftest import use_provider
 
 
 class RecordingExecutor:
@@ -65,7 +66,7 @@ def _runtime(provider, executor=None):
         audit_service=audit,
         approval_store=InMemoryApprovalStore(),
     )
-    runtime._provider = provider
+    use_provider(runtime, provider)
     return runtime, executor, audit
 
 

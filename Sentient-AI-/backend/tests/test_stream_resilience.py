@@ -349,7 +349,7 @@ async def test_provider_cache_is_bounded():
         approval_store=InMemoryApprovalStore(),
     )
     for i in range(runtime._PROVIDER_CACHE_MAX + 8):
-        runtime._resolve_provider("ollama", f"model-{i}")
+        await runtime._resolve_provider("ollama", f"model-{i}")
     assert len(runtime._provider_cache) == runtime._PROVIDER_CACHE_MAX
     # Let the eviction close() tasks run before the loop closes.
     await asyncio.sleep(0.05)

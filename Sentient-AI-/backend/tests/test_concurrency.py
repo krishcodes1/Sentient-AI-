@@ -28,7 +28,7 @@ from services.agent.tool_registry import (
     RuntimePermissionAdapter,
     build_tools,
 )
-from tests.conftest import auth_headers, make_user
+from tests.conftest import auth_headers, make_user, use_provider
 from tests.test_streaming import RecordingAudit
 
 SEND_EMAIL = "google_workspace.send_email"
@@ -154,7 +154,7 @@ def _runtime(session_factory, provider=None, executor=None):
         audit_service=audit,
         approval_store=DbApprovalStore(session_factory=session_factory),
     )
-    runtime._provider = provider or EchoProvider()
+    use_provider(runtime, provider or EchoProvider())
     runtime._CONTENT_CHUNK_DELAY = 0
     return runtime, executor, audit
 
