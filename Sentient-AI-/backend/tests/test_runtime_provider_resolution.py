@@ -176,6 +176,37 @@ async def test_key_resolved_lazily_and_cached_until_invalidated(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_context_is_sized_for_the_model_each_turn_runs_on(monkeypatch):
+    """Not config.LLM_MODEL: the install default and a user's own pick can
+    have windows 15x apart, so each turn budgets for its resolved model."""
+    from services.agent.context_manager import ContextManager, get_context_window
+
+    seen: list = []
+    real = ContextManager.prepare_context
+
+    def spy(self, *args, **kwargs):
+        seen.append(kwargs.get("model"))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(ContextManager, "prepare_context", spy)
+    rt = runtime(
+        Source(provider="deepseek", model="deepseek-chat", keys={"deepseek": "d", "gemini": "g"}),
+        monkeypatch,
+    )
+    await rt.chat([{"role": "user", "content": "hello"}], [], "u1")
+    await rt.chat(
+        [{"role": "user", "content": "hello again"}],
+        [],
+        "u1",
+        llm_provider="gemini",
+        llm_model="gemini-2.5-flash",
+    )
+    assert seen == ["deepseek-chat", "gemini-2.5-flash"]
+    assert settings.LLM_MODEL not in seen
+    assert get_context_window(seen[0]) != get_context_window(seen[1])
+
+
+@pytest.mark.asyncio
 async def test_explicit_default_pair_and_none_share_one_instance(monkeypatch):
     rt = runtime(Source(keys={"gemini": "k"}), monkeypatch)
     assert await rt._resolve_provider("gemini", "gemini-2.5-flash") is (
@@ -958,3 +989,160 @@ async def test_channel_chat_with_an_unavailable_user_provider_points_at_settings
     assert outcome["settings_url"] == "/settings"
     assert "setup_url" not in outcome
     assert "openai" in outcome["error"]
+
+
+# ---------------------------------------------------------------------------
+# After setup: the install lost its key. /setup redirects away once setup is
+# complete, so every surface points at Settings instead (code
+# provider_unavailable), still 503.
+# ---------------------------------------------------------------------------
+
+_MISSING = object()
+
+
+async def _completed_installation(session_factory, owner_id):
+    from services.installation import InstallationService
+
+    installation = InstallationService(session_factory)
+    await installation.mark_setup_complete(allow_registration=False, actor_id=owner_id)
+    return installation
+
+
+class _Wired:
+    """Put a runtime and an installation on app.state for one test."""
+
+    def __init__(self, runtime, installation):
+        from main import app
+
+        self.app = app
+        self.values = {"agent_runtime": runtime, "installation": installation}
+        self.saved: dict = {}
+
+    def __enter__(self):
+        for name, value in self.values.items():
+            self.saved[name] = getattr(self.app.state, name, _MISSING)
+            setattr(self.app.state, name, value)
+        return self
+
+    def __exit__(self, *exc):
+        for name, value in self.saved.items():
+            if value is _MISSING:
+                if hasattr(self.app.state, name):
+                    delattr(self.app.state, name)
+            else:
+                setattr(self.app.state, name, value)
+
+
+@pytest.mark.asyncio
+async def test_send_message_after_setup_without_a_key_points_at_settings(
+    client, session_factory
+):
+    from api.routes import agent as agent_routes
+    from main import app
+
+    user, token = await make_user(session_factory, "after-setup-send@example.com")
+    installation = await _completed_installation(session_factory, user.id)
+    runtime = _unconfigured_runtime()
+    app.dependency_overrides[agent_routes.get_runtime] = lambda: runtime
+    try:
+        with _Wired(runtime, installation):
+            created = await client.post(
+                "/api/agent/conversations", headers=auth_headers(token), json={}
+            )
+            response = await client.post(
+                f"/api/agent/conversations/{created.json()['id']}/messages",
+                headers=auth_headers(token),
+                json={"content": "hello"},
+            )
+    finally:
+        app.dependency_overrides.pop(agent_routes.get_runtime, None)
+    assert response.status_code == 503
+    assert response.json()["detail"] == {
+        "message": SETUP_SENTENCE,
+        "code": "provider_unavailable",
+        "settings_url": "/settings",
+    }
+
+
+@pytest.mark.asyncio
+async def test_stream_after_setup_without_a_key_points_at_settings(client, session_factory):
+    from api.routes import agent as agent_routes
+    from main import app
+
+    user, token = await make_user(session_factory, "after-setup-stream@example.com")
+    installation = await _completed_installation(session_factory, user.id)
+    runtime = _unconfigured_runtime()
+    app.dependency_overrides[agent_routes.get_runtime] = lambda: runtime
+    try:
+        with _Wired(runtime, installation):
+            created = await client.post(
+                "/api/agent/conversations", headers=auth_headers(token), json={}
+            )
+            response = await client.post(
+                f"/api/agent/conversations/{created.json()['id']}/messages/stream",
+                headers=auth_headers(token),
+                json={"content": "hello"},
+            )
+    finally:
+        app.dependency_overrides.pop(agent_routes.get_runtime, None)
+    errors = [data for name, data in _frames(response.text) if name == "error"]
+    assert errors == [
+        {
+            "reason": SETUP_SENTENCE,
+            "code": "provider_unavailable",
+            "settings_url": "/settings",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_channel_chat_after_setup_without_a_key_points_at_settings(session_factory):
+    from api.routes.agent import build_chat_applier
+    from main import app
+
+    user, _ = await make_user(session_factory, "after-setup-telegram@example.com")
+    installation = await _completed_installation(session_factory, user.id)
+    with _Wired(_unconfigured_runtime(), installation):
+        outcome = await build_chat_applier(app, session_factory=session_factory)(
+            str(user.id), "hello"
+        )
+    assert outcome["error"] == SETUP_SENTENCE
+    assert outcome["code"] == "provider_unavailable"
+    assert outcome["settings_url"] == "/settings"
+    assert "setup_url" not in outcome
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_setup_state_keeps_the_setup_pointer(client, session_factory):
+    """If the installation cannot say whether setup is done, the original
+    pointer stands: a broken probe must not turn a 503 into a 500."""
+    from api.routes import agent as agent_routes
+    from main import app
+
+    class BrokenInstallation:
+        async def setup_completed(self):
+            raise RuntimeError("database unavailable")
+
+        async def report(self):
+            from services import capabilities as registry
+
+            return registry.report(registry.default_switches(), registry.default_context())
+
+    user, token = await make_user(session_factory, "after-setup-broken@example.com")
+    runtime = _unconfigured_runtime()
+    app.dependency_overrides[agent_routes.get_runtime] = lambda: runtime
+    try:
+        with _Wired(runtime, BrokenInstallation()):
+            created = await client.post(
+                "/api/agent/conversations", headers=auth_headers(token), json={}
+            )
+            response = await client.post(
+                f"/api/agent/conversations/{created.json()['id']}/messages",
+                headers=auth_headers(token),
+                json={"content": "hello"},
+            )
+    finally:
+        app.dependency_overrides.pop(agent_routes.get_runtime, None)
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "provider_not_configured"
+    assert response.json()["detail"]["setup_url"] == "/setup"

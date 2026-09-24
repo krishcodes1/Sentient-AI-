@@ -216,6 +216,8 @@ async def test_status_before_and_after_owner(client, env):
         "provider_configured": False,
         "setup_completed": False,
         "secrets_unreadable": False,
+        "registration_open": False,
+        "registration_env_locked": False,
     }
 
     await _owner_token(client)
@@ -224,6 +226,7 @@ async def test_status_before_and_after_owner(client, env):
     assert after["has_owner"] is True
     assert after["needs_setup"] is True  # the wizard is not finished yet
     assert after["setup_completed"] is False
+    assert after["registration_open"] is False
 
 
 @pytest.mark.asyncio
@@ -296,6 +299,7 @@ async def test_admin_routes_refuse_non_admins(client, env, session_factory):
         client.delete("/api/setup/telegram", headers=headers),
         client.delete("/api/setup/secrets", headers=headers),
         client.post("/api/setup/complete", json={"allow_registration": True}, headers=headers),
+        client.put("/api/setup/registration", json={"allow_registration": True}, headers=headers),
     ]
     for call in calls:
         resp = await call
@@ -618,18 +622,121 @@ async def test_complete_stamps_setup_and_closes_registration(client, env, sessio
     assert row is not None
 
 
+def _unset_allow_registration(monkeypatch) -> None:
+    """Make the shared settings read as if ALLOW_REGISTRATION were absent
+    from the environment and .env. conftest exports it, and
+    pydantic-settings records every env-sourced field in model_fields_set,
+    which is how the lock tells "unset" from "set"."""
+    monkeypatch.setattr(
+        settings,
+        "__pydantic_fields_set__",
+        set(settings.model_fields_set) - {"ALLOW_REGISTRATION"},
+    )
+
+
 @pytest.mark.asyncio
-async def test_complete_can_leave_registration_open(client, env, monkeypatch):
-    monkeypatch.setattr(settings, "ALLOW_REGISTRATION", False, raising=False)
+@pytest.mark.parametrize("explicit", [False, True])
+async def test_complete_can_leave_registration_open(client, env, monkeypatch, explicit):
+    """Unset, or explicitly true: the owner's choice decides."""
+    if not explicit:
+        _unset_allow_registration(monkeypatch)
     token = await _owner_token(client)  # the owner step ignores the switch
     await client.post(
         "/api/setup/complete", json={"allow_registration": True}, headers=auth_headers(token)
     )
+    status_body = (await client.get("/api/setup/status")).json()
+    assert status_body["registration_open"] is True
+    assert status_body["registration_env_locked"] is False
     joined = await client.post(
         "/api/auth/register", json={"email": "friend@example.com", "password": "password-123"}
     )
     assert joined.status_code == 201
     assert joined.json()["is_admin"] is False
+
+
+@pytest.mark.asyncio
+async def test_explicit_false_locks_registration_whatever_the_owner_chose(
+    client, env, monkeypatch, session_factory
+):
+    monkeypatch.setattr(settings, "ALLOW_REGISTRATION", False, raising=False)
+    token = await _owner_token(client)  # the owner step ignores the lock
+    done = await client.post(
+        "/api/setup/complete", json={"allow_registration": True}, headers=auth_headers(token)
+    )
+    assert done.status_code == 200  # completing never fails on the lock
+
+    status_body = (await client.get("/api/setup/status")).json()
+    assert status_body["registration_env_locked"] is True
+    assert status_body["registration_open"] is False
+    refused = await client.post(
+        "/api/auth/register", json={"email": "friend@example.com", "password": "password-123"}
+    )
+    assert refused.status_code == 403
+    assert refused.json()["detail"] == "Registration is disabled on this server"
+
+    # Stored closed, so removing the lock later does not open sign-up.
+    row = await _latest_audit(session_factory, "setup_completed")
+    assert row.request_data == {"allow_registration": False}
+
+
+# ---------------------------------------------------------------------------
+# PUT /setup/registration (the Settings switch)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_owner_toggles_registration_after_setup(client, env, session_factory):
+    token = await _owner_token(client)
+    headers = auth_headers(token)
+    await client.post("/api/setup/complete", json={"allow_registration": False}, headers=headers)
+
+    opened = await client.put(
+        "/api/setup/registration", json={"allow_registration": True}, headers=headers
+    )
+    assert opened.status_code == 200
+    assert opened.json() == {"ok": True, "allow_registration": True, "registration_open": True}
+    assert (await client.get("/api/setup/status")).json()["registration_open"] is True
+    joined = await client.post("/api/auth/register", json=_LATE)
+    assert joined.status_code == 201
+
+    closed = await client.put(
+        "/api/setup/registration", json={"allow_registration": False}, headers=headers
+    )
+    assert closed.json() == {"ok": True, "allow_registration": False, "registration_open": False}
+    refused = await client.post(
+        "/api/auth/register", json={**_LATE, "email": "later@example.com"}
+    )
+    assert refused.status_code == 403
+
+    row = await _latest_audit(session_factory, "registration_updated")
+    assert row is not None
+    assert row.endpoint == "/api/setup/registration"
+    assert row.request_data == {"allow_registration": False}
+
+
+@pytest.mark.asyncio
+async def test_registration_switch_is_409_under_the_env_lock(client, env, monkeypatch, session_factory):
+    token = await _owner_token(client)
+    headers = auth_headers(token)
+    await client.post("/api/setup/complete", json={"allow_registration": False}, headers=headers)
+    monkeypatch.setattr(settings, "ALLOW_REGISTRATION", False, raising=False)
+
+    resp = await client.put(
+        "/api/setup/registration", json={"allow_registration": True}, headers=headers
+    )
+    assert resp.status_code == 409
+    assert "ALLOW_REGISTRATION=false" in resp.json()["detail"]
+    assert await _latest_audit(session_factory, "registration_updated") is None
+    assert (await client.post("/api/auth/register", json=_LATE)).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_registration_switch_takes_a_real_boolean(client, env):
+    token = await _owner_token(client)
+    resp = await client.put(
+        "/api/setup/registration", json={"allow_registration": "yes"}, headers=auth_headers(token)
+    )
+    assert resp.status_code == 422
 
 
 # ---------------------------------------------------------------------------

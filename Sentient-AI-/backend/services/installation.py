@@ -49,7 +49,7 @@ import structlog
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
-from core.config import PROVIDER_KEY_FIELDS, settings
+from core.config import LLM_PROVIDERS, PROVIDER_KEY_FIELDS, settings
 from core.security import decrypt_credentials, encrypt_credentials
 from models.audit import AuditStatus
 from models.installation import INSTALLATION_ROW_ID, Installation
@@ -66,6 +66,16 @@ UNREADABLE_KEYS_MESSAGE = (
     "Stored provider keys cannot be decrypted with the current ENCRYPTION_KEY; "
     "restore the key or clear the stored keys"
 )
+
+REGISTRATION_LOCKED_MESSAGE = (
+    "Registration is locked closed by ALLOW_REGISTRATION=false in the server "
+    "configuration; remove it from .env to manage it here."
+)
+
+
+class RegistrationLocked(Exception):
+    """The environment locks registration closed (ALLOW_REGISTRATION=false),
+    so the stored switch cannot be changed from the app."""
 
 
 @dataclass(frozen=True)
@@ -370,7 +380,7 @@ class InstallationService:
         self, provider: str, model: str, api_key: Optional[str], *, actor_id: uuid.UUID
     ) -> None:
         name = (provider or "").strip().lower()
-        if name not in PROVIDER_KEY_FIELDS and name != "ollama":
+        if name not in LLM_PROVIDERS:
             # Never echo the input: a key pasted into the wrong field
             # would land in the HTTP response and the client's logs.
             raise ValueError("Unknown provider")
@@ -462,23 +472,74 @@ class InstallationService:
         return (await self._load()).setup_completed_at is not None
 
     async def needs_setup(self) -> bool:
+        """No account yet, or the wizard is unfinished."""
         return not await self.has_users() or not await self.setup_completed()
 
+    # ── registration ───────────────────────────────────────────────────
+    #
+    # One rule, in order: an explicit ALLOW_REGISTRATION=false in the
+    # environment or .env locks registration closed; otherwise, once setup
+    # is complete, the owner's stored switch decides; before that it is
+    # closed (with no users too: the first account comes from /setup/owner
+    # only). An explicit true opens nothing by itself — it only seeds the
+    # switch when stamp_setup_if_legacy() carries an upgraded install past
+    # the wizard.
+
+    def _registration_env_explicit(self) -> bool:
+        """Whether ALLOW_REGISTRATION came from the environment or .env
+        rather than the field default. pydantic-settings records every
+        value it read from either in model_fields_set. A stand-in config
+        without that record counts as explicit when it has the attribute,
+        so a lock is never read as open."""
+        fields_set = getattr(self._config, "model_fields_set", None)
+        if fields_set is None:
+            return hasattr(self._config, "ALLOW_REGISTRATION")
+        return "ALLOW_REGISTRATION" in fields_set
+
+    def registration_env_locked(self) -> bool:
+        """True when ALLOW_REGISTRATION=false is set explicitly: registration
+        is closed whatever the stored switch says, and the switch cannot be
+        changed from the app."""
+        return self._registration_env_explicit() and not bool(
+            getattr(self._config, "ALLOW_REGISTRATION", True)
+        )
+
     async def registration_allowed(self) -> bool:
-        """After setup completes, the owner's stored switch decides. Before
-        any user exists, the environment decides (the first account on an
-        install that does not use the wizard). In between — the owner was
-        created through /setup/owner, which does not ask this — it is
-        closed, so nobody can sign up while the wizard is unfinished."""
-        snap = await self._load()
-        if snap.setup_completed_at is not None:
-            return snap.allow_registration
-        if await self.has_users():
+        """Whether /auth/register may create an account now (see the rule
+        above)."""
+        if self.registration_env_locked():
             return False
-        return bool(self._config.ALLOW_REGISTRATION)
+        snap = await self._load()
+        return snap.setup_completed_at is not None and snap.allow_registration
+
+    async def set_registration(self, allow: bool, *, actor_id: uuid.UUID) -> None:
+        """Store the owner's open-registration switch (Settings). Refused
+        with RegistrationLocked while the environment locks it: the stored
+        value would do nothing until someone removed the lock, and then it
+        would silently open sign-up."""
+        if not isinstance(allow, bool):
+            raise ValueError("allow_registration must be true or false")
+        if self.registration_env_locked():
+            raise RegistrationLocked(REGISTRATION_LOCKED_MESSAGE)
+
+        def mutate(row: Installation) -> Mapping[str, Any]:
+            row.allow_registration = allow
+            return {"allow_registration": allow}
+
+        await self._write(
+            mutate,
+            actor_id=actor_id,
+            action="registration_updated",
+            endpoint="/api/setup/registration",
+        )
+        await self._changed("registration")
 
     async def mark_setup_complete(self, *, allow_registration: bool, actor_id: uuid.UUID) -> None:
-        allow = bool(allow_registration)
+        """Stamp setup complete and store the registration switch. Under
+        the environment lock the switch is stored closed, whatever was
+        asked: completing setup must not fail on it, and an open switch
+        must not be waiting for the day the lock is removed."""
+        allow = bool(allow_registration) and not self.registration_env_locked()
 
         def mutate(row: Installation) -> Mapping[str, Any]:
             row.setup_completed_at = datetime.now(timezone.utc)
@@ -502,19 +563,23 @@ class InstallationService:
         has stored a provider, the owner is mid-wizard (or done) and a
         restart must resume it rather than skip past it.
 
-        The stamp also carries today's ALLOW_REGISTRATION into the row:
-        once setup is complete the stored switch governs, and the column
-        default (closed) would otherwise silently change an upgraded
-        deployment's behaviour."""
+        The stamp also seeds the registration switch, which governs from
+        then on: open only when the environment explicitly says
+        ALLOW_REGISTRATION=true. Unset (or false) seeds it closed, so an
+        upgrade never leaves an install open by accident; the owner can
+        open it later in Settings."""
         if not self._env_supplies_provider_key() or not await self.has_users():
             return False
+        allow = self._registration_env_explicit() and bool(
+            getattr(self._config, "ALLOW_REGISTRATION", False)
+        )
         stamped = False
         async with self._lock:
             async with self._session_factory() as session:
                 row = await self._get_or_create(session, for_update=True)
                 if row.setup_completed_at is None and row.llm_provider is None:
                     row.setup_completed_at = datetime.now(timezone.utc)
-                    row.allow_registration = bool(self._config.ALLOW_REGISTRATION)
+                    row.allow_registration = allow
                     await session.commit()
                     stamped = True
             self.invalidate()

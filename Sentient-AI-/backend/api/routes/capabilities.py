@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, StrictBool
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api.routes._deps import installation_service, require_admin
 from core.database import async_session
 from models.audit import AuditStatus
 from models.user import User
@@ -27,7 +28,6 @@ from services import capabilities
 from services.audit import append_audit_log
 from services.auth import get_current_user
 from services.capabilities.base import Capability
-from services.installation import InstallationService
 from services.tools.system import SystemToolkit
 
 logger = structlog.get_logger(__name__)
@@ -43,9 +43,7 @@ _toolkit = SystemToolkit()
 
 # Audit rows must never sit behind a running install: each write opens its
 # own short-lived session from this factory instead of borrowing the
-# request's session. app.state.session_factory (set by tests, since the
-# httpx client fixture only overrides get_db) takes precedence so a test's
-# in-memory database sees these rows.
+# request's session. Tests point it at their own database.
 _session_factory: Callable[[], AsyncSession] = async_session
 
 # Capability keys with an install currently running. A second POST for the
@@ -60,26 +58,8 @@ class CapabilitiesPatch(BaseModel):
     capabilities: dict[str, StrictBool]
 
 
-def _installation(request: Request) -> InstallationService:
-    service = getattr(request.app.state, "installation", None)
-    if service is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Installation service not available",
-        )
-    return service
-
-
 def _system_toolkit(request: Request) -> SystemToolkit:
     return getattr(request.app.state, "system_toolkit", None) or _toolkit
-
-
-def _require_admin(user: User) -> None:
-    if not user.is_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only the owner can change permissions",
-        )
 
 
 def _capability(key: str) -> Capability:
@@ -89,19 +69,14 @@ def _capability(key: str) -> Capability:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown capability")
 
 
-async def _audit(
-    request: Request, *, user_id: Any, action: str, endpoint: str, data: dict[str, Any]
-) -> None:
+async def _audit(*, user_id: Any, action: str, endpoint: str, data: dict[str, Any]) -> None:
     """Write one audit row through a short-lived session.
 
     Never the request's own DB session: an install can run for minutes,
     and holding a session open that long would tie up a pool connection
-    for nothing. app.state.session_factory lets a test's in-memory
-    database see these rows even though the test client only overrides
-    get_db, not this module's factory.
+    for nothing.
     """
-    factory = getattr(request.app.state, "session_factory", None) or _session_factory
-    async with factory() as session:
+    async with _session_factory() as session:
         await append_audit_log(
             session,
             user_id=user_id,
@@ -120,7 +95,7 @@ async def list_capabilities(
     request: Request,
     current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
-    statuses = await _installation(request).report()
+    statuses = await installation_service(request).report()
     return {"capabilities": [s.to_dict() for s in statuses]}
 
 
@@ -128,12 +103,11 @@ async def list_capabilities(
 async def update_capabilities(
     body: CapabilitiesPatch,
     request: Request,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
 ) -> dict[str, Any]:
     """Partial update: keys not in the patch keep their stored value. The
     service validates the keys and writes the audit row with the diff."""
-    _require_admin(current_user)
-    service = _installation(request)
+    service = installation_service(request)
     if not body.capabilities:
         statuses = await service.report()
     else:
@@ -152,7 +126,7 @@ async def update_capabilities(
 async def request_access(
     key: str,
     request: Request,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
 ) -> dict[str, Any]:
     """Show the OS permission prompt / open the settings pane.
 
@@ -161,9 +135,8 @@ async def request_access(
     or already granted, there is nothing left to request either. Any of
     those come back as a 409 the UI can show as-is.
     """
-    _require_admin(current_user)
     cap = _capability(key)
-    service = _installation(request)
+    service = installation_service(request)
     current = capabilities.statuses_by_key(await service.report()).get(key)
     if current is None or not current.can_request_access:
         detail = (current.availability_reason or current.reason) if current is not None else None
@@ -179,7 +152,6 @@ async def request_access(
             "capability_request_access_failed", capability=key, error_type=type(exc).__name__
         )
         await _audit(
-            request,
             user_id=current_user.id,
             action="capability_access_request_failed",
             endpoint=request.url.path,
@@ -197,7 +169,6 @@ async def request_access(
     fresh = capabilities.statuses_by_key(await service.report())[key]
 
     await _audit(
-        request,
         user_id=current_user.id,
         action="capability_access_requested",
         endpoint=request.url.path,
@@ -210,7 +181,7 @@ async def request_access(
 async def install(
     key: str,
     request: Request,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
 ) -> dict[str, Any]:
     """Run the allowlisted install behind ``capability.install``.
 
@@ -224,7 +195,6 @@ async def install(
     second POST for the same key while one is already running is refused
     outright rather than queued.
     """
-    _require_admin(current_user)
     cap = _capability(key)
     if not cap.install:
         raise HTTPException(
@@ -243,7 +213,6 @@ async def install(
     _installs_in_progress.add(key)
     try:
         await _audit(
-            request,
             user_id=user_id,
             action="capability_install_started",
             endpoint=endpoint,
@@ -267,7 +236,6 @@ async def install(
                 service.invalidate()
 
         await _audit(
-            request,
             user_id=user_id,
             action="capability_install_finished",
             endpoint=endpoint,

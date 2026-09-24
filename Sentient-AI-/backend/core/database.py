@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -122,6 +123,18 @@ def _stamp_baseline() -> None:
 # configuration was consulted (the old column server default).
 _LEGACY_LLM_PAIR = ("anthropic", "claude-sonnet-4-20250514")
 
+# How far apart created_at and updated_at may be on an account that was
+# never edited. Not zero: the ORM fills the two columns from two separate
+# datetime.now() calls, so a brand-new row routinely differs by a few
+# microseconds. Nobody registers and saves Settings within a second.
+_NEVER_EDITED_WITHIN = timedelta(seconds=1)
+
+
+def _never_edited(created_at: Optional[datetime], updated_at: Optional[datetime]) -> bool:
+    if created_at is None or updated_at is None:
+        return False
+    return abs(updated_at - created_at) <= _NEVER_EDITED_WITHIN
+
 
 async def backfill_user_llm_defaults(
     conn: AsyncConnection, provider: Optional[str], model: Optional[str]
@@ -129,43 +142,66 @@ async def backfill_user_llm_defaults(
     """Turn inherited provider/model pairs into NULL ("follow the install").
 
     Accounts used to be stamped at registration with the provider/model the
-    server ran that day, so a row that still holds the server's CURRENT
-    default pair almost always inherited it rather than chose it. Setting
-    it to NULL lets the account follow the install from now on — including
-    a provider the owner configures later through the setup wizard, which
-    a stamped row would never have reached.
+    server ran that day. Setting such a pair to NULL lets the account follow
+    the install from now on — including a provider the owner configures
+    later through the setup wizard, which a stamped row would never have
+    reached.
 
-    Rows still on the historical hardcoded default are included only when
-    their ``updated_at`` equals ``created_at``: that account never touched
-    Settings, so it never chose the pair (anyone who did may have picked it
-    on purpose).
+    Only accounts that were never edited qualify (``updated_at`` within a
+    second of ``created_at``): this runs on every boot, and someone who
+    saved Settings since registering may have picked the pair on purpose.
+    The pairs are the server's CURRENT default and the historical hardcoded
+    one (the old column server default).
 
-    Values are bound parameters, never inlined into the SQL. Comparison is
-    case- and whitespace-insensitive on the provider, whitespace-insensitive
-    on the model. Idempotent; ``updated_at`` is left alone, because this is
-    not the user changing anything.
+    Candidates are filtered in SQL on the provider (bound parameters, never
+    inlined) and checked in Python on the model and the timestamps, which
+    keeps the time comparison portable across SQLite and Postgres.
+    Comparison is case- and whitespace-insensitive on the provider,
+    whitespace-insensitive on the model. Idempotent; ``updated_at`` is left
+    alone, because this is not the user changing anything.
     """
-    from sqlalchemy import text
+    import sqlalchemy as sa
 
+    # Typed for the timestamps only; id is passed back exactly as read.
+    users = sa.table(
+        "users",
+        sa.column("id"),
+        sa.column("llm_provider", sa.String()),
+        sa.column("llm_model", sa.String()),
+        sa.column("created_at", sa.DateTime(timezone=True)),
+        sa.column("updated_at", sa.DateTime(timezone=True)),
+    )
+    pairs = {_LEGACY_LLM_PAIR}
     provider = (provider or "").strip().lower()
     model = (model or "").strip()
     if provider and model:
-        await conn.execute(
-            text(
-                "UPDATE users SET llm_provider = NULL, llm_model = NULL "
-                "WHERE LOWER(TRIM(llm_provider)) = :provider "
-                "AND TRIM(llm_model) = :model"
-            ),
-            {"provider": provider, "model": model},
+        pairs.add((provider, model))
+
+    candidates = await conn.execute(
+        sa.select(
+            users.c.id,
+            users.c.llm_provider,
+            users.c.llm_model,
+            users.c.created_at,
+            users.c.updated_at,
+        ).where(
+            sa.func.lower(sa.func.trim(users.c.llm_provider)).in_(
+                sorted({p for p, _m in pairs})
+            )
         )
-    await conn.execute(
-        text(
-            "UPDATE users SET llm_provider = NULL, llm_model = NULL "
-            "WHERE llm_provider = :provider AND llm_model = :model "
-            "AND updated_at = created_at"
-        ),
-        {"provider": _LEGACY_LLM_PAIR[0], "model": _LEGACY_LLM_PAIR[1]},
     )
+    stale = [
+        row.id
+        for row in candidates
+        if ((row.llm_provider or "").strip().lower(), (row.llm_model or "").strip()) in pairs
+        and _never_edited(row.created_at, row.updated_at)
+    ]
+    if stale:
+        await conn.execute(
+            sa.update(users)
+            .where(users.c.id.in_(stale))
+            .values(llm_provider=None, llm_model=None)
+        )
 
 
 async def init_db(retries: int = 10, delay: float = 2.0) -> None:
@@ -206,9 +242,10 @@ async def init_db(retries: int = 10, delay: float = 2.0) -> None:
             await asyncio.to_thread(_run_alembic_upgrade)
             logger.info("database_schema_at_head")
 
-            # Data fix, after the schema allows NULL (0009): accounts that
-            # merely inherited the server's provider/model follow the
-            # install default instead. It stays here rather than in the
+            # Data fix, after the schema allows NULL (0009): never-edited
+            # accounts that merely inherited the server's provider/model
+            # follow the install default instead; it runs every boot, so a
+            # deliberate choice is never touched. It stays here rather than in the
             # migration because the target pair is runtime configuration,
             # not static DDL (an offline `alembic upgrade --sql` would bake
             # in whatever environment generated the script).

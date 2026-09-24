@@ -235,6 +235,70 @@ async def test_install_says_so_when_the_probe_still_reports_missing():
     assert "not detected" in result["note"]
 
 
+class _FinishedProcess:
+    returncode = 0
+
+    async def communicate(self):
+        return b"done\n", None
+
+    def kill(self):  # pragma: no cover - only on timeout
+        pass
+
+    async def wait(self):  # pragma: no cover - only on timeout
+        return 0
+
+
+@pytest.mark.asyncio
+async def test_install_steps_run_with_an_allowlisted_environment(monkeypatch):
+    """pip and Playwright run third-party code (build hooks, a downloaded
+    driver): they get what they need to find the interpreter, the network
+    and a cache, and never the server's secrets."""
+    secrets = {
+        "SECRET_KEY": "sentinel-secret-key",
+        "ENCRYPTION_KEY": "sentinel-encryption-key",
+        "GEMINI_API_KEY": "sentinel-gemini-key",
+        "TELEGRAM_BOT_TOKEN": "sentinel-bot-token",
+        "DATABASE_URL": "postgresql://sentinel:pw@db/crawler",
+    }
+    for name, value in secrets.items():
+        monkeypatch.setenv(name, value)
+    passed = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": "/home/crawler",
+        "HTTPS_PROXY": "http://proxy.internal:3128",
+        "PLAYWRIGHT_BROWSERS_PATH": "/var/cache/ms-playwright",
+        "VIRTUAL_ENV": "/opt/crawler/venv",
+    }
+    for name, value in passed.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("NO_PROXY", raising=False)
+
+    seen: list[dict[str, str]] = []
+
+    async def fake_exec(*argv, **kwargs):
+        seen.append(kwargs["env"])
+        return _FinishedProcess()
+
+    monkeypatch.setattr(system_module.asyncio, "create_subprocess_exec", fake_exec)
+    code, output = await system_module._run_step(list(BROWSER_STEPS[0]), 5.0)
+
+    assert (code, output) == (0, "done\n")
+    (env,) = seen
+    for name in secrets:
+        assert name not in env
+    assert not any(value in env.values() for value in secrets.values())
+    for name, value in passed.items():
+        assert env[name] == value
+    assert "NO_PROXY" not in env  # absent stays absent, never an empty string
+    assert env["PIP_NO_INPUT"] == "1"
+    assert env["PIP_DISABLE_PIP_VERSION_CHECK"] == "1"
+    allowed = set(system_module._STEP_ENV_ALLOWLIST) | {
+        "PIP_NO_INPUT",
+        "PIP_DISABLE_PIP_VERSION_CHECK",
+    }
+    assert set(env) <= allowed
+
+
 # ---------------------------------------------------------------------------
 # capabilities
 # ---------------------------------------------------------------------------

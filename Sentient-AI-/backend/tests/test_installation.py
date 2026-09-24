@@ -58,6 +58,40 @@ def _other_encryption_key() -> str:
     return base64.urlsafe_b64encode(os.urandom(32)).decode("utf-8")
 
 
+def _registration_env(value: bool | None):
+    """A copy of the (pinned) settings with ALLOW_REGISTRATION set to
+    *value* in the environment, or absent from it when *value* is None.
+
+    conftest exports ALLOW_REGISTRATION=true, so the shared settings always
+    count it as explicitly set; pydantic-settings records every field read
+    from the environment or .env in model_fields_set, and a copy lets a
+    test take it back out."""
+    if value is None:
+        config = settings.model_copy()
+        config.__pydantic_fields_set__.discard("ALLOW_REGISTRATION")
+        return config
+    return settings.model_copy(update={"ALLOW_REGISTRATION": value})
+
+
+def test_settings_record_an_env_sourced_field_as_explicit(tmp_path, monkeypatch):
+    """The lock rests on pydantic-settings marking values it read from the
+    environment or the .env file as set, and leaving defaults unmarked."""
+    from core.config import Settings
+
+    monkeypatch.delenv("ALLOW_REGISTRATION", raising=False)
+    monkeypatch.chdir(tmp_path)  # no .env here
+    assert "ALLOW_REGISTRATION" not in Settings().model_fields_set
+
+    (tmp_path / ".env").write_text("ALLOW_REGISTRATION=false\n", encoding="utf-8")
+    from_dotenv = Settings()
+    assert "ALLOW_REGISTRATION" in from_dotenv.model_fields_set
+    assert from_dotenv.ALLOW_REGISTRATION is False
+
+    (tmp_path / ".env").unlink()
+    monkeypatch.setenv("ALLOW_REGISTRATION", "true")
+    assert "ALLOW_REGISTRATION" in Settings().model_fields_set
+
+
 @pytest.mark.asyncio
 async def test_capabilities_default_then_patch_and_audit(session_factory, monkeypatch):
     svc = InstallationService(session_factory)
@@ -123,7 +157,8 @@ async def test_ollama_needs_no_key(session_factory):
 async def test_needs_setup_and_completion(session_factory):
     svc = InstallationService(session_factory)
     assert await svc.needs_setup() is True
-    assert await svc.registration_allowed() is True  # env applies before any user
+    # The first account comes from /setup/owner, never open sign-up.
+    assert await svc.registration_allowed() is False
     user, _ = await make_user(session_factory, "o@example.com")
     assert await svc.needs_setup() is True  # owner exists but wizard not finished
     assert await svc.registration_allowed() is False  # closed until the wizard ends
@@ -284,7 +319,9 @@ async def test_no_audit_row_carries_a_secret(session_factory):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["capabilities", "llm", "telegram", "setup", "clear"])
+@pytest.mark.parametrize(
+    "operation", ["capabilities", "llm", "telegram", "setup", "clear", "registration"]
+)
 async def test_a_failed_audit_write_rolls_the_change_back(session_factory, monkeypatch, operation):
     svc = InstallationService(session_factory)
     user, _ = await make_user(session_factory, "o@example.com")
@@ -310,6 +347,7 @@ async def test_a_failed_audit_write_rolls_the_change_back(session_factory, monke
         "telegram": lambda: svc.set_telegram_token(None, actor_id=user.id),
         "setup": lambda: svc.mark_setup_complete(allow_registration=True, actor_id=user.id),
         "clear": lambda: svc.clear_stored_secrets(actor_id=user.id),
+        "registration": lambda: svc.set_registration(True, actor_id=user.id),
     }
     with pytest.raises(RuntimeError, match="audit store unavailable"):
         await calls[operation]()
@@ -636,34 +674,142 @@ async def test_undecryptable_warning_is_logged_once_per_blob(session_factory, mo
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    ("env_value", "locked"), [(None, False), (True, False), (False, True)]
+)
+def test_only_an_explicit_false_locks_registration(session_factory, env_value, locked):
+    svc = InstallationService(session_factory, config=_registration_env(env_value))
+    assert svc.registration_env_locked() is locked
+
+
+def test_a_config_without_a_fields_record_is_read_as_explicit(session_factory):
+    """A plain stand-in config (no pydantic model_fields_set) that carries
+    ALLOW_REGISTRATION=False still locks: never read a lock as open."""
+    from types import SimpleNamespace
+
+    locked = SimpleNamespace(ALLOW_REGISTRATION=False)
+    assert InstallationService(session_factory, config=locked).registration_env_locked()
+    unset = SimpleNamespace()
+    assert not InstallationService(session_factory, config=unset).registration_env_locked()
+
+
 @pytest.mark.asyncio
-async def test_registration_follows_env_before_any_user(session_factory, monkeypatch):
-    svc = InstallationService(session_factory)
-    assert await svc.registration_allowed() is True
-    monkeypatch.setattr(settings, "ALLOW_REGISTRATION", False, raising=False)
-    svc.invalidate()
+@pytest.mark.parametrize("env_value", [None, True, False])
+async def test_registration_is_closed_before_any_user(session_factory, env_value):
+    """Zero users: the first account comes from /setup/owner only, whatever
+    the environment says."""
+    svc = InstallationService(session_factory, config=_registration_env(env_value))
     assert await svc.registration_allowed() is False
 
 
 @pytest.mark.asyncio
-async def test_registration_is_closed_between_owner_and_wizard_completion(session_factory):
-    svc = InstallationService(session_factory)
-    await make_user(session_factory, "owner@example.com")
-    assert settings.ALLOW_REGISTRATION is True
+@pytest.mark.parametrize("env_value", [None, True])
+async def test_registration_is_closed_between_owner_and_wizard_completion(
+    session_factory, env_value
+):
+    svc = InstallationService(session_factory, config=_registration_env(env_value))
+    user, _ = await make_user(session_factory, "owner@example.com")
+    # Even a switch stored before completion does not open it early.
+    await svc.set_registration(True, actor_id=user.id)
     assert await svc.registration_allowed() is False
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("env_value", [True, False])
+@pytest.mark.parametrize("env_value", [None, True])
 @pytest.mark.parametrize("stored", [True, False])
 async def test_registration_follows_the_stored_switch_after_setup(
-    session_factory, monkeypatch, env_value, stored
+    session_factory, env_value, stored
 ):
-    monkeypatch.setattr(settings, "ALLOW_REGISTRATION", env_value, raising=False)
-    svc = InstallationService(session_factory)
+    """Unset or explicitly true, the environment does not decide: the
+    owner's stored switch does."""
+    svc = InstallationService(session_factory, config=_registration_env(env_value))
     user, _ = await make_user(session_factory, "o@example.com")
     await svc.mark_setup_complete(allow_registration=stored, actor_id=user.id)
     assert await svc.registration_allowed() is stored
+
+
+@pytest.mark.asyncio
+async def test_explicit_false_locks_registration_whatever_the_switch_says(session_factory):
+    open_svc = InstallationService(session_factory, config=_registration_env(None))
+    user, _ = await make_user(session_factory, "o@example.com")
+    await open_svc.mark_setup_complete(allow_registration=True, actor_id=user.id)
+    assert await open_svc.registration_allowed() is True
+
+    locked_svc = InstallationService(session_factory, config=_registration_env(False))
+    assert await locked_svc.registration_allowed() is False
+    assert (await _row(session_factory)).allow_registration is True  # switch untouched
+
+
+@pytest.mark.asyncio
+async def test_completing_setup_under_the_lock_stores_the_switch_closed(session_factory):
+    """Asking to open registration while the environment locks it must not
+    leave an open switch behind for the day the lock is removed."""
+    svc = InstallationService(session_factory, config=_registration_env(False))
+    user, _ = await make_user(session_factory, "o@example.com")
+    await svc.mark_setup_complete(allow_registration=True, actor_id=user.id)
+    assert (await _row(session_factory)).allow_registration is False
+    rows = await _audit_rows(session_factory)
+    assert rows[-1].action == "setup_completed"
+    assert rows[-1].request_data == {"allow_registration": False}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("env_value", [None, True])
+async def test_set_registration_stores_and_audits_the_switch(session_factory, env_value):
+    svc = InstallationService(session_factory, config=_registration_env(env_value))
+    user, _ = await make_user(session_factory, "o@example.com")
+    await svc.mark_setup_complete(allow_registration=False, actor_id=user.id)
+    seen: list[str] = []
+
+    async def cb(topic: str) -> None:
+        seen.append(topic)
+
+    svc.on_change(cb)
+    await svc.set_registration(True, actor_id=user.id)
+    assert await svc.registration_allowed() is True
+    await svc.set_registration(False, actor_id=user.id)
+    assert await svc.registration_allowed() is False
+    assert seen == ["registration", "registration"]
+
+    rows = [r for r in await _audit_rows(session_factory) if r.action == "registration_updated"]
+    assert [
+        (r.request_data, r.endpoint, r.connector_name, r.scope_used, r.status) for r in rows
+    ] == [
+        (
+            {"allow_registration": True},
+            "/api/setup/registration",
+            "installation",
+            "admin",
+            AuditStatus.approved,
+        ),
+        (
+            {"allow_registration": False},
+            "/api/setup/registration",
+            "installation",
+            "admin",
+            AuditStatus.approved,
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_set_registration_is_refused_under_the_lock(session_factory):
+    svc = InstallationService(session_factory, config=_registration_env(False))
+    user, _ = await make_user(session_factory, "o@example.com")
+    assert await svc.setup_completed() is False  # reading creates the row
+    audits_before = len(await _audit_rows(session_factory))
+    with pytest.raises(installation_module.RegistrationLocked):
+        await svc.set_registration(True, actor_id=user.id)
+    assert (await _row(session_factory)).allow_registration is False
+    assert len(await _audit_rows(session_factory)) == audits_before
+
+
+@pytest.mark.asyncio
+async def test_set_registration_takes_a_real_boolean(session_factory):
+    svc = InstallationService(session_factory, config=_registration_env(None))
+    user, _ = await make_user(session_factory, "o@example.com")
+    with pytest.raises(ValueError):
+        await svc.set_registration("yes", actor_id=user.id)  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
@@ -672,13 +818,26 @@ async def test_registration_follows_the_stored_switch_after_setup(
 
 
 @pytest.mark.asyncio
-async def test_legacy_stamp_carries_the_env_registration_switch(session_factory, monkeypatch):
+@pytest.mark.parametrize(
+    ("env_value", "stored"),
+    [
+        # Unset: an upgraded install is never left open by accident.
+        (None, False),
+        # The operator said so in .env: carried into the switch.
+        (True, True),
+        (False, False),
+    ],
+)
+async def test_legacy_stamp_seeds_the_registration_switch(
+    session_factory, monkeypatch, env_value, stored
+):
     monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", "env-key", raising=False)
-    svc = InstallationService(session_factory)
+    svc = InstallationService(session_factory, config=_registration_env(env_value))
     await make_user(session_factory, "o@example.com")
     assert await svc.stamp_setup_if_legacy() is True
     assert await svc.needs_setup() is False
-    assert await svc.registration_allowed() is True  # ALLOW_REGISTRATION pinned True
+    assert (await _row(session_factory)).allow_registration is stored
+    assert await svc.registration_allowed() is stored
 
 
 @pytest.mark.asyncio
@@ -864,4 +1023,6 @@ def test_migration_0008_upgrades_a_database_that_already_has_users(tmp_path, mon
     assert needed_before is True
     assert stamped is True
     assert needs_setup is False
-    assert registration is True  # the env switch (pinned True) carried into the row
+    # conftest exports ALLOW_REGISTRATION=true, an explicit value, so the
+    # stamp carries it into the row.
+    assert registration is True

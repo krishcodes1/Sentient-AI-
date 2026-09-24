@@ -14,7 +14,7 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.config import settings
+from core.config import LLM_PROVIDERS, settings
 from core.database import get_db
 from core.security import (
     create_access_token,
@@ -28,13 +28,6 @@ from models.installation import INSTALLATION_ROW_ID, Installation
 from models.user import User
 from services.audit import append_auth_event
 from services.auth import get_current_user, login_lockout
-
-# LLM providers the platform can construct. Validated at the settings
-# boundary so an unknown provider fails fast with 422 instead of surfacing
-# later as a 502 mid-chat.
-_KNOWN_PROVIDERS = frozenset(
-    {"anthropic", "openai", "gemini", "grok", "deepseek", "groq", "mistral", "ollama"}
-)
 
 logger = structlog.get_logger(__name__)
 
@@ -215,9 +208,10 @@ async def register(
     Closed until the setup wizard is finished, with zero users too: the
     first account comes from /setup/owner, so open sign-up can never race
     the person installing the server for ownership. Once setup is complete
-    the owner's stored switch decides. Without an installation service
-    (unit tests that do not wire the app) the environment's
-    ALLOW_REGISTRATION decides, as it did before the wizard existed.
+    the owner's stored switch decides, unless ALLOW_REGISTRATION=false in
+    the environment locks it closed (InstallationService.registration_allowed).
+    Without an installation service (unit tests that do not wire the app)
+    the environment's ALLOW_REGISTRATION decides.
     """
     installation = getattr(request.app.state, "installation", None)
     if installation is not None:
@@ -613,12 +607,14 @@ async def update_settings(
             provider = None
         else:
             provider = body.llm_provider.strip().lower()
-            if provider not in _KNOWN_PROVIDERS:
+            # Validated here so an unknown provider fails fast with 422
+            # instead of surfacing later as a 502 mid-chat.
+            if provider not in LLM_PROVIDERS:
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                     detail=(
                         f"Unknown LLM provider '{body.llm_provider}'. Choose one of: "
-                        + ", ".join(sorted(_KNOWN_PROVIDERS))
+                        + ", ".join(sorted(LLM_PROVIDERS))
                     ),
                 )
     if "llm_model" in sent:
@@ -927,7 +923,11 @@ async def delete_account(
             )
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="Transfer ownership before deleting the last owner account",
+                detail=(
+                    "This is the only owner account. Create another owner first "
+                    "(an admin can promote an account) — or reset the install — "
+                    "before deleting it."
+                ),
             )
 
     logger.warning(

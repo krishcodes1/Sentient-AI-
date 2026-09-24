@@ -106,6 +106,9 @@ class CapabilityStatus:
     install: Optional[str]
     when_denied: str
     tools: tuple[str, ...]
+    # The download the Install button would start ("~150-300 MB download"),
+    # from the ALLOWLIST entry behind ``install``; None when there is none.
+    install_size_hint: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -125,6 +128,7 @@ class CapabilityStatus:
             "reason": self.reason,
             "can_request_access": self.can_request_access,
             "install": self.install,
+            "install_size_hint": self.install_size_hint,
             "when_denied": self.when_denied,
             "tools": list(self.tools),
         }

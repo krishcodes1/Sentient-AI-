@@ -13,6 +13,24 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # signing every session token with a string committed to a public repo.
 _PLACEHOLDER_MARKERS = ("replace_me", "changeme", "change-me", "your-secret")
 
+# Provider name → the Settings attribute that holds its API key. Shared by
+# the runtime and the installation service so the ".env wins" rule has one
+# definition.
+PROVIDER_KEY_FIELDS: dict[str, str] = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "grok": "GROK_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "mistral": "MISTRAL_API_KEY",
+}
+
+# Every LLM provider the platform can construct, in display order: the
+# keyed ones plus Ollama, which needs no key. The one list LLM_PROVIDER,
+# the Settings page (auth) and the setup wizard all validate against.
+LLM_PROVIDERS: tuple[str, ...] = (*PROVIDER_KEY_FIELDS, "ollama")
+
 
 class Settings(BaseSettings):
     """Application configuration loaded from environment variables / .env file."""
@@ -126,8 +144,8 @@ class Settings(BaseSettings):
     # ── LLM provider ─────────────────────────────────────────────────────
     LLM_PROVIDER: str = Field(
         default="anthropic",
-        pattern="^(anthropic|openai|gemini|grok|deepseek|groq|mistral|ollama)$",
-        description="LLM backend: anthropic, openai, gemini, grok, deepseek, groq, mistral, or ollama",
+        pattern=f"^({'|'.join(LLM_PROVIDERS)})$",
+        description="LLM backend: " + ", ".join(LLM_PROVIDERS),
     )
     # Fallback when LLM_MODEL is unset. claude-sonnet-4-20250514 was retired
     # on 2026-06-15; it was users.llm_model's server_default until migration
@@ -202,9 +220,13 @@ class Settings(BaseSettings):
     # token stays useful a while longer", so the ceiling is what keeps that
     # trade bounded — past it the user logs in again, no exceptions.
     SESSION_MAX_HOURS: int = Field(default=12, ge=1, le=720)
-    # Gate on POST /auth/register. Register the owner account, then set
-    # false in production so strangers can't create accounts billed to the
-    # operator's LLM keys.
+    # Lock on POST /auth/register. Leave it unset to manage open sign-up
+    # from the setup wizard / Settings (the owner's stored switch, closed by
+    # default); set it to false to lock registration closed whatever that
+    # switch says. An explicit true opens nothing by itself: it only seeds
+    # the switch when an install that predates the wizard is upgraded
+    # (services.installation). "Explicit" means present in the environment
+    # or .env, which pydantic-settings records in model_fields_set.
     ALLOW_REGISTRATION: bool = True
     # Minimum password length enforced at register/change. 8 is the floor;
     # operators can only raise it.
@@ -255,9 +277,11 @@ class Settings(BaseSettings):
             )
         if self.ALLOW_REGISTRATION:
             warnings.append(
-                "registration is open; set ALLOW_REGISTRATION=false once the "
-                "owner account exists, or anyone who finds the URL can create "
-                "accounts billed to this server's LLM keys"
+                "registration is not locked: the owner's switch in the setup "
+                "wizard / Settings decides whether anyone who finds the URL can "
+                "create accounts billed to this server's LLM keys. Leave "
+                "ALLOW_REGISTRATION unset to manage it from the wizard/Settings; "
+                "set ALLOW_REGISTRATION=false to lock it closed"
             )
         if self.ALLOWED_HOSTS == ["*"]:
             warnings.append(
@@ -300,18 +324,5 @@ class Settings(BaseSettings):
                 wide.append(cidr)
         return wide
 
-
-# Provider name → the Settings attribute that holds its API key. Shared by
-# the runtime and the installation service so the ".env wins" rule has one
-# definition.
-PROVIDER_KEY_FIELDS: dict[str, str] = {
-    "anthropic": "ANTHROPIC_API_KEY",
-    "openai": "OPENAI_API_KEY",
-    "gemini": "GEMINI_API_KEY",
-    "grok": "GROK_API_KEY",
-    "deepseek": "DEEPSEEK_API_KEY",
-    "groq": "GROQ_API_KEY",
-    "mistral": "MISTRAL_API_KEY",
-}
 
 settings = Settings()  # type: ignore[call-arg]

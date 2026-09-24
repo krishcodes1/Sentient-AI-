@@ -19,7 +19,6 @@ import asyncio
 import base64
 import inspect
 import io
-import sys
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
 
@@ -83,7 +82,9 @@ def _screen_context() -> ReportContext:
         platform=cap_env.platform_name(),
         telegram_configured=False,
         browser_installed=False,
-        executable=sys.executable,
+        # The same resolved binary the report names, so the probe checks
+        # the grant the owner was told to give (and shares its cache entry).
+        executable=cap_env.crawler_executable(),
     )
 
 
