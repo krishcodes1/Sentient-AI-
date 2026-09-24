@@ -171,7 +171,7 @@ The wizard shows "Provided by server configuration" for any secret that comes fr
 
 ### 5.3 Upgrade of an existing install
 
-At startup, if users already exist and a provider key is available from the environment, `setup_completed_at` is stamped automatically so an existing deployment (your Docker stack) is not forced into the wizard. Everything else keeps its defaults, which reproduce today's behaviour: all existing capabilities on, `screen` off.
+At startup, if users already exist, the wizard has not stored a provider, and the environment supplies the provider key (a key saved by the wizard does not count — an owner who quit mid-wizard resumes it), `setup_completed_at` is stamped automatically so an existing deployment (your Docker stack) is not forced into the wizard. Everything else keeps its defaults, which reproduce today's behaviour: all existing capabilities on, `screen` off.
 
 ### 5.4 `InstallationService` (`backend/services/installation.py`)
 
