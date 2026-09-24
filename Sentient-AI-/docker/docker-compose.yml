@@ -44,6 +44,9 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://sentientai:sentientai@db:5432/sentientai
       REDIS_URL: redis://redis:6379/0
+      # Marks this as a container so the "See my screen" capability reports
+      # unavailable instead of failing (backend/services/capabilities/env.py).
+      CRAWLER_CONTAINER: "1"
       # The frontend's Vite proxy rewrites Host to its target (changeOrigin),
       # so /api requests arrive as `backend:8000`; without the service name
       # here TrustedHostMiddleware answers every one with 400 "Invalid host

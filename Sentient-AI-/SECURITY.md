@@ -116,6 +116,35 @@ is whoever deployed it. There is no UI to transfer or grant the role; see
   executor re-checks scopes at dispatch (defense in depth). Legacy
   connectors with empty scope lists are treated as **read-only**.
 
+**Capability switches** (`services/capabilities/`) are a third, orthogonal
+control: coarse, owner-only toggles (Browse the web, Screenshots of
+websites, See my screen, Reminders, Install optional software, Telegram)
+set in the setup wizard or Settings → Permissions, on top of the action
+tiers and scopes above.
+
+- Only the owner (`users.is_admin`) can change them (`PUT /api/capabilities`);
+  every other user gets a read-only view.
+- Enforced at three independent points: **offer** (`build_tools` drops every
+  tool whose capability is off), **dispatch** (the executor re-checks
+  `enabled_keys()` and refuses an off capability even if somehow requested,
+  audited as `tool_blocked` / `reason=capability_off`), and the **prompt**
+  (a `<permissions>` block, derived from the same report, tells the model
+  which switches are on/off/blocked so it explains rather than guesses or
+  retries).
+- `screen` (screen capture) is off by default, high risk, and additionally
+  gated on the OS having granted screen-recording to the backend process;
+  it reports "unavailable" rather than attempting capture inside a
+  container (`CRAWLER_CONTAINER=1` in the compose files).
+- Secrets the wizard stores — provider API keys and the Telegram bot
+  token — are encrypted at rest the same way as connector credentials:
+  AES-256-GCM via `core.security.encrypt_credentials` under
+  `ENCRYPTION_KEY`, never returned by any API. A value set in `backend/.env`
+  (a provider key, `TELEGRAM_BOT_TOKEN`) always overrides whatever the
+  wizard has stored, so a compromised database cannot be used to redirect
+  traffic to an attacker-controlled key when the environment pins one.
+- Every capability, provider, and Telegram change is audited with the
+  acting user.
+
 ## Approval flow
 
 `requires_approval` tool calls are persisted to the `pending_actions` table
