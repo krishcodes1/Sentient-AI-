@@ -31,6 +31,7 @@ from services.agent.tool_registry import (
     RuntimePermissionAdapter,
     build_tools,
 )
+from tests.conftest import use_provider
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +114,7 @@ def _runtime(provider, executor=None, guard=None):
         audit_service=audit,
         approval_store=InMemoryApprovalStore(),
     )
-    runtime._provider = provider
+    use_provider(runtime, provider)
     return runtime, executor, audit
 
 
@@ -492,29 +493,34 @@ async def test_semantic_cache_is_scoped_per_user_and_conversation():
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_provider_default_pair_reuses_singleton():
-    runtime, _, _ = _runtime(ScriptedProvider([]))
-    resolved = runtime._resolve_provider(settings.LLM_PROVIDER, settings.LLM_MODEL)
-    assert resolved is runtime._provider
-    assert runtime._resolve_provider(None, None) is runtime._provider
+@pytest.mark.asyncio
+async def test_resolve_provider_default_pair_reuses_singleton():
+    default = ScriptedProvider([])
+    runtime, _, _ = _runtime(default)
+    resolved = await runtime._resolve_provider(settings.LLM_PROVIDER, settings.LLM_MODEL)
+    assert resolved is default
+    assert await runtime._resolve_provider(None, None) is default
 
 
-def test_resolve_provider_unconfigured_raises_clear_provider_error(monkeypatch):
+@pytest.mark.asyncio
+async def test_resolve_provider_unconfigured_raises_clear_provider_error(monkeypatch):
     runtime, _, _ = _runtime(ScriptedProvider([]))
     monkeypatch.setattr(settings, "OPENAI_API_KEY", None)
     with pytest.raises(ProviderError) as excinfo:
-        runtime._resolve_provider("openai", "gpt-4o")
+        await runtime._resolve_provider("openai", "gpt-4o")
     assert "openai" in str(excinfo.value)
     assert "not configured" in str(excinfo.value)
 
 
-def test_resolve_provider_caches_per_pair():
-    runtime, _, _ = _runtime(ScriptedProvider([]))
+@pytest.mark.asyncio
+async def test_resolve_provider_caches_per_pair():
+    default = ScriptedProvider([])
+    runtime, _, _ = _runtime(default)
     # Ollama needs no API key, so it can be built in tests.
-    first = runtime._resolve_provider("ollama", "llama3.2")
-    second = runtime._resolve_provider("ollama", "llama3.2")
+    first = await runtime._resolve_provider("ollama", "llama3.2")
+    second = await runtime._resolve_provider("ollama", "llama3.2")
     assert first is second
-    assert first is not runtime._provider
+    assert first is not default
 
 
 @pytest.mark.asyncio

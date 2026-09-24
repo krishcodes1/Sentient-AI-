@@ -32,6 +32,7 @@ from services.agent.tool_registry import (
 from services.tools import system as system_module
 from services.tools.system import ALLOWLIST, SystemToolkit, browser_installed
 from services.tools.web import WebToolkit
+from tests.conftest import use_provider
 
 BROWSER_STEPS = [
     [sys.executable, "-m", "pip", "install", "playwright>=1.45,<2.0"],
@@ -516,7 +517,7 @@ def _runtime(host: FakeHost) -> tuple[AgentRuntime, RecordingAudit]:
         audit_service=audit,
         approval_store=InMemoryApprovalStore(),
     )
-    runtime._provider = ScriptedProvider(
+    provider = ScriptedProvider(
         [
             LLMResponse(
                 content="",
@@ -531,6 +532,7 @@ def _runtime(host: FakeHost) -> tuple[AgentRuntime, RecordingAudit]:
             LLMResponse(content="I have asked you to approve the browser install."),
         ]
     )
+    use_provider(runtime, provider)
     return runtime, audit
 
 

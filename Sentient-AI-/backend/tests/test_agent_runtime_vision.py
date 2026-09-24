@@ -24,6 +24,7 @@ from services.agent.tool_registry import (
     RuntimePermissionAdapter,
     build_tools,
 )
+from tests.conftest import use_provider
 
 PIXEL = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAE"
 
@@ -86,7 +87,7 @@ def _runtime(provider, guard=None):
         audit_service=audit,
         approval_store=InMemoryApprovalStore(),
     )
-    runtime._provider = provider
+    use_provider(runtime, provider)
     return runtime, audit
 
 

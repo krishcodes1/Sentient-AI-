@@ -7,8 +7,8 @@ Covers the audit fixes:
 - Conversation.updated_at bumps whenever a message is persisted, so
   newest-first ordering reflects real activity.
 - Per-user rate_limit enforcement on send_message (429).
-- Per-user llm_provider/llm_model: an unconfigured provider yields a
-  clear 502 via ProviderError.
+- Per-user llm_provider/llm_model: a provider with no API key yields a
+  503 naming it, with a pointer to /setup (ProviderNotConfigured).
 - Resume-after-approval: deciding an approval persists an assistant
   Message into the originating conversation (approve AND deny), bumps
   updated_at, and keeps returning the result in the response.
@@ -404,9 +404,11 @@ async def test_user_rate_limit_enforced_on_send_message(client, session_factory)
 
 
 @pytest.mark.asyncio
-async def test_unconfigured_user_provider_returns_502(
+async def test_unconfigured_user_provider_returns_503_pointing_at_setup(
     client, session_factory, monkeypatch
 ):
+    """No key for the provider the user picked is a configuration gap, not
+    an upstream failure: 503, the provider named, and where to fix it."""
     from api.routes import agent as agent_routes
     from core.config import settings
     from main import app
@@ -430,9 +432,11 @@ async def test_unconfigured_user_provider_returns_502(
             headers=auth_headers(token),
             json={"content": "hello"},
         )
-        assert response.status_code == 502
-        assert "openai" in response.json()["detail"]
-        assert "not configured" in response.json()["detail"]
+        assert response.status_code == 503
+        detail = response.json()["detail"]
+        assert "openai" in detail["message"]
+        assert "not configured" in detail["message"]
+        assert detail["setup_url"] == "/setup"
     finally:
         app.dependency_overrides.pop(agent_routes.get_runtime, None)
 

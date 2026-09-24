@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.conftest import auth_headers, make_user
+from tests.conftest import auth_headers, make_user, use_provider
 
 
 class RecordingExecutor:
@@ -76,7 +76,7 @@ def _runtime(session_factory, provider, executor=None):
         audit_service=RecordingAudit(),
         approval_store=DbApprovalStore(session_factory=session_factory),
     )
-    runtime._provider = provider
+    use_provider(runtime, provider)
     return runtime, executor
 
 

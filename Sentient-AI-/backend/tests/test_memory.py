@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from services.memory import MemoryRejected, render_memory_block, screen_memory_content
+from tests.conftest import use_provider
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +197,7 @@ async def test_runtime_injects_memory_into_provider_call():
         approval_store=InMemoryApprovalStore(),
     )
     provider = ScriptedProvider()
-    runtime._provider = provider
+    use_provider(runtime, provider)
 
     block = "<user_memory>\n- [project] Building SentientAI\n</user_memory>"
     await runtime.chat(

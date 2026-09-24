@@ -42,6 +42,27 @@ class ProviderError(Exception):
         super().__init__(f"{provider} provider error{suffix}: {detail}")
 
 
+class ProviderNotConfigured(ProviderError):
+    """No API key is available for the selected provider — the install has
+    not been set up yet (or the key was removed). Routes answer 503 with a
+    pointer to /setup; channels say the same sentence.
+
+    ``str()`` is the bare sentence, without ProviderError's "<name> provider
+    error:" prefix, because the web app and Telegram show it verbatim to
+    someone who has not configured anything yet.
+    """
+
+    SETUP_MESSAGE = (
+        "No AI provider is configured yet. Finish setup at /setup or add a "
+        "key in Settings."
+    )
+
+    def __init__(self, provider: str, detail: Optional[str] = None):
+        message = detail or self.SETUP_MESSAGE
+        super().__init__(provider, None, message)
+        self.args = (message,)
+
+
 def _raise_provider_error(provider: str, exc: httpx.HTTPStatusError) -> None:
     """Convert an httpx error into a ProviderError without leaking the URL."""
     body = exc.response.text[:300] if exc.response is not None else ""

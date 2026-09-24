@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from services.agent.approvals import DbApprovalStore, InMemoryApprovalStore
+from tests.conftest import use_provider
 
 
 @pytest.mark.asyncio
@@ -192,7 +193,7 @@ def _build_runtime(session_factory, tool_calls):
         audit_service=audit,
         approval_store=DbApprovalStore(session_factory=session_factory),
     )
-    runtime._provider = FakeProvider(tool_calls)
+    use_provider(runtime, FakeProvider(tool_calls))
     return runtime, executor, audit
 
 
@@ -327,8 +328,9 @@ async def test_runtime_injects_system_prompt_and_wraps_tool_results(session_fact
         session_factory,
         [ToolCall(id="tc1", name="canvas.get_courses", arguments={})],
     )
-    runtime._provider = InspectingProvider(
-        [ToolCall(id="tc1", name="canvas.get_courses", arguments={})]
+    use_provider(
+        runtime,
+        InspectingProvider([ToolCall(id="tc1", name="canvas.get_courses", arguments={})]),
     )
     tools = build_tools([ConnectorSpec("canvas")])
 

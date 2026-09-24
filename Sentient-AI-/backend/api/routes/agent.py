@@ -31,13 +31,18 @@ from models.user import User
 from services.auth import get_current_user
 from services.memory import render_memory_block
 from services.agent.context_manager import compress_tool_result
-from services.agent.providers import ProviderError
+from services.agent.providers import ProviderError, ProviderNotConfigured
 from services.agent.runtime import AgentRuntime
 from services.agent.tool_registry import ConnectorSpec, build_tools, effective_tier
 
 logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/agent", tags=["agent"])
+
+# Where the web app finishes first-run setup (AI provider key). Every
+# ProviderNotConfigured answer — 503, stream error frame, channel reply —
+# carries it so the client can link straight to the fix.
+SETUP_URL = "/setup"
 
 
 class UserRateLimiter:
@@ -765,6 +770,13 @@ async def send_message(
             llm_model=current_user.llm_model,
             memory_block=memory_block,
         )
+    except ProviderNotConfigured as exc:
+        # Not an upstream failure: this install has no key for the provider
+        # yet. 503 plus where to fix it, so the client can link to setup.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"message": str(exc), "setup_url": SETUP_URL},
+        ) from None
     except ProviderError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -994,6 +1006,9 @@ async def stream_message(
                         # done frame; remember it so the failed turn is not
                         # persisted as an empty assistant message below.
                         turn_errored = True
+                        if data.get("code") == "provider_not_configured":
+                            # Same pointer the blocking route's 503 carries.
+                            data = {**data, "setup_url": SETUP_URL}
                     if etype == "done":
                         final_content = data.get("content", "")
                         tool_calls_payload = data.get("tool_calls", []) or []
@@ -1394,6 +1409,19 @@ def build_chat_applier(app: Any, session_factory: Any = async_session):
                 llm_model=model,
                 memory_block=memory_block,
             )
+        except ProviderNotConfigured as exc:
+            # The channel sends "error" verbatim: the setup sentence.
+            logger.warning(
+                "channel_chat_provider_not_configured",
+                conversation_id=str(conversation_id),
+                provider=exc.provider,
+            )
+            return {
+                "error": str(exc),
+                "code": "provider_not_configured",
+                "setup_url": SETUP_URL,
+                "conversation_id": str(conversation_id),
+            }
         except ProviderError as exc:
             # The channel shows the user the error; without this line the
             # server side had no record that an out-of-band turn failed.

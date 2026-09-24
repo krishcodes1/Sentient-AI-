@@ -12,7 +12,7 @@ from collections import OrderedDict
 from collections.abc import AsyncGenerator, Awaitable, Coroutine
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Protocol
 
 import structlog
 
@@ -29,6 +29,7 @@ from services.agent.providers import (
     LLMProvider,
     LLMResponse,
     ProviderError,
+    ProviderNotConfigured,
     ToolCall,
     content_text,
     create_provider,
@@ -38,6 +39,41 @@ from services.agent.providers import (
 from core.config import PROVIDER_KEY_FIELDS as _PROVIDER_KEY_MAP
 
 logger = structlog.get_logger(__name__)
+
+
+class ProviderSettingsSource(Protocol):
+    """Where the runtime learns which provider to use and with what key.
+
+    Asked at turn time, not at startup, so a key the owner saves while the
+    server runs takes effect on the next turn (after
+    ``AgentRuntime.invalidate_providers``). ``llm_api_key`` returns None
+    when no key is configured, and "" for a provider that needs none
+    (Ollama).
+    """
+
+    async def llm_defaults(self) -> tuple[str, str]: ...
+
+    async def llm_api_key(self, provider: str) -> Optional[str]: ...
+
+
+class _ConfigSettingsSource:
+    """Default source: the process environment / .env, exactly as before."""
+
+    def __init__(self, config: Any) -> None:
+        self._config = config
+
+    async def llm_defaults(self) -> tuple[str, str]:
+        return (
+            (self._config.LLM_PROVIDER or "").strip().lower(),
+            (self._config.LLM_MODEL or "").strip(),
+        )
+
+    async def llm_api_key(self, provider: str) -> Optional[str]:
+        if provider == "ollama":
+            return ""
+        attr = _PROVIDER_KEY_MAP.get(provider)
+        value = (getattr(self._config, attr, None) or "").strip() if attr else ""
+        return value or None
 
 
 # The security contract every conversation runs under. Providers receive
@@ -252,6 +288,16 @@ def _spawn_detached(coro: Coroutine[Any, Any, None]) -> None:
     task.add_done_callback(_BACKGROUND_TASKS.discard)
 
 
+async def _close_quietly(provider: LLMProvider) -> None:
+    """Release a dropped provider's HTTP client. Nobody awaits this, so a
+    failure is logged here instead of surfacing as an unretrieved task
+    exception."""
+    try:
+        await provider.aclose()
+    except Exception as exc:
+        logger.debug("provider_close_failed", error=str(exc))
+
+
 async def _run_orphaned_callback(
     on_orphaned: Callable[[AgentResponse], Awaitable[None]],
     response: AgentResponse,
@@ -405,16 +451,14 @@ class AgentRuntime:
         audit_service: AuditService | None = None,
         tool_executor: ToolExecutor | None = None,
         approval_store: ApprovalStore | None = None,
+        settings_source: Optional[ProviderSettingsSource] = None,
     ):
         self._config = config
-        # Resolve the correct API key for the selected provider
-        key_attr = _PROVIDER_KEY_MAP.get(config.LLM_PROVIDER)
-        api_key = getattr(config, key_attr, None) if key_attr else None
-        self._provider: LLMProvider = create_provider(
-            provider_name=config.LLM_PROVIDER,
-            model=config.LLM_MODEL,
-            api_key=api_key,
-            base_url=config.OLLAMA_BASE_URL,
+        # No provider is built here: a fresh install has no key yet, and the
+        # owner can add or change one while the server runs. Each turn asks
+        # the source (see _resolve_provider); without one, the environment.
+        self._source: ProviderSettingsSource = (
+            settings_source or _ConfigSettingsSource(config)
         )
         self._context_manager = ContextManager(model=config.LLM_MODEL)
         self._permissions = permission_engine or PermissionEngine()
@@ -426,14 +470,18 @@ class AgentRuntime:
         self._executor = tool_executor or ToolExecutor()
         self._approvals: ApprovalStore = approval_store or InMemoryApprovalStore()
         self._approval_ttl_minutes: int = getattr(config, "APPROVAL_TTL_MINUTES", 15)
-        # Per-user provider overrides (Settings page) are built lazily and
-        # cached per (provider, model) pair. Bounded LRU: the model string
-        # is user-supplied, so an unbounded dict is a slow resource leak
-        # (each Gemini/Ollama provider owns an httpx client) that any
-        # authenticated user could grow by cycling model names.
+        # Every provider — the install default and per-user overrides
+        # (Settings page) alike — is built lazily and cached per (provider,
+        # model) pair. Bounded LRU: the model string is user-supplied, so an
+        # unbounded dict is a slow resource leak (each Gemini/Ollama
+        # provider owns an httpx client) that any authenticated user could
+        # grow by cycling model names.
         self._provider_cache: "OrderedDict[tuple[str, str], LLMProvider]" = (
             OrderedDict()
         )
+        # Bumped by invalidate_providers(); lets a resolution that was
+        # awaiting the source notice its key may predate the change.
+        self._provider_generation = 0
         # Upper bound on chained tool rounds within a single chat turn.
         self._max_tool_rounds: int = int(getattr(config, "MAX_TOOL_ROUNDS", 8) or 8)
 
@@ -461,36 +509,80 @@ class AgentRuntime:
             for t in tools
         ]
 
-    def _resolve_provider(
+    async def _select_provider(
+        self, provider_name: Optional[str], model: Optional[str]
+    ) -> tuple[str, str]:
+        """The (provider, model) pair one turn runs on: the user's Settings
+        override where given, the source's defaults otherwise."""
+        default_provider, default_model = await self._source.llm_defaults()
+        name = (provider_name or default_provider or "").strip().lower()
+        model_name = (model or default_model or "").strip()
+        return name, model_name
+
+    async def _resolve_provider(
         self, provider_name: Optional[str], model: Optional[str]
     ) -> LLMProvider:
         """Return the LLM provider instance for one chat turn.
 
         Users pick ``llm_provider``/``llm_model`` on the Settings page;
-        when the pair differs from the server-configured default the
-        runtime builds (and caches) a dedicated instance using the
-        server-side API keys from ``core.config``. A missing key raises
-        ``ProviderError`` so the route surfaces a clear 502 instead of
-        silently falling back to the wrong provider.
+        omitted, the source's defaults apply. Instances are built on first
+        use with the key the settings source holds and cached per pair
+        until :meth:`invalidate_providers`. A missing key raises
+        ``ProviderNotConfigured`` so the route can point at /setup instead
+        of silently falling back to the wrong provider.
         """
-        name = (provider_name or self._config.LLM_PROVIDER or "").strip().lower()
-        model_name = (model or self._config.LLM_MODEL or "").strip()
-        if name == self._config.LLM_PROVIDER and model_name == self._config.LLM_MODEL:
-            return self._provider
+        name, model_name = await self._select_provider(provider_name, model)
+        return await self._provider_for(name, model_name)
 
-        cache_key = (name, model_name)
+    def _cached_provider(self, cache_key: tuple[str, str]) -> Optional[LLMProvider]:
         cached = self._provider_cache.get(cache_key)
         if cached is not None:
             self._provider_cache.move_to_end(cache_key)
+        return cached
+
+    async def _provider_for(self, name: str, model_name: str) -> LLMProvider:
+        cache_key = (name, model_name)
+        cached = self._cached_provider(cache_key)
+        if cached is not None:
             return cached
 
-        key_attr = _PROVIDER_KEY_MAP.get(name)
-        api_key = getattr(self._config, key_attr, None) if key_attr else None
+        # The lookup is awaited, which is a window for invalidate_providers():
+        # a key read before the owner changed it must not be cached after,
+        # or the stale key would outlive the change. Read it again instead.
+        while True:
+            generation = self._provider_generation
+            api_key = await self._source.llm_api_key(name)
+            if generation == self._provider_generation:
+                break
+        # Another turn may have built this pair while we were waiting.
+        cached = self._cached_provider(cache_key)
+        if cached is not None:
+            return cached
+
+        if api_key is None:
+            default_provider, _ = await self._source.llm_defaults()
+            if (
+                name
+                and name != default_provider
+                and await self._source.llm_api_key(default_provider) is not None
+            ):
+                # The install is set up; this user's Settings pick a provider
+                # it holds no key for. Say which one. (With no key anywhere
+                # the install simply is not set up yet — the setup sentence.)
+                raise ProviderNotConfigured(
+                    name,
+                    (
+                        f"The '{name}' provider selected in your Settings is "
+                        "not configured on this server. Choose a different "
+                        "provider, or add its API key in Settings."
+                    ),
+                )
+            raise ProviderNotConfigured(name or "unknown")
         try:
             provider = create_provider(
                 provider_name=name,
                 model=model_name,
-                api_key=api_key,
+                api_key=api_key or None,
                 base_url=self._config.OLLAMA_BASE_URL,
             )
         except (ValueError, ImportError) as exc:
@@ -498,23 +590,37 @@ class AgentRuntime:
                 name,
                 None,
                 (
-                    f"The '{name}' provider selected in your Settings is not "
-                    f"configured on this server ({exc}). Choose a different "
-                    "provider or ask the administrator to add its API key."
+                    f"The '{name}' provider is not configured on this server "
+                    f"({exc}). Choose a different provider or add its API key."
                 ),
             ) from None
         self._provider_cache[cache_key] = provider
         while len(self._provider_cache) > self._PROVIDER_CACHE_MAX:
             _evicted_key, evicted = self._provider_cache.popitem(last=False)
-            try:
-                asyncio.get_running_loop().create_task(evicted.aclose())
-            except RuntimeError:  # no running loop (sync context)
-                pass
+            self._schedule_close(evicted)
         return provider
+
+    def invalidate_providers(self) -> None:
+        """Forget every cached provider (the owner changed a key or the
+        default). The next turn rebuilds from the settings source."""
+        self._provider_generation += 1
+        for provider in self._provider_cache.values():
+            self._schedule_close(provider)
+        self._provider_cache.clear()
+
+    @staticmethod
+    def _schedule_close(provider: LLMProvider) -> None:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:  # no running loop (sync context)
+            return
+        _spawn_detached(_close_quietly(provider))
 
     @staticmethod
     def _with_system_prompt(
-        messages: list[dict[str, Any]], memory_block: Optional[str] = None
+        messages: list[dict[str, Any]],
+        memory_block: Optional[str] = None,
+        permissions_text: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """Ensure the security system prompt heads the message list.
 
@@ -522,6 +628,12 @@ class AgentRuntime:
         screened) is appended to the policy inside the SAME system message,
         so it is clearly subordinate to the security rules and cannot
         occupy its own competing system slot.
+
+        ``permissions_text`` is the owner's ``<permissions>`` block (which
+        capabilities are on, off or blocked, and what to say about each),
+        so the model explains a switched-off ability instead of guessing.
+        It goes before the memory block: it changes only when settings do,
+        which keeps the cached prompt prefix stable across turns.
         """
         # The model has no clock. Day granularity is enough for "next Friday"
         # and keeps the cached prompt prefix identical across a whole day;
@@ -531,7 +643,11 @@ class AgentRuntime:
             "<today>" + today.strftime("%A, %Y-%m-%d") + " ("
             + (today.tzname() or "local") + ")</today>"
         )
-        tail = f"\n\n{today_line}" + (f"\n\n{memory_block}" if memory_block else "")
+        tail = (
+            f"\n\n{today_line}"
+            + (f"\n\n{permissions_text}" if permissions_text else "")
+            + (f"\n\n{memory_block}" if memory_block else "")
+        )
         if messages and messages[0].get("role") == "system":
             # Fold into the caller-provided system msg rather than adding a
             # competing system slot.
@@ -554,12 +670,16 @@ class AgentRuntime:
     _MAX_IMAGES_PER_FOLLOW_UP = 2
 
     def _images_for_model(
-        self, tool_results: list[dict[str, Any]]
+        self, tool_results: list[dict[str, Any]], provider_name: str
     ) -> list[dict[str, Any]]:
         """Image blocks for screenshots this round, capped, vision providers
         only. An image is ~1k tokens where its base64 would be ~50k, and
-        it is the only way the model can read a JavaScript results page."""
-        if getattr(self, "_turn_provider", "") not in self._VISION_PROVIDERS:
+        it is the only way the model can read a JavaScript results page.
+
+        ``provider_name`` is the provider this turn resolved to. It is a
+        parameter, not runtime state: one runtime serves concurrent turns
+        on different providers."""
+        if provider_name not in self._VISION_PROVIDERS:
             return []
         blocks: list[dict[str, Any]] = []
         for tr in tool_results:
@@ -637,12 +757,13 @@ class AgentRuntime:
         messages: list[dict[str, Any]],
         llm_response: LLMResponse,
         tool_results: list[dict[str, Any]],
+        provider_name: str,
     ) -> list[dict[str, Any]]:
         follow_up = list(messages)
         if llm_response.content.strip():
             follow_up.append({"role": "assistant", "content": llm_response.content})
         wrapped = self._wrap_tool_results(tool_results)
-        images = self._images_for_model(tool_results)
+        images = self._images_for_model(tool_results, provider_name)
         if images:
             follow_up.append(
                 {
@@ -720,6 +841,7 @@ class AgentRuntime:
         llm_model: Optional[str] = None,
         memory_block: Optional[str] = None,
         event_sink: Optional[Callable[[dict[str, Any]], Awaitable[None]]] = None,
+        permissions_text: Optional[str] = None,
     ) -> AgentResponse:
         """Process a conversation turn.
 
@@ -727,13 +849,15 @@ class AgentRuntime:
         execution (so tool calls can chain), with permission checks and
         prompt-guard scanning on user input, tool arguments, tool results,
         and the final model output. ``llm_provider``/``llm_model`` select a
-        per-user provider override (Settings page); omitted, the server
-        default is used. ``memory_block`` is the user's saved-memory context
-        (already screened), folded into the system prompt.
+        per-user provider override (Settings page); omitted, the settings
+        source's default is used. ``memory_block`` is the user's
+        saved-memory context (already screened) and ``permissions_text`` the
+        owner's ``<permissions>`` block; both are folded into the system
+        prompt. Raises ``ProviderNotConfigured`` when no key is available.
         """
-        messages = self._with_system_prompt(messages, memory_block)
-        provider = self._resolve_provider(llm_provider, llm_model)
-        self._turn_provider = (llm_provider or self._config.LLM_PROVIDER or "").strip().lower()
+        messages = self._with_system_prompt(messages, memory_block, permissions_text)
+        turn_provider, turn_model = await self._select_provider(llm_provider, llm_model)
+        provider = await self._provider_for(turn_provider, turn_model)
 
         async def emit(event: dict[str, Any]) -> None:
             """Best-effort progress emission for the streaming path. A sink
@@ -1097,7 +1221,9 @@ class AgentRuntime:
 
             # Feed the results back and loop — the next call still offers
             # tools (until the round budget runs out) so calls can chain.
-            messages = self._follow_up_messages(messages, llm_response, round_results)
+            messages = self._follow_up_messages(
+                messages, llm_response, round_results, turn_provider
+            )
 
         if hit_round_limit:
             final_content = (final_content or "").rstrip() + (
@@ -1145,12 +1271,9 @@ class AgentRuntime:
             else:
                 # Name the provider actually used for this turn, not the
                 # server default — they differ on multi-provider deploys.
-                turn_provider = (
-                    llm_provider or self._config.LLM_PROVIDER or "unknown"
-                )
-                logger.warning("blank_completion", provider=turn_provider)
+                logger.warning("blank_completion", provider=turn_provider or "unknown")
                 raise ProviderError(
-                    turn_provider,
+                    turn_provider or "unknown",
                     None,
                     "the model returned an empty response — please retry",
                 )
@@ -1198,6 +1321,7 @@ class AgentRuntime:
         on_orphaned: Optional[
             Callable[[AgentResponse], Awaitable[None]]
         ] = None,
+        permissions_text: Optional[str] = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Streaming variant — yields dicts with ``type`` and ``data`` keys.
 
@@ -1208,7 +1332,8 @@ class AgentRuntime:
         - ``pending_approval``: an action was parked for user approval
         - ``blocked``: an action was blocked by policy
         - ``content_delta``: incremental chunk of the FINAL answer
-        - ``error``: a provider failure
+        - ``error``: a provider failure (``code: provider_not_configured``
+          when no API key is available, so the caller can point at setup)
         - ``done``: stream finished, carries usage + the full content
 
         Implemented as an adapter over :meth:`chat` so every security layer —
@@ -1247,6 +1372,7 @@ class AgentRuntime:
                 llm_model=llm_model,
                 memory_block=memory_block,
                 event_sink=sink,
+                permissions_text=permissions_text,
             )
         )
 
@@ -1278,6 +1404,15 @@ class AgentRuntime:
 
             try:
                 response = task.result()
+            except ProviderNotConfigured as exc:
+                logger.warning("stream_chat_provider_not_configured", provider=exc.provider)
+                yield {
+                    "type": "error",
+                    "data": {"reason": str(exc), "code": "provider_not_configured"},
+                }
+                finished = True
+                yield {"type": "done", "data": {}}
+                return
             except ProviderError as exc:
                 # Log it: this used to be the only failure path in the app
                 # that left no server-side trace at all.

@@ -31,8 +31,9 @@ os.environ.setdefault(
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 os.environ.setdefault("LLM_PROVIDER", "anthropic")
 os.environ.setdefault("LLM_MODEL", "claude-sonnet-4-6")
-# Lets AgentRuntime construct its provider in tests; never used for real
-# calls (tests patch the provider with fakes).
+# The runtime's default settings source resolves this key when a turn needs
+# a provider; never used for real calls (tests install fakes with
+# use_provider below).
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-key-not-real")
 # The developer's local .env may restrict these (they are real Settings
 # fields now); env vars outrank the .env file, so tests always see an
@@ -150,3 +151,21 @@ async def make_user(session_factory, email: str = "user@example.com"):
 
 def auth_headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+def use_provider(runtime, provider) -> None:
+    """Make ``provider`` the LLM a runtime uses on the server's default
+    (provider, model) pair — what a turn with no per-user override, or with
+    the env defaults every test account is created with, resolves to.
+
+    The runtime builds providers lazily from its settings source and caches
+    them per pair, so tests seed that cache where they used to overwrite
+    the eagerly built ``runtime._provider``. Call again to swap it.
+    """
+    from core.config import settings
+
+    pair = (
+        (settings.LLM_PROVIDER or "").strip().lower(),
+        (settings.LLM_MODEL or "").strip(),
+    )
+    runtime._provider_cache[pair] = provider
