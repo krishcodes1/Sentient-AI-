@@ -13,6 +13,7 @@ import ConfirmDialog from "@/components/ConfirmDialog";
 import CapabilityList, { CapabilityListError } from "@/components/CapabilityList";
 import type { CapabilityStatus, User } from "@/types";
 import {
+  ApiError,
   changePassword,
   createTelegramLink,
   deleteAccount,
@@ -23,7 +24,10 @@ import {
   installCapability,
   login,
   logout,
+  removeTelegramToken,
   requestCapabilityAccess,
+  saveTelegram,
+  testTelegram,
   unlinkTelegram,
   updateCapabilities,
   updateProfile,
@@ -190,6 +194,16 @@ export default function Settings() {
   const [tgBusy, setTgBusy] = useState(false);
   const [tgFeedback, setTgFeedback] = useState<Feedback>(null);
 
+  // Telegram bot token (admin only): the setup wizard's own token step,
+  // repeated here so an owner can rotate or add it without re-running
+  // setup. Env-managed (TELEGRAM_BOT_TOKEN) always wins server-side; a 409
+  // from test/save is how that surfaces, since there is no status field
+  // for it the way SetupProvider.key_from_env exists for LLM keys.
+  const [tgToken, setTgToken] = useState("");
+  const [tgTokenBusy, setTgTokenBusy] = useState<"test" | "save" | "remove" | null>(null);
+  const [tgTokenFeedback, setTgTokenFeedback] = useState<Feedback>(null);
+  const [tgTokenEnvManaged, setTgTokenEnvManaged] = useState(false);
+
   // Permissions (capabilities)
   const [capabilities, setCapabilities] = useState<CapabilityStatus[] | null>(null);
   const [capabilitiesBusyKey, setCapabilitiesBusyKey] = useState<string | null>(null);
@@ -327,6 +341,64 @@ export default function Settings() {
       setTgFeedback({ ok: false, text: (err as Error).message });
     } finally {
       setTgBusy(false);
+    }
+  };
+
+  /** A 409 here always means the same thing: TELEGRAM_BOT_TOKEN in the
+   * server's .env provides the token, so the stored one this form would
+   * write is never used. Surface that and stop offering to overwrite it. */
+  const reportTgTokenError = (err: unknown) => {
+    if (err instanceof ApiError && err.status === 409) setTgTokenEnvManaged(true);
+    setTgTokenFeedback({ ok: false, text: (err as Error).message });
+  };
+
+  const handleTgTokenTest = async () => {
+    setTgTokenBusy("test");
+    setTgTokenFeedback(null);
+    try {
+      const r = await testTelegram(tgToken.trim());
+      setTgTokenFeedback(
+        r.ok
+          ? { ok: true, text: `The token works — your bot is @${r.bot_username}.` }
+          : { ok: false, text: r.error || "Telegram rejected that token." },
+      );
+    } catch (err) {
+      reportTgTokenError(err);
+    } finally {
+      setTgTokenBusy(null);
+    }
+  };
+
+  const handleTgTokenSave = async () => {
+    setTgTokenBusy("save");
+    setTgTokenFeedback(null);
+    try {
+      const r = await saveTelegram(tgToken.trim());
+      setTgToken("");
+      setTgTokenFeedback(
+        r.running
+          ? { ok: true, text: `Saved. Crawler now answers as @${r.bot_username}.` }
+          : { ok: false, text: "Saved. The bot could not start yet — check the token or try again." },
+      );
+      setTgStatus(await getTelegramStatus());
+    } catch (err) {
+      reportTgTokenError(err);
+    } finally {
+      setTgTokenBusy(null);
+    }
+  };
+
+  const handleTgTokenRemove = async () => {
+    setTgTokenBusy("remove");
+    setTgTokenFeedback(null);
+    try {
+      await removeTelegramToken();
+      setTgTokenFeedback({ ok: true, text: "Bot token removed." });
+      setTgStatus(await getTelegramStatus());
+    } catch (err) {
+      setTgTokenFeedback({ ok: false, text: (err as Error).message });
+    } finally {
+      setTgTokenBusy(null);
     }
   };
 
@@ -684,41 +756,117 @@ export default function Settings() {
           Get approval requests on your phone with Approve / Deny buttons —
           no need to be at a computer when the assistant asks for permission.
         </p>
+
+        {me?.is_admin && (
+          <div
+            className="rounded-[10px] p-4 mb-4 space-y-3"
+            style={{ background: "var(--bg-input)", border: "1px solid var(--claw-border)" }}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-sm font-semibold" style={{ color: "var(--text-primary)" }}>
+                Bot token
+              </span>
+              {tgStatus?.configured && (
+                <button
+                  type="button"
+                  onClick={() => void handleTgTokenRemove()}
+                  disabled={tgTokenBusy !== null}
+                  className="text-xs font-medium underline disabled:opacity-50"
+                  style={{ color: "var(--text-secondary)" }}
+                >
+                  Remove
+                </button>
+              )}
+            </div>
+            {tgTokenEnvManaged ? (
+              // The 409 from test/save said TELEGRAM_BOT_TOKEN in .env
+              // provides it; a stored one here would never be used.
+              <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
+                {tgTokenFeedback?.text}
+              </p>
+            ) : (
+              <>
+                <input
+                  type="password"
+                  value={tgToken}
+                  onChange={(e) => setTgToken(e.target.value)}
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder={
+                    tgStatus?.configured ? "A token is saved — paste a new one to replace it" : "123456789:AA…"
+                  }
+                  className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
+                  style={inputStyle}
+                />
+                <div className="flex items-center gap-3 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={() => void handleTgTokenTest()}
+                    disabled={!tgToken.trim() || tgTokenBusy !== null}
+                    className="px-4 py-2 rounded-[10px] text-sm font-semibold disabled:opacity-50"
+                    style={{
+                      background: "transparent",
+                      border: "1px solid var(--claw-border)",
+                      color: "var(--text-primary)",
+                    }}
+                  >
+                    {tgTokenBusy === "test" ? (
+                      <Loader2 className="w-4 h-4 animate-spin inline-block mr-1.5" />
+                    ) : null}
+                    Test
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleTgTokenSave()}
+                    disabled={!tgToken.trim() || tgTokenBusy !== null}
+                    className="px-4 py-2 rounded-[10px] text-sm font-semibold disabled:opacity-50"
+                    style={{ background: "var(--accent-primary)", color: "#0a0a0b" }}
+                  >
+                    {tgTokenBusy === "save" ? (
+                      <Loader2 className="w-4 h-4 animate-spin inline-block mr-1.5" />
+                    ) : null}
+                    Save
+                  </button>
+                  <FeedbackLine feedback={tgTokenFeedback} />
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
         {tgStatus === null ? (
           <p className="text-sm" style={{ color: "var(--text-muted)" }}>
             Checking status…
           </p>
         ) : !tgStatus.configured ? (
-          <div
-            className="rounded-[10px] p-4 text-sm space-y-2"
-            style={{ background: "var(--bg-input)", border: "1px solid var(--claw-border)" }}
-          >
-            <p style={{ color: "var(--text-primary)" }}>
-              One-time server setup (about 2 minutes):
+          me?.is_admin ? (
+            <div
+              className="rounded-[10px] p-4 text-sm space-y-2"
+              style={{ background: "var(--bg-input)", border: "1px solid var(--claw-border)" }}
+            >
+              <p style={{ color: "var(--text-primary)" }}>One-time setup (about a minute):</p>
+              <ol className="list-decimal pl-5 space-y-1" style={{ color: "var(--text-secondary)" }}>
+                <li>
+                  In Telegram, message{" "}
+                  <a
+                    href="https://t.me/BotFather"
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{ color: "var(--accent-primary)" }}
+                  >
+                    @BotFather
+                  </a>
+                  , send <code>/newbot</code>, and pick any name.
+                </li>
+                <li>Paste the token it replies with into Bot token above, and Save.</li>
+                <li>Tap Connect below to link your own chat.</li>
+              </ol>
+            </div>
+          ) : (
+            <p className="text-sm" style={{ color: "var(--text-muted)" }}>
+              Ask the owner to add a bot token.
             </p>
-            <ol className="list-decimal pl-5 space-y-1" style={{ color: "var(--text-secondary)" }}>
-              <li>
-                In Telegram, message{" "}
-                <a
-                  href="https://t.me/BotFather"
-                  target="_blank"
-                  rel="noreferrer"
-                  style={{ color: "var(--accent-primary)" }}
-                >
-                  @BotFather
-                </a>
-                , send <code>/newbot</code>, and pick any name.
-              </li>
-              <li>
-                Copy the token BotFather replies with into{" "}
-                <code style={{ color: "var(--accent-primary)" }}>
-                  TELEGRAM_BOT_TOKEN=
-                </code>{" "}
-                in <code>backend/.env</code>.
-              </li>
-              <li>Restart the backend, then come back here and tap Connect.</li>
-            </ol>
-          </div>
+          )
         ) : tgStatus.linked ? (
           <div className="flex items-center gap-3 flex-wrap">
             <span

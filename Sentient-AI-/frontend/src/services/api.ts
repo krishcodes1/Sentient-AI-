@@ -42,7 +42,7 @@ const AUTH_EXEMPT_FROM_REDIRECT = new Set<string>([
   "/auth/register",
 ]);
 
-class ApiError extends Error {
+export class ApiError extends Error {
   status: number;
   constructor(message: string, status: number) {
     super(message);
@@ -879,6 +879,12 @@ export async function saveTelegram(
     method: "PUT",
     body: JSON.stringify({ token }),
   });
+}
+
+/** Clears the stored bot token (an environment one is untouched). Stops
+ * the poller through the installation's change listener. Admin only. */
+export async function removeTelegramToken(): Promise<void> {
+  await request<void>("/setup/telegram", { method: "DELETE" });
 }
 
 export async function completeSetup(body: { allow_registration: boolean }): Promise<void> {
