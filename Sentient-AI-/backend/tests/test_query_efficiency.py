@@ -201,6 +201,12 @@ async def test_account_deletion_cascades_to_all_owned_rows(
     """Deleting an account must remove its data via the database's ON
     DELETE CASCADE — the ORM no longer loads these rows to do it itself
     (passive_deletes=True), so this verifies the database really does."""
+    # The first account owns the install and may not delete itself, so the
+    # account under test is the second one.
+    await client.post(
+        "/api/auth/register",
+        json={"email": "owner@example.com", "password": "password-123"},
+    )
     await client.post(
         "/api/auth/register",
         json={"email": "deleter@example.com", "password": "password-123"},

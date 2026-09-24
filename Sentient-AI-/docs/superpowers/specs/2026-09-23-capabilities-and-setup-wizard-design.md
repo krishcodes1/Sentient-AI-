@@ -165,7 +165,7 @@ The existing per-user `llm_provider` / `llm_model` on `users` stay: a user may p
 - API key for provider P: `settings.<P>_API_KEY` if non-empty, else the stored key, else none.
 - Telegram token: `settings.TELEGRAM_BOT_TOKEN` if non-empty, else stored.
 - Default provider and model: the stored values if the owner chose them in the wizard, else `settings.LLM_PROVIDER` / `settings.LLM_MODEL` (which carry their own defaults). Keys follow the environment-first rule above; the provider choice follows the owner-first rule because a wizard choice must not be silently undone by a stale `.env` default.
-- Registration: before setup completes, `settings.ALLOW_REGISTRATION` applies; after, the stored switch applies.
+- Registration: `/auth/register` answers 403 until setup completes, even with zero users (the first account comes from `/setup/owner`), and after that the stored switch applies; `settings.ALLOW_REGISTRATION` decides only when no installation service is wired and seeds the switch when §5.3 stamps an upgraded install.
 
 The wizard shows "Provided by server configuration" for any secret that comes from `.env` and does not ask for it.
 

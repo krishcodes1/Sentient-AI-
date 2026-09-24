@@ -12,6 +12,7 @@ by a NON-admin that was previously unreachable.
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import select, update
 
 from services.agent.permissions import PermissionEngine, UserTier
 from services.agent.tool_registry import ConnectorSpec, build_tools, effective_tier
@@ -220,3 +221,104 @@ def test_policy_admin_only_action_requires_confirmation_for_an_admin():
     )
     assert as_admin.requires_approval is True
     assert as_standard.requires_approval is False  # refused outright
+
+
+# ---------------------------------------------------------------------------
+# The install always keeps an owner
+# ---------------------------------------------------------------------------
+
+
+async def _signed_up(client, email: str) -> dict[str, str]:
+    created = await client.post(
+        "/api/auth/register", json={"email": email, "password": "password-123"}
+    )
+    assert created.status_code == 201, created.text
+    login = await client.post(
+        "/api/auth/login", json={"email": email, "password": "password-123"}
+    )
+    return auth_headers(login.json()["access_token"])
+
+
+async def _delete_own_account(client, headers):
+    return await client.request(
+        "DELETE",
+        "/api/auth/account",
+        headers=headers,
+        json={"current_password": "password-123"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_last_owner_cannot_delete_their_account(client, session_factory):
+    """With no admin left, nobody could run setup, change capabilities or
+    use an admin_only connector again, and /setup/owner stays closed while
+    other accounts exist."""
+    from models.audit import AuditLog, AuditStatus
+
+    owner = await _signed_up(client, "owner@example.com")
+    await _signed_up(client, "guest@example.com")
+
+    resp = await _delete_own_account(client, owner)
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "Transfer ownership before deleting the last owner account"
+    assert (await client.get("/api/auth/me", headers=owner)).status_code == 200
+
+    async with session_factory() as session:
+        rows = (
+            (await session.execute(select(AuditLog).order_by(AuditLog.seq))).scalars().all()
+        )
+    assert rows[-1].action == "account_delete_denied"
+    assert rows[-1].status is AuditStatus.blocked
+
+
+@pytest.mark.asyncio
+async def test_a_sole_owner_with_no_other_accounts_is_refused_too(client):
+    owner = await _signed_up(client, "owner@example.com")
+    resp = await _delete_own_account(client, owner)
+    assert resp.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_a_non_admin_can_still_delete_their_account(client):
+    await _signed_up(client, "owner@example.com")
+    guest = await _signed_up(client, "guest@example.com")
+
+    resp = await _delete_own_account(client, guest)
+    assert resp.status_code == 204
+    assert (await client.get("/api/auth/me", headers=guest)).status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_an_owner_may_leave_while_another_active_admin_remains(client, session_factory):
+    from models.user import User
+
+    owner = await _signed_up(client, "owner@example.com")
+    await _signed_up(client, "second@example.com")
+    async with session_factory() as session:
+        await session.execute(
+            update(User).where(User.email == "second@example.com").values(is_admin=True)
+        )
+        await session.commit()
+
+    resp = await _delete_own_account(client, owner)
+    assert resp.status_code == 204
+
+
+@pytest.mark.asyncio
+async def test_a_deactivated_admin_does_not_count_as_a_remaining_owner(
+    client, session_factory
+):
+    from models.user import User
+
+    owner = await _signed_up(client, "owner@example.com")
+    await _signed_up(client, "second@example.com")
+    async with session_factory() as session:
+        await session.execute(
+            update(User)
+            .where(User.email == "second@example.com")
+            .values(is_admin=True, is_active=False)
+        )
+        await session.commit()
+
+    resp = await _delete_own_account(client, owner)
+    assert resp.status_code == 409

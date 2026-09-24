@@ -21,7 +21,7 @@ from services import capabilities
 from services.capabilities import screen
 from services.capabilities.base import CapabilityStatus
 from services.tools.system import SystemToolkit
-from tests.conftest import auth_headers
+from tests.conftest import auth_headers, make_user
 
 STATUS_KEYS = set(CapabilityStatus.__dataclass_fields__)
 
@@ -51,28 +51,24 @@ async def installation(session_factory):
     capabilities.clear_probe_cache()
 
 
-async def _register(client, email: str) -> tuple[str, str]:
-    """Register + log in; the first account on the deployment is the admin."""
-    created = await client.post(
-        "/api/auth/register", json={"email": email, "password": "password-123"}
-    )
-    assert created.status_code == 201, created.text
-    login = await client.post(
-        "/api/auth/login", json={"email": email, "password": "password-123"}
-    )
-    assert login.status_code == 200, login.text
-    return login.json()["access_token"], created.json()["id"]
-
-
 @pytest_asyncio.fixture
 async def owner(client, installation):
-    token, user_id = await _register(client, "owner@example.com")
-    return auth_headers(token), user_id
+    """The owner comes from the wizard's first step, as on a real install:
+    open registration stays closed until setup is complete."""
+    created = await client.post(
+        "/api/setup/owner",
+        json={"email": "owner@example.com", "password": "password-123"},
+    )
+    assert created.status_code == 200, created.text
+    body = created.json()
+    return auth_headers(body["access_token"]), body["user"]["id"]
 
 
 @pytest_asyncio.fixture
-async def guest(client, owner):
-    token, _user_id = await _register(client, "guest@example.com")
+async def guest(owner, session_factory):
+    """A second, non-admin account, created directly: /auth/register is
+    closed while the wizard is unfinished."""
+    _user, token = await make_user(session_factory, "guest@example.com")
     return auth_headers(token)
 
 
@@ -128,8 +124,6 @@ async def test_report_requires_authentication(client, installation):
 async def test_missing_installation_service_is_503(client, session_factory):
     """No installation fixture here: app.state.installation is unset, as it
     is before the lifespan wires it."""
-    from tests.conftest import make_user
-
     _user, token = await make_user(session_factory)
     resp = await client.get("/api/capabilities", headers=auth_headers(token))
     assert resp.status_code == 503

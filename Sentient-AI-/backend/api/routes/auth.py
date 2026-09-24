@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
@@ -12,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
@@ -23,8 +22,9 @@ from core.security import (
     verify_access_token,
     verify_password,
 )
-from core.validation import SafeStr, normalize_email
+from core.validation import MODEL_ID_RULES, SafeStr, is_valid_model_id, normalize_email
 from models.audit import AuditStatus
+from models.installation import INSTALLATION_ROW_ID, Installation
 from models.user import User
 from services.audit import append_auth_event
 from services.auth import get_current_user, login_lockout
@@ -115,6 +115,22 @@ class SettingsUpdateRequest(BaseModel):
     memory_enabled: Optional[bool] = None
 
 
+async def lock_installation_row(db: AsyncSession) -> None:
+    """Take the installation row with SELECT ... FOR UPDATE for the rest of
+    this transaction.
+
+    The per-process locks around account creation cannot see a second
+    worker or a second replica. Holding this row makes the "is there an
+    owner yet?" check and the insert that depends on it atomic across
+    processes on Postgres: a concurrent creator waits here until this
+    transaction commits, then sees its user. SQLite ignores FOR UPDATE
+    (and serialises writers anyway), so this is a no-op in the tests.
+    """
+    await db.execute(
+        select(Installation).where(Installation.id == INSTALLATION_ROW_ID).with_for_update()
+    )
+
+
 async def create_account(
     db: AsyncSession,
     *,
@@ -149,6 +165,9 @@ async def create_account(
     # The first account on a self-hosted install belongs to whoever deployed
     # it, so it owns the deployment. This is what makes the `admin_only`
     # connector tier mean something rather than "disabled for everyone".
+    # Locked first, so two processes creating accounts at once cannot both
+    # conclude they are first.
+    await lock_installation_row(db)
     is_first_account = (
         await db.execute(select(User.id).limit(1))
     ).scalar_one_or_none() is None
@@ -187,12 +206,20 @@ async def register(
 ) -> User:
     """Create a new user account.
 
-    Once setup is complete the owner's stored switch decides whether
-    strangers may sign up; before that (and in unit tests that build no
-    installation service) the environment's ALLOW_REGISTRATION does.
+    Closed until the setup wizard is finished, with zero users too: the
+    first account comes from /setup/owner, so open sign-up can never race
+    the person installing the server for ownership. Once setup is complete
+    the owner's stored switch decides. Without an installation service
+    (unit tests that do not wire the app) the environment's
+    ALLOW_REGISTRATION decides, as it did before the wizard existed.
     """
     installation = getattr(request.app.state, "installation", None)
     if installation is not None:
+        if not await installation.setup_completed():
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Registration is disabled until setup is complete",
+            )
         allowed = await installation.registration_allowed()
     else:
         allowed = settings.ALLOW_REGISTRATION
@@ -581,13 +608,12 @@ async def update_settings(
         model = body.llm_model.strip()
         # Model ids are provider catalog names (letters, digits, and a few
         # separators). Anything else is a typo or probe; rejecting it here
-        # keeps garbage strings out of the runtime's provider cache.
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}", model):
+        # keeps garbage strings out of the runtime's provider cache and
+        # path-like ids out of any provider URL they are spliced into.
+        if not is_valid_model_id(model):
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=(
-                    "Model name may only contain letters, digits, and ./_:-"
-                ),
+                detail=MODEL_ID_RULES,
             )
         current_user.llm_model = model
     if body.memory_enabled is not None:
@@ -799,6 +825,12 @@ async def delete_account(
     operation the API offers and it has no undo, so a bearer token alone is
     not enough authority to trigger it — see ``_require_current_password``.
 
+    The last owner cannot leave (409): with no active admin left nobody
+    could finish setup, change capabilities or use an admin_only
+    connector, and /setup/owner stays closed while other accounts exist.
+    The check runs under the installation row lock so two admins deleting
+    themselves at once cannot each count the other as the one remaining.
+
     The refusals are audited; the deletion itself cannot be, because the
     same cascade that erases the account erases its audit chain. That is
     the correct outcome for an erasure request, so the durable record of
@@ -825,6 +857,33 @@ async def delete_account(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Deleting your account requires your current password",
         )
+
+    if current_user.is_admin:
+        await lock_installation_row(db)
+        other_admins = (
+            await db.execute(
+                select(func.count())
+                .select_from(User)
+                .where(
+                    User.is_admin.is_(True),
+                    User.is_active.is_(True),
+                    User.id != current_user.id,
+                )
+            )
+        ).scalar_one()
+        if not other_admins:
+            await _record_auth_event(
+                db,
+                user=current_user,
+                action="account_delete_denied",
+                auth_status=AuditStatus.blocked,
+                endpoint="/api/auth/account",
+                reason="last owner account",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Transfer ownership before deleting the last owner account",
+            )
 
     logger.warning(
         "account_deleted",

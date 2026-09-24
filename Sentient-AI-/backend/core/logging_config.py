@@ -19,6 +19,12 @@ from core.config import settings
 def configure_logging() -> None:
     level = getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO)
 
+    # httpx logs every request line at INFO, URL included, and a Telegram
+    # Bot API URL carries the bot token in its path. Only their warnings
+    # and errors are worth keeping.
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
     renderer: structlog.typing.Processor
     if settings.ENVIRONMENT == "production":
         renderer = structlog.processors.JSONRenderer()

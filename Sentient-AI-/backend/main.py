@@ -9,6 +9,7 @@ from typing import Any, Callable
 import structlog
 import uvicorn
 from fastapi import Depends, FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
@@ -311,6 +312,29 @@ async def health_check(db: AsyncSession = Depends(get_db)) -> JSONResponse:
             content={"status": "unhealthy", "reason": "database unreachable"},
         )
     return JSONResponse(content={"status": "healthy", "version": "0.1.0"})
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    """422 that says where and why, never what was sent.
+
+    FastAPI's stock body repeats each failing field's ``input`` (for a
+    missing field, the whole request body) plus the validator's ``ctx``,
+    so a login or setup request missing one field would send the password
+    or API key next to it straight back into the response, the browser's
+    devtools and any proxy log. Only type, location and message survive.
+    """
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": [
+                {"type": err.get("type"), "loc": list(err.get("loc", ())), "msg": err.get("msg")}
+                for err in exc.errors()
+            ]
+        },
+    )
 
 
 @app.exception_handler(Exception)
