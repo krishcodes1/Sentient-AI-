@@ -50,7 +50,9 @@ _PROBE_TTL_S = 10.0
 # context (platform, executable), and the context is not constant — a
 # report built for one environment (a test, a different executable) must
 # never be served for another. ReportContext is part of the key, so every
-# field it gains must stay hashable.
+# field it gains must stay hashable. In a running process this stays a
+# couple of entries per capability (the report's context, and the minimal
+# one a tool builds at call time).
 _probe_cache: dict[tuple[str, ReportContext], tuple[float, ProbeResult]] = {}
 
 _UNCHECKED = ProbeResult("unknown", "Not checked while off or unavailable.")
@@ -135,6 +137,20 @@ def _cached_probe(cap: Capability, ctx: ReportContext, use_cache: bool) -> Probe
     result = _run_probe(cap, ctx)
     _probe_cache[cache_key] = (now, result)
     return result
+
+
+def cached_probe(key: str, ctx: ReportContext) -> ProbeResult:
+    """Run capability *key*'s probe through the shared TTL cache.
+
+    For a tool re-checking its permission at call time. It does not check
+    availability: a caller that could run somewhere the capability is
+    unavailable must check ``availability(ctx)`` first. A capability with
+    no probe answers ``not_required``.
+    """
+    cap = get(key)
+    if cap.probe is None:
+        return ProbeResult("not_required")
+    return _cached_probe(cap, ctx, use_cache=True)
 
 
 def _status(cap: Capability, enabled: bool, ctx: ReportContext, use_cache: bool) -> CapabilityStatus:
