@@ -25,6 +25,10 @@ import type {
   ToolCall,
   BlockedAction,
   UsageSummary,
+  CapabilityStatus,
+  SetupStatus,
+  SetupProviders,
+  ProviderChoice,
 } from "@/types";
 
 const API_BASE = "/api";
@@ -723,4 +727,107 @@ export async function createTelegramLink(): Promise<TelegramLink> {
 
 export async function unlinkTelegram(): Promise<void> {
   return request<void>("/telegram/link", { method: "DELETE" });
+}
+
+// Capabilities.
+export async function getCapabilities(): Promise<CapabilityStatus[]> {
+  const data = await request<{ capabilities: CapabilityStatus[] }>("/capabilities");
+  return data.capabilities;
+}
+
+export async function updateCapabilities(
+  patch: Record<string, boolean>,
+): Promise<CapabilityStatus[]> {
+  const data = await request<{ capabilities: CapabilityStatus[] }>("/capabilities", {
+    method: "PUT",
+    body: JSON.stringify({ capabilities: patch }),
+  });
+  return data.capabilities;
+}
+
+export async function requestCapabilityAccess(key: string): Promise<CapabilityStatus> {
+  const data = await request<{ ok: boolean; status: CapabilityStatus }>(
+    `/capabilities/${key}/request-access`,
+    { method: "POST" },
+  );
+  return data.status;
+}
+
+export async function installCapability(key: string): Promise<{ ok: boolean; error?: string }> {
+  return request(`/capabilities/${key}/install`, { method: "POST" });
+}
+
+// First-run setup.
+
+/**
+ * Whether this install still needs the /setup wizard. Deliberately a bare
+ * fetch rather than `request`: the app asks this before anyone is signed
+ * in, so it must not try to renew a token or bounce a 401 to /login — the
+ * endpoint is public and a leftover token from a wiped install is noise.
+ */
+export async function getSetupStatus(): Promise<SetupStatus> {
+  const response = await fetch(`${API_BASE}/setup/status`);
+  if (!response.ok) {
+    throw new ApiError(`Request failed: ${response.statusText}`, response.status);
+  }
+  return response.json();
+}
+
+/**
+ * Create the first (owner) account. Only accepted while the install has no
+ * users; the response carries a token, stored exactly as login() does so
+ * the rest of the wizard runs authenticated.
+ */
+export async function createOwner(data: RegisterData): Promise<AuthResponse> {
+  const result = await request<AuthResponse>("/setup/owner", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+  localStorage.setItem("auth_token", result.access_token);
+  clearMeCache();
+  return result;
+}
+
+export async function getSetupProviders(): Promise<SetupProviders> {
+  return request<SetupProviders>("/setup/providers");
+}
+
+/** Sends one tiny prompt with the given key; nothing is stored. */
+export async function testProvider(
+  body: ProviderChoice,
+): Promise<{ ok: boolean; reply?: string; error?: string }> {
+  return request("/setup/provider/test", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function saveProvider(body: ProviderChoice): Promise<void> {
+  await request<{ ok: boolean }>("/setup/provider", {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function testTelegram(
+  token: string,
+): Promise<{ ok: boolean; bot_username?: string; error?: string }> {
+  return request("/setup/telegram/test", {
+    method: "POST",
+    body: JSON.stringify({ token }),
+  });
+}
+
+export async function saveTelegram(token: string): Promise<{ bot_username: string }> {
+  return request<{ ok: boolean; bot_username: string }>("/setup/telegram", {
+    method: "PUT",
+    body: JSON.stringify({ token }),
+  });
+}
+
+export async function completeSetup(body: { allow_registration: boolean }): Promise<void> {
+  await request<{ ok: boolean }>("/setup/complete", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 }

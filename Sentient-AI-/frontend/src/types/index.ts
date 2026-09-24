@@ -310,3 +310,60 @@ export interface AuthResponse {
   access_token: string;
   token_type: string;
 }
+
+// Capabilities (contract §1.7 of the capabilities plan). Mirrors the
+// backend's CapabilityStatus.to_dict(): the owner's switch, the OS or
+// environment verdict, and the effective state the agent runs with.
+export type CapabilityEffective = "on" | "off" | "blocked";
+export type ProbeState = "granted" | "denied" | "not_required" | "unknown";
+
+export interface CapabilityStatus {
+  key: string;
+  label: string;
+  description: string;
+  risk: "low" | "medium" | "high";
+  enabled: boolean;
+  default_enabled: boolean;
+  available: boolean;
+  availability_reason: string;
+  probe_state: ProbeState;
+  probe_detail: string;
+  fix_url: string | null;
+  fix_steps: string[];
+  effective: CapabilityEffective;
+  reason: string;
+  can_request_access: boolean;
+  install: string | null;
+  when_denied: string;
+  tools: string[];
+}
+
+// First-run setup (GET /api/setup/status and the /api/setup/* writes).
+export interface SetupStatus {
+  needs_setup: boolean;
+  has_owner: boolean;
+  provider_configured: boolean;
+  setup_completed: boolean;
+}
+
+export interface SetupProvider {
+  name: string;
+  /** The key comes from the server's .env, which always wins over the DB. */
+  key_from_env: boolean;
+  /** A key was already saved through the wizard and is held encrypted. */
+  key_stored: boolean;
+  /** Suggested model ids, best default first. */
+  models: string[];
+}
+
+export interface SetupProviders {
+  providers: SetupProvider[];
+  current: { provider: string; model: string };
+}
+
+export interface ProviderChoice {
+  provider: string;
+  model: string;
+  /** Omitted when the server already holds the key. */
+  api_key?: string;
+}
