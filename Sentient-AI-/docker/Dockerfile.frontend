@@ -70,7 +70,7 @@ FROM base AS build
 RUN npm run build
 
 # ── Production runtime ───────────────────────────────────────────────
-FROM nginx:1.27-alpine AS prod
+FROM nginx:1.29-alpine AS prod
 
 COPY --from=build /app/dist /usr/share/nginx/html
 
