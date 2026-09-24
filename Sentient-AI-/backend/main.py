@@ -28,6 +28,7 @@ from api.routes import (
     agent,
     audit,
     auth,
+    capabilities,
     connectors,
     memory,
     reminders,
@@ -186,6 +187,7 @@ app.include_router(memory.router, prefix="/api")
 app.include_router(reminders.router, prefix="/api")
 app.include_router(telegram.router, prefix="/api")
 app.include_router(usage.router, prefix="/api")
+app.include_router(capabilities.router, prefix="/api")
 
 
 @app.get("/")
