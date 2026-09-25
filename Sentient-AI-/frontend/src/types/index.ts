@@ -197,12 +197,25 @@ export interface Message {
    *  frame's code and setup_url/settings_url), so the bubble can link to
    *  where it is fixed. */
   provider_error?: { code?: string; setup_url?: string; settings_url?: string };
+  /** Client-only: the screenshots this turn's tools took. They arrive with
+   *  the live turn and are never saved, so a reloaded thread has none. */
+  screenshots?: TurnImage[];
 }
 
 export interface ToolCall {
   name: string;
   result?: unknown;
   tool_call_id?: string | null;
+}
+
+/** A screenshot a tool took this turn, delivered to the live view only (the
+ *  saved tool call keeps a placeholder). `index` is the tool call it belongs
+ *  to; `tool` and `source` (the page's host or the app) name it. */
+export interface TurnImage {
+  tool: string;
+  source?: string | null;
+  index: number;
+  data_url: string;
 }
 
 export interface PendingApproval {
@@ -232,6 +245,7 @@ export interface AgentTurnResponse {
   tool_calls: ToolCall[];
   pending_approvals: PendingApproval[];
   blocked_actions: BlockedAction[];
+  images?: TurnImage[];
 }
 
 export interface ApprovalDecisionResponse {

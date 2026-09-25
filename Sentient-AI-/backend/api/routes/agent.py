@@ -60,6 +60,7 @@ from services.agent.runtime import (
     TurnUsage,
     is_browser_tool,
     redact_binary_for_model,
+    tool_call_facts,
 )
 from services.agent.tool_registry import ConnectorSpec, build_tools, effective_tier, resolve_tool
 
@@ -397,6 +398,18 @@ class ToolCallOut(BaseModel):
     tool_call_id: Optional[str] = None
 
 
+class TurnImageOut(BaseModel):
+    """A screenshot one of this turn's tools took, for the live web view
+    only: rows keep the placeholder (spec §9), so a reload shows none.
+    ``index`` is the tool call it belongs to; ``tool`` and ``source`` (the
+    page's host or the app) are the facts its alt text names."""
+
+    tool: str
+    source: Optional[str] = None
+    index: int
+    data_url: str
+
+
 class PendingApprovalOut(BaseModel):
     action_id: str
     tool_name: str
@@ -425,6 +438,7 @@ class AgentTurnResponse(BaseModel):
     tool_calls: list[ToolCallOut] = []
     pending_approvals: list[PendingApprovalOut] = []
     blocked_actions: list[BlockedActionOut] = []
+    images: list[TurnImageOut] = []
 
 
 class ApprovalDecisionRequest(BaseModel):
@@ -931,10 +945,12 @@ async def send_message(
     return AgentTurnResponse(
         user_message=MessageResponse.model_validate(user_message),
         assistant_message=MessageResponse.model_validate(assistant_message),
+        # Screenshots travel once, checked, in ``images``; each result keeps
+        # the placeholder its row holds.
         tool_calls=[
             ToolCallOut(
                 name=tc.get("name", ""),
-                result=tc.get("result"),
+                result=redact_binary_for_model(tc.get("result")),
                 tool_call_id=tc.get("tool_call_id"),
             )
             for tc in agent_response.tool_calls
@@ -959,6 +975,7 @@ async def send_message(
             )
             for ba in agent_response.blocked_actions
         ],
+        images=[TurnImageOut(**image) for image in _turn_images(agent_response.tool_calls)],
     )
 
 
@@ -1161,6 +1178,14 @@ async def stream_message(
                         turn_provider = data.get("provider") or None
                         turn_model = data.get("model") or None
                         turn_done = True
+                        if tool_calls_payload:
+                            # As send_message: the screenshots once, checked,
+                            # and the tool calls with the row's placeholder.
+                            data = {
+                                **data,
+                                "tool_calls": redact_binary_for_model(tool_calls_payload),
+                                "images": _turn_images(tool_calls_payload),
+                            }
                     yield _sse(etype, data)
             except GeneratorExit:
                 raise
@@ -1677,7 +1702,8 @@ def build_decision_applier(app: Any, session_factory: Any = async_session):
 # resumable from the web app like any other conversation.
 TELEGRAM_CONVERSATION_TITLE = "Telegram"
 
-# Most tool-captured images one channel turn delivers.
+# Most tool-captured images one channel turn delivers (the web chat's
+# toolScreenshots.ts names the same limit in its note).
 MAX_CHANNEL_IMAGES = 3
 
 # The only images a channel forwards: base64 raster data URLs of the types
@@ -1751,6 +1777,61 @@ def _channel_image(name: str, result: Any) -> Optional[str]:
         if isinstance(image, str) and _CHANNEL_IMAGE_URL.match(image):
             return image
     return None
+
+
+# What the web chat renders as an <img>: the whole string one base64 PNG,
+# JPEG or WebP data URL (nothing after the payload), no bigger than an
+# attachment may be. Anything else is dropped, never shown.
+_WEB_IMAGE_URL = re.compile(r"data:image/(?:jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}")
+_MAX_WEB_IMAGE_CHARS = len("data:image/jpeg;base64,") + MAX_IMAGE_BYTES * 4 // 3 + 4
+
+# An app name the alt text may carry; any other name is left out.
+_IMAGE_APP_NAME = re.compile(r"[\w .&'+()-]{1,60}")
+
+
+def _image_source(name: str, result: dict[str, Any]) -> Optional[str]:
+    """What a screenshot shows, for its alt text: the page's host (never
+    its path or query) or, for a desktop tool, the app. Facts only: no
+    page title and nothing the model wrote."""
+    needs = result.get("needs_human")
+    for where in (needs if isinstance(needs, dict) else {}, result):
+        for key in ("final_url", "url"):
+            host = tool_call_facts({"url": where.get(key)}).get("host")
+            if host:
+                return host
+    app = result.get("app")
+    if name.startswith("desktop.") and isinstance(app, str) and _IMAGE_APP_NAME.fullmatch(app):
+        return app
+    return None
+
+
+def _turn_images(tool_calls: Any) -> list[dict[str, Any]]:
+    """The screenshots a web turn shows live: what a channel would deliver
+    (see _channel_image), each checked against _WEB_IMAGE_URL and the
+    attachment cap, at most MAX_CHANNEL_IMAGES. Read from the live response
+    before redaction and never written to a row (spec §9)."""
+    images: list[dict[str, Any]] = []
+    for index, tc in enumerate(tool_calls if isinstance(tool_calls, list) else []):
+        if len(images) >= MAX_CHANNEL_IMAGES:
+            break
+        if not isinstance(tc, dict):
+            continue
+        name = str(tc.get("name", ""))
+        result = tc.get("result")
+        data_url = _channel_image(name, result)
+        if data_url is None or not isinstance(result, dict):
+            continue
+        payload = data_url.partition(",")[2]
+        if (
+            len(data_url) > _MAX_WEB_IMAGE_CHARS
+            or len(payload) % 4
+            or not _WEB_IMAGE_URL.fullmatch(data_url)
+        ):
+            continue
+        images.append(
+            {"tool": name, "source": _image_source(name, result), "index": index, "data_url": data_url}
+        )
+    return images
 
 
 def build_chat_applier(app: Any, session_factory: Any = async_session):

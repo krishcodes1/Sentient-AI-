@@ -31,6 +31,7 @@ import type {
   UpdateMemoryRequest,
   Message,
   ToolCall,
+  TurnImage,
   BlockedAction,
   UsageSummary,
   CapabilityStatus,
@@ -403,6 +404,8 @@ export interface StreamHandlers {
     tool_calls?: ToolCall[];
     pending_approvals?: PendingApproval[];
     blocked_actions?: BlockedAction[];
+    /** This turn's screenshots, sent once and never saved. */
+    images?: TurnImage[];
   }) => void;
   onSaved?: (assistant: Message | null) => void;
   /** `reason` is ready to show (a provider failure's fix pointer already

@@ -33,6 +33,7 @@ import type {
   ToolCall,
   PendingApproval,
   BlockedAction,
+  TurnImage,
   User,
 } from "@/types";
 import {
@@ -50,6 +51,8 @@ import {
 import ConfirmDialog from "@/components/ConfirmDialog";
 import MarkdownMessage from "@/components/MarkdownMessage";
 import ProviderErrorText from "@/components/ProviderErrorText";
+import ToolScreenshot from "@/components/ToolScreenshot";
+import { hasDroppedScreenshot } from "@/components/toolScreenshots";
 import ChatComposer from "@/components/ChatComposer";
 import { ConversationTokenTotal, MessageTokenCaption } from "@/components/TokenUsage";
 import { DESKTOP_QUERY, useMediaQuery } from "@/hooks/useMediaQuery";
@@ -126,24 +129,42 @@ function MessageTime({ iso, onAccent }: { iso?: string; onAccent?: boolean }) {
   );
 }
 
-function ToolCallBadge({ tc }: { tc: ToolCall }) {
+function ToolCallBadge({
+  tc,
+  screenshot,
+  turnImages,
+}: {
+  tc: ToolCall;
+  screenshot?: TurnImage;
+  turnImages?: TurnImage[];
+}) {
+  // A screenshot shows as the image (live turn) or a note saying why not
+  // (reloaded thread, or past the reply's limit), never as its JSON.
+  const shot = screenshot !== undefined || hasDroppedScreenshot(tc.result);
   return (
-    <div
-      className="mono-tag flex items-center gap-2 px-3 py-2 rounded-[8px]"
-      style={{
-        background: "var(--fill-success)",
-        border: "1px solid var(--border-success)",
-      }}
-    >
-      <CheckCircle2 className="w-3.5 h-3.5" style={{ color: "var(--accent-success)" }} />
-      <span style={{ color: "var(--accent-success)" }} className="font-medium">
-        {tc.name}
-      </span>
-      <ChevronRight className="w-3 h-3" style={{ color: "var(--text-muted)" }} />
-      <span className="truncate max-w-[200px]" style={{ color: "var(--text-secondary)" }}>
-        {typeof tc.result === "string" ? tc.result : JSON.stringify(tc.result ?? "")}
-      </span>
-    </div>
+    <>
+      <div
+        className="mono-tag flex items-center gap-2 px-3 py-2 rounded-[8px]"
+        style={{
+          background: "var(--fill-success)",
+          border: "1px solid var(--border-success)",
+        }}
+      >
+        <CheckCircle2 className="w-3.5 h-3.5" style={{ color: "var(--accent-success)" }} />
+        <span style={{ color: "var(--accent-success)" }} className="font-medium">
+          {tc.name}
+        </span>
+        {!shot && (
+          <>
+            <ChevronRight className="w-3 h-3" style={{ color: "var(--text-muted)" }} />
+            <span className="truncate max-w-[200px]" style={{ color: "var(--text-secondary)" }}>
+              {typeof tc.result === "string" ? tc.result : JSON.stringify(tc.result ?? "")}
+            </span>
+          </>
+        )}
+      </div>
+      {shot && <ToolScreenshot image={screenshot} turnImages={turnImages} />}
+    </>
   );
 }
 
@@ -822,16 +843,23 @@ export default function Chat() {
               content: data.content ?? "",
               tool_calls: data.tool_calls ?? [],
               blocked_actions: data.blocked_actions ?? [],
+              screenshots: data.images ?? [],
             });
           },
           onSaved: (saved) => {
             if (saved) {
               // Swap the temp assistant bubble for the persisted row, keeping
-              // the streamed tool_calls/blocked metadata.
+              // the streamed tool_calls/blocked metadata and the screenshots
+              // (never saved, so only this bubble has them).
               setMessages((prev) =>
                 prev.map((m) =>
                   m.id === asstTempId
-                    ? { ...saved, tool_calls: m.tool_calls, blocked_actions: m.blocked_actions }
+                    ? {
+                        ...saved,
+                        tool_calls: m.tool_calls,
+                        blocked_actions: m.blocked_actions,
+                        screenshots: m.screenshots,
+                      }
                     : m,
                 ),
               );
@@ -905,7 +933,15 @@ export default function Chat() {
     if (activeConv) {
       try {
         const conv = await getConversation(activeConv);
-        setMessages(conv.messages ?? []);
+        // Screenshots are never saved: carry the ones on screen over to
+        // their saved rows (same ids since onSaved), or they would vanish.
+        setMessages((prev) => {
+          const shots = new Map(prev.map((m) => [m.id, m.screenshots]));
+          return (conv.messages ?? []).map((m) => {
+            const screenshots = shots.get(m.id);
+            return screenshots ? { ...m, screenshots } : m;
+          });
+        });
       } catch {
         // The decision itself succeeded; the thread catches up on next load.
       }
@@ -1393,7 +1429,12 @@ export default function Chat() {
                 {msg.tool_calls && msg.tool_calls.length > 0 && (
                   <div className="mt-2 space-y-1">
                     {msg.tool_calls.map((tc, i) => (
-                      <ToolCallBadge key={`${tc.tool_call_id ?? tc.name}-${i}`} tc={tc} />
+                      <ToolCallBadge
+                        key={`${tc.tool_call_id ?? tc.name}-${i}`}
+                        tc={tc}
+                        screenshot={msg.screenshots?.find((s) => s.index === i)}
+                        turnImages={msg.screenshots}
+                      />
                     ))}
                   </div>
                 )}
