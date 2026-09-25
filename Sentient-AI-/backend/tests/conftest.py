@@ -51,6 +51,7 @@ os.environ["PASSWORD_MIN_LENGTH"] = "8"
 os.environ["ALLOW_REGISTRATION"] = "true"
 
 import httpx  # noqa: E402
+import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
 from sqlalchemy import event  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
@@ -202,3 +203,44 @@ def use_provider(runtime, provider, pair: tuple[str, str] | None = None) -> None
     runtime._provider_cache[
         ((provider_name or "").strip().lower(), (model or "").strip())
     ] = provider
+
+
+# ── browser harness (contracts §8) ────────────────────────────────────────
+
+
+@pytest.fixture
+def fakesite(monkeypatch):
+    """The fake site on a free 127.0.0.1 port, with the loopback toggle set
+    for the duration of the test (never in production code paths)."""
+    from tests.fakesite import FakeSite
+
+    monkeypatch.setenv("CRAWLER_ALLOW_LOOPBACK_FOR_TESTS", "1")
+    site = FakeSite().start()
+    try:
+        yield site
+    finally:
+        site.stop()
+
+
+@pytest.fixture
+def loopback_resolver():
+    """A guard resolver that maps every host to 127.0.0.1: the fake site's
+    address, and what a DNS-rebinding attacker would love to return."""
+    return lambda host: ["127.0.0.1"]
+
+
+@pytest_asyncio.fixture
+async def page():
+    """One headless Chromium page; skipped where the browser is absent."""
+    playwright_api = pytest.importorskip("playwright.async_api")
+    async with playwright_api.async_playwright() as playwright:
+        try:
+            browser = await playwright.chromium.launch(headless=True)
+        except playwright_api.Error as exc:
+            pytest.skip(f"headless Chromium unavailable: {str(exc).splitlines()[0]}")
+        context = await browser.new_context(viewport={"width": 1280, "height": 800})
+        page = await context.new_page()
+        try:
+            yield page
+        finally:
+            await browser.close()
