@@ -138,7 +138,7 @@ jobs:
           cp src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg "out/Crawler-AI-${version}-mac.dmg"
           ls -l out
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: desktop-mac
           path: Sentient-AI-/desktop/out/*
@@ -188,7 +188,7 @@ jobs:
           cp src-tauri/target/release/bundle/nsis/*-setup.exe "out/Crawler-AI-${version}-windows-setup.exe"
           ls -l out
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: desktop-windows
           path: Sentient-AI-/desktop/out/*
