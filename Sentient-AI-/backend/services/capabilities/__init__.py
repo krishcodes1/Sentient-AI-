@@ -8,6 +8,7 @@ from typing import Iterable, Mapping, Optional
 import structlog
 
 from services.capabilities import (
+    browser_control,
     installs,
     reminders,
     screen,
@@ -33,6 +34,7 @@ REGISTRY: tuple[Capability, ...] = (
     reminders.CAPABILITY,
     installs.CAPABILITY,
     telegram.CAPABILITY,
+    browser_control.CAPABILITY,
 )
 
 # Tools no capability gates. Listed explicitly so that a new built-in tool
@@ -90,7 +92,10 @@ def default_switches() -> dict[str, bool]:
 def default_context(*, telegram_configured: bool = False) -> ReportContext:
     """Gather the environment facts for one report. This is the only place
     that touches the OS for availability; availability() reads the result."""
-    from services.tools.system import browser_installed
+    # Both deferred, like browser_installed: the registry stays importable
+    # without the toolkit or the platform package.
+    from services import platform as platform_layer
+    from services.tools.system import browser_installed, playwright_installed
 
     return ReportContext(
         in_container=in_container(),
@@ -98,6 +103,8 @@ def default_context(*, telegram_configured: bool = False) -> ReportContext:
         telegram_configured=telegram_configured,
         browser_installed=browser_installed(),
         executable=crawler_executable(),
+        playwright_installed=playwright_installed(),
+        browser_channel=platform_layer.current().browser_channel() or "",
     )
 
 

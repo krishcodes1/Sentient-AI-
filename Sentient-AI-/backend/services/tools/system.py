@@ -97,6 +97,13 @@ class Installable:
     detect: Callable[[], bool]
 
 
+def playwright_installed() -> bool:
+    """True when the Playwright package is importable, whether or not it has
+    downloaded a browser: the platform layer may drive an installed
+    Chrome/Edge instead (browser_control's availability rule)."""
+    return _playwright_package_dir() is not None
+
+
 def browser_installed() -> bool:
     """True when Playwright and the Chromium build(s) it would launch are
     both present. See the module docstring for what is checked and why."""

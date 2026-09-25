@@ -19,6 +19,7 @@ restored afterwards so no other test sees the wiring.
 from __future__ import annotations
 
 import dataclasses
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -248,6 +249,7 @@ async def test_system_capabilities_reports_the_permission_switches(wired_app):
     assert set(by_key) == set(capability_registry.keys())
     assert by_key["screen"]["enabled"] is False
     assert by_key["screen"]["effective"] == "off"
+    assert by_key["browser_control"]["enabled"] is False and by_key["browser_control"]["effective"] == "off"
 
 
 # ── executor toolkit map ─────────────────────────────────────────────────
@@ -461,3 +463,123 @@ async def test_channel_delivers_only_builtin_raster_images(client, session_facto
         {"data_url": png, "caption": "https://a.example/"},
         {"data_url": webp, "caption": "Your screen"},
     ]
+
+
+# ── browser sessions ─────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform_name, headless", [("container", True), ("mac", False), ("windows", False)])
+async def test_browser_sessions_are_wired_per_platform_and_closed_on_shutdown(
+    session_factory, monkeypatch, platform_name, headless
+):
+    import main as main_module
+    from main import app, wire_services
+
+    made: list[dict[str, Any]] = []
+
+    class Recorder:
+        def __init__(self, **kwargs: Any) -> None:
+            made.append(kwargs)
+
+        async def close_all(self) -> None:
+            made.append({"closed": True})
+
+        async def reap_idle(self) -> int:
+            return 0
+
+    fake_platform = SimpleNamespace(name=platform_name, browser_channel=lambda: None)
+    monkeypatch.setattr(main_module, "BrowserSessionManager", Recorder)
+    monkeypatch.setattr(main_module, "current_platform", lambda: fake_platform)
+    monkeypatch.setattr(settings, "TELEGRAM_BOT_TOKEN", "", raising=False)
+    FakeService.instances.clear()
+    saved = dict(app.state._state)
+    await wire_services(app, session_factory, telegram_service_factory=FakeService)
+    try:
+        assert made[0] == {"headless": headless, "platform": fake_platform}
+        assert isinstance(app.state.browser_sessions, Recorder)
+        builtin = app.state.agent_runtime._executor._builtins["browser"]
+        assert builtin.task_scoped is True
+        assert app.state.agent_runtime._browser_spend is not None
+        await main_module.close_browser_sessions(app)
+        assert made[-1] == {"closed": True}
+    finally:
+        await app.state.telegram_manager.stop()
+        app.state._state.clear()
+        app.state._state.update(saved)
+
+
+@pytest.mark.asyncio
+async def test_real_container_platform_wires_headless(session_factory, monkeypatch):
+    from main import app, wire_services
+    from services.platform import current
+
+    monkeypatch.setenv("CRAWLER_PLATFORM", "container")
+    current.cache_clear()
+    monkeypatch.setattr(settings, "TELEGRAM_BOT_TOKEN", "", raising=False)
+    FakeService.instances.clear()
+    saved = dict(app.state._state)
+    try:
+        await wire_services(app, session_factory, telegram_service_factory=FakeService)
+        assert app.state.browser_sessions._headless is True
+        assert app.state.browser_sessions._platform.name == "container"
+    finally:
+        await app.state.telegram_manager.stop()
+        app.state._state.clear()
+        app.state._state.update(saved)
+        current.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_closing_browser_sessions_never_fails_shutdown(monkeypatch):
+    import main as main_module
+
+    class Stuck:
+        async def close_all(self) -> None:
+            raise RuntimeError("chrome would not quit")
+
+    app = SimpleNamespace(state=SimpleNamespace(browser_sessions=Stuck()))
+    await main_module.close_browser_sessions(app)  # logs, does not raise
+    await main_module.close_browser_sessions(SimpleNamespace(state=SimpleNamespace()))
+
+
+@pytest.mark.asyncio
+async def test_reaper_task_calls_reap_idle_and_is_cancelled_on_shutdown(monkeypatch):
+    import asyncio
+
+    import main as main_module
+
+    calls: list[int] = []
+
+    class Sessions:
+        async def reap_idle(self) -> int:
+            calls.append(1)
+            return 0
+
+        async def close_all(self) -> None:
+            pass
+
+    monkeypatch.setattr(main_module, "REAP_INTERVAL_S", 0.01)
+    app = SimpleNamespace(state=SimpleNamespace(browser_sessions=Sessions()))
+    main_module.start_browser_reaper(app)
+    await asyncio.sleep(0.05)
+    assert calls
+    await main_module.close_browser_sessions(app)
+    assert app.state.browser_reaper.cancelled() or app.state.browser_reaper.done()
+
+
+@pytest.mark.asyncio
+async def test_browser_spend_sink_adds_to_the_task(session_factory):
+    import main as main_module
+    from services.tools.browser.session import TaskState
+
+    class Session:
+        task = TaskState(task_id="t1")
+
+    class Sessions:
+        sessions = {"u1": Session()}
+
+    sink = main_module.browser_spend_sink(Sessions())
+    await sink("u1", "t1", 0.01)
+    await sink("u1", "t1", 0.02)
+    assert Session.task.spend_usd == pytest.approx(0.03)

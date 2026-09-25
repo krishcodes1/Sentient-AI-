@@ -13,6 +13,7 @@ Crawler AI — Secure-by-Design Agentic AI Platform.
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
 from typing import Any, Callable
@@ -62,6 +63,11 @@ from services.notifications.reminders import ReminderService
 from services.notifications.telegram import NotifyingApprovalStore, TelegramService
 from services.notifications.telegram_manager import TelegramManager
 from services.tools.system import SystemToolkit
+from services.platform import current as current_platform
+from services.tools.browser import guard as browser_guard
+from services.tools.browser import handoff as browser_handoff
+from services.tools.browser.actions import BrowserReadToolkit
+from services.tools.browser.session import BrowserSessionManager
 
 logger = structlog.get_logger(__name__)
 
@@ -89,6 +95,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.warning("app_starting_without_database")
 
     await wire_services(app)
+    start_browser_reaper(app)
     reminder_service: ReminderService = app.state.reminders
     await reminder_service.start()
 
@@ -104,6 +111,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             await runtime.aclose()
         except Exception as exc:  # shutdown must finish regardless
             logger.warning("agent_runtime_close_failed", error=str(exc))
+    await close_browser_sessions(app)
     await engine.dispose()
 
 
@@ -118,6 +126,59 @@ def _wire_telegram(
     open sessions from the factory wire_services was given."""
     service.decide = agent.build_decision_applier(app, session_factory)
     service.chat = agent.build_chat_applier(app, session_factory)
+
+
+REAP_INTERVAL_S = 60.0
+
+
+def browser_spend_sink(sessions: Any) -> Callable[[str, str, float], Any]:
+    """Adds a turn's estimated cost to the task the browser toolkit caps.
+
+    Only on the session that is already open for that task: recording a
+    cost must never launch a browser (sessions.get would, after a failed
+    launch, a reap or a refused action) nor reset another task's caps."""
+
+    async def add(user_id: str, task_id: str, usd: float) -> None:
+        session = sessions.sessions.get(user_id)
+        if session is None or session.task.task_id != task_id:
+            return
+        session.task.spend_usd += usd
+
+    return add
+
+
+def start_browser_reaper(app: Any) -> None:
+    """Close idle browser sessions every REAP_INTERVAL_S (spec §4); never
+    one parked on an approval or handoff (the manager skips those)."""
+
+    async def loop() -> None:
+        while True:
+            await asyncio.sleep(REAP_INTERVAL_S)
+            try:
+                await app.state.browser_sessions.reap_idle()
+            except Exception as exc:  # the reaper must outlive one bad sweep
+                logger.warning("browser_reap_failed", error_type=type(exc).__name__)
+
+    app.state.browser_reaper = asyncio.create_task(loop())
+
+
+async def close_browser_sessions(app: Any) -> None:
+    """Stop the reaper and close every browser the agent opened. Shutdown
+    must finish regardless: a browser that will not quit is logged, not raised."""
+    reaper = getattr(app.state, "browser_reaper", None)
+    if reaper is not None and not reaper.done():
+        reaper.cancel()
+        # cancel() only asks; wait until the loop has actually stopped so
+        # no sweep races close_all below. wait() never raises the task's
+        # CancelledError into shutdown.
+        await asyncio.wait({reaper})
+    sessions = getattr(app.state, "browser_sessions", None)
+    if sessions is None:
+        return
+    try:
+        await sessions.close_all()
+    except Exception as exc:
+        logger.warning("browser_sessions_close_failed", error_type=type(exc).__name__)
 
 
 async def wire_services(
@@ -188,6 +249,16 @@ async def wire_services(
     # without one answers "not configured"), so a construction error is a
     # genuine bug and must fail startup rather than leave /api/health
     # reporting healthy with no agent behind it.
+    #
+    # One browser per process, launched on the first browser.read: the
+    # installed Chrome/Edge with a window on a Mac or PC (the window is the
+    # handoff surface), headless Chromium in the container. Sessions are
+    # per process, so this holds only with a single uvicorn worker.
+    platform = current_platform()
+    browser_sessions = BrowserSessionManager(
+        headless=platform.name == "container", platform=platform
+    )
+    app.state.browser_sessions = browser_sessions
     app.state.agent_runtime = AgentRuntime(
         config=settings,
         permission_engine=RuntimePermissionAdapter(
@@ -197,10 +268,14 @@ async def wire_services(
             session_factory=session_factory,
             capability_gate=installation.capability_statuses,
             system_toolkit=system_toolkit,
+            browser_toolkit=BrowserReadToolkit(
+                browser_sessions, guard=browser_guard, handoff=browser_handoff
+            ),
         ),
         audit_service=RuntimeAuditLogger(session_factory=session_factory),
         approval_store=approval_store,
         settings_source=installation,
+        browser_spend=browser_spend_sink(browser_sessions),
     )
     logger.info("agent_runtime_initialized")
 

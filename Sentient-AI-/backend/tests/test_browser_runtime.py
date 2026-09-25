@@ -406,3 +406,296 @@ async def test_the_thinking_budget_is_only_sent_to_models_that_accept_zero(model
     await provider.complete([{"role": "user", "content": "hi"}], thinking_budget=0)
     assert ("generationConfig" in sent[0]) is sends
     await provider.aclose()
+
+
+# -- agent route: channel images and URL stripping -----------------------------------
+
+
+def test_channel_image_prefers_user_image_and_reads_needs_human():
+    from api.routes.agent import _channel_image
+
+    pixel = "data:image/jpeg;base64," + "Q" * 300
+    assert _channel_image("browser.read", {"ok": True, "user_image": pixel, "image": "data:image/jpeg;base64,x"}) == pixel
+    assert _channel_image("browser.read", {"ok": False, "needs_human": {"kind": "requested", "detail": "Sign in", "user_image": pixel}}) == pixel
+    assert _channel_image("web.screenshot", {"image": pixel}) == pixel
+    assert _channel_image("gmail.send_email", {"image": pixel}) is None
+    assert _channel_image("browser.read", {"image": "data:image/svg+xml;base64,x"}) is None
+
+
+def test_channel_caption_uses_needs_human_detail_then_title_then_url():
+    from api.routes.agent import _channel_caption
+
+    assert _channel_caption("browser.read", {"needs_human": {"detail": "Solve the puzzle", "url": "http://s/c"}}) == "Solve the puzzle"
+    assert _channel_caption("browser.read", {"title": "Grades", "url": "http://s/grades?x=1"}) == "Grades"
+    assert _channel_caption("web.screenshot", {"final_url": "http://s/?q=1"}) == "http://s/?q=1"
+    assert _channel_caption("desktop.screenshot", {}) == "Your screen"
+
+
+def test_account_mode_and_url_stripping():
+    from api.routes.agent import _account_mode, strip_url_queries
+
+    assert _account_mode([{"name": "browser.read", "result": {"mode": "account"}}]) is True
+    assert _account_mode([{"name": "browser.read", "result": {"ok": True}}]) is True  # no mode: fail closed
+    assert _account_mode([{"name": "browser.read", "result": {"mode": "public"}}]) is False
+    assert _account_mode([{"name": "web.search", "result": {"mode": "account"}}]) is False
+    assert strip_url_queries("see https://canvas.school.edu/courses/1/grades?student=42#top now") == "see https://canvas.school.edu/courses/1/grades now"
+
+
+def test_task_id_of_rows_is_the_newest_user_message():
+    from types import SimpleNamespace
+
+    from api.routes.agent import _task_id_of
+    from models.conversation import MessageRole
+
+    rows = [
+        SimpleNamespace(id="m1", role=MessageRole.user),
+        SimpleNamespace(id="m2", role=MessageRole.assistant),
+        SimpleNamespace(id="m3", role=MessageRole.user),
+    ]
+    assert _task_id_of(rows) == "m3"
+    assert _task_id_of([]) is None
+
+
+@pytest.mark.asyncio
+async def test_channel_turn_passes_the_task_id_and_strips_account_urls(client, session_factory):
+    import uuid
+
+    from sqlalchemy import select
+
+    from api.routes.agent import build_chat_applier
+    from main import app
+    from models.conversation import Message, MessageRole
+    from services.agent.runtime import AgentResponse
+    from tests.conftest import make_user
+
+    user, _ = await make_user(session_factory, "tg-task-id@example.com")
+    pixel = "data:image/jpeg;base64," + "Q" * 300
+    seen: dict[str, Any] = {}
+
+    class FakeRuntime:
+        async def chat(self, **kwargs):
+            seen.update(kwargs)
+            return AgentResponse(
+                content="Your grades: https://canvas.example.edu/grades?student=42#top",
+                tool_calls=[
+                    {
+                        "name": "browser.read",
+                        "result": {"ok": True, "mode": "account", "user_image": pixel, "url": "https://canvas.example.edu/grades?student=42"},
+                    }
+                ],
+            )
+
+    saved = getattr(app.state, "agent_runtime", None)
+    app.state.agent_runtime = FakeRuntime()
+    try:
+        outcome = await build_chat_applier(app, session_factory=session_factory)(str(user.id), "grades?")
+    finally:
+        app.state.agent_runtime = saved
+
+    assert outcome["content"] == "Your grades: https://canvas.example.edu/grades"
+    assert outcome["images"] == [{"data_url": pixel, "caption": "https://canvas.example.edu/grades"}]
+    async with session_factory() as session:
+        asked = (
+            await session.execute(
+                select(Message).where(
+                    Message.conversation_id == uuid.UUID(outcome["conversation_id"]),
+                    Message.role == MessageRole.user,
+                )
+            )
+        ).scalars().all()
+    assert seen["task_id"] == str(asked[-1].id)
+
+
+@pytest.mark.asyncio
+async def test_an_approved_call_runs_under_the_task_that_parked_it(client, session_factory):
+    import uuid
+    from datetime import datetime, timezone
+
+    from api.routes import agent as agent_routes
+    from main import app
+    from models.conversation import Message, MessageRole
+    from tests.conftest import auth_headers, make_user
+    from tests.test_resume_after_approval import ScriptedProvider, _park_action, _runtime
+
+    executor = RecordingExecutor()
+    runtime, _ = _runtime(session_factory, ScriptedProvider([LLMResponse(content="Done.")]), executor)
+    app.dependency_overrides[agent_routes.get_runtime] = lambda: runtime
+    try:
+        user, token = await make_user(session_factory, "approve-task@example.com")
+        conv = (await client.post("/api/agent/conversations", headers=auth_headers(token), json={})).json()
+        async with session_factory() as session:
+            older = Message(
+                conversation_id=uuid.UUID(conv["id"]),
+                role=MessageRole.user,
+                content="first ask",
+                created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            )
+            newest = Message(
+                conversation_id=uuid.UUID(conv["id"]),
+                role=MessageRole.user,
+                content="send it",
+                created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+            )
+            session.add_all([older, newest])
+            await session.commit()
+        action = await _park_action(session_factory, user, conv["id"])
+
+        decided = await client.post(
+            f"/api/agent/approvals/{action.action_id}", headers=auth_headers(token), json={"approved": True}
+        )
+        assert decided.status_code == 200
+        assert executor.calls[0]["task_id"] == str(newest.id)
+    finally:
+        app.dependency_overrides.pop(agent_routes.get_runtime, None)
+
+
+@pytest.mark.asyncio
+async def test_screenshot_bytes_are_delivered_but_not_persisted(client, session_factory):
+    import uuid
+
+    from sqlalchemy import select
+
+    from api.routes.agent import build_chat_applier
+    from main import app
+    from models.conversation import Message
+    from services.agent.runtime import AgentResponse
+    from tests.conftest import make_user
+
+    user, _ = await make_user(session_factory, "tg-no-blob@example.com")
+    blob = "data:image/png;base64," + "Z" * 5000
+
+    class FakeRuntime:
+        async def chat(self, **kwargs):
+            return AgentResponse(
+                content="Here.",
+                tool_calls=[{"name": "web.screenshot", "result": {"ok": True, "image": blob, "final_url": "https://a.example/"}}],
+            )
+
+    saved = getattr(app.state, "agent_runtime", None)
+    app.state.agent_runtime = FakeRuntime()
+    try:
+        outcome = await build_chat_applier(app, session_factory=session_factory)(str(user.id), "shot")
+    finally:
+        app.state.agent_runtime = saved
+
+    assert outcome["images"][0]["data_url"] == blob
+    async with session_factory() as session:
+        rows = (await session.execute(select(Message).where(Message.conversation_id == uuid.UUID(outcome["conversation_id"])))).scalars().all()
+    stored = [m.tool_calls for m in rows if m.tool_calls][0]
+    assert "delivered to the user" in stored[0]["result"]["image"]
+    assert "Z" * 100 not in str(stored)
+
+
+class _BlobRuntime:
+    """A runtime whose one turn captured a screenshot: the blocking and the
+    streaming route must both store the placeholder, never the bytes."""
+
+    blob = "data:image/png;base64," + "Z" * 5000
+
+    def _calls(self) -> list[dict[str, Any]]:
+        return [{"name": "web.screenshot", "result": {"ok": True, "image": self.blob}}]
+
+    async def chat(self, **kwargs):
+        from services.agent.runtime import AgentResponse
+
+        return AgentResponse(content="Here.", tool_calls=self._calls())
+
+    async def stream_chat(self, **kwargs):
+        yield {"type": "done", "data": {"content": "Here.", "tool_calls": self._calls()}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["messages", "messages/stream"])
+async def test_the_web_routes_persist_no_image_data(client, session_factory, path):
+    import uuid
+
+    from sqlalchemy import select
+
+    from api.routes import agent as agent_routes
+    from main import app
+    from models.conversation import Message
+    from tests.conftest import auth_headers, make_user
+
+    app.dependency_overrides[agent_routes.get_runtime] = lambda: _BlobRuntime()
+    try:
+        _, token = await make_user(session_factory, f"no-blob-{path.replace('/', '-')}@example.com")
+        conv = (await client.post("/api/agent/conversations", headers=auth_headers(token), json={})).json()
+        resp = await client.post(
+            f"/api/agent/conversations/{conv['id']}/{path}", headers=auth_headers(token), json={"content": "shot"}
+        )
+        assert resp.status_code in (200, 201)
+    finally:
+        app.dependency_overrides.pop(agent_routes.get_runtime, None)
+    async with session_factory() as session:
+        rows = (
+            (await session.execute(select(Message).where(Message.conversation_id == uuid.UUID(conv["id"]))))
+            .scalars()
+            .all()
+        )
+    stored = [m.tool_calls for m in rows if m.tool_calls]
+    assert stored and "delivered to the user" in stored[0][0]["result"]["image"]
+    assert "Z" * 100 not in str(stored)
+
+
+@pytest.mark.asyncio
+async def test_a_channel_approval_strips_account_urls_from_the_resumed_reply(client, session_factory):
+    from api.routes.agent import build_decision_applier
+    from main import app
+    from services.agent.runtime import AgentResponse
+    from tests.conftest import auth_headers, make_user
+    from tests.test_resume_after_approval import _park_action
+
+    user, token = await make_user(session_factory, "tg-approve-strip@example.com")
+    conv = (await client.post("/api/agent/conversations", headers=auth_headers(token), json={})).json()
+    action = await _park_action(session_factory, user, conv["id"])
+
+    class FakeRuntime:
+        async def approve_action(self, action_id, user_id, *, task_id=None):
+            return {"ok": True, "tool": "google_workspace.send_email", "result": "sent", "conversation_id": conv["id"]}
+
+        async def chat(self, **kwargs):
+            return AgentResponse(
+                content="Done: https://canvas.example.edu/grades?student=42#top",
+                tool_calls=[{"name": "browser.read", "result": {"ok": True, "mode": "account"}}],
+            )
+
+    saved = getattr(app.state, "agent_runtime", None)
+    app.state.agent_runtime = FakeRuntime()
+    try:
+        outcome = await build_decision_applier(app, session_factory=session_factory)(
+            str(user.id), action.action_id, True
+        )
+    finally:
+        app.state.agent_runtime = saved
+    assert outcome["summary"] == "Done: https://canvas.example.edu/grades"
+
+
+def test_url_stripping_ignores_scheme_case():
+    from api.routes.agent import strip_url_queries
+
+    assert strip_url_queries("HTTPS://Canvas.example.edu/grades?student=42") == "HTTPS://Canvas.example.edu/grades"
+
+
+@pytest.mark.asyncio
+async def test_browser_spend_is_recorded_on_the_open_session_and_never_launches_one():
+    import main as main_module
+    from services.tools.browser.session import TaskState
+
+    class Session:
+        task = TaskState(task_id="t1")
+
+    class Sessions:
+        def __init__(self) -> None:
+            self.sessions: dict[str, Any] = {"u1": Session()}
+
+        async def get(self, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("recording spend must never launch a browser")
+
+    sink = main_module.browser_spend_sink(Sessions())
+    await sink("u1", "t1", 0.01)
+    await sink("u1", "t1", 0.02)
+    assert Session.task.spend_usd == pytest.approx(0.03)
+    # No browser (its launch failed, or it was reaped) or another task: nothing to add to.
+    await sink("u2", "t1", 0.5)
+    await sink("u1", "other-task", 0.5)
+    assert Session.task.spend_usd == pytest.approx(0.03)

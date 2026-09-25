@@ -522,3 +522,21 @@ def test_resolve_tool_does_not_mistake_an_underscore_type_for_a_slug():
     assert resolved is not None
     assert resolved.connector_type == "google_workspace"
     assert resolved.slug is None
+
+
+# ---------------------------------------------------------------------------
+# Built-in browser (phase 1: browser.read; act/login follow)
+# ---------------------------------------------------------------------------
+
+
+def test_browser_policy_reads_run_unattended_and_writes_need_confirmation():
+    engine = PermissionEngine()
+    read = engine.check_permission("browser", "read", ActionCategory.READ)
+    assert read.allowed is True and read.requires_approval is False
+    write = engine.check_permission("browser", "act", ActionCategory.WRITE)
+    assert write.allowed is False and write.requires_approval is True
+    assert write.tier == PermissionTier.USER_CONFIRM
+    for category in (ActionCategory.DELETE, ActionCategory.EXECUTE, ActionCategory.FINANCIAL):
+        decision = engine.check_permission("browser", "x", category)
+        assert decision.tier == PermissionTier.HARD_BLOCKED, category
+        assert decision.allowed is False and decision.requires_approval is False

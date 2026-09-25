@@ -196,6 +196,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-dev.txt
+          python -m playwright install --with-deps chromium
 
       # pytest-cov is installed here rather than pinned in
       # requirements-dev.txt: coverage is a reporting concern for CI, and a
@@ -291,6 +292,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-dev.txt
+          python -m playwright install --with-deps chromium
 
       # Migrations only ever meet real Postgres here: SQLite renders native
       # ENUMs as VARCHAR, so the SQLite migration tests cannot prove the enum
@@ -310,3 +312,38 @@ jobs:
 
       - name: Run tests
         run: python -m pytest tests/ -v
+
+  # Windows covers unit tests only (spec §11.1): the platform layer runs for
+  # real here, and the browser-backed tests skip themselves through the
+  # `page`/`kit` fixtures because no Chromium is installed.
+  backend-windows-unit:
+    name: Backend (pytest, Windows unit)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: Sentient-AI-/backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: |
+            Sentient-AI-/backend/requirements.txt
+            Sentient-AI-/backend/requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      # No Chromium here (spec §11.1: Windows CI covers unit tests only);
+      # the browser-backed tests skip themselves through the `page`/`kit`
+      # fixtures, and the platform suite runs the Windows layer for real.
+      - name: Unit tests
+        run: python -m pytest tests/test_platform.py tests/test_browser_snapshot.py tests/test_browser_session.py tests/test_browser_handoff.py tests/test_browser_guard.py tests/test_browser_runtime.py tests/test_capability_gating.py tests/test_capabilities_report.py -q -p no:cacheprovider
+
+      - name: Types
+        run: python -m mypy services/platform services/tools/browser

@@ -118,6 +118,7 @@ def test_capability_for_tool_matches_exact_and_prefix():
     assert capabilities.capability_for_tool("web.search").key == "web_browsing"
     assert capabilities.capability_for_tool("reminders.create").key == "reminders"
     assert capabilities.capability_for_tool("desktop.screenshot").key == "screen"
+    assert capabilities.capability_for_tool("browser.read").key == "browser_control"
     assert capabilities.capability_for_tool("system.capabilities") is None
     assert capabilities.capability_for_tool("gmail.send_email") is None
 

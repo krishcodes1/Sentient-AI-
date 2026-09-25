@@ -83,6 +83,12 @@ from services.agent.runtime import (
     Tool,
 )
 from services.capabilities.base import Capability, CapabilityStatus
+from services.platform import current as current_platform
+from services.tools.browser import guard as browser_guard
+from services.tools.browser import handoff as browser_handoff
+from services.tools.browser.actions import ACTIONS as BROWSER_ACTIONS
+from services.tools.browser.actions import BrowserReadToolkit
+from services.tools.browser.session import BrowserSessionManager
 from services.tools.desktop import DesktopToolkit
 from services.tools.reminders import ReminderToolkit
 from services.tools.system import ALLOWLIST as SYSTEM_CAPABILITIES
@@ -445,10 +451,52 @@ CONNECTOR_CATALOG: dict[str, list[ToolSpec]] = {
             _schema(display={"type": "integer", "description": "Display index, 0 = main"}),
         ),
     ],
+    # Built-in, capability "browser_control" (off by default): the agent
+    # drives Crawler's own browser. One READ tool with one flat schema (the
+    # ``action`` enum picks the toolkit action) keeps the offered list
+    # small and Gemini-friendly. browser.act (WRITE, phase 3) and
+    # browser.login (WRITE, phase 2) join this family later.
+    "browser": [
+        ToolSpec(
+            "read",
+            "Read and move around in Crawler's own browser; it never types or "
+            "submits (that is browser.act). Pick one action: open(url) loads a "
+            "page and returns its outline, lines like '- link \"Grades\" [ref=e3]'; "
+            "click(ref) follows a link or opens a menu (a click that would submit, "
+            "send, buy or sign up is refused: use browser.act); snapshot(query?, "
+            "full?) re-reads the current page; find(text) returns the lines that "
+            "mention text together with their row; text(ref?) returns visible text; "
+            "scroll(direction); back; tabs and switch(index); wait(text or ms); "
+            "screenshot(ref?, for_model?) sends the person a picture (for_model=true "
+            "also returns a small copy you can look at); note(text) keeps a fact for "
+            "later steps; handoff(reason) asks the person to take over (sign-in, "
+            "CAPTCHA). Every result carries the fresh outline, so do not snapshot "
+            "right after open or click.",
+            ActionCategory.READ,
+            _schema(
+                action={
+                    "type": "string",
+                    "enum": list(BROWSER_ACTIONS),
+                    "description": "Which browser action to run",
+                    "required": True,
+                },
+                url={"type": "string", "description": "open: the http(s) page to open"},
+                ref={"type": "string", "description": "click, text, screenshot: an element ref from the outline, e.g. e7"},
+                text={"type": "string", "description": "find: text to look for; wait: text to wait for; note: the fact to keep"},
+                query={"type": "string", "description": "snapshot: keep only lines matching this"},
+                full={"type": "boolean", "description": "snapshot: the whole page (up to 24k characters) instead of the visible part"},
+                direction={"type": "string", "enum": ["up", "down", "top", "bottom"], "description": "scroll: which way"},
+                index={"type": "integer", "description": "switch: a tab index from tabs"},
+                ms={"type": "integer", "description": "wait: milliseconds to wait (at most 10000)"},
+                for_model={"type": "boolean", "description": "screenshot: also return a small copy for you to look at (default false)"},
+                reason={"type": "string", "description": "handoff: what the person should do and why"},
+            ),
+        ),
+    ],
 }
 
 # Types offered to every user with no connector row and no credentials.
-BUILTIN_CONNECTOR_TYPES: tuple[str, ...] = ("web", "reminders", "system", "desktop")
+BUILTIN_CONNECTOR_TYPES: tuple[str, ...] = ("web", "reminders", "system", "desktop", "browser")
 
 # The tier each built-in stands in for the connector row it does not
 # have. web and reminders run unattended by policy, so an account whose
@@ -463,6 +511,9 @@ _BUILTIN_STANCE: dict[str, str] = {
     # Reads are auto by policy, so this changes nothing for the one action
     # there is; the capability switch (off by default) is the real gate.
     "desktop": "user_confirm",
+    # Same for browser.read today; browser.act and browser.login must keep
+    # their approval card under every account default, like system does.
+    "browser": "user_confirm",
 }
 
 
@@ -867,7 +918,7 @@ def build_tools(
     include_builtins: bool = True,
     enabled_capabilities: Optional[frozenset[str]] = None,
 ) -> list[Tool]:
-    """Produce the runtime ``Tool`` objects for a user's active connectors.
+    """Produce the runtime ``Tool`` objects for a user's active connectors and the built-in families (web, reminders, system, desktop, browser).
 
     ``enabled_capabilities`` is the owner's effective set (see
     services/capabilities); tools of any other capability are not offered.
@@ -1108,18 +1159,22 @@ class _Builtin:
     """How the executor dispatches one built-in tool family.
 
     ``call(action, params, user_id, approved)`` runs the action on the
-    family's toolkit. ``allowed`` is every category the family may run at
-    all (the policy hard-blocks the rest; a spec in another category
-    reaching here means the catalog gained an action the policy was never
-    written for). ``confirm`` is the subset that runs only with
-    ``approved=True``, with ``confirm_note`` saying why in the refusal.
+    family's toolkit; with ``task_scoped`` it is
+    ``call(action, params, user_id, approved, task_id)``, because that
+    toolkit keeps state per task (caps, notes) and must be told which one.
+    ``allowed`` is every category the family may run at all (the policy
+    hard-blocks the rest; a spec in another category reaching here means
+    the catalog gained an action the policy was never written for).
+    ``confirm`` is the subset that runs only with ``approved=True``, with
+    ``confirm_note`` saying why in the refusal.
     """
 
     label: str
-    call: Callable[[str, dict[str, Any], str, bool], Awaitable[dict[str, Any]]]
+    call: Callable[..., Awaitable[dict[str, Any]]]
     allowed: frozenset[ActionCategory]
     confirm: frozenset[ActionCategory] = frozenset()
     confirm_note: str = "changes something"
+    task_scoped: bool = False
 
 
 class ConnectorToolExecutor:
@@ -1131,7 +1186,7 @@ class ConnectorToolExecutor:
     policy), authenticate, execute, and return the sanitized result.
 
     Built-in tools (``web.*``, ``reminders.*``, ``system.*``,
-    ``desktop.*``) run here too, but take none of that path. They are
+    ``desktop.*``, ``browser.*``) run here too, but take none of that path. They are
     first checked against the owner's capability report
     (``capability_gate``; the registry defaults when unwired) and refused
     unless theirs is on; the refusal says whether it is off, blocked or
@@ -1164,6 +1219,7 @@ class ConnectorToolExecutor:
         reminder_toolkit: Optional[ReminderToolkit] = None,
         system_toolkit: Optional[SystemToolkit] = None,
         desktop_toolkit: Optional[DesktopToolkit] = None,
+        browser_toolkit: Optional[BrowserReadToolkit] = None,
         capability_gate: Optional[CapabilityGate] = None,
     ) -> None:
         self._session_factory = session_factory
@@ -1171,6 +1227,13 @@ class ConnectorToolExecutor:
         reminders = reminder_toolkit or ReminderToolkit(session_factory)
         system = system_toolkit or SystemToolkit()
         desktop = desktop_toolkit or DesktopToolkit()
+        # Nothing launches here: the manager starts a browser on the first
+        # browser.read. main.py hands in the one built for this platform.
+        browser = browser_toolkit or BrowserReadToolkit(
+            BrowserSessionManager(headless=True, platform=current_platform()),
+            guard=browser_guard,
+            handoff=browser_handoff,
+        )
         read, write = ActionCategory.READ, ActionCategory.WRITE
         # One entry per built-in family (see services/capabilities/README.md).
         # Only the reminder toolkit is handed the caller's identity: it is
@@ -1203,6 +1266,20 @@ class ConnectorToolExecutor:
                 lambda a, p, uid, ok: desktop.execute(a, p),
                 frozenset({read}),
             ),
+            # browser.read's own ``action`` argument names the toolkit
+            # action; the tool-level action ("read") is the tier. The task
+            # id is the runtime's, never the model's.
+            "browser": _Builtin(
+                "Browser",
+                lambda a, p, uid, ok, task: browser.execute(
+                    p.get("action", ""),
+                    {k: v for k, v in p.items() if k != "action"},
+                    user_id=uid,
+                    task_id=task,
+                ),
+                frozenset({read}),
+                task_scoped=True,
+            ),
         }
         # Returns the owner's capability report by key. Unwired, the
         # registry defaults apply (see _gate_refusal), so an off-by-default
@@ -1232,8 +1309,8 @@ class ConnectorToolExecutor:
         task_id: Optional[str] = None,
     ) -> dict[str, Any]:
         # ``task_id`` is the runtime's task identity (see
-        # ToolExecutor.execute); no family here keeps per-task state yet, so
-        # it is accepted and unused until the browser toolkit takes it.
+        # ToolExecutor.execute); only task-scoped families (the browser
+        # toolkit) use it, see the builtin dispatch below.
         from services.mcp.integration import is_mcp_tool
 
         if is_mcp_tool(tool_name):
@@ -1305,6 +1382,14 @@ class ConnectorToolExecutor:
                         "approves it."
                     ),
                 }
+            if builtin.task_scoped:
+                # The runtime names the task it carries across approval and
+                # handoff resumes (its conversation id when nothing else
+                # does); a caller that passes none gets a task keyed on the
+                # user, so caps still apply and never reset within a call.
+                return await builtin.call(
+                    resolved.action, dict(arguments), user_id, approved, task_id or user_id
+                )
             return await builtin.call(resolved.action, dict(arguments), user_id, approved)
 
         if self._session_factory is None:

@@ -431,3 +431,92 @@ def test_the_report_and_screen_capture_name_one_executable(monkeypatch, tmp_path
     assert crawler_executable() == str(real.resolve())
     assert capabilities.default_context().executable == crawler_executable()
     assert desktop._screen_context().executable == crawler_executable()
+
+
+# ── browser_control ──────────────────────────────────────────────────────
+
+
+def test_report_context_carries_the_browser_facts_with_safe_defaults():
+    plain = ctx()
+    assert plain.playwright_installed is False and plain.browser_channel == ""
+    assert hash(ctx(playwright_installed=True, browser_channel="chrome"))  # stays a cache key
+
+
+def test_default_context_reads_playwright_and_the_platform_channel(monkeypatch):
+    from services import platform as platform_pkg
+    from services.tools import system
+
+    monkeypatch.setattr(system, "playwright_installed", lambda: True)
+    monkeypatch.setattr(
+        platform_pkg, "current", lambda: SimpleNamespace(browser_channel=lambda: "msedge")
+    )
+    context = capabilities.default_context()
+    assert context.playwright_installed is True
+    assert context.browser_channel == "msedge"
+
+
+def test_default_context_container_has_no_channel(monkeypatch):
+    from services.platform import current
+
+    monkeypatch.setenv("CRAWLER_PLATFORM", "container")
+    current.cache_clear()
+    try:
+        assert capabilities.default_context().browser_channel == ""
+    finally:
+        current.cache_clear()
+
+
+@pytest.mark.parametrize(
+    "over, available, hint",
+    [
+        (
+            {"playwright_installed": False, "browser_channel": "chrome", "browser_installed": True},
+            False,
+            "Playwright",
+        ),
+        (
+            {"playwright_installed": True, "browser_channel": "chrome", "browser_installed": False},
+            True,
+            "",
+        ),
+        (
+            {"playwright_installed": True, "browser_channel": "", "browser_installed": True},
+            True,
+            "",
+        ),
+        (
+            {"playwright_installed": True, "browser_channel": "", "browser_installed": False},
+            False,
+            "Chromium",
+        ),
+    ],
+)
+def test_browser_control_availability(over, available, hint):
+    from services.capabilities import browser_control
+
+    result = browser_control.availability(ctx(**over))
+    assert result.available is available
+    assert hint in result.reason
+
+
+def test_browser_control_declaration_is_off_high_risk_and_installable():
+    from services.capabilities import browser_control
+
+    cap = browser_control.CAPABILITY
+    assert cap.key == "browser_control" and cap.label == "Control a browser"
+    assert cap.tools == ("browser.",)
+    assert cap.default_enabled is False and cap.risk == "high"
+    assert cap.install == "browser" and cap.probe is None
+
+
+def test_browser_control_is_registered_off_by_default():
+    assert capabilities.default_switches()["browser_control"] is False
+    status = by_key(capabilities.report({}, ctx()))["browser_control"]
+    assert status.effective == "off" and status.risk == "high"
+
+
+def test_browser_control_blocked_offers_the_bundled_install():
+    status = by_key(
+        capabilities.report({"browser_control": True}, ctx(playwright_installed=True, browser_channel="", browser_installed=False))
+    )["browser_control"]
+    assert status.effective == "blocked" and status.install == "browser" and status.install_size_hint

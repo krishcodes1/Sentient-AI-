@@ -47,7 +47,7 @@ from services.capabilities.prompt import render_permissions_block
 from services.memory import render_memory_block
 from services.agent.context_manager import compress_tool_result
 from services.agent.providers import ProviderError, ProviderNotConfigured
-from services.agent.runtime import AgentRuntime
+from services.agent.runtime import AgentRuntime, is_browser_tool, redact_binary_for_model
 from services.agent.tool_registry import ConnectorSpec, build_tools, effective_tier, resolve_tool
 
 logger = structlog.get_logger(__name__)
@@ -837,10 +837,9 @@ async def send_message(
         .where(Message.conversation_id == conversation.id)
         .order_by(Message.created_at)
     )
-    history = [
-        {"role": m.role.value, "content": m.content}
-        for m in history_result.scalars().all()
-    ]
+    rows = list(history_result.scalars().all())
+    history = [{"role": m.role.value, "content": m.content} for m in rows]
+    task_id = _task_id_of(rows)
     _attach_images(history, body.images)
 
     # 3. Build the tool list (connectors + MCP) and memory block. The
@@ -871,6 +870,7 @@ async def send_message(
             llm_model=current_user.llm_model,
             memory_block=memory_block,
             permissions_text=permissions_text,
+            task_id=task_id,
         )
     except ProviderNotConfigured as exc:
         # Not an upstream failure: no key for the provider this turn needs.
@@ -899,7 +899,8 @@ async def send_message(
         conversation_id=conversation.id,
         role=MessageRole.assistant,
         content=agent_response.content,
-        tool_calls=agent_response.tool_calls or None,
+        # Image data is delivered, never stored (spec §9): the row keeps the placeholder the model saw.
+        tool_calls=redact_binary_for_model(agent_response.tool_calls) or None,
         **_usage_columns(
             agent_response.usage, agent_response.provider, agent_response.model
         ),
@@ -976,7 +977,7 @@ async def _persist_assistant_detached(
                     conversation_id=conversation_id,
                     role=MessageRole.assistant,
                     content=content,
-                    tool_calls=tool_calls or None,
+                    tool_calls=redact_binary_for_model(tool_calls) or None,
                     **_usage_columns(usage, llm_provider, llm_model),
                 )
             )
@@ -1050,10 +1051,9 @@ async def stream_message(
         .where(Message.conversation_id == conversation.id)
         .order_by(Message.created_at)
     )
-    history = [
-        {"role": m.role.value, "content": m.content}
-        for m in history_result.scalars().all()
-    ]
+    rows = list(history_result.scalars().all())
+    history = [{"role": m.role.value, "content": m.content} for m in rows]
+    task_id = _task_id_of(rows)
     _attach_images(history, body.images)
     installation = getattr(request.app.state, "installation", None)
     tools, memory_block, permissions_text = await _build_tools_and_memory(
@@ -1109,6 +1109,7 @@ async def stream_message(
                     memory_block=memory_block,
                     on_orphaned=_persist_orphaned,
                     permissions_text=permissions_text,
+                    task_id=task_id,
                 ):
                     etype = event.get("type", "message")
                     data = event.get("data", {})
@@ -1164,7 +1165,7 @@ async def stream_message(
                     conversation_id=conv_id,
                     role=MessageRole.assistant,
                     content=final_content,
-                    tool_calls=tool_calls_payload or None,
+                    tool_calls=redact_binary_for_model(tool_calls_payload) or None,
                     **_usage_columns(usage_payload, turn_provider, turn_model),
                 )
                 db.add(assistant)
@@ -1265,12 +1266,13 @@ async def _resume_after_approval(
         .where(Message.conversation_id == conversation.id)
         .order_by(Message.created_at)
     )
-    history = [
-        {"role": m.role.value, "content": m.content}
-        for m in history_result.scalars().all()
-    ]
+    rows = list(history_result.scalars().all())
+    history = [{"role": m.role.value, "content": m.content} for m in rows]
     if not history:
         return None
+    # The decision row is an assistant message, so this is still the user
+    # message that started the task: the resume keeps its caps.
+    task_id = _task_id_of(rows)
 
     tools, memory_block, permissions_text = await _build_tools_and_memory(
         mcp_catalog, current_user, db, installation
@@ -1288,6 +1290,7 @@ async def _resume_after_approval(
         llm_model=current_user.llm_model,
         memory_block=memory_block,
         permissions_text=permissions_text,
+        task_id=task_id,
     )
     if not (agent_response.content or "").strip():
         return None
@@ -1295,7 +1298,7 @@ async def _resume_after_approval(
         conversation_id=conversation.id,
         role=MessageRole.assistant,
         content=agent_response.content,
-        tool_calls=agent_response.tool_calls or None,
+        tool_calls=redact_binary_for_model(agent_response.tool_calls) or None,
         **_usage_columns(
             agent_response.usage, agent_response.provider, agent_response.model
         ),
@@ -1325,6 +1328,38 @@ def _render_decision_message(
     return content, [{"name": tool_name, "result": safe_result, "approved": True}]
 
 
+async def _parked_task_id(db: AsyncSession, current_user: User, action_id: str) -> Optional[str]:
+    """The task id of a pending action: the newest user message of the
+    conversation it was parked in (the same identity ``_task_id_of`` gives
+    the turn that parked it), so the approved call runs under that turn's
+    TaskState. None when the action is unknown or has no conversation; the
+    runtime then falls back to the conversation id.
+
+    Read through the request's own session rather than a second one: the
+    decision below must stay the only other database work in this request
+    (the approval store's single-use update)."""
+    try:
+        action_uuid = uuid.UUID(action_id)
+    except ValueError:
+        return None
+    newest = (
+        await db.execute(
+            select(Message.id)
+            .join(PendingAction, PendingAction.conversation_id == Message.conversation_id)
+            .join(Conversation, Conversation.id == Message.conversation_id)
+            .where(
+                PendingAction.id == action_uuid,
+                PendingAction.user_id == current_user.id,
+                Conversation.user_id == current_user.id,
+                Message.role == MessageRole.user,
+            )
+            .order_by(Message.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return str(newest) if newest is not None else None
+
+
 async def _apply_decision(
     db: AsyncSession,
     runtime: AgentRuntime,
@@ -1339,13 +1374,18 @@ async def _apply_decision(
     and out-of-band decision channels (Telegram); returns the runtime's
     result dict, or {"error": ...} for unknown/expired/foreign actions.
     """
+    # The task (spec §10) the parked call belongs to, looked up before the
+    # connection is released below: the approved call then runs under the
+    # same per-task browser caps as the turn that parked it.
+    task_id = await _parked_task_id(db, current_user, action_id) if approved else None
+
     # Release the pooled connection before the decision: an approval
     # executes the real tool (connector/MCP HTTP) and then runs a resumed
     # agent turn, neither of which needs this session.
     await db.commit()
 
     if approved:
-        result = await runtime.approve_action(action_id, str(current_user.id))
+        result = await runtime.approve_action(action_id, str(current_user.id), task_id=task_id)
     else:
         result = await runtime.deny_action(action_id, str(current_user.id))
 
@@ -1366,8 +1406,11 @@ async def _apply_decision(
             )
             conversation = conv_result.scalar_one_or_none()
             if conversation is not None and conversation.user_id == current_user.id:
+                # The row (content and tool_calls) records the placeholder,
+                # never image data (spec §9); the caller still gets the
+                # result as the tool returned it.
                 content, tool_calls_payload = _render_decision_message(
-                    approved, tool_name, result.get("result")
+                    approved, tool_name, redact_binary_for_model(result.get("result"))
                 )
                 db.add(
                     Message(
@@ -1402,7 +1445,15 @@ async def _apply_decision(
                             db.add(resumed)
                             conversation.updated_at = datetime.now(timezone.utc)
                             await db.flush()
-                            result["assistant_reply"] = resumed.content
+                            # Only a channel reads this (the HTTP route drops
+                            # it); like build_chat_applier, a resumed turn
+                            # that read a logged-in site loses URL queries
+                            # before they reach Telegram (spec §9).
+                            result["assistant_reply"] = (
+                                strip_url_queries(resumed.content)
+                                if _account_mode(resumed.tool_calls)
+                                else resumed.content
+                            )
                     except Exception as exc:
                         logger.warning(
                             "resume_after_approval_failed",
@@ -1468,6 +1519,49 @@ MAX_CHANNEL_IMAGES = 3
 # anything else never reach the person's chat as a photo.
 _CHANNEL_IMAGE_URL = re.compile(r"data:image/(?:jpeg|png|webp);base64,")
 
+_URL_WITH_QUERY = re.compile(r"(https?://[^\s<>\"'()]+?)[?#][^\s<>\"'()]*", re.IGNORECASE)
+
+
+def strip_url_queries(text: str) -> str:
+    """Query strings and fragments removed from every URL in *text* (spec
+    §9): on a turn that read a logged-in site they carry tokens and ids."""
+    return _URL_WITH_QUERY.sub(r"\1", text)
+
+
+def _task_id_of(rows: list[Any]) -> Optional[str]:
+    """The task identity (spec §10): the newest user message's id, so a
+    task keeps its caps across approval and handoff resumes."""
+    for row in reversed(rows):
+        if row.role == MessageRole.user:
+            return str(row.id)
+    return None
+
+
+def _account_mode(tool_calls: Any) -> bool:
+    """True when this turn touched a logged-in site: any browser result
+    whose ``mode`` is "account" — or that carries no mode at all (a toolkit
+    that does not say is treated as private, fail closed)."""
+    for tc in tool_calls if isinstance(tool_calls, list) else []:
+        if not isinstance(tc, dict):
+            continue
+        result = tc.get("result")
+        if is_browser_tool(tc.get("name")) and isinstance(result, dict):
+            if result.get("mode", "account") == "account":
+                return True
+    return False
+
+
+def _channel_caption(name: str, result: dict[str, Any]) -> str:
+    needs = result.get("needs_human")
+    if isinstance(needs, dict) and needs.get("detail"):
+        return str(needs["detail"])
+    return str(
+        result.get("title")
+        or result.get("final_url")
+        or result.get("url")
+        or ("Your screen" if name.startswith("desktop.") else "")
+    )
+
 
 def _channel_image(name: str, result: Any) -> Optional[str]:
     """The data URL a channel may deliver for one tool call, else None.
@@ -1480,9 +1574,16 @@ def _channel_image(name: str, result: Any) -> Optional[str]:
 
     if is_mcp_tool(name) or resolve_tool(name) is None or not isinstance(result, dict):
         return None
-    image = result.get("image")
-    if isinstance(image, str) and _CHANNEL_IMAGE_URL.match(image):
-        return image
+    # A browser screenshot's ``user_image`` is the person's copy (masked,
+    # never shown to the model); a handoff nests it under ``needs_human``;
+    # ``image`` is the model's copy or a web/desktop screenshot. Whichever
+    # exists is delivered; with both, the person's.
+    needs = result.get("needs_human")
+    candidates = [needs.get("user_image")] if isinstance(needs, dict) else []
+    candidates += [result.get("user_image"), result.get("image")]
+    for image in candidates:
+        if isinstance(image, str) and _CHANNEL_IMAGE_URL.match(image):
+            return image
     return None
 
 
@@ -1553,10 +1654,9 @@ def build_chat_applier(app: Any, session_factory: Any = async_session):
                 .where(Message.conversation_id == conversation.id)
                 .order_by(Message.created_at)
             )
-            history = [
-                {"role": m.role.value, "content": m.content}
-                for m in history_result.scalars().all()
-            ]
+            rows = list(history_result.scalars().all())
+            history = [{"role": m.role.value, "content": m.content} for m in rows]
+            task_id = _task_id_of(rows)
             tools, memory_block, permissions_text = await _build_tools_and_memory(
                 mcp_catalog, user, db, installation
             )
@@ -1576,6 +1676,7 @@ def build_chat_applier(app: Any, session_factory: Any = async_session):
                 llm_model=model,
                 memory_block=memory_block,
                 permissions_text=permissions_text,
+                task_id=task_id,
             )
         except ProviderNotConfigured as exc:
             # The channel sends "error" verbatim: the bare sentence, with the
@@ -1612,7 +1713,7 @@ def build_chat_applier(app: Any, session_factory: Any = async_session):
                     conversation_id=conversation.id,
                     role=MessageRole.assistant,
                     content=agent_response.content,
-                    tool_calls=agent_response.tool_calls or None,
+                    tool_calls=redact_binary_for_model(agent_response.tool_calls) or None,
                     **_usage_columns(
                         agent_response.usage,
                         agent_response.provider,
@@ -1623,10 +1724,15 @@ def build_chat_applier(app: Any, session_factory: Any = async_session):
             conversation.updated_at = datetime.now(timezone.utc)
             await db.commit()
 
-        # Images a tool captured (web.screenshot, desktop.screenshot, ...)
-        # are delivered to the person as photos; the model only ever saw a
-        # placeholder (see runtime.redact_binary_for_model). Capped so one
-        # turn that loops on a screenshot tool cannot flood the chat.
+        # Images a tool captured (web.screenshot, desktop.screenshot,
+        # browser screenshots and handoffs) are delivered to the person as
+        # photos; the model only ever saw a placeholder (see
+        # runtime.redact_binary_for_model). Capped so one turn that loops on
+        # a screenshot tool cannot flood the chat. On a turn that read a
+        # logged-in site, URLs lose their query strings and fragments
+        # before they reach Telegram's servers (spec §9).
+        account = _account_mode(agent_response.tool_calls)
+        reply = strip_url_queries(agent_response.content) if account else agent_response.content
         images: list[dict[str, str]] = []
         for tc in agent_response.tool_calls:
             if len(images) >= MAX_CHANNEL_IMAGES:
@@ -1636,13 +1742,13 @@ def build_chat_applier(app: Any, session_factory: Any = async_session):
             data_url = _channel_image(name, result)
             if data_url is None or not isinstance(result, dict):
                 continue
-            caption = result.get("final_url") or result.get("url") or (
-                "Your screen" if name.startswith("desktop.") else ""
+            caption = _channel_caption(name, result)
+            images.append(
+                {"data_url": data_url, "caption": strip_url_queries(caption) if account else caption}
             )
-            images.append({"data_url": data_url, "caption": str(caption)})
 
         return {
-            "content": agent_response.content,
+            "content": reply,
             "conversation_id": str(conversation_id),
             "images": images,
             "tool_calls": [tc.get("name", "") for tc in agent_response.tool_calls],

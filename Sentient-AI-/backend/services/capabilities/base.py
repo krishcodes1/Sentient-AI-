@@ -47,6 +47,11 @@ class ReportContext:
     telegram_configured: bool
     browser_installed: bool
     executable: str = ""
+    # For browser_control: the Playwright package (the bundled Chromium is
+    # ``browser_installed``) and the installed browser the platform layer
+    # would drive ("chrome" / "msedge"; "" when there is none).
+    playwright_installed: bool = False
+    browser_channel: str = ""
 
 
 @dataclass(frozen=True)

@@ -125,6 +125,20 @@ _DEFAULT_POLICIES: dict[tuple[str, ActionCategory], PermissionTier] = {
     ("desktop", ActionCategory.DELETE): PermissionTier.HARD_BLOCKED,
     ("desktop", ActionCategory.EXECUTE): PermissionTier.HARD_BLOCKED,
     ("desktop", ActionCategory.FINANCIAL): PermissionTier.HARD_BLOCKED,
+    # Built-in browser — the agent drives Crawler's own browser. Opening a
+    # page, reading it and moving between pages is a read and runs
+    # unattended once the owner switches the capability on; the toolkit
+    # decides at execution time, from live page facts, whether a click is
+    # consequential (submit, sign up, pay) and refuses it at read tier.
+    # Typing, selecting and consequential clicks are browser.act, and the
+    # login itself is browser.login: WRITE, so the approval card applies
+    # every time. Nothing in this family deletes or executes, and money
+    # never moves through a browser the agent drives: blocked outright.
+    ("browser", ActionCategory.READ): PermissionTier.AUTO_APPROVE,
+    ("browser", ActionCategory.WRITE): PermissionTier.USER_CONFIRM,
+    ("browser", ActionCategory.DELETE): PermissionTier.HARD_BLOCKED,
+    ("browser", ActionCategory.EXECUTE): PermissionTier.HARD_BLOCKED,
+    ("browser", ActionCategory.FINANCIAL): PermissionTier.HARD_BLOCKED,
     # Todoist
     ("todoist", ActionCategory.READ): PermissionTier.AUTO_APPROVE,
     ("todoist", ActionCategory.WRITE): PermissionTier.USER_CONFIRM,

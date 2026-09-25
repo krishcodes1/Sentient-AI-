@@ -774,3 +774,99 @@ async def test_approval_whose_gate_errors_is_audited_as_blocked():
         (CAPABILITY_GATE_ERROR_POLICY, CAPABILITY_GATE_ERROR_REASON)
     ]
     assert GATE_SECRET not in repr(outcome) and GATE_SECRET not in repr(audit.entries)
+
+
+# ── browser.read ─────────────────────────────────────────────────────────
+
+
+class RecordingBrowserToolkit:
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    async def execute(self, action, params, *, user_id, task_id):
+        self.calls.append((action, params, user_id, task_id))
+        return {"ok": True}
+
+
+def test_browser_is_a_builtin_type_with_a_stance():
+    from services.agent.tool_registry import _BUILTIN_STANCE
+
+    assert "browser" in BUILTIN_CONNECTOR_TYPES
+    assert _BUILTIN_STANCE["browser"] == "user_confirm"
+
+
+def test_browser_read_is_offered_only_with_browser_control_on():
+    from services.tools.browser.actions import ACTIONS
+
+    assert "browser.read" not in names(build_tools([]))
+    offered = build_tools([], enabled_capabilities=frozenset({"browser_control"}))
+    tool = next(t for t in offered if t.name == "browser.read")
+    assert tool.permission_tier == "auto"
+    assert tool.parameters["required"] == ["action"]
+    assert tool.parameters["properties"]["action"]["enum"] == list(ACTIONS)
+    assert set(tool.parameters["properties"]) == {
+        "action", "url", "ref", "text", "query", "full", "direction", "index", "ms", "for_model", "reason",
+    }
+
+
+def test_browser_read_resolves_as_a_read():
+    resolved = resolve_tool("browser.read")
+    assert resolved is not None and resolved.spec.category.value == "read"
+    assert resolve_tool("browser__deadbeef.read") is None
+
+
+@pytest.mark.asyncio
+async def test_executor_hands_the_browser_toolkit_the_action_user_and_task():
+    kit = RecordingBrowserToolkit()
+    ex = ConnectorToolExecutor(
+        session_factory=None,
+        capability_gate=_gate("browser_control", playwright_installed=True, browser_channel="chrome"),
+        browser_toolkit=kit,
+    )
+    result = await ex.execute(
+        "browser.read",
+        {"action": "open", "url": "https://example.com/", "user_confirmed": True},
+        user_id="u1",
+        task_id="conv-9",
+    )
+    assert result == {"ok": True}
+    assert kit.calls == [("open", {"url": "https://example.com/"}, "u1", "conv-9")]
+
+
+@pytest.mark.asyncio
+async def test_executor_task_id_falls_back_to_the_user():
+    kit = RecordingBrowserToolkit()
+    ex = ConnectorToolExecutor(
+        session_factory=None,
+        capability_gate=_gate("browser_control", playwright_installed=True, browser_channel="chrome"),
+        browser_toolkit=kit,
+    )
+    await ex.execute("browser.read", {"action": "tabs"}, user_id="u1")
+    assert kit.calls == [("tabs", {}, "u1", "u1")]
+
+
+@pytest.mark.asyncio
+async def test_executor_refuses_browser_read_when_browser_control_is_off_or_blocked():
+    kit = RecordingBrowserToolkit()
+    off = ConnectorToolExecutor(session_factory=None, capability_gate=_gate("web_browsing"), browser_toolkit=kit)
+    result = await off.execute("browser.read", {"action": "open", "url": "x"}, user_id="u1")
+    assert result["ok"] is False and result["capability"] == "browser_control" and result["state"] == "off"
+    blocked = ConnectorToolExecutor(
+        session_factory=None,
+        capability_gate=_gate("browser_control", playwright_installed=False),
+        browser_toolkit=kit,
+    )
+    result = await blocked.execute("browser.read", {"action": "open", "url": "x"}, user_id="u1")
+    assert result["state"] == "blocked" and "Playwright" in result["error"]
+    assert kit.calls == []
+
+
+@pytest.mark.asyncio
+async def test_permission_adapter_blocks_browser_read_until_the_owner_turns_it_on():
+    adapter = RuntimePermissionAdapter(capability_gate=_gate("web_browsing"))
+    assert await adapter.check("u1", "browser.read", {}) == "blocked"
+    assert await adapter.get_policy_name("u1", "browser.read") == CAPABILITY_OFF_POLICY
+    on = RuntimePermissionAdapter(
+        capability_gate=_gate("browser_control", playwright_installed=True, browser_channel="chrome")
+    )
+    assert await on.check("u1", "browser.read", {}) == "approved"
