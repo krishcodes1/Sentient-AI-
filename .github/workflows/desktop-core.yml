@@ -43,7 +43,7 @@ jobs:
         shell: bash
         working-directory: Sentient-AI-/desktop/src-tauri
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # rustup is preinstalled on GitHub's macOS and Windows images.
       - name: Set up Rust (stable, clippy, rustfmt)
