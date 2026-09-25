@@ -11,7 +11,12 @@ use tauri::test::{get_ipc_response, mock_builder, MockRuntime, INVOKE_KEY};
 use tauri::webview::InvokeRequest;
 use tauri::{App, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
+// The app's own pages: Tauri serves them from a custom scheme on macOS and Linux,
+// and from http://tauri.localhost on Windows (WebView2 cannot register custom schemes).
+#[cfg(not(windows))]
 const LOCAL_ORIGIN: &str = "tauri://localhost/index.html";
+#[cfg(windows)]
+const LOCAL_ORIGIN: &str = "http://tauri.localhost/index.html";
 const CRAWLER_ORIGIN: &str = "http://localhost:3000/";
 
 fn app() -> App<MockRuntime> {
