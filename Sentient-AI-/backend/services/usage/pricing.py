@@ -1,8 +1,15 @@
 """Holds list prices per (provider, model) and estimates the cost of a turn from
 its token counts.
 
-Why it exists: The usage summary needs one price table with exact matches only,
-so a model that is not listed shows no cost rather than a wrong one.
+Why it exists: Every cost shown (dashboard, /usage, the Telegram reply line)
+needs one price table. Lookups fold spelling only (case, a models/ prefix,
+a pinned -001 or -latest suffix), so a model that is not listed shows no
+cost rather than a near-miss's wrong one.
+
+Connects to: nothing external; a static price table.
+Used by: services/usage/summary.py (dashboard totals, /usage and the
+per-reply Telegram cost line) and the setup wizard's model suggestions
+(each suggested model must have a price).
 
 List prices used to ESTIMATE what a turn cost.
 
@@ -15,20 +22,22 @@ a naive estimate and the bill. The provider's own console is the source of
 truth; this table exists so a person can see roughly where their spend is
 going without leaving the app.
 
-Lookups are exact on (provider, model). A model that is not listed gets no
-price at all rather than the price of something that looks similar: a
-near-miss match (say, pricing a new Opus at an older Opus's rate) would be
-off by 3x and would look just as authoritative as a correct one.
+Lookups are exact on (provider, model) after normalising spelling only (see
+``normalize_model_id``). A model that is not listed gets no price at all
+rather than the price of something that looks similar: a near-miss match
+(say, pricing a new Opus at an older Opus's rate) would be off by 3x and
+would look just as authoritative as a correct one.
 """
 
 from __future__ import annotations
 
+import re
 from typing import NamedTuple, Optional
 
 # The date the CURRENT section below was checked against the providers'
 # pricing pages. Review when a provider announces a price change or a
 # model is added to the Settings page.
-PRICING_AS_OF = "2026-09-23"
+PRICING_AS_OF = "2026-09-24"
 
 # Anthropic bills a (5-minute, ephemeral) cache write at 1.25x the input
 # rate. No other provider here charges for writing its cache.
@@ -61,8 +70,10 @@ _PRICES: dict[tuple[str, str], ModelPrice] = {
     ("openai", "gpt-5.4-nano"): ModelPrice(0.20, 0.02, 1.25),
     ("openai", "gpt-5.6-luna"): ModelPrice(0.20, 0.02, 1.20),
     ("openai", "gpt-5-mini"): ModelPrice(0.25, 0.025, 2.00),
-    # Google. The 3.7/3.8 Flash rates are introductory, valid until
-    # 2026-12-31; re-check them then.
+    # Google. Output rates include thinking tokens. The 3.7/3.8 Flash rates
+    # are introductory, valid until 2026-12-31 ($1.50 / $0.15 / $7.50 from
+    # 2027-01-01); re-check them then.
+    ("gemini", "gemini-3.5-flash"): ModelPrice(1.50, 0.15, 9.00),
     ("gemini", "gemini-3.5-flash-lite"): ModelPrice(0.30, 0.03, 2.50),
     # An alias Google moves between releases; it pointed at
     # gemini-3.5-flash-lite when this table was dated.
@@ -125,14 +136,97 @@ _FREE_PROVIDERS = frozenset({"ollama"})
 _FREE = ModelPrice(0.0, 0.0, 0.0)
 
 
+# Spellings of one Gemini model that bill identically: a pinned stable
+# revision ("-001") and the "-latest" suffix on an already-versioned id.
+# Anchored at the end and removed once, never used as a prefix match:
+# "gemini-3.5-flash" is a prefix of "gemini-3.5-flash-lite", and the two
+# are priced 5x apart. Previews ("-preview-09-2026") are deliberately NOT
+# folded into their base model: Google has priced previews differently
+# before, so an unlisted preview stays unpriced rather than guessed.
+_GEMINI_EQUIVALENT_SUFFIX = re.compile(r"-(?:latest|\d{3})$")
+
+
+def normalize_model_id(provider: Optional[str], model: Optional[str]) -> str:
+    """The spelling a model id is priced (and grouped) under.
+
+    Case and surrounding whitespace never change the model, and Gemini
+    accepts its REST resource name ("models/gemini-3.5-flash") for the
+    same model, so both are folded away. Nothing else is rewritten here.
+    """
+    name = (model or "").strip().lower()
+    if (provider or "").strip().lower() == "gemini" and name.startswith("models/"):
+        name = name[len("models/") :]
+    return name
+
+
 def price_for(provider: Optional[str], model: Optional[str]) -> Optional[ModelPrice]:
     """Per-1M-token rates for one model, or None when unknown."""
     name = (provider or "").strip().lower()
     if name in _FREE_PROVIDERS:
         return _FREE
-    if not name or not model:
+    model_id = normalize_model_id(name, model)
+    if not name or not model_id:
         return None
-    return _PRICES.get((name, model.strip()))
+    # Exact first, so a listed alias ("gemini-flash-lite-latest") keeps its
+    # own row instead of being cut down to something else.
+    price = _PRICES.get((name, model_id))
+    if price is None and name == "gemini":
+        base = _GEMINI_EQUIVALENT_SUFFIX.sub("", model_id)
+        if base != model_id:
+            price = _PRICES.get((name, base))
+    return price
+
+
+def _same_model(provider: Optional[str], a: Optional[str], b: Optional[str]) -> bool:
+    """Whether two ids are spellings of one billed model."""
+    name = (provider or "").strip().lower()
+    left, right = normalize_model_id(name, a), normalize_model_id(name, b)
+    if name == "gemini":
+        left = _GEMINI_EQUIVALENT_SUFFIX.sub("", left)
+        right = _GEMINI_EQUIVALENT_SUFFIX.sub("", right)
+    return left == right
+
+
+def pricing_model_for(
+    provider: Optional[str], model: Optional[str], served_model: Optional[str] = None
+) -> Optional[str]:
+    """The model id a turn should be priced under.
+
+    ``model`` is what was requested; ``served_model`` is what the vendor
+    says actually answered, when it says. They differ when ``model`` is a
+    moving alias ("gemini-flash-latest"): the bill follows the served
+    model, so that is priced, and an unlisted served model stays unpriced
+    rather than inheriting the alias's (possibly stale) row.
+    """
+    if served_model and served_model.strip() and not _same_model(
+        provider, model, served_model
+    ):
+        return served_model
+    return model
+
+
+def estimate_turn_cost_usd(
+    provider: Optional[str],
+    model: Optional[str],
+    usage: Optional[dict[str, int]],
+    served_model: Optional[str] = None,
+) -> Optional[float]:
+    """Estimated USD for one turn's summed usage dict (the runtime's
+    ``AgentResponse.usage`` shape), priced under ``pricing_model_for``."""
+    counts = usage or {}
+
+    def count(key: str) -> int:
+        value = counts.get(key)
+        return value if isinstance(value, int) and value > 0 else 0
+
+    return estimate_cost_usd(
+        provider,
+        pricing_model_for(provider, model, served_model),
+        count("input_tokens"),
+        count("output_tokens"),
+        count("cache_read_tokens"),
+        count("cache_write_tokens"),
+    )
 
 
 def estimate_cost_usd(

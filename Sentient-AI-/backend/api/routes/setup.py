@@ -8,6 +8,12 @@ endpoints; this module is where each secret is validated against its provider,
 scrubbed out of error messages, refused when the environment already supplies
 it, and rate-limited per admin.
 
+Connects to: services/installation (encrypted settings), the provider
+classes in services/agent/providers.py (live key tests), the Telegram Bot
+API (token test) and the audit log.
+Used by: the web app's first-run wizard and Settings page; main.py mounts
+the router.
+
 First-run setup: the owner account, the AI provider, Telegram, finish.
 
 A native install has no .env to edit, so the /setup wizard writes the
@@ -68,7 +74,10 @@ router = APIRouter(prefix="/setup", tags=["setup"])
 # these as choices; any id the provider accepts still works, because the
 # save path runs a real completion against it before storing anything.
 SUGGESTED_MODELS: dict[str, list[str]] = {
-    "gemini": ["gemini-2.5-flash", "gemini-2.5-flash-lite"],
+    # 2.5 Flash is refused for new API keys ("no longer available to new
+    # users"), so it is not offered. Each id here has a price in
+    # services/usage/pricing.py.
+    "gemini": ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash"],
     "anthropic": ["claude-sonnet-5", "claude-haiku-4-5-20251001"],
     "openai": ["gpt-4o-mini"],
     "grok": ["grok-4.3"],
