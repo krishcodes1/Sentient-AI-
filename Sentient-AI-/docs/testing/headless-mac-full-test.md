@@ -295,21 +295,20 @@ matters for this test. Add the Python the backend runs as too, for runs not
 started from Terminal:
 
 ```sh
-# the interpreter the Permissions row names
-~/Sentient-AI-/Sentient-AI-/backend/.venv/bin/python -c "import os,sys; print(os.path.realpath(sys.executable))"
-# the binary the backend process actually runs as (framework Pythons re-exec into Python.app)
-ps -o command= -p "$(pgrep -f 'uvicorn main:app' | head -1)" | awk '{print $1}'
+cd ~/Sentient-AI-/Sentient-AI-/backend && .venv/bin/python -c "from services.capabilities.env import crawler_executable; print(crawler_executable())"
 ```
 
-On the verification Mac these printed `.../Versions/3.13/bin/python3.13` and
-`.../Versions/3.13/Resources/Python.app/Contents/MacOS/Python`.
+This is the entry macOS lists for the running Python, and the one the
+Permissions row names. For python.org's Python it is
+`.../Versions/3.x/Resources/Python.app` (its `bin/python3.x` is only a
+launcher; adding that path does nothing). For Homebrew's it is the
+`bin/python3.x` binary itself.
 
 System Settings > Privacy & Security:
 
 1. **Accessibility**: `+` > Applications > Utilities > **Terminal** > Open,
-   switch it on. Then `+` > cmd+shift+G > paste the `Python.app` path (up
-   to and including `Python.app`) > Open, switch it on. Adding the
-   `bin/python3.x` path from the first command as well does no harm.
+   switch it on. Then `+` > cmd+shift+G > paste the path printed above >
+   Open, switch it on.
 2. **Screen & System Audio Recording** (called Screen Recording before
    macOS 15): the same entries.
 3. The **Grant access** button on the Permissions row shows macOS's own

@@ -68,24 +68,23 @@ pip install -r requirements.txt
 #     "pyobjc-framework-Quartz>=10,<13" "pyobjc-framework-Cocoa>=10,<13"
 ```
 
-## 3. Find the binary that needs the grants
+## 3. Find the entry that needs the grants
 
-With the venv active:
+With the venv active, from `backend/`:
 
 ```sh
-python3 -c "import sys,os;print(os.path.realpath(sys.executable))"
+python3 -c "from services.capabilities.env import crawler_executable; print(crawler_executable())"
 ```
 
-This prints the real interpreter behind the venv, for example
-`/opt/homebrew/Cellar/python@3.12/3.12.x/Frameworks/Python.framework/Versions/3.12/bin/python3.12`
-or `/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12`.
-The smoke script prints the same path on its first line.
+This prints what macOS lists in Privacy & Security for the running
+Python, which is the same entry the Permissions page names and the smoke
+script prints on its first line. It is one of:
 
-Framework builds of Python start that interpreter as the `Python.app`
-beside it: a running process shows up in `ps` as
-`.../Versions/3.x/Resources/Python.app/Contents/MacOS/Python` (seen with
-the python.org 3.13 build). If a grant to the `bin/python3.x` path does not
-take, add that `Python.app` as well.
+- `/Library/Frameworks/Python.framework/Versions/3.x/Resources/Python.app`
+  for python.org's Python (its `bin/python3.x` is only a launcher that
+  re-executes this app, and the grant lands on the app, listed as
+  "Python"), or
+- `/opt/homebrew/Cellar/python@3.x/.../bin/python3.x` for Homebrew's.
 
 ## 4. Grant Accessibility and Screen Recording
 

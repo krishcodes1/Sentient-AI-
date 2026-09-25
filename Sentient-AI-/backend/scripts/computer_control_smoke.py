@@ -32,7 +32,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-import os
 import re
 import subprocess
 import sys
@@ -187,8 +186,10 @@ async def run(args: argparse.Namespace) -> int:
     from services.tools.computer.toolkit import ComputerToolkit
 
     report = Report()
-    python = os.path.realpath(sys.executable)
-    print(f"Python binary that needs the grants: {python}")
+    from services.capabilities.env import crawler_executable
+
+    python = crawler_executable()
+    print(f"Entry that needs the grants: {python}")
     if sys.platform != "darwin":
         print("This smoke test is for macOS only.")
         return 2

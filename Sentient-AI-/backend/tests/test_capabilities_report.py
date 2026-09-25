@@ -405,14 +405,60 @@ def test_an_installable_capability_carries_its_download_size():
 
 
 def test_default_context_names_the_resolved_interpreter(monkeypatch, tmp_path):
-    # macOS attaches the Screen Recording grant to the real binary, not to
+    # Without the kernel's answer, the fallback is the real binary behind
     # the venv symlink that sys.executable usually is.
+    monkeypatch.setattr("services.capabilities.env._process_executable", lambda: "")
     real = tmp_path / "python3.12"
     real.write_text("")
     link = tmp_path / "venv-python"
     link.symlink_to(real)
     monkeypatch.setattr("sys.executable", str(link))
     assert capabilities.default_context().executable == str(real.resolve())
+
+
+@pytest.mark.parametrize(
+    ("reported", "named"),
+    [
+        # python.org's framework build: the launcher re-executes Python.app
+        # and macOS lists that app, so the owner must add the bundle.
+        (
+            "/Library/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python",
+            "/Library/Frameworks/Python.framework/Versions/3.14/Resources/Python.app",
+        ),
+        # Homebrew's build runs the binary itself.
+        (
+            "/opt/homebrew/Cellar/python@3.12/3.12.7/Frameworks/Python.framework/Versions/3.12/bin/python3.12",
+            "/opt/homebrew/Cellar/python@3.12/3.12.7/Frameworks/Python.framework/Versions/3.12/bin/python3.12",
+        ),
+    ],
+)
+def test_on_macos_the_report_names_what_the_privacy_list_shows(monkeypatch, reported, named):
+    from services.capabilities import env
+
+    monkeypatch.setattr(env.sys, "platform", "darwin")
+    monkeypatch.setattr(env, "_process_executable", lambda: reported)
+    assert env.crawler_executable() == named
+
+
+def test_off_macos_the_report_names_the_resolved_interpreter(monkeypatch, tmp_path):
+    from services.capabilities import env
+
+    real = tmp_path / "python.exe"
+    real.write_text("")
+    monkeypatch.setattr(env.sys, "platform", "win32")
+    monkeypatch.setattr("sys.executable", str(real))
+    assert env.crawler_executable() == str(real.resolve())
+
+
+def test_a_kernel_that_cannot_say_falls_back_to_the_resolved_interpreter(monkeypatch, tmp_path):
+    from services.capabilities import env
+
+    real = tmp_path / "python3.12"
+    real.write_text("")
+    monkeypatch.setattr(env.sys, "platform", "darwin")
+    monkeypatch.setattr(env, "_process_executable", lambda: "")
+    monkeypatch.setattr("sys.executable", str(real))
+    assert env.crawler_executable() == str(real.resolve())
 
 
 def test_the_report_and_screen_capture_name_one_executable(monkeypatch, tmp_path):
@@ -422,6 +468,7 @@ def test_the_report_and_screen_capture_name_one_executable(monkeypatch, tmp_path
     from services.capabilities.env import crawler_executable
     from services.tools import desktop
 
+    monkeypatch.setattr("services.capabilities.env._process_executable", lambda: "")
     real = tmp_path / "python3.13"
     real.write_text("")
     link = tmp_path / "venv-python"
