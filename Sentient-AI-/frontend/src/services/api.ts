@@ -506,6 +506,10 @@ export async function streamMessage(
       case "saved":
         handlers.onSaved?.((data.assistant_message ?? null) as Message | null);
         break;
+      case "stopped":
+        // The user stopped the task. Its "Stopped." reply follows as content
+        // and `done`, so there is nothing extra to show.
+        break;
       case "error": {
         sawTerminalEvent = true;
         const reason = String(data.reason ?? "Stream error");
@@ -556,6 +560,16 @@ export async function decideApproval(
     method: "POST",
     body: JSON.stringify({ approved }),
   });
+}
+
+/**
+ * The Stop button: ask the signed-in user's running task to stop. The server
+ * ends it at its next step (a started tool call is never cut short) with a
+ * short "Stopped." reply, which arrives on the open stream like any other
+ * reply and is saved with the conversation.
+ */
+export async function stopAgent(): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>("/agent/stop", { method: "POST" });
 }
 
 // Connectors

@@ -134,6 +134,7 @@ message with the verdict.
 
 - `telegram.py` — long-polling `TelegramService`: link-code linking, `/status`/`/help`, message + callback (approve/deny) handling, `NotifyingApprovalStore`.
 - `telegram_manager.py` — starts/restarts/stops the poller at runtime as settings change; serializes concurrent apply calls.
+- `progress.py` — `TurnProgress`: turns a running turn's tool_call events into short fact-only lines ("Opening canvas.nyit.edu…") and paces them (2 s grace, one per 4 s, no repeats, 6 per turn, the reply at least 1 s after the last line).
 - `reminders.py` — `ReminderService`: delivers due reminders (Telegram when linked).
 
 ## Usage / pricing (`backend/services/usage/`)

@@ -1,8 +1,9 @@
 """Runs the Telegram bot: long-polls updates, serves only the linked
-Telegram account, turns its messages into agent turns (each reply ending
-with that turn's token and cost line), handles /stop, links accounts by
-one-time code, pushes approval cards, and applies Approve/Deny presses
-through the shared decision pipeline.
+Telegram account, turns its messages into agent turns (short progress
+lines while one runs, each reply ending with that turn's token and cost
+line), handles /stop, links accounts by one-time code, pushes approval
+cards, and applies Approve/Deny presses through the shared decision
+pipeline.
 
 Why it exists: Approvals must be decidable away from a computer and without a
 public webhook URL; the Telegram manager starts this service, and
@@ -12,7 +13,8 @@ pushed.
 Connects to: the Telegram Bot API (httpx long polling and sends), the
 User table (links), the chat and decision appliers from
 api/routes/agent.py, the approval store, services/usage (cost line and
-/usage) and the stop flag in services/agent/cancel.py.
+/usage), the progress lines in services/notifications/progress.py and the
+stop requests in services/agent/cancel.py.
 Used by: TelegramManager, which starts and stops it; main.py wires its
 appliers; reminders and approval notifications send through it.
 
@@ -66,6 +68,7 @@ import structlog
 from sqlalchemy import select, update
 
 from services.agent import cancel as agent_cancel
+from services.notifications.progress import TurnProgress, takes_keyword, takes_on_event
 
 logger = structlog.get_logger(__name__)
 
@@ -98,8 +101,9 @@ _MESSAGE_CHUNK = 3900
 _TEXT_METHODS = frozenset({"sendMessage", "editMessageText"})
 
 # How long /stop waits for the cancelled work to finish unwinding before it
-# answers. Unwinding is an aborted HTTP request plus one DB write, so this
-# is a ceiling for a wedged tool, not an expected wait.
+# answers, and stopping the bot before it closes its client. Unwinding is an
+# aborted HTTP request plus one DB write, so this is a ceiling for a wedged
+# tool, not an expected wait.
 _STOP_WAIT_S = 10.0
 
 # Telegram serves a bot token's getUpdates to one poller at a time and
@@ -126,6 +130,20 @@ def _short_json(data: dict[str, Any], limit: int = 700) -> str:
     except (TypeError, ValueError):
         text = str(data)
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _card_arguments(tool_name: Any, arguments: Any) -> dict[str, Any]:
+    """A call's arguments as its approval card shows them. A desktop.act
+    card also stores the screen it was made from under a reserved key
+    starting with "_" (``services.tools.computer.CARD_KEY``), set by the
+    runtime and never by the model (the toolkit refuses any argument no
+    action takes), so those keys are left out. Every other tool's arguments
+    are shown whole: nothing the owner approves is hidden from the card."""
+    if not isinstance(arguments, dict):
+        return {}
+    if tool_name != "desktop.act":
+        return arguments
+    return {k: v for k, v in arguments.items() if not str(k).startswith("_")}
 
 
 def _chunks(text: str, size: int = _MESSAGE_CHUNK) -> list[str]:
@@ -221,6 +239,8 @@ class TelegramService:
             timeout=httpx.Timeout(35.0, connect=10.0),
         )
         self._task: Optional[asyncio.Task[None]] = None
+        # Set by stop(): no chat work starts from then on.
+        self._closing = False
         self._offset: Optional[int] = None
         self._bot_username: Optional[str] = None
         # The poll loop's waits go through here so tests can drive its
@@ -235,9 +255,15 @@ class TelegramService:
         logger.info("telegram_poller_started")
 
     async def stop(self) -> None:
-        for task in self._all_chat_tasks():
-            task.cancel()
-        await self.wait_for_chats()
+        """Stop polling, then cancel the chats' work and close the client.
+
+        New work is refused first: a started tool call runs to its end
+        (runtime._RunsToEnd), and a poll loop still running meanwhile would
+        start turns nothing cancels or awaits. The wait for the cancelled
+        work is bounded, so a wedged tool cannot hold up the app's shutdown
+        or the owner turning Telegram off; whatever is still running then is
+        logged and loses the client."""
+        self._closing = True
         if self._task is not None:
             self._task.cancel()
             try:
@@ -245,6 +271,16 @@ class TelegramService:
             except (asyncio.CancelledError, Exception):
                 pass
             self._task = None
+        running = [task for task in self._all_chat_tasks() if not task.done()]
+        for task in running:
+            task.cancel()
+        if running:
+            _, lingering = await asyncio.wait(running, timeout=_STOP_WAIT_S)
+            if lingering:
+                logger.warning(
+                    "telegram_stop_left_running",
+                    tasks=sorted(task.get_name() for task in lingering),
+                )
         await self._client.aclose()
 
     async def wait_for_chats(self) -> None:
@@ -257,7 +293,12 @@ class TelegramService:
         return [task for tasks in self._chat_tasks.values() for task in tasks]
 
     def _track(self, chat_id: int, coro: Coroutine[Any, Any, None], name: str) -> None:
-        """Run one piece of a chat's work as a task /stop can find."""
+        """Run one piece of a chat's work as a task /stop can find. Once
+        the bot is stopping, the work is dropped instead."""
+        if self._closing:
+            coro.close()
+            logger.info("telegram_chat_work_refused_while_stopping", chat_id=chat_id)
+            return
         task = asyncio.create_task(coro, name=name)
         tasks = self._chat_tasks.setdefault(chat_id, set())
         tasks.add(task)
@@ -431,7 +472,7 @@ class TelegramService:
             ]
             if getattr(action, "risk_note", None):
                 lines += ["", f"⚠️ {action.risk_note}"]
-            args = _short_json(action.arguments or {})
+            args = _short_json(_card_arguments(action.tool_name, action.arguments or {}))
             if args and args != "{}":
                 lines += ["", "Arguments:", args]
             lines += ["", f"Expires in {_expires_in_text(action.expires_at)}."]
@@ -600,17 +641,26 @@ class TelegramService:
         """Cancel this chat's running turn, and any messages queued behind
         it. The tasks are cancelled, not asked to finish: provider calls
         abort, nothing further is sent for them, and the transcript records
-        the stop. Another chat's tasks are never touched.
+        the stop. A tool call that has started, or an approval card being
+        stored, still finishes and is recorded first (runtime._RunsToEnd).
+        Another chat's tasks are never touched.
 
-        The account's stop flag is raised too: a desktop action runs in a
-        worker thread that task cancellation cannot interrupt, and
-        computer control checks the flag before every step. The runtime
-        lowers it when this account's next turn starts."""
+        A stop is requested for the account too (services.agent.cancel): a
+        desktop action runs in a worker thread that task cancellation cannot
+        interrupt, and computer control checks the request before every
+        step. It ends the account's work accepted before it (a web turn
+        included, which then ends as "Stopped.") and nothing later: new work
+        takes a fresh mark, so nothing has to lift it. That includes the
+        task behind each approval card already waiting: approving the card
+        runs its action, then that task ends as "Stopped.", so the reply
+        says when cards are waiting."""
         agent_cancel.request_cancel(user_id)
         running = [t for t in self._chat_tasks.get(chat_id, ()) if not t.done()]
         if not running:
             await self._api(
-                "sendMessage", chat_id=chat_id, text="Nothing is running right now."
+                "sendMessage",
+                chat_id=chat_id,
+                text="Nothing is running right now." + await self._waiting_cards_note(user_id),
             )
             return
         for task in running:
@@ -626,7 +676,33 @@ class TelegramService:
                 "⏹ Stopped. Nothing more will be sent for that request."
                 if not still_running
                 else "⏹ Stopping — nothing more will be sent for that request."
-            ),
+            )
+            + await self._waiting_cards_note(user_id),
+        )
+
+    async def _waiting_cards_note(self, user_id: str) -> str:
+        """What /stop's reply adds when approval cards are waiting on the
+        account: the stop also ends each one's task once it is approved
+        (services.agent.cancel.mark_since), though the approved action
+        itself still runs. Empty when none wait, or when they cannot be
+        read: the stop has already been requested either way."""
+        from services.agent.approvals import DbApprovalStore
+
+        try:
+            waiting = len(await DbApprovalStore(self._session_factory).list_pending(user_id))
+        except Exception as exc:
+            logger.warning("telegram_stop_pending_lookup_failed", error=str(exc)[:200])
+            return ""
+        if not waiting:
+            return ""
+        if waiting == 1:
+            return (
+                "\n\n1 action is still waiting for your approval (/pending). "
+                "Approving it runs that one action; its task stays stopped."
+            )
+        return (
+            f"\n\n{waiting} actions are still waiting for your approval (/pending). "
+            "Approving one runs that one action; its task stays stopped."
         )
 
     async def _handle_pending(self, chat_id: int, user_id: str) -> None:
@@ -692,14 +768,18 @@ class TelegramService:
             return
         fresh = chat_id in self._fresh_chats
         self._fresh_chats.discard(chat_id)
+        # Accepted now: a stop requested from here on (this chat's /stop, or
+        # the web Stop button, which only records the stop) ends this
+        # message's turn, even while it waits behind the chat's running one.
+        stop_mark = agent_cancel.mark(user_id)
         self._track(
             chat_id,
-            self._run_chat(chat_id, user_id, text, fresh),
+            self._run_chat(chat_id, user_id, text, fresh, stop_mark),
             name=f"telegram-chat-{chat_id}",
         )
 
     async def _run_chat(
-        self, chat_id: int, user_id: str, text: str, fresh: bool
+        self, chat_id: int, user_id: str, text: str, fresh: bool, stop_mark: int
     ) -> None:
         started = False
         try:
@@ -710,14 +790,27 @@ class TelegramService:
                 # starts; the task only refreshes it while the turn runs.
                 await self._api("sendChatAction", chat_id=chat_id, action="typing")
                 typing = asyncio.create_task(self._keep_typing(chat_id))
+                # "Searching the web…" lines while a long turn runs, paced and
+                # built from facts by progress.py; silent, so they never buzz.
+                progress = self._turn_progress(chat_id)
                 try:
                     assert self.chat is not None
-                    outcome = await self.chat(user_id, text, new_conversation=fresh)
+                    # A callback without on_event still runs; it just gets no lines.
+                    listen: dict[str, Any] = (
+                        {"on_event": progress.on_event} if takes_on_event(self.chat) else {}
+                    )
+                    # Likewise one without stop_mark: it takes its mark on entry.
+                    if takes_keyword(self.chat, "stop_mark"):
+                        listen["stop_mark"] = stop_mark
+                    outcome = await self.chat(user_id, text, new_conversation=fresh, **listen)
                 except Exception as exc:
                     logger.error("telegram_chat_failed", chat_id=chat_id, error=str(exc))
                     outcome = {"error": "The assistant hit an unexpected error."}
                 finally:
                     typing.cancel()
+                    # Before anything else goes out (a /stop's reply included),
+                    # so no progress line can follow the turn it describes.
+                    await progress.aclose()
                 if outcome.get("error"):
                     await self._api(
                         "sendMessage",
@@ -752,6 +845,15 @@ class TelegramService:
                 # it carried was never used, so keep it for the next message.
                 self._fresh_chats.add(chat_id)
             raise
+
+    def _turn_progress(self, chat_id: int) -> TurnProgress:
+        """Progress lines (services/notifications/progress.py) for one turn,
+        sent to *chat_id* silently, so they never buzz the phone."""
+        return TurnProgress(
+            lambda line: self._api(
+                "sendMessage", chat_id=chat_id, text=line, disable_notification=True
+            )
+        )
 
     async def _send_reply(self, chat_id: int, text: str, outcome: dict[str, Any]) -> None:
         """Send a reply in Telegram-sized chunks, ending with the turn's
@@ -863,7 +965,8 @@ class TelegramService:
 
         # Authorization: the pressing account must own a linked chat, and the
         # decision runs scoped to THAT user (the store rejects foreign or
-        # already-decided actions). Checked before anything is decided.
+        # already-decided actions). Checked before anything is decided; a
+        # press with no chat (inline mode) has none to check and is refused.
         user_id = await self._user_for_chat(chat_id)
         if chat_id is None or user_id is None:
             logger.info("telegram_callback_from_unlinked_account_ignored")
@@ -873,15 +976,17 @@ class TelegramService:
             await answer("Approvals are not available right now.")
             return
 
-        # An approval runs the tool and then a whole resumed agent turn, so
-        # it runs as this chat's tracked work: the poll loop stays free
-        # (other chats, /stop), it queues behind a running turn instead of
-        # racing it in the same conversation, and /stop can cancel it.
+        # Answered now, not when the decision is done: an approval runs the
+        # action and then a whole resumed agent turn, which can take a
+        # minute, and Telegram shows the button as busy until the press is
+        # answered. The verdict then goes on the card itself.
+        await answer("Approving…" if approved else "Denying…")
+        # The decision runs as this chat's tracked work: the poll loop stays
+        # free (other chats, /stop), it queues behind a running turn instead
+        # of racing it in the same conversation, and /stop can cancel it.
         self._track(
             chat_id,
-            self._run_decision(
-                chat_id, user_id, action_id, approved, message, message_id, answer
-            ),
+            self._run_decision(chat_id, user_id, action_id, approved, message, message_id),
             name=f"telegram-decision-{chat_id}",
         )
 
@@ -893,12 +998,11 @@ class TelegramService:
         approved: bool,
         message: dict[str, Any],
         message_id: Any,
-        answer: Callable[[str], Awaitable[None]],
     ) -> None:
         lock = self._chat_locks.setdefault(chat_id, asyncio.Lock())
         async with lock:
             await self._apply_decision(
-                chat_id, user_id, action_id, approved, message, message_id, answer
+                chat_id, user_id, action_id, approved, message, message_id
             )
 
     async def _apply_decision(
@@ -909,19 +1013,36 @@ class TelegramService:
         approved: bool,
         message: dict[str, Any],
         message_id: Any,
-        answer: Callable[[str], Awaitable[None]],
     ) -> None:
+        """Apply one Approve/Deny press, then freeze the card and send the
+        resumed turn's reply. While an approval runs, the chat shows
+        "typing…" and progress lines, as a message turn does. The press was
+        already answered, so a failure goes to the chat as a message."""
         assert self.decide is not None
+        typing: Optional[asyncio.Task[None]] = None
+        progress: Optional[TurnProgress] = None
+        listen: dict[str, Any] = {}
+        if approved:
+            await self._api("sendChatAction", chat_id=chat_id, action="typing")
+            typing = asyncio.create_task(self._keep_typing(chat_id))
+            progress = self._turn_progress(chat_id)
+            # A callback without on_event still decides; it gets no lines.
+            if takes_on_event(self.decide):
+                listen = {"on_event": progress.on_event}
         try:
-            outcome = await self.decide(user_id, action_id, approved)
+            outcome = await self.decide(user_id, action_id, approved, **listen)
         except Exception as exc:
             # A decision failure must reach the person who pressed the
             # button; silently swallowing it looks like a dead button.
             logger.error(
                 "telegram_decision_failed", action_id=action_id, error=str(exc)
             )
-            await answer("Could not apply that decision — see server logs.")
-            return
+            outcome = {"error": "Could not apply that decision — see server logs."}
+        finally:
+            if typing is not None:
+                typing.cancel()
+            if progress is not None:
+                await progress.aclose()
         logger.info(
             "telegram_decision_applied",
             action_id=action_id,
@@ -929,11 +1050,14 @@ class TelegramService:
             outcome=str(outcome.get("status") or outcome.get("error"))[:80],
         )
         if outcome.get("error"):
-            await answer(str(outcome["error"])[:180])
+            await self._api(
+                "sendMessage",
+                chat_id=chat_id,
+                text="⚠️ " + str(outcome["error"])[:180],
+            )
             return
 
         verdict = "✅ Approved" if approved else "❌ Denied"
-        await answer(verdict)
         # Freeze the card: replace the buttons with the decision so it
         # can't be pressed twice from the chat history.
         if message_id is not None:

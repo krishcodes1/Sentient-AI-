@@ -266,7 +266,8 @@ async def wire_services(
     # Windows; an unavailable stand-in anywhere else, the container
     # included). Nothing is loaded or touched until the first call, and the
     # computer_control switch (off by default) gates every one. The stop
-    # flag is the per-user one each new turn clears.
+    # check is the per-user one the runtime answers for the turn or
+    # approved action in progress (services.agent.cancel).
     computer_toolkit = ComputerToolkit(
         computer_backend.select_backend(platform.name),
         cancel_flag=agent_cancel.is_cancelled,

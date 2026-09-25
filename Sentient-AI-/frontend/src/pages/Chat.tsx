@@ -43,6 +43,7 @@ import {
   getConversations,
   getMe,
   getPendingApprovals,
+  stopAgent,
   streamMessage,
   updateConversation,
 } from "@/services/api";
@@ -65,11 +66,15 @@ const APPROVAL_POLL_MS = 20_000;
 // Roughly one line of text plus padding, so a reader who has nudged the
 // scrollbar is not dragged back down by the next token.
 const NEAR_BOTTOM_PX = 120;
+// How long Stop waits for the server to end the turn (its "Stopped." reply
+// and `done` frame) before it cuts the stream on this side instead.
+const STOP_FALLBACK_MS = 10_000;
 
 // Countdown helpers live in their own module (shared with Dashboard) so the
 // Dashboard chunk doesn't drag in this whole page. Not re-exported from
 // here: a page module that exports non-components loses Fast Refresh.
 import { formatCountdown, useCountdown } from "./approvalCountdown";
+import { shownArguments } from "./approvalArguments";
 
 // Ids for optimistic bubbles, replaced by the server's ids once the turn is
 // saved. They only have to be unique within this tab, so a counter does the
@@ -224,7 +229,7 @@ function ApprovalCard({
       <p className="text-xs mb-2" style={{ color: "var(--text-secondary)" }}>
         Tool <strong>{approval.tool_name}</strong> wants to run.
       </p>
-      {Object.keys(approval.arguments ?? {}).length > 0 && (
+      {Object.keys(shownArguments(approval)).length > 0 && (
         <pre
           className="text-xs mb-2 p-2 rounded-[8px] overflow-x-auto"
           style={{
@@ -233,7 +238,7 @@ function ApprovalCard({
             border: "1px solid var(--claw-border)",
           }}
         >
-          {JSON.stringify(approval.arguments, null, 2)}
+          {JSON.stringify(shownArguments(approval), null, 2)}
         </pre>
       )}
       <p className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
@@ -380,6 +385,8 @@ export default function Chat() {
   const activeConvRef = useRef<string | null>(null);
   // Controller for the in-flight stream; lets the Stop button abort it.
   const abortRef = useRef<AbortController | null>(null);
+  // The stream Stop was already pressed for, so a second press sends nothing.
+  const stopSentFor = useRef<AbortController | null>(null);
 
   const closeList = useCallback(() => setListOpen(false), []);
   useFocusTrap(listOpen && !isDesktop, listRef, closeList);
@@ -684,11 +691,21 @@ export default function Chat() {
   };
 
   const handleStop = () => {
-    // Aborts the client stream only. Server-side the turn keeps running
-    // to completion (side-effectful tools must not be cut between a side
-    // effect and its audit record) and persists via on_orphaned; the
-    // finished reply appears on the next thread load.
-    abortRef.current?.abort();
+    const controller = abortRef.current;
+    if (!controller || stopSentFor.current === controller) return;
+    stopSentFor.current = controller;
+    // Ask the server to stop the task. It ends at its next step (a started
+    // tool call is never cut short) with a short "Stopped." reply that
+    // arrives on this stream, `done` included, and is saved like any other,
+    // so the stream stays open for it. It is cut here only if the request
+    // fails or the turn has not ended within STOP_FALLBACK_MS; the server
+    // then finishes the turn on its own and saves it (on_orphaned).
+    setStreamStatus("Stopping…");
+    const cut = () => {
+      if (abortRef.current === controller) controller.abort();
+    };
+    setTimeout(cut, STOP_FALLBACK_MS);
+    stopAgent().catch(cut);
   };
 
   const sendContent = async (content: string, images: string[]) => {
@@ -842,7 +859,8 @@ export default function Chat() {
       void refreshApprovals();
     } catch (err) {
       if (controller.signal.aborted) {
-        // The user pressed Stop. The server finishes the turn on its own and
+        // Stop cut the stream (its request failed, or the turn did not end
+        // in time). The server finishes the turn on its own and
         // persists it, so whatever streamed so far is real output and stays,
         // marked as cut short; an assistant bubble that never got a token is
         // just noise.

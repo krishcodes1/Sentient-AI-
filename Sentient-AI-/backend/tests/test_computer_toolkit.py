@@ -26,7 +26,7 @@ from services.tools.computer.backend import (
     select_backend,
 )
 from services.tools.computer.backend_fake import FakeApp, FakeBackend, FakeWindow, make_node
-from services.tools.computer.toolkit import ComputerToolkit
+from services.tools.computer.toolkit import CARD_KEY, ComputerToolkit
 
 U1 = "user-1"
 U2 = "user-2"
@@ -858,6 +858,240 @@ async def test_precheck_refuses_statically_and_reads_nothing():
     assert kit.precheck({"action": "click", "ref": ref(first, '"Send"')}, user_id=U1) is None
     assert kit.precheck({"action": "open_app", "app": "Calculator"}, user_id=U1) is None
     assert fake.events == [] and fake.reads == []
+
+
+@pytest.mark.asyncio
+async def test_precheck_refuses_when_a_check_fails(monkeypatch):
+    fake, kit, _ = await observed()
+
+    def broken(*_args):
+        raise RuntimeError("rules unavailable")
+
+    monkeypatch.setattr(kit, "_static_rules", broken)
+    result = kit.precheck({"action": "open_app", "app": "Calculator"}, user_id=U1)
+    assert_refused(result, "check_failed")
+    assert "rules unavailable" not in result["error"]
+    assert fake.events == [] and fake.reads == []
+
+
+# ── bind(): an approval card is tied to the screen it was made from ─────────
+
+
+async def approve(kit, card, user=U1):
+    """Run the act an approval card stored (``bind``'s copy of the call),
+    as the executor does once the owner approves it."""
+    return await kit.execute("act", card, user_id=user, approved=True)
+
+
+def messages_app():
+    return FakeApp(
+        "Messages", 105, [FakeWindow("Ann", (make_node("text field", "iMessage", handle="imsg"),))]
+    )
+
+
+@pytest.mark.asyncio
+async def test_bind_records_the_latest_outline_and_reads_nothing():
+    fake = desktop()
+    kit = kit_for(fake)
+    # Before any outline there is no screen to tie the card to.
+    assert kit.bind({"action": "open_app", "app": "Calculator"}, user_id=U1) == {
+        "action": "open_app",
+        "app": "Calculator",
+        CARD_KEY: {"app": "", "outline": ""},
+    }
+    first = await observe(kit)
+    fake.reads.clear()
+    send = ref(first, '"Send"')
+    card = kit.bind({"action": "click", "ref": send}, user_id=U1)
+    screen = card.pop(CARD_KEY)
+    assert card == {"action": "click", "ref": send}
+    assert screen["app"] == "Mail" and re.fullmatch(r"[0-9a-f]{12}", screen["outline"])
+    # A value the call itself carried is replaced, never kept.
+    forged = kit.bind(
+        {"action": "key", "keys": "enter", CARD_KEY: {"app": "Messages", "outline": "x"}},
+        user_id=U1,
+    )
+    assert forged[CARD_KEY] == screen
+    assert fake.events == [] and fake.reads == []
+    # Every outline gets a new id; another user's card is tied to their own.
+    await observe(kit)
+    assert kit.bind({}, user_id=U1)[CARD_KEY]["outline"] != screen["outline"]
+    assert kit.bind({}, user_id=U2)[CARD_KEY] == {"app": "", "outline": ""}
+
+
+@pytest.mark.asyncio
+async def test_an_approved_act_runs_while_its_screen_holds():
+    fake, kit, first = await observed()
+    send = ref(first, '"Send"')
+    card = kit.bind({"action": "click", "ref": send}, user_id=U1)
+    done = await approve(kit, card)
+    assert done["ok"] is True, done
+    assert fake.events == [("click", "send", False)]
+    # Keys and typing name no element, so only the app has to be the same:
+    # a newer outline of Mail keeps the card good.
+    card = kit.bind({"action": "type", "text": "Thanks"}, user_id=U1)
+    await observe(kit)
+    done = await approve(kit, card)
+    assert done["ok"] is True, done
+    assert fake.events[-1] == ("type", "Thanks", "subject")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"action": "type", "text": "I quit\n"},
+        {"action": "key", "keys": "cmd+a"},
+        {"action": "key", "keys": "enter"},
+        {"action": "scroll", "direction": "down"},
+        {"action": "click", "x": 10, "y": 10},
+    ],
+)
+async def test_input_is_refused_once_another_app_was_looked_at(params):
+    # The card said "in Mail"; by approval time the latest outline is of
+    # Messages, which is in front with its chat box focused.
+    fake, kit, _ = await observed(apps=(messages_app(),))
+    card = kit.bind(params, user_id=U1)
+    assert kit.describe(card, user_id=U1).endswith(" in Mail")
+    fake.front, fake.focused_handle = "Messages", "imsg"
+    assert (await observe(kit))["app"] == "Messages"
+    fake.reads.clear()
+    result = await approve(kit, card)
+    assert_refused(result, "screen_changed")
+    assert result["error"] == "The screen changed since this was approved. Look again first."
+    assert fake.events == [] and fake.reads == []
+
+
+@pytest.mark.asyncio
+async def test_input_is_refused_when_the_app_was_looked_at_but_not_brought_forward():
+    # The latest outline is of Messages, named while Mail stayed in front.
+    # The card, made in Mail, is refused whichever of the two is in front.
+    fake, kit, _ = await observed(apps=(messages_app(),))
+    card = kit.bind({"action": "key", "keys": "cmd+a"}, user_id=U1)
+    assert (await observe(kit, app="Messages"))["app"] == "Messages"
+    assert_refused(await approve(kit, card), "screen_changed")
+    fake.front = "Messages"
+    assert_refused(await approve(kit, card), "screen_changed")
+    assert fake.events == []
+
+
+@pytest.mark.asyncio
+async def test_a_ref_card_is_refused_once_its_outline_was_replaced():
+    fake, kit, first = await observed()
+    card = kit.bind({"action": "click", "ref": ref(first, '"Send"')}, user_id=U1)
+    await observe(kit)  # same app, new outline: the card's ref is gone
+    assert_refused(await approve(kit, card), "screen_changed")
+    assert fake.events == []
+
+
+@pytest.mark.asyncio
+async def test_a_ref_card_is_refused_after_a_restart_even_when_the_ref_is_reused():
+    # Ref numbers start over in a new process, so d4 can name another
+    # element in the same app; only the outline's id tells them apart.
+    fake, kit, first = await observed()
+    send = ref(first, '"Send"')
+    card = kit.bind({"action": "click", "ref": send}, user_id=U1)
+    fake.apps["Mail"].windows.insert(
+        0,
+        FakeWindow(
+            "Inbox",
+            (
+                make_node("button", "Archive", handle="archive"),
+                make_node("button", "Junk", handle="junk"),
+                make_node("button", "Delete", handle="delete"),
+            ),
+        ),
+    )
+    restarted = kit_for(fake)
+    again = await observe(restarted)
+    assert ref(again, '"Delete"') == send  # the same ref, another element
+    assert_refused(await approve(restarted, card), "screen_changed")
+    assert fake.events == []
+
+
+@pytest.mark.asyncio
+async def test_opening_an_app_needs_only_the_cards_screen_to_be_there():
+    fake, kit, _ = await observed()
+    card = kit.bind({"action": "open_app", "app": "Calculator"}, user_id=U1)
+    fake.front = "TextEdit"
+    await observe(kit)
+    done = await approve(kit, card)
+    assert done["ok"] is True, done
+    assert fake.events == [("open_app", "Calculator")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "screen",
+    [
+        "missing",
+        None,
+        "Mail",
+        {"app": "Mail"},
+        {"app": "Mail", "outline": 3},
+        ["Mail", "abc"],
+    ],
+)
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"action": "key", "keys": "enter"},
+        {"action": "open_app", "app": "Calculator"},
+    ],
+)
+async def test_an_approved_act_without_its_cards_screen_is_refused(screen, params):
+    fake, kit, _ = await observed()
+    card = dict(params) if screen == "missing" else {**params, CARD_KEY: screen}
+    result = await approve(kit, card)
+    assert_refused(result, "unbound_approval")
+    assert fake.events == [] and fake.reads == []
+
+
+@pytest.mark.asyncio
+async def test_a_card_made_before_any_outline_never_sends_input():
+    fake = desktop()
+    kit = kit_for(fake)
+    card = kit.bind({"action": "key", "keys": "enter"}, user_id=U1)
+    await observe(kit)
+    assert_refused(await approve(kit, card), "screen_changed")
+    assert fake.events == []
+
+
+@pytest.mark.asyncio
+async def test_the_card_key_from_the_model_is_an_argument_no_action_takes():
+    fake, kit, first = await observed()
+    screen = kit.bind({}, user_id=U1)[CARD_KEY]
+    params = {"action": "click", "ref": ref(first, '"Send"'), CARD_KEY: screen}
+    refused = kit.precheck(params, user_id=U1)
+    assert refused is not None and refused["ok"] is False
+    assert f"does not take {CARD_KEY}" in refused["error"]
+    # Unapproved, the key is not read as a card: the call is refused.
+    result = await act(kit, **params)
+    assert result["ok"] is False and f"does not take {CARD_KEY}" in result["error"]
+    observed_with = await observe(kit, **{CARD_KEY: screen})
+    assert observed_with["ok"] is False
+    assert fake.events == []
+
+
+@pytest.mark.asyncio
+async def test_describe_names_the_cards_screen_not_a_newer_one():
+    fake, kit, first = await observed(apps=(messages_app(),))
+    send = ref(first, '"Send"')
+    click = kit.bind({"action": "click", "ref": send}, user_id=U1)
+    press = kit.bind({"action": "key", "keys": "cmd+s"}, user_id=U1)
+    assert kit.describe(click, user_id=U1) == 'Click "Send" in Mail'
+    assert kit.describe(press, user_id=U1) == "Press cmd+s in Mail"
+    fake.front = "Messages"
+    await observe(kit)
+    # A newer outline of another app does not move the card there.
+    assert kit.describe(press, user_id=U1) == "Press cmd+s in Mail"
+    assert kit.describe(click, user_id=U1) == (
+        f"Click {send} (not in the latest outline, so it will be refused)"
+    )
+    assert kit.describe({**press, CARD_KEY: "junk"}, user_id=U1) == (
+        "Press cmd+s in the frontmost app"
+    )
+    assert fake.events == []
 
 
 # ── errors fail closed ───────────────────────────────────────────────────────

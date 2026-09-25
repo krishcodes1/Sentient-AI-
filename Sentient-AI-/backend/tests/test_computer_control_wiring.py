@@ -392,7 +392,13 @@ async def test_act_is_refused_unapproved_and_runs_once_approved(backend_ready):
     )
     assert smuggled["requires_approval"] is True and fake.events == []
 
-    done = await ex.execute("desktop.act", {"action": "click", "ref": send}, U1, approved=True)
+    # Approved, it runs only with the arguments its card stored, which tie
+    # it to the screen the card was made from.
+    bare = await ex.execute("desktop.act", {"action": "click", "ref": send}, U1, approved=True)
+    assert bare["refused"] is True and bare["rule"] == "unbound_approval"
+    assert fake.events == []
+    card = ex.approval_arguments("desktop.act", {"action": "click", "ref": send}, U1)
+    done = await ex.execute("desktop.act", card, U1, approved=True)
     assert done["ok"] is True, done
     assert done["did"] == 'click button "Send" in Mail'
     assert fake.events == [("click", "send", False)]
@@ -416,12 +422,13 @@ async def test_observe_and_act_are_refused_with_computer_control_off(backend_rea
 async def test_a_stop_request_refuses_the_next_act(backend_ready):
     fake = mail_desktop()
     ex = executor(fake, "computer_control")
+    card = ex.approval_arguments("desktop.act", {"action": "open_app", "app": "Calculator"}, U1)
     cancel.request_cancel(U1)
-    result = await ex.execute("desktop.act", {"action": "open_app", "app": "Calculator"}, U1, approved=True)
+    result = await ex.execute("desktop.act", card, U1, approved=True)
     assert result["ok"] is False and result["refused"] is True and result["rule"] == "cancelled"
     assert fake.events == []
     cancel.clear(U1)
-    result = await ex.execute("desktop.act", {"action": "open_app", "app": "Calculator"}, U1, approved=True)
+    result = await ex.execute("desktop.act", card, U1, approved=True)
     assert result["ok"] is True, result
     assert fake.events == [("open_app", "Calculator")]
 

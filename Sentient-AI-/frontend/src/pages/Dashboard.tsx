@@ -51,6 +51,7 @@ import { formatCost, formatTokens } from "@/components/usageFormat";
 // Countdown logic lives beside Chat's ApprovalCard so both approval queues
 // expire in lockstep with the server-side TTL.
 import { formatCountdown, useCountdown } from "@/pages/approvalCountdown";
+import { shownArguments } from "@/pages/approvalArguments";
 import { useResolvedColors } from "@/hooks/useResolvedColors";
 
 const FEED_LIMIT = 6;
@@ -193,7 +194,7 @@ function ApprovalRow({
           </button>
         </div>
       </div>
-      {Object.keys(approval.arguments ?? {}).length > 0 && (
+      {Object.keys(shownArguments(approval)).length > 0 && (
         <pre
           className="text-xs mt-2 p-2 rounded-[8px] overflow-x-auto"
           style={{
@@ -202,7 +203,7 @@ function ApprovalRow({
             border: "1px solid var(--border-subtle)",
           }}
         >
-          {JSON.stringify(approval.arguments, null, 2)}
+          {JSON.stringify(shownArguments(approval), null, 2)}
         </pre>
       )}
       {error && (

@@ -1,6 +1,6 @@
-"""Tests for the audit service: chained writes, sensitive-data sanitization, the
-runtime adapter's event mapping, and chain integrity all hold when appends race
-concurrently.
+"""Tests for the audit service: chained writes, sensitive-data sanitization (the
+text desktop.act types is stored as its length only), the runtime adapter's
+event mapping, and chain integrity all hold when appends race concurrently.
 
 Why it exists: Guards against a broken hash chain or a leaked secret in an
 audit row, and against concurrent writes corrupting the sequence numbers or the
@@ -18,7 +18,12 @@ import pytest
 
 from core.security import compute_audit_hash
 from models.audit import AuditStatus
-from services.audit import RuntimeAuditLogger, append_audit_log, build_hash_payload
+from services.audit import (
+    RuntimeAuditLogger,
+    append_audit_log,
+    build_hash_payload,
+    redact_tool_arguments,
+)
 
 
 @pytest.mark.asyncio
@@ -137,6 +142,93 @@ async def test_runtime_logger_maps_events(session_factory):
     assert blocked.reasoning_chain["policy"] == "robinhood:financial"
     # Adapter rows chain like any other write.
     assert blocked.previous_hash == executed.integrity_hash
+
+
+@pytest.mark.asyncio
+async def test_desktop_act_text_is_stored_as_its_length_in_every_row(session_factory):
+    """What desktop.act types can be a password; no row keeps it, whichever
+    event wrote the row and however the tool name was spelled."""
+    from sqlalchemy import select
+
+    from models.audit import AuditLog
+    from tests.conftest import make_user
+
+    user, _ = await make_user(session_factory)
+    audit_logger = RuntimeAuditLogger(session_factory=session_factory)
+    typed = {"action": "type", "ref": "d4", "text": "hunter2-S3cret"}
+    events = [
+        ("tool_blocked", "desktop.act"),
+        ("tool_pending_approval", "desktop.act"),
+        ("tool_executing", "desktop.act"),
+        ("tool_executed", "desktop.act"),
+        ("tool_approved", "desktop.act"),
+        ("tool_approved_and_executed", "desktop.act"),
+        ("tool_denied", "desktop.act"),
+        # Spellings the registry refuses are still refused calls on record.
+        ("tool_blocked", "desktop__deadbeef.act"),
+        ("tool_blocked", "Desktop.act "),
+        ("tool_blocked", "desktop..act"),
+    ]
+    for event, tool in events:
+        await audit_logger.log(
+            {
+                "event": event,
+                "user_id": str(user.id),
+                "tool": tool,
+                "arguments": dict(typed),
+                "reason": "refused",
+            }
+        )
+
+    async with session_factory() as session:
+        rows = list(
+            (
+                await session.execute(
+                    select(AuditLog).where(AuditLog.user_id == user.id).order_by(AuditLog.seq)
+                )
+            ).scalars()
+        )
+    assert len(rows) == len(events)
+    for row in rows:
+        assert row.request_data == {"action": "type", "ref": "d4", "text": "<14 characters>"}
+        assert "hunter2" not in str(row.request_data)
+    # The stored row and its hash agree: the redaction happens before hashing.
+    last = rows[-1]
+    payload = build_hash_payload(
+        user_id=str(last.user_id),
+        connector_name=last.connector_name,
+        action=last.action,
+        endpoint=last.endpoint,
+        scope_used=last.scope_used,
+        status_value=last.status.value,
+        request_id=last.request_id,
+        request_data=last.request_data,
+        response_summary=last.response_summary,
+        previous_hash=last.previous_hash,
+        reasoning_chain=last.reasoning_chain,
+    )
+    assert compute_audit_hash(payload) == last.integrity_hash
+
+
+def test_redact_tool_arguments_keeps_other_tools_and_fields():
+    typed = {"action": "type", "text": "a"}
+    assert redact_tool_arguments("desktop.act", typed) == {
+        "action": "type",
+        "text": "<1 character>",
+    }
+    assert typed == {"action": "type", "text": "a"}  # the caller's copy is untouched
+    # Text that is not a string is not measured, only hidden.
+    assert redact_tool_arguments("desktop.act", {"text": ["secret"]}) == {"text": "***REDACTED***"}
+    # Other tools, other fields and other shapes pass through unchanged.
+    for tool, arguments in (
+        ("reminders.create", {"text": "buy milk"}),
+        ("mcp.desktop.act", {"text": "hi"}),
+        ("desktop.observe", {"action": "outline"}),
+        ("desktop.act", {"action": "key", "keys": "cmd+s"}),
+    ):
+        assert redact_tool_arguments(tool, arguments) == arguments, tool
+    assert redact_tool_arguments("desktop.act", None) is None
+    assert redact_tool_arguments("desktop.act", "text") == "text"
 
 
 @pytest.mark.asyncio

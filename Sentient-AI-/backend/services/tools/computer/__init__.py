@@ -11,11 +11,15 @@ tested on its own and no test ever touches the real desktop.
 Wiring: ``main.wire_services`` builds ``ComputerToolkit(select_backend(
 platform.name), cancel_flag=services.agent.cancel.is_cancelled)``; the
 executor's ``desktop`` entry routes ``desktop.observe`` / ``desktop.act`` to
-``execute("observe" | "act", params, user_id=...)``, and
+``execute("observe" | "act", params, user_id=..., approved=...)``, and
 ``describe(params, user_id=...)`` is the approval card's sentence for
-``desktop.act`` (``ConnectorToolExecutor.describe_approval``).
-``precheck(params, user_id=...)`` (a refusal that needs no approval card) is
-not wired yet.
+``desktop.act`` (``ConnectorToolExecutor.describe_approval``), and
+``precheck(params, user_id=...)`` is asked before that card is made
+(``ConnectorToolExecutor.precheck_approval``): an act it refuses gets no
+card, only a blocked event (policy ``computer_rule``) and the refusal as its
+result. ``bind(params, user_id=...)`` gives the arguments the card stores
+(``ConnectorToolExecutor.approval_arguments``): the call plus the screen it
+was made from, under ``CARD_KEY``. An approved act runs only on that screen.
 """
 
 from services.tools.computer.backend import (
@@ -27,9 +31,10 @@ from services.tools.computer.backend import (
     WindowInfo,
     select_backend,
 )
-from services.tools.computer.toolkit import ComputerToolkit
+from services.tools.computer.toolkit import CARD_KEY, ComputerToolkit
 
 __all__ = [
+    "CARD_KEY",
     "AppInfo",
     "ComputerBackend",
     "ComputerToolkit",

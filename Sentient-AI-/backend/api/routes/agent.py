@@ -1,7 +1,7 @@
 """Serves the /agent API: conversation CRUD and search, sending a message
 (buffered or as an SSE stream) through the AgentRuntime, listing and
-deciding pending tool approvals, and the appliers that let the Telegram
-poller run the same chat and approval pipelines.
+deciding pending tool approvals, stopping a running task, and the appliers
+that let the Telegram poller run the same chat and approval pipelines.
 
 Why it exists: This is where the HTTP layer, the tool registry, memory
 injection and the runtime meet: it builds each turn's tool set and
@@ -51,10 +51,12 @@ from services import capabilities as capability_registry
 from services.auth import get_current_user
 from services.capabilities.prompt import render_permissions_block
 from services.memory import render_memory_block
+from services.agent import cancel as agent_cancel
 from services.agent.context_manager import compress_tool_result
 from services.agent.providers import ProviderError, ProviderNotConfigured
 from services.agent.runtime import (
     AgentRuntime,
+    EventSink,
     TurnUsage,
     is_browser_tool,
     redact_binary_for_model,
@@ -828,6 +830,10 @@ async def send_message(
             ),
         )
 
+    # The message is accepted: a Stop pressed from here on ends this turn,
+    # even while the setup below (history, tools, memory) is still running.
+    stop_mark = agent_cancel.mark(str(current_user.id))
+
     conversation = await _get_owned_conversation(conversation_id, current_user, db)
 
     # 1. Persist the user message. Only attachment METADATA is stored; see
@@ -882,6 +888,7 @@ async def send_message(
             memory_block=memory_block,
             permissions_text=permissions_text,
             task_id=task_id,
+            stop_mark=stop_mark,
         )
     except ProviderNotConfigured as exc:
         # Not an upstream failure: no key for the provider this turn needs.
@@ -1044,6 +1051,9 @@ async def stream_message(
             ),
         )
 
+    # Accepted: a Stop pressed from here on ends this turn (see send_message).
+    stop_mark = agent_cancel.mark(str(current_user.id))
+
     conversation = await _get_owned_conversation(conversation_id, current_user, db)
 
     user_message = Message(
@@ -1121,6 +1131,7 @@ async def stream_message(
                     on_orphaned=_persist_orphaned,
                     permissions_text=permissions_text,
                     task_id=task_id,
+                    stop_mark=stop_mark,
                 ):
                     etype = event.get("type", "message")
                     data = event.get("data", {})
@@ -1288,10 +1299,14 @@ async def _recent_messages(
 def _unfinished_turn_message(
     conversation_id: Any, turn: TurnUsage, content: str
 ) -> Message:
+    """The row that closes a turn that never returned: its billed tokens,
+    and the tool calls it recorded before it ended (a call a chat's /stop
+    landed on still finishes and is recorded, runtime._RunsToEnd)."""
     return Message(
         conversation_id=conversation_id,
         role=MessageRole.assistant,
         content=content,
+        tool_calls=redact_binary_for_model(turn.tool_calls) or None,
         **_usage_columns(turn.usage, turn.provider, turn.model),
     )
 
@@ -1304,6 +1319,8 @@ async def _resume_after_approval(
     conversation: Conversation,
     installation: Any = None,
     turn: Optional[TurnUsage] = None,
+    stop_mark: Optional[int] = None,
+    on_event: Optional[EventSink] = None,
 ) -> Optional[Message]:
     """Run one more agent turn after an approved action executed.
 
@@ -1318,6 +1335,13 @@ async def _resume_after_approval(
 
     ``turn``, when given, is filled in with the resumed turn's usage and
     model (see :class:`TurnUsage`), so a channel can show what it cost.
+
+    ``stop_mark`` is the ``resume_stop_mark`` ``approve_action`` returned:
+    a Stop pressed while the card waited, or after the Approve tap, ends
+    this turn before its first model call.
+
+    ``on_event``, when given, receives this turn's progress events live (a
+    channel's progress lines).
     """
     rows = await _recent_messages(db, conversation.id)
     history = [{"role": r.role.value, "content": r.content} for r in rows]
@@ -1347,6 +1371,8 @@ async def _resume_after_approval(
             permissions_text=permissions_text,
             task_id=task_id,
             usage_sink=turn,
+            stop_mark=stop_mark,
+            event_sink=on_event,
         )
     except asyncio.CancelledError:
         # Stopped from a chat channel mid-turn: keep the calls already
@@ -1430,6 +1456,7 @@ async def _apply_decision(
     action_id: str,
     approved: bool,
     installation: Any = None,
+    on_event: Optional[EventSink] = None,
 ) -> Dict[str, Any]:
     """Decide a pending action, persist the outcome into its conversation,
     and (on approval) run the resumed agent turn. Shared by the HTTP route
@@ -1440,7 +1467,10 @@ async def _apply_decision(
     finish together even if this call is cancelled (a chat's /stop): a
     tool that already ran but was never written down would be invisible
     to the next turn, which could then run it again. Only the resumed
-    turn after them can be stopped.
+    turn after them can be stopped, by that cancel or by a stop request
+    (``services.agent.cancel``) made since the card was raised.
+
+    ``on_event`` goes to the resumed turn (``_resume_after_approval``).
     """
     # The task (spec §10) the parked call belongs to, looked up before the
     # decision releases the connection: the approved call then runs under
@@ -1449,6 +1479,8 @@ async def _apply_decision(
     result, conversation = await _finish_even_if_cancelled(
         _decide_and_record(db, runtime, current_user, action_id, approved, task_id)
     )
+    # For the resumed turn only; never shown to the user.
+    resume_stop_mark = result.pop("resume_stop_mark", None)
     if "error" in result or conversation is None or not approved:
         return result
 
@@ -1469,6 +1501,8 @@ async def _apply_decision(
             conversation,
             installation,
             turn,
+            stop_mark=resume_stop_mark,
+            on_event=on_event,
         )
         if resumed is not None:
             db.add(resumed)
@@ -1575,9 +1609,18 @@ def build_decision_applier(app: Any, session_factory: Any = async_session):
     poller): (user_id, action_id, approved) -> outcome dict. Runs the same
     decide → record → resume pipeline as POST /approvals/{action_id},
     with its own DB session from ``session_factory`` and an explicit
-    commit at the end."""
+    commit at the end.
 
-    async def apply(user_id: str, action_id: str, approved: bool) -> Dict[str, Any]:
+    ``on_event``, when given, receives the resumed turn's progress events
+    live, as ``build_chat_applier``'s does for a message turn."""
+
+    async def apply(
+        user_id: str,
+        action_id: str,
+        approved: bool,
+        *,
+        on_event: Optional[EventSink] = None,
+    ) -> Dict[str, Any]:
         runtime: Optional[AgentRuntime] = getattr(app.state, "agent_runtime", None)
         if runtime is None:
             return {"error": "Agent runtime is not available."}
@@ -1596,6 +1639,7 @@ def build_decision_applier(app: Any, session_factory: Any = async_session):
                 action_id,
                 approved,
                 getattr(app.state, "installation", None),
+                on_event=on_event,
             )
             await db.commit()
 
@@ -1715,11 +1759,25 @@ def build_chat_applier(app: Any, session_factory: Any = async_session):
     turn pipeline as POST /conversations/{id}/messages — rate limit,
     persisted user message, tools + memory, runtime.chat (prompt guard,
     tiering, approvals, audit), persisted assistant message with usage —
-    with its own DB session. Returns {"error": str} instead of raising."""
+    with its own DB session. Returns {"error": str} instead of raising.
+
+    ``stop_mark`` (``services.agent.cancel.mark``) lets the channel pass the
+    mark it took when the message arrived, so a /stop sent while the message
+    waited for its turn also ends it; omitted, the mark is taken on entry.
+
+    ``on_event``, when given, receives the turn's progress events live."""
 
     async def chat(
-        user_id: str, text: str, *, new_conversation: bool = False
+        user_id: str,
+        text: str,
+        *,
+        new_conversation: bool = False,
+        stop_mark: Optional[int] = None,
+        on_event: Optional[EventSink] = None,
     ) -> Dict[str, Any]:
+        # Accepted: a stop from here on ends this turn, setup included.
+        if stop_mark is None:
+            stop_mark = agent_cancel.mark(user_id)
         runtime: Optional[AgentRuntime] = getattr(app.state, "agent_runtime", None)
         if runtime is None:
             return {"error": "The assistant is not available right now."}
@@ -1808,11 +1866,14 @@ def build_chat_applier(app: Any, session_factory: Any = async_session):
                 permissions_text=permissions_text,
                 task_id=task_id,
                 usage_sink=turn,
+                stop_mark=stop_mark,
+                event_sink=on_event,
             )
         except asyncio.CancelledError:
             # /stop: the reply will never come. Close the turn in the
             # transcript (so the next turn does not see an unanswered
-            # message) and keep its billed tokens, then keep unwinding.
+            # message) and keep its billed tokens and the calls that ran,
+            # then keep unwinding.
             await record_unfinished(_STOPPED_REPLY)
             raise
         except ProviderNotConfigured as exc:
@@ -1948,3 +2009,51 @@ async def decide_approval(
         approved=body.approved,
         result=result,
     )
+
+
+@router.post("/stop")
+async def stop_running_task(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Dict[str, bool]:
+    """The web Stop button: ask the signed-in user's running task to stop.
+
+    Records a stop (``services.agent.cancel``) that ends each of the user's
+    turns accepted before it: the runtime checks before every model round
+    and every tool call, and the computer toolkit before every desktop
+    action. The turn then ends through its normal path with a short
+    "Stopped." reply, so the SSE stream still sends its ``done`` frame and
+    the reply is saved like any other. Work the user starts afterwards is
+    not affected, except the turn resumed from an approval card that was
+    already waiting: the approved action runs, and that turn then ends as
+    "Stopped.". With nothing running this is otherwise harmless.
+
+    The stop is recorded before the audit row is written, so a failed audit
+    write never keeps it from taking effect.
+    """
+    # Imported here rather than at the top so this endpoint stays one
+    # self-contained block at the end of the file.
+    from models.audit import AuditStatus
+    from services.agent.runtime import USER_STOPPED_POLICY
+    from services.audit import append_audit_log
+
+    agent_cancel.request_cancel(str(current_user.id))
+    try:
+        await append_audit_log(
+            db,
+            user_id=current_user.id,
+            connector_name="agent",
+            action="stop_requested",
+            endpoint="/api/agent/stop",
+            scope_used="agent",
+            status=AuditStatus.approved,
+            reasoning_chain={
+                "event": "stop_requested",
+                "policy": USER_STOPPED_POLICY,
+                "channel": "web",
+            },
+        )
+    except Exception as exc:
+        await db.rollback()
+        logger.error("stop_request_audit_failed", error=str(exc)[:200])
+    return {"ok": True}

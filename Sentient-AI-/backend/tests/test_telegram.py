@@ -1,5 +1,6 @@
 """Tests for the Telegram approval channel: link-code linking is single-use and
-expires, only a linked chat's decisions are authorized, and the notifying
+expires, only a linked chat's decisions are authorized, an approval card shows
+the call without the screen a desktop.act card stores, and the notifying
 approval-store decorator, message splitting, and poller-conflict backoff all
 behave correctly.
 
@@ -10,7 +11,8 @@ so this exercises the service's real request and response code.
 Connects to: services/notifications/telegram.py and the agent appliers,
 with the Bot API faked at the httpx transport.
 Used by: pytest (CI backend jobs); FakeTelegramAPI is reused by
-test_usage.py and test_telegram_cost_safety.py.
+test_usage.py, test_telegram_cost_safety.py, test_telegram_decisions.py and
+test_telegram_progress.py.
 
 Telegram approval-channel tests: linking security, decision
 authorization, and the notifying approval-store decorator.
@@ -259,6 +261,42 @@ async def test_notify_pending_skips_unlinked_and_messages_linked(
     buttons = sent[0]["reply_markup"]["inline_keyboard"][0]
     assert buttons[0]["callback_data"] == "apv:a1"
     assert buttons[1]["callback_data"] == "dny:a1"
+    await service._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_desktop_card_leaves_out_the_screen_it_stores(session_factory, fake_api):
+    """A desktop.act card stores the screen it was made from under the
+    reserved "_screen" key; the card shows the call without it. Any other
+    tool's arguments are shown whole, "_" keys included."""
+    from services.agent.approvals import StoredAction
+
+    user = await _link(session_factory, "tg-notify-screen@example.com", 889)
+    service = _make_service(session_factory)
+    expires = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()
+
+    def action(tool_name: str, arguments: dict) -> StoredAction:
+        return StoredAction(
+            action_id="a2",
+            user_id=str(user.id),
+            tool_name=tool_name,
+            arguments=arguments,
+            reason="Click \"Send\" in Mail",
+            created_at=datetime.now(timezone.utc).isoformat(),
+            expires_at=expires,
+        )
+
+    await service.notify_pending(
+        action(
+            "desktop.act",
+            {"action": "click", "ref": "d3", "_screen": {"app": "Mail", "outline": "9f2c1a"}},
+        )
+    )
+    await service.notify_pending(action("mcp.github.search", {"q": "x", "_scope": "org"}))
+    desktop, other = (m["text"] for m in fake_api.sent_messages())
+    assert '"ref": "d3"' in desktop
+    assert "_screen" not in desktop and "9f2c1a" not in desktop
+    assert '"_scope": "org"' in other
     await service._client.aclose()
 
 

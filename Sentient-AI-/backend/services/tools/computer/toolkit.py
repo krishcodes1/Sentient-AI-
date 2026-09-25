@@ -23,6 +23,11 @@ Refs (``d1``, ``d2`` …) belong to one user and last until that user's next
 outline, which every observe outline and every act's ``then`` produces.
 Numbering carries on across outlines, so a stale ref is refused as unknown
 instead of silently naming a different element.
+
+An approval card is tied to the screen it was made from: ``bind`` stores the
+app and the outline's id with the parked call (under ``CARD_KEY``), and an
+approved act runs only while that screen holds (rule ``screen_changed``) and
+only with that tie (rule ``unbound_approval``).
 """
 
 from __future__ import annotations
@@ -30,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import re
+import secrets
 import threading
 import unicodedata
 from dataclasses import dataclass
@@ -111,6 +117,16 @@ _NO_PERMISSION = (
 )
 _OWNER_STEP = "The owner can do this step themselves."
 
+# The reserved desktop.act argument an approval card's screen is stored
+# under (see ``ComputerToolkit.bind``). No action takes it, so a call that
+# carries it is refused before any card; only an approved act reads it.
+CARD_KEY = "_screen"
+_SCREEN_CHANGED = "The screen changed since this was approved. Look again first."
+_UNBOUND = (
+    "This approval does not say which screen it was made for, so nothing was done. "
+    "Look again first."
+)
+
 
 class _Refused(Exception):
     """A hard rule said no. Audited with its rule name."""
@@ -132,11 +148,14 @@ class _Failed(Exception):
 
 @dataclass(frozen=True)
 class _Snapshot:
-    """What the user's latest outline showed: its app and its refs."""
+    """What the user's latest outline showed: its app and its refs.
+    ``outline`` is the outline's own id, random so that it never repeats,
+    not even after a restart (when ref numbering starts over)."""
 
     app: str
     window_title: str
     refs: Mapping[str, Node]
+    outline: str = ""
 
 
 @dataclass
@@ -342,6 +361,17 @@ def _find_handle(nodes: Iterable[Node], handle: Any) -> Optional[Node]:
     return None
 
 
+def _bound_screen(card: Any) -> Optional[tuple[str, str]]:
+    """The (app, outline id) an approval card was made from, as ``bind``
+    stored it, or None when *card* is not that."""
+    if not isinstance(card, Mapping):
+        return None
+    app, outline = card.get("app"), card.get("outline")
+    if not isinstance(app, str) or not isinstance(outline, str):
+        return None
+    return app, outline
+
+
 class ComputerToolkit:
     """desktop.observe / desktop.act over one ComputerBackend.
 
@@ -376,9 +406,15 @@ class ComputerToolkit:
         params: Optional[Mapping[str, Any]],
         *,
         user_id: str,
+        approved: bool = False,
     ) -> dict[str, Any]:
-        """Run ``desktop.observe`` or ``desktop.act``. Never raises."""
-        return await asyncio.to_thread(self._execute, action_family, params, user_id)
+        """Run ``desktop.observe`` or ``desktop.act``. Never raises.
+
+        ``approved`` means the act comes from an approval card the owner
+        accepted (the executor's own flag, never the model's). It then runs
+        only with the screen that card was made from under ``CARD_KEY``
+        (see ``bind``), and only while that screen holds."""
+        return await asyncio.to_thread(self._execute, action_family, params, user_id, approved)
 
     def describe(
         self, params: Optional[Mapping[str, Any]], *, user_id: Optional[str] = None
@@ -386,9 +422,14 @@ class ComputerToolkit:
         """The approval-card sentence for a desktop.act call, built from facts:
         ``Click "Send" in Mail``, ``Type 42 characters into "Subject" in Mail``,
         ``Press cmd+s in TextEdit``, ``Open Calculator``. Refs resolve against
-        *user_id*'s latest outline. Calls no backend."""
+        *user_id*'s latest outline. With the screen ``bind`` added, the
+        sentence names that screen's app, and a ref resolves only while that
+        outline is still the latest, so the card says what the approved act
+        would run on. Calls no backend."""
         try:
-            request = _parse_act(dict(params or {}))
+            params = dict(params or {})
+            card = params.pop(CARD_KEY, None)
+            request = _parse_act(params)
         except _Refused as refusal:
             return f"Blocked desktop action: {refusal.message}"
         except _Failed as failure:
@@ -396,18 +437,43 @@ class ComputerToolkit:
         except Exception:
             return "Invalid desktop action."
         snapshot = self._snapshot(user_id) if user_id else None
+        app = snapshot.app if snapshot else None
+        if card is not None:
+            bound = _bound_screen(card)
+            app = bound[0] if bound else None
+            if bound is None or snapshot is None or snapshot.outline != bound[1]:
+                snapshot = None
         if request.ref is not None and snapshot is not None:
             request = dataclasses.replace(request, node=snapshot.refs.get(request.ref))
-        text = _facts(request, snapshot.app if snapshot else None, with_role=False)
+        text = _facts(request, app, with_role=False)
         return text[:1].upper() + text[1:]
+
+    def bind(self, params: Optional[Mapping[str, Any]], *, user_id: str) -> dict[str, Any]:
+        """*params* as a desktop.act approval card stores them: with the
+        screen the card is made from under ``CARD_KEY`` (the app and the id
+        of *user_id*'s latest outline, both empty when there is none),
+        replacing anything the call itself put there. The executor asks it
+        when the call is parked; the approved act then runs only on that
+        screen. Calls no backend."""
+        snapshot = self._snapshot(user_id)
+        screen = {
+            "app": snapshot.app if snapshot else "",
+            "outline": snapshot.outline if snapshot else "",
+        }
+        return {**dict(params or {}), CARD_KEY: screen}
 
     def precheck(
         self, params: Optional[Mapping[str, Any]], *, user_id: str
     ) -> Optional[dict[str, Any]]:
         """The refusal or error a desktop.act call would get from the checks
         that need no backend (arguments, cancel flag, blocked apps and combos,
-        typing into a known password field, stale refs), or None. Lets the
-        caller refuse before showing an approval card."""
+        typing into a known password field, stale refs), or None. The runtime
+        asks it before making an approval card
+        (``ConnectorToolExecutor.precheck_approval``), so a call it refuses
+        never gets one; ``execute`` runs the same checks again. A check that
+        fails refuses the call (rule ``check_failed``). A call that brings
+        its own ``CARD_KEY`` is refused like any argument no action takes:
+        only ``bind`` sets it."""
         try:
             request = _parse_act(dict(params or {}))
             self._check_cancel(user_id)
@@ -416,14 +482,21 @@ class ComputerToolkit:
             return {"ok": False, "refused": True, "rule": refusal.rule, "error": refusal.message}
         except _Failed as failure:
             return _error(failure.message, **failure.extra)
-        except Exception as exc:
+        except Exception as exc:  # fail closed: an unchecked act gets no card
             _log_failure("computer_precheck_failed", exc)
-            return _error("desktop.act failed.")
+            return {
+                "ok": False,
+                "refused": True,
+                "rule": "check_failed",
+                "error": (
+                    "Could not check this action before asking for approval, so nothing was done."
+                ),
+            }
         return None
 
     # ── dispatch ────────────────────────────────────────────────────────
 
-    def _execute(self, family: str, params: Any, user_id: str) -> dict[str, Any]:
+    def _execute(self, family: str, params: Any, user_id: str, approved: bool) -> dict[str, Any]:
         if family not in ("observe", "act"):
             return _error(f"Unknown desktop tool '{clean_text(family, 40)}'.")
         if not isinstance(user_id, str) or not user_id:
@@ -434,11 +507,14 @@ class ComputerToolkit:
             return _error(f"Invalid arguments for desktop.{family}.")
         params = dict(params)
         action = params.get("action")
+        # Only an approved act reads a card's screen; anywhere else the
+        # reserved key is an argument no action takes, and is refused.
+        card = params.pop(CARD_KEY, None) if approved and family == "act" else None
         try:
             with self._op_lock:
                 if family == "observe":
                     return self._observe(params, user_id)
-                return self._act(params, user_id)
+                return self._act(params, user_id, approved=approved, card=card)
         except _Refused as refusal:
             logger.info(
                 "computer_refused",
@@ -638,7 +714,12 @@ class ComputerToolkit:
             title = nodes[0].name if nodes and nodes[0].role == "window" else ""
         with self._state_lock:
             state.next_ref = out.next_ref
-            state.snapshot = _Snapshot(app=target, window_title=title, refs=dict(out.refs))
+            state.snapshot = _Snapshot(
+                app=target,
+                window_title=title,
+                refs=dict(out.refs),
+                outline=secrets.token_hex(6),
+            )
         return {
             "ok": True,
             "frontmost_app": _label(front_app),
@@ -666,10 +747,14 @@ class ComputerToolkit:
 
     # ── act ─────────────────────────────────────────────────────────────
 
-    def _act(self, params: dict[str, Any], user_id: str) -> dict[str, Any]:
+    def _act(
+        self, params: dict[str, Any], user_id: str, *, approved: bool = False, card: Any = None
+    ) -> dict[str, Any]:
         request = _parse_act(params)
         self._check_cancel(user_id)
         snapshot = self._snapshot(user_id)
+        if approved:
+            self._check_card(request, snapshot, card)
         # Static rules: no backend call of any kind before these pass.
         request = self._static_rules(request, snapshot)
         self._preflight()
@@ -682,6 +767,27 @@ class ComputerToolkit:
         self._perform(request, user_id)
         did = _facts(request, snapshot.app if snapshot else None, with_role=True)
         return {"ok": True, "did": did, "then": self._then(user_id)}
+
+    def _check_card(self, request: _Request, snapshot: Optional[_Snapshot], card: Any) -> None:
+        """An approved act runs only on the screen its card was made from
+        (``bind``): input goes only to that app, and a ref only while that
+        outline is the latest (after a restart ref numbers start over, so a
+        ref alone could name another element). Opening or switching to an
+        app does not depend on what is on screen, so it only needs the card
+        to carry its screen. Reads nothing: the live rules then hold the
+        front app to the outline's app, and so to the card's."""
+        bound = _bound_screen(card)
+        if bound is None:
+            raise _Refused("unbound_approval", _UNBOUND)
+        if request.action in _APP_ACTIONS:
+            return
+        app, outline = bound
+        if (
+            snapshot is None
+            or not rules.same_app(snapshot.app, app)
+            or (request.ref is not None and snapshot.outline != outline)
+        ):
+            raise _Refused("screen_changed", _SCREEN_CHANGED)
 
     def _static_rules(self, request: _Request, snapshot: Optional[_Snapshot]) -> _Request:
         """Rules decided from the request and the user's last outline alone."""

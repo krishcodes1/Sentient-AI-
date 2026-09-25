@@ -83,6 +83,7 @@ from services.agent.runtime import (
     CAPABILITY_GATE_ERROR_POLICY,
     CAPABILITY_GATE_ERROR_REASON,
     CAPABILITY_OFF_POLICY,
+    PrecheckRefusal,
     Tool,
 )
 from services.capabilities.base import Capability, CapabilityStatus
@@ -1240,6 +1241,32 @@ class RuntimePermissionAdapter:
 # ---------------------------------------------------------------------------
 
 
+# A desktop.act refused by one of the computer toolkit's own hard rules
+# before its approval card (ConnectorToolExecutor.precheck_approval). The
+# toolkit's rule name (blocked_app, secure_field, cancelled ...) rides along.
+COMPUTER_RULE_POLICY = "computer_rule"
+
+
+def _without_confirmation(arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """*arguments* as the tool sees them. Confirmation is decided by the
+    approval flow, never by the model, so any ``user_confirmed`` it sent is
+    dropped; the card, the precheck and the dispatch all see the same call."""
+    return {k: v for k, v in arguments.items() if k != "user_confirmed"}
+
+
+def _desktop_rule(result: Mapping[str, Any]) -> str:
+    """The rule a desktop.act precheck refused under: the toolkit's own
+    (``blocked_app``, ``secure_field``, ``cancelled`` ...), else the kind of
+    error it found (a stale ref, no outline yet, bad arguments)."""
+    rule = result.get("rule")
+    if isinstance(rule, str) and rule:
+        return rule
+    for flag in ("stale_ref", "needs_observe"):
+        if result.get(flag) is True:
+            return flag
+    return "invalid_arguments"
+
+
 @dataclass(frozen=True)
 class _Builtin:
     """How the executor dispatches one built-in tool family.
@@ -1289,6 +1316,14 @@ class ConnectorToolExecutor:
     computer) run at all. The flag can never come from tool
     arguments — any LLM-supplied ``user_confirmed`` value is stripped
     before dispatch.
+
+    Before a call is parked for approval the runtime asks
+    ``precheck_approval``: a ``desktop.act`` that the computer toolkit's
+    own hard rules refuse (Terminal, a password field, a stale ref, after
+    Stop) gets no card at all and is filed under ``computer_rule``. The
+    card it does get stores ``approval_arguments``, which tie it to the
+    screen it was made from. The toolkit checks every rule again when an
+    approved act runs, and refuses one whose screen has changed since.
 
     Whatever comes back is data, never instruction: the runtime scans
     every tool result before it reaches the model, and fetched web pages
@@ -1360,13 +1395,15 @@ class ConnectorToolExecutor:
             # screenshot is the screen toolkit's; observe and act are the
             # computer toolkit's, which keeps refs per user, so it gets the
             # executor's user_id. act is WRITE: it runs only re-dispatched
-            # with approved=True after the owner said yes to its card.
+            # with approved=True after the owner said yes to its card, and
+            # the toolkit then holds it to the screen that card was made
+            # from (approval_arguments).
             "desktop": _Builtin(
                 "Desktop",
                 lambda a, p, uid, ok: (
                     desktop.execute(a, p)
                     if a == "screenshot"
-                    else computer.execute(a, p, user_id=uid)
+                    else computer.execute(a, p, user_id=uid, approved=ok)
                 ),
                 frozenset({read, write}),
                 confirm=frozenset({write}),
@@ -1405,13 +1442,58 @@ class ConnectorToolExecutor:
 
         Only ``desktop.act`` has one: the computer toolkit names the real
         element and app from the user's latest outline (``Click "Send" in
-        Mail``, ``Type 42 characters into "Subject" in Mail``). It calls no
-        backend, so building a card never touches the screen.
+        Mail``, ``Type 42 characters into "Subject" in Mail``), or, given the
+        card's arguments (``approval_arguments``), from the screen they are
+        tied to. It calls no backend, so building a card never touches the
+        screen.
         """
         resolved = resolve_tool(tool_name)
         if resolved is None or (resolved.connector_type, resolved.action) != ("desktop", "act"):
             return None
-        return self._computer.describe(arguments, user_id=user_id)
+        return self._computer.describe(_without_confirmation(arguments), user_id=user_id)
+
+    def approval_arguments(
+        self, tool_name: str, arguments: dict[str, Any], user_id: str
+    ) -> dict[str, Any]:
+        """The arguments an approval card stores for a call: *arguments*
+        unchanged, except for ``desktop.act``. Its card is tied to the screen
+        it was made from (the computer toolkit's ``bind``: that app and that
+        outline, under a key no action takes, set here and never by the
+        model). Once approved, the act runs only while that screen holds, and
+        an act with no such tie is refused. Calls no backend.
+        """
+        resolved = resolve_tool(tool_name)
+        if resolved is None or (resolved.connector_type, resolved.action) != ("desktop", "act"):
+            return arguments
+        return self._computer.bind(arguments, user_id=user_id)
+
+    def precheck_approval(
+        self, tool_name: str, arguments: Mapping[str, Any], user_id: str
+    ) -> Optional[PrecheckRefusal]:
+        """The refusal a call would meet even once approved, when this
+        executor can tell without running it; None otherwise (the runtime
+        then parks it for approval as usual).
+
+        Only ``desktop.act`` has one: the computer toolkit's checks that need
+        no backend (its arguments, the Stop flag, blocked apps and key
+        combos, typing into a known password field, a ref the latest outline
+        does not have). A refusal is filed under ``computer_rule`` with the
+        toolkit's rule name, and the model is shown the toolkit's own
+        result. Calls no backend; the same checks run again when an approved
+        act executes.
+        """
+        resolved = resolve_tool(tool_name)
+        if resolved is None or (resolved.connector_type, resolved.action) != ("desktop", "act"):
+            return None
+        result = self._computer.precheck(_without_confirmation(arguments), user_id=user_id)
+        if result is None:
+            return None
+        return PrecheckRefusal(
+            reason=str(result.get("error") or "desktop.act was refused."),
+            policy=COMPUTER_RULE_POLICY,
+            result=result,
+            rule=_desktop_rule(result),
+        )
 
     def _get_mcp_dispatcher(self):
         if self._mcp_dispatcher is None:
@@ -1462,7 +1544,7 @@ class ConnectorToolExecutor:
 
         # Confirmation status is decided by the approval flow, never by the
         # model. Strip any attempt to smuggle it through tool arguments.
-        arguments = {k: v for k, v in arguments.items() if k != "user_confirmed"}
+        arguments = _without_confirmation(arguments)
 
         cap = _capability_of(resolved.connector_type, resolved.action)
         refusal = await _gate_refusal(self._capability_gate, cap) if cap is not None else None

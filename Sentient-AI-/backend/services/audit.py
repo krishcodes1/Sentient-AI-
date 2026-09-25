@@ -26,7 +26,8 @@ spurious chain failures), so head selection and verification order by
 Four layers live here:
 
 - ``sanitize_request_data`` / ``_sanitize``: strip credentials and other
-  sensitive values before anything is persisted.
+  sensitive values before anything is persisted; ``redact_tool_arguments``
+  keeps only the length of what some tools take (the text desktop.act types).
 - ``build_hash_payload`` + ``append_audit_log``: the canonical hash
   payload (shared with ``api/routes/audit.py`` verification and
   ``scripts/verify_audit_log.py``) and the chained insert.
@@ -104,6 +105,43 @@ def sanitize_request_data(data: Any) -> str:
         return json.dumps(sanitized, default=str)
     except (TypeError, ValueError):
         return json.dumps({"raw": str(sanitized)})
+
+
+# Tool arguments an audit row keeps as their length only, by (connector
+# type, action). What desktop.act types can be a password (a call aimed at a
+# password field is refused, but its row is still written) or a private
+# message, and this log is append-only: nothing written here can be taken
+# back. The approval store keeps the real text, since an approved call
+# needs it to run.
+_LENGTH_ONLY_ARGUMENTS: dict[tuple[str, str], frozenset[str]] = {
+    ("desktop", "act"): frozenset({"text"}),
+}
+
+
+def _tool_key(tool: str) -> tuple[str, str]:
+    """(connector type, action) of a tool name however it was spelled:
+    case, stray spaces or dots, and a per-connector ``__slug`` are
+    ignored, so a spelling the registry refuses is redacted too."""
+    connector, _, action = tool.strip().lower().rpartition(".")
+    return connector.split("__", 1)[0].strip(" ."), action.strip()
+
+
+def _length_marker(value: Any) -> str:
+    if not isinstance(value, str):
+        return "***REDACTED***"
+    return "<1 character>" if len(value) == 1 else f"<{len(value)} characters>"
+
+
+def redact_tool_arguments(tool: str, arguments: Any) -> Any:
+    """*arguments* of a call to *tool* as an audit row stores them: the
+    fields in ``_LENGTH_ONLY_ARGUMENTS`` replaced by their length
+    (``"<14 characters>"``), everything else untouched."""
+    fields = _LENGTH_ONLY_ARGUMENTS.get(_tool_key(tool))
+    if not fields or not isinstance(arguments, dict):
+        return arguments
+    return {
+        key: _length_marker(value) if key in fields else value for key, value in arguments.items()
+    }
 
 
 # ------------------------------------------------------------------ #
@@ -206,11 +244,14 @@ async def append_audit_log(
 
     This is the only sanctioned way to write audit rows. Request data and
     the response summary are sanitized before hashing so the stored values
-    and the hash always agree.
+    and the hash always agree. Request data is first passed through
+    ``redact_tool_arguments`` for the tool *connector_name*.*action*, so no
+    writer can store the text a desktop.act types.
     """
     user_uuid = user_id if isinstance(user_id, uuid.UUID) else uuid.UUID(str(user_id))
     rid = request_id or str(uuid.uuid4())
 
+    request_data = redact_tool_arguments(f"{connector_name}.{action}", request_data)
     sanitized_request = json.loads(sanitize_request_data(request_data)) if request_data is not None else None
     sanitized_summary = _sanitize(response_summary) if response_summary is not None else None
     # Sanitise once and hash exactly what is stored, so the row and its hash
@@ -369,6 +410,8 @@ _EVENT_STATUS: dict[str, AuditStatus] = {
     "tool_expired": AuditStatus.blocked,
     "input_blocked": AuditStatus.blocked,
     "output_blocked": AuditStatus.blocked,
+    # The user's stop ended a turn before it finished (policy user_stopped).
+    "turn_stopped": AuditStatus.blocked,
 }
 
 
@@ -407,7 +450,9 @@ class RuntimeAuditLogger:
         status = _EVENT_STATUS.get(event, AuditStatus.blocked)
 
         reasoning: dict[str, Any] = {"event": event}
-        for key in ("reason", "policy", "action_id", "threat_level"):
+        # "rule" names the tool's own hard rule when a call was refused
+        # before its approval card (policy computer_rule: blocked_app ...).
+        for key in ("reason", "policy", "rule", "action_id", "threat_level"):
             if entry.get(key) is not None:
                 reasoning[key] = entry[key]
 

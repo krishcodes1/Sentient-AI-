@@ -35,14 +35,19 @@ Outline lines mirror the browser format: `- button "Send" [ref=d12]`, `- text fi
 ```
 Coordinates only when no ref exists (screenshot fallback); refs are preferred. `type` goes to the focused element or the given ref.
 
+**What stays in context** (the browser's latest-observation policy, `runtime.py`): only the newest desktop outline (an `observe` outline or an `act`'s `then`) is sent to the model in full. Once a newer one exists, each older one is resent as one line of facts: `outline of Mail, window "New Message", 77 lines, 77 refs, truncated. A newer outline replaced this one, so its refs no longer work.` (about 170 chars where the outline was about 6,900), prefixed with `did click button "Send" in Mail; then …` for an act. Refusals, errors and app or window lists are never shrunk. A stale outline's screenshot goes with it; any other picture from the same round (a `browser.read` or `web.screenshot` one) stays until a newer one of its own kind replaces it, as before.
+
+The policy works inside one turn, and every `desktop.act` ends the turn at its approval card (§6: no account setting auto-approves it). So in real use it saves context on turns that read several outlines before acting. On the fake desktop (a Mail window whose outline fills the 6,000-char default), a turn that lists the apps, reads Mail, reads TextEdit and then parks an act sends ~9.4k chars in its last request instead of ~16.1k, and ~38.7k for the whole turn instead of ~45.4k. A turn with one observe and then an act is unchanged. After approval, the act runs outside the turn. Its result reaches the resumed turn's history as the decision message, cut to 2,000 chars (`api/routes/agent.py`). So the growth across approvals, about 2k chars per approved step, is not touched by this policy and is still open. The larger figure applies only to an engine that ran acts unattended, which Crawler does not have. For comparison, 10 rounds in one turn on the same window would bring the last request from ~84k to ~23k chars and the whole task from ~499k to ~191k.
+
 ## 4. Hard rules (enforced in the toolkit, before the backend is called)
 
 - **Never type into a secure/password field** (Mac `AXSecureTextField` subrole; Windows UIA `IsPassword`). Refuse and suggest the owner does it.
 - **Blocked apps** (refuse any `act` whose target app is one of these): Keychain Access, Passwords, 1Password, Bitwarden, LastPass, Dashlane, System Settings / System Preferences, Terminal, iTerm2, Warp, PowerShell, Windows Terminal, Command Prompt, Registry Editor, Task Manager, the login/lock window, and Crawler AI itself. (A later `shell` capability is the only path to commands.)
 - **Blocked key combos:** logout/lock/shutdown/restart combos, `cmd+option+esc`/`ctrl+alt+del`, `cmd+q` on Finder, anything with the Globe/Fn key; `key` accepts only a small grammar (modifiers + one key).
 - **Financial:** refuse when the frontmost window's outline contains payment fields (card number / CVC / IBAN patterns) — same rule as the browser.
-- **Kill switch:** `/stop` (Telegram) and the web Stop button cancel the turn; the toolkit checks a per-user cancel flag before every action.
+- **Kill switch:** `/stop` (Telegram) and the web Stop button cancel the turn; the toolkit checks a per-user cancel flag before every action, and the runtime ends the turn before its next model round.
 - Every `act` is audited (existing intent row + result), including refusals.
+- **Refused before the card:** the rules that need no screen read (arguments, the cancel flag, blocked apps and key combos, typing into a known password field, a stale ref) are checked before the approval card is made. An act they refuse gets no card: it gets a `blocked` event and a `tool_blocked` audit row (policy `computer_rule`, with the rule's name), and the model sees the refusal as the call's result. A check that fails refuses the act. Every rule runs again when an approved act executes. A round that parks any act for approval ends the turn on its card, so the model never asks for the same card twice.
 
 ## 5. Platform backends
 
