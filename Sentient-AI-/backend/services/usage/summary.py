@@ -5,6 +5,11 @@ Why it exists: The usage route and the Telegram usage reply need a result whose
 cost does not grow with the transcript, so aggregation is one GROUP BY here and
 pricing is applied to those rows.
 
+Connects to: the Message table (one aggregate SQL query) and
+services/usage/pricing.py.
+Used by: api/routes/usage.py (dashboard) and the Telegram bot (/usage and
+the cost line at the end of every reply).
+
 Aggregate one account's token usage across time windows and models.
 
 Everything is summed in SQL: a transcript is unbounded, and loading every
@@ -25,7 +30,11 @@ from sqlalchemy import Integer, case, func, literal_column, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.conversation import Conversation, Message, MessageRole
-from services.usage.pricing import PRICING_AS_OF, estimate_cost_usd
+from services.usage.pricing import (
+    PRICING_AS_OF,
+    estimate_cost_usd,
+    estimate_turn_cost_usd,
+)
 
 WINDOWS = ("today", "last_7_days", "last_30_days", "all_time")
 
@@ -226,6 +235,53 @@ def _format_window(label: str, window: dict[str, Any]) -> str:
     if window["unpriced_turns"] and window["estimated_cost_usd"] is not None:
         line += f" (excludes {window['unpriced_turns']} unpriced turn(s))"
     return line
+
+
+def _format_token_count(total: int) -> str:
+    if total < 1000:
+        return str(total)
+    if total < 99_950:
+        return f"{total / 1000:.1f}k"
+    if total < 999_500:
+        return f"{total / 1000:.0f}k"
+    return f"{total / 1_000_000:.1f}M"
+
+
+def _format_turn_cost(cost: Optional[float]) -> str:
+    # One reply usually costs a fraction of a cent, which the two-decimal
+    # _format_cost of the /usage totals would flatten to "<$0.01".
+    if cost is None:
+        return "cost n/a"
+    if cost == 0:
+        return "$0"
+    if cost < 0.001:
+        return "<$0.001"
+    if cost < 0.1:
+        return f"≈${cost:.3f}"
+    return f"≈${cost:,.2f}"
+
+
+def format_turn_usage_line(
+    usage: Optional[dict[str, int]],
+    provider: Optional[str],
+    model: Optional[str],
+    served_model: Optional[str] = None,
+) -> str:
+    """One reply's footer, e.g. ``5.3k tokens · ≈$0.002``.
+
+    ``usage`` is that turn's own summed counts (every model call of its
+    tool loop, nothing else); the cost prices them on the model that ran
+    the turn via services/usage/pricing.py. "cost n/a" means the model has
+    no listed price, never that it was free.
+    """
+    counts = usage or {}
+    total = sum(
+        value
+        for key in ("input_tokens", "output_tokens")
+        if isinstance(value := counts.get(key), int) and value > 0
+    )
+    cost = estimate_turn_cost_usd(provider, model, counts, served_model)
+    return f"{_format_token_count(total)} tokens · {_format_turn_cost(cost)}"
 
 
 def format_usage_text(summary: dict[str, Any]) -> str:

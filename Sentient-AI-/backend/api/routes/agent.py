@@ -9,6 +9,12 @@ injection and the runtime meet: it builds each turn's tool set and
 limit, persists user and assistant messages with their token usage, and resumes
 a paused turn after an approval, so an out-of-band channel reuses this path
 instead of a second copy.
+
+Connects to: AgentRuntime (services/agent/runtime.py), the Conversation
+and Message tables, the tool registry and capability report, the memory
+service and the approval store.
+Used by: the web chat UI over HTTP, and main.py, which mounts the router
+and hands build_chat_applier / build_decision_applier to the Telegram bot.
 """
 
 from __future__ import annotations
@@ -47,7 +53,12 @@ from services.capabilities.prompt import render_permissions_block
 from services.memory import render_memory_block
 from services.agent.context_manager import compress_tool_result
 from services.agent.providers import ProviderError, ProviderNotConfigured
-from services.agent.runtime import AgentRuntime, is_browser_tool, redact_binary_for_model
+from services.agent.runtime import (
+    AgentRuntime,
+    TurnUsage,
+    is_browser_tool,
+    redact_binary_for_model,
+)
 from services.agent.tool_registry import ConnectorSpec, build_tools, effective_tier, resolve_tool
 
 logger = structlog.get_logger(__name__)
@@ -1242,6 +1253,49 @@ async def list_pending_approvals(
     ]
 
 
+# Most messages a Telegram turn (or a resume after an approval) reads back.
+# The context manager keeps only the newest 12 verbatim and folds the rest
+# into a size-capped summary, so rows older than this could only ever reach
+# the model as a clipped summary line — not worth loading every row of a
+# thread that is reused for months.
+CHANNEL_HISTORY_LIMIT = 60
+
+# Assistant row written when a turn ends without a reply (stopped from the
+# chat, or failed after some model calls were already billed). It keeps the
+# transcript alternating user/assistant and carries the billed tokens.
+_STOPPED_REPLY = "[Stopped before the reply was finished.]"
+_FAILED_REPLY = "[No reply: the model provider returned an error.]"
+
+
+async def _recent_messages(
+    db: AsyncSession, conversation_id: Any, limit: int = CHANNEL_HISTORY_LIMIT
+) -> list[Any]:
+    """The newest ``limit`` messages of a conversation, oldest first, with
+    only the columns a turn uses (id, role, content): ``tool_calls`` can
+    hold whole tool results, screenshot data URLs included, that the
+    history never needs."""
+    rows = (
+        await db.execute(
+            select(Message.id, Message.role, Message.content)
+            .where(Message.conversation_id == conversation_id)
+            .order_by(Message.created_at.desc())
+            .limit(limit)
+        )
+    ).all()
+    return list(reversed(rows))
+
+
+def _unfinished_turn_message(
+    conversation_id: Any, turn: TurnUsage, content: str
+) -> Message:
+    return Message(
+        conversation_id=conversation_id,
+        role=MessageRole.assistant,
+        content=content,
+        **_usage_columns(turn.usage, turn.provider, turn.model),
+    )
+
+
 async def _resume_after_approval(
     mcp_catalog: Any,
     current_user: User,
@@ -1249,6 +1303,7 @@ async def _resume_after_approval(
     runtime: AgentRuntime,
     conversation: Conversation,
     installation: Any = None,
+    turn: Optional[TurnUsage] = None,
 ) -> Optional[Message]:
     """Run one more agent turn after an approved action executed.
 
@@ -1260,14 +1315,12 @@ async def _resume_after_approval(
     Tools are rebuilt exactly as the send path does, so the resumed turn is
     subject to the same permissions, taint gate, and scanning — an approval
     unlocks the one action the user approved, not a freer agent.
+
+    ``turn``, when given, is filled in with the resumed turn's usage and
+    model (see :class:`TurnUsage`), so a channel can show what it cost.
     """
-    history_result = await db.execute(
-        select(Message)
-        .where(Message.conversation_id == conversation.id)
-        .order_by(Message.created_at)
-    )
-    rows = list(history_result.scalars().all())
-    history = [{"role": m.role.value, "content": m.content} for m in rows]
+    rows = await _recent_messages(db, conversation.id)
+    history = [{"role": r.role.value, "content": r.content} for r in rows]
     if not history:
         return None
     # The decision row is an assistant message, so this is still the user
@@ -1281,17 +1334,26 @@ async def _resume_after_approval(
     # resumed turn; everything written so far — the decision message — is
     # durable from here.
     await db.commit()
-    agent_response = await runtime.chat(
-        messages=history,
-        tools=tools,
-        user_id=str(current_user.id),
-        conversation_id=str(conversation.id),
-        llm_provider=current_user.llm_provider,
-        llm_model=current_user.llm_model,
-        memory_block=memory_block,
-        permissions_text=permissions_text,
-        task_id=task_id,
-    )
+    turn = turn if turn is not None else TurnUsage()
+    try:
+        agent_response = await runtime.chat(
+            messages=history,
+            tools=tools,
+            user_id=str(current_user.id),
+            conversation_id=str(conversation.id),
+            llm_provider=current_user.llm_provider,
+            llm_model=current_user.llm_model,
+            memory_block=memory_block,
+            permissions_text=permissions_text,
+            task_id=task_id,
+            usage_sink=turn,
+        )
+    except asyncio.CancelledError:
+        # Stopped from a chat channel mid-turn: keep the calls already
+        # billed, then let the cancellation finish unwinding.
+        db.add(_unfinished_turn_message(conversation.id, turn, _STOPPED_REPLY))
+        await db.commit()
+        raise
     if not (agent_response.content or "").strip():
         return None
     return Message(
@@ -1373,15 +1435,78 @@ async def _apply_decision(
     and (on approval) run the resumed agent turn. Shared by the HTTP route
     and out-of-band decision channels (Telegram); returns the runtime's
     result dict, or {"error": ...} for unknown/expired/foreign actions.
+
+    The decision, the tool it runs and the transcript row recording it
+    finish together even if this call is cancelled (a chat's /stop): a
+    tool that already ran but was never written down would be invisible
+    to the next turn, which could then run it again. Only the resumed
+    turn after them can be stopped.
     """
     # The task (spec §10) the parked call belongs to, looked up before the
-    # connection is released below: the approved call then runs under the
-    # same per-task browser caps as the turn that parked it.
+    # decision releases the connection: the approved call then runs under
+    # the same per-task browser caps as the turn that parked it.
     task_id = await _parked_task_id(db, current_user, action_id) if approved else None
+    result, conversation = await _finish_even_if_cancelled(
+        _decide_and_record(db, runtime, current_user, action_id, approved, task_id)
+    )
+    if "error" in result or conversation is None or not approved:
+        return result
 
+    # Resume the task. Without this the agent dead-ends after an approval —
+    # the tool ran, but the user had to send another message just to get
+    # the answer it was fetched for. Run one more turn over the updated
+    # transcript so the assistant actually uses the result and continues.
+    #
+    # Best effort: the approval already happened and is recorded, so a
+    # resume failure must not turn into a failed request.
+    turn = TurnUsage()
+    try:
+        resumed = await _resume_after_approval(
+            mcp_catalog,
+            current_user,
+            db,
+            runtime,
+            conversation,
+            installation,
+            turn,
+        )
+        if resumed is not None:
+            db.add(resumed)
+            conversation.updated_at = datetime.now(timezone.utc)
+            await db.flush()
+            # Only a channel reads these two (the HTTP route drops them).
+            # Like build_chat_applier, a resumed turn that read a logged-in
+            # site loses URL queries before they reach Telegram (spec §9);
+            # the turn's usage lets the channel show what it cost.
+            result["assistant_reply"] = (
+                strip_url_queries(resumed.content)
+                if _account_mode(resumed.tool_calls)
+                else resumed.content
+            )
+            result["assistant_turn"] = turn
+    except Exception as exc:
+        logger.warning(
+            "resume_after_approval_failed",
+            conversation_id=str(conversation.id),
+            error=str(exc),
+        )
+    return result
+
+
+async def _decide_and_record(
+    db: AsyncSession,
+    runtime: AgentRuntime,
+    current_user: User,
+    action_id: str,
+    approved: bool,
+    task_id: Optional[str] = None,
+) -> tuple[Dict[str, Any], Optional[Conversation]]:
+    """Apply the decision (on approval: run the tool under ``task_id``'s
+    caps) and commit the transcript row that records it. Returns the
+    runtime's result and the conversation the row went into (None when
+    there was none to write)."""
     # Release the pooled connection before the decision: an approval
-    # executes the real tool (connector/MCP HTTP) and then runs a resumed
-    # agent turn, neither of which needs this session.
+    # executes the real tool (connector/MCP HTTP), which does not need it.
     await db.commit()
 
     if approved:
@@ -1390,76 +1515,58 @@ async def _apply_decision(
         result = await runtime.deny_action(action_id, str(current_user.id))
 
     if "error" in result:
-        return result
+        return result, None
 
     # Persist the outcome into the conversation the action came from.
     conv_id = result.pop("conversation_id", None)
     tool_name = result.get("tool", "")
-    if conv_id:
-        try:
-            conv_uuid = uuid.UUID(str(conv_id))
-        except ValueError:
-            conv_uuid = None
-        if conv_uuid is not None:
-            conv_result = await db.execute(
-                select(Conversation).where(Conversation.id == conv_uuid)
-            )
-            conversation = conv_result.scalar_one_or_none()
-            if conversation is not None and conversation.user_id == current_user.id:
-                # The row (content and tool_calls) records the placeholder,
-                # never image data (spec §9); the caller still gets the
-                # result as the tool returned it.
-                content, tool_calls_payload = _render_decision_message(
-                    approved, tool_name, redact_binary_for_model(result.get("result"))
-                )
-                db.add(
-                    Message(
-                        conversation_id=conversation.id,
-                        role=MessageRole.assistant,
-                        content=content,
-                        tool_calls=tool_calls_payload,
-                    )
-                )
-                conversation.updated_at = datetime.now(timezone.utc)
-                await db.flush()
+    if not conv_id:
+        return result, None
+    try:
+        conv_uuid = uuid.UUID(str(conv_id))
+    except ValueError:
+        return result, None
+    conversation = (
+        await db.execute(select(Conversation).where(Conversation.id == conv_uuid))
+    ).scalar_one_or_none()
+    if conversation is None or conversation.user_id != current_user.id:
+        return result, None
+    # The row (content and tool_calls) records the placeholder, never image
+    # data (spec §9); the caller still gets the result as the tool returned it.
+    content, tool_calls_payload = _render_decision_message(
+        approved, tool_name, redact_binary_for_model(result.get("result"))
+    )
+    db.add(
+        Message(
+            conversation_id=conversation.id,
+            role=MessageRole.assistant,
+            content=content,
+            tool_calls=tool_calls_payload,
+        )
+    )
+    conversation.updated_at = datetime.now(timezone.utc)
+    # Durable before anything that can be interrupted runs.
+    await db.commit()
+    return result, conversation
 
-                # Resume the task. Without this the agent dead-ends after an
-                # approval — the tool ran, but the user had to send another
-                # message just to get the answer it was fetched for. Run one
-                # more turn over the updated transcript so the assistant
-                # actually uses the result and continues.
-                #
-                # Best effort: the approval already happened and is recorded,
-                # so a resume failure must not turn into a failed request.
-                if approved:
-                    try:
-                        resumed = await _resume_after_approval(
-                            mcp_catalog,
-                            current_user,
-                            db,
-                            runtime,
-                            conversation,
-                            installation,
-                        )
-                        if resumed is not None:
-                            db.add(resumed)
-                            conversation.updated_at = datetime.now(timezone.utc)
-                            await db.flush()
-                            # Only a channel reads this (the HTTP route drops
-                            # it); like build_chat_applier, a resumed turn
-                            # that read a logged-in site loses URL queries
-                            # before they reach Telegram (spec §9).
-                            result["assistant_reply"] = (
-                                strip_url_queries(resumed.content)
-                                if _account_mode(resumed.tool_calls)
-                                else resumed.content
-                            )
-                    except Exception as exc:
-                        logger.warning(
-                            "resume_after_approval_failed",
-                            conversation_id=str(conversation.id),
-                            error=str(exc),
-                        )
+
+async def _finish_even_if_cancelled(coro: Any) -> Any:
+    """Await ``coro`` to its end even if the caller is cancelled meanwhile,
+    then honour the cancellation. For short sections that must not stop
+    half-way (a side effect and the record of it)."""
+    task = asyncio.ensure_future(coro)
+    cancelled = False
+    while True:
+        try:
+            result = await asyncio.shield(task)
+            break
+        except asyncio.CancelledError:
+            if task.done():
+                # The section itself was cancelled (e.g. loop shutdown).
+                raise
+            cancelled = True
+    if cancelled:
+        raise asyncio.CancelledError
     return result
 
 
@@ -1495,13 +1602,28 @@ def build_decision_applier(app: Any, session_factory: Any = async_session):
         if "error" in result:
             return result
         summary = None
+        outcome: Dict[str, Any] = {}
         if approved:
             reply = (result.get("assistant_reply") or "").strip()
-            summary = reply[:1500] if reply else (
+            # The whole reply: the channel splits long text into several
+            # messages, and a cut here would also cut the usage line.
+            summary = reply or (
                 f"Executed '{result.get('tool', '')}'. Open Crawler AI for the "
                 "full result."
             )
-        return {"status": "approved" if approved else "denied", "summary": summary}
+            turn = result.get("assistant_turn")
+            if reply and isinstance(turn, TurnUsage):
+                outcome = {
+                    "usage": dict(turn.usage),
+                    "provider": turn.provider,
+                    "model": turn.model,
+                    "served_model": turn.served_model,
+                }
+        return {
+            "status": "approved" if approved else "denied",
+            "summary": summary,
+            **outcome,
+        }
 
     return apply
 
@@ -1649,13 +1771,11 @@ def build_chat_applier(app: Any, session_factory: Any = async_session):
                 )
             )
             await db.flush()
-            history_result = await db.execute(
-                select(Message)
-                .where(Message.conversation_id == conversation.id)
-                .order_by(Message.created_at)
-            )
-            rows = list(history_result.scalars().all())
-            history = [{"role": m.role.value, "content": m.content} for m in rows]
+            # The channel thread is reused indefinitely (until /new), so read
+            # back only its recent tail; the newest user message, which names
+            # the task, is always in it.
+            rows = await _recent_messages(db, conversation.id)
+            history = [{"role": r.role.value, "content": r.content} for r in rows]
             task_id = _task_id_of(rows)
             tools, memory_block, permissions_text = await _build_tools_and_memory(
                 mcp_catalog, user, db, installation
@@ -1665,6 +1785,16 @@ def build_chat_applier(app: Any, session_factory: Any = async_session):
             # The user message is durable from here; release the pooled
             # connection for the (possibly long) turn.
             await db.commit()
+
+        # Filled in while the turn runs: a turn stopped from the chat (task
+        # cancelled) or failing after some model calls still records the
+        # tokens those calls billed.
+        turn = TurnUsage()
+
+        async def record_unfinished(content: str) -> None:
+            async with session_factory() as db:
+                db.add(_unfinished_turn_message(conversation_id, turn, content))
+                await db.commit()
 
         try:
             agent_response = await runtime.chat(
@@ -1677,7 +1807,14 @@ def build_chat_applier(app: Any, session_factory: Any = async_session):
                 memory_block=memory_block,
                 permissions_text=permissions_text,
                 task_id=task_id,
+                usage_sink=turn,
             )
+        except asyncio.CancelledError:
+            # /stop: the reply will never come. Close the turn in the
+            # transcript (so the next turn does not see an unanswered
+            # message) and keep its billed tokens, then keep unwinding.
+            await record_unfinished(_STOPPED_REPLY)
+            raise
         except ProviderNotConfigured as exc:
             # The channel sends "error" verbatim: the bare sentence, with the
             # code and the matching setup_url/settings_url alongside.
@@ -1700,6 +1837,10 @@ def build_chat_applier(app: Any, session_factory: Any = async_session):
                 conversation_id=str(conversation_id),
                 error=str(exc)[:200],
             )
+            if any(turn.usage.values()):
+                # Earlier calls of this turn were billed before the failing
+                # one; without a row their tokens vanish from /usage.
+                await record_unfinished(_FAILED_REPLY)
             return {"error": str(exc), "conversation_id": str(conversation_id)}
 
         async with session_factory() as db:
@@ -1756,7 +1897,12 @@ def build_chat_applier(app: Any, session_factory: Any = async_session):
                 pa.tool_name for pa in agent_response.pending_approvals
             ],
             "blocked": [ba.tool_name for ba in agent_response.blocked_actions],
-            "usage": agent_response.usage,
+            # This turn's own calls only (every round of its tool loop), and
+            # the model that ran it: what a per-reply cost line prices.
+            "usage": dict(agent_response.usage),
+            "provider": agent_response.provider,
+            "model": agent_response.model,
+            "served_model": agent_response.served_model,
         }
 
     return chat
@@ -1795,6 +1941,7 @@ async def decide_approval(
             detail=result["error"],
         )
     result.pop("assistant_reply", None)
+    result.pop("assistant_turn", None)
 
     return ApprovalDecisionResponse(
         action_id=action_id,

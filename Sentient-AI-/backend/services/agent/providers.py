@@ -5,6 +5,11 @@ Why it exists: The runtime needs a single interface for completion, streaming,
 tool calls and images no matter which vendor is configured; wire formats,
 retries and error mapping are provider-specific and live only here.
 
+Connects to: each vendor's HTTP API (Anthropic, OpenAI, Gemini, xAI,
+DeepSeek, Mistral, Groq) and a local Ollama server, through httpx.
+Used by: AgentRuntime for every model call, and api/routes/setup.py to
+test a key before it is saved.
+
 LLM provider abstraction layer.
 
 Supports Anthropic Claude, OpenAI, Google Gemini, xAI Grok, Deepseek,
@@ -202,6 +207,10 @@ class LLMResponse:
     tool_calls: list[ToolCall] = field(default_factory=list)
     model: str = ""
     usage: dict[str, int] = field(default_factory=dict)
+    # The concrete model the vendor reports having served this call, when it
+    # reports one separately from the id that was requested (Gemini's
+    # ``modelVersion``). Empty when the vendor does not say.
+    served_model: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -728,8 +737,11 @@ class GeminiProvider(LLMProvider):
     def __init__(self, api_key: str, model: str = "gemini-2.5-flash"):
         self._api_key = api_key
         # Gemini model ids are lowercase; normalise so a misconfigured
-        # "Gemini-2.5-Flash" still resolves.
-        self._model = model.lower()
+        # "Gemini-2.5-Flash" still resolves. The REST resource name
+        # ("models/gemini-2.5-flash") names the same model, and _build_url
+        # adds the "models/" segment itself, so a pasted resource name
+        # would otherwise request ".../models/models/...".
+        self._model = model.strip().lower().removeprefix("models/")
         self._base_url = "https://generativelanguage.googleapis.com/v1beta"
         # Key travels in a header, never in the URL, so it cannot leak into
         # logs or tracebacks.
@@ -824,11 +836,14 @@ class GeminiProvider(LLMProvider):
         think before answering, Google bills those tokens as output, and
         the candidates count leaves them out — on a reasoning-heavy turn
         they are most of the output bill. Implicit caching has no write
-        surcharge.
+        surcharge. ``toolUsePromptTokenCount`` (the prompt of Google-run
+        tools such as grounding or code execution) is billed as input and
+        is not part of ``promptTokenCount``, so it is added in.
         """
         meta = usage_meta or {}
         usage = {
-            "input_tokens": meta.get("promptTokenCount") or 0,
+            "input_tokens": (meta.get("promptTokenCount") or 0)
+            + (meta.get("toolUsePromptTokenCount") or 0),
             "output_tokens": (meta.get("candidatesTokenCount") or 0)
             + (meta.get("thoughtsTokenCount") or 0),
             "cache_write_tokens": 0,
@@ -905,11 +920,13 @@ class GeminiProvider(LLMProvider):
 
         usage = self._usage(data.get("usageMetadata"))
         self._log_cache_usage(usage)
+        served = data.get("modelVersion")
         return LLMResponse(
             content="".join(text_parts),
             tool_calls=tool_calls,
             model=self._model,
             usage=usage,
+            served_model=served.strip() if isinstance(served, str) else "",
         )
 
     async def stream(self, messages, tools=None, *, thinking_budget: Optional[int] = None):

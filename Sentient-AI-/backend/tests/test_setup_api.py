@@ -8,6 +8,10 @@ test client's own ASGI call, so this suite cannot accidentally reach the
 network while it pins the wizard's owner-claim, key-storage, and registration-
 lock behavior.
 
+Connects to: the /api/setup routes through the test client, with every
+outside network call faked.
+Used by: pytest (CI backend jobs).
+
 The first-run setup API (/api/setup/*).
 
 No real LLM or Telegram traffic: ``services.agent.providers.create_provider``
@@ -339,7 +343,13 @@ async def test_providers_lists_every_provider_without_values(client, env, monkey
     assert by_name["openai"]["key_from_env"] is True
     assert by_name["gemini"]["key_stored"] is True and by_name["gemini"]["key_from_env"] is False
     assert by_name["anthropic"]["key_from_env"] is False and by_name["anthropic"]["key_stored"] is False
-    assert by_name["gemini"]["models"][0] == "gemini-2.5-flash"
+    # 2.5 Flash is refused for new API keys, so it is not suggested; every
+    # Gemini id the wizard suggests has a price, so a turn on it is costed.
+    from services.usage import price_for
+
+    assert by_name["gemini"]["models"][0] == "gemini-3.5-flash-lite"
+    assert "gemini-2.5-flash" not in by_name["gemini"]["models"]
+    assert all(price_for("gemini", m) is not None for m in by_name["gemini"]["models"])
     assert by_name["ollama"]["models"] == ["llama3.2"]
     assert all(p["models"] for p in body["providers"])
     assert body["current"] == {"provider": "gemini", "model": "gemini-2.5-flash"}

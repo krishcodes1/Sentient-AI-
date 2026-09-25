@@ -5,6 +5,11 @@ Why it exists: Without a budget the history plus every schema and result
 outgrows the window and fails or silently truncates; the agent runtime calls
 this on every turn, and the agent route reuses its tool-result compression.
 
+Connects to: nothing external; pure functions over the message list and
+tool schemas.
+Used by: AgentRuntime on every turn (window, capped summary, tool
+selection, replay cache) and api/routes/agent.py (compress_tool_result).
+
 Smart Context Manager for Crawler AI.
 
 Solves the OpenClaw token explosion problem by implementing:
@@ -191,14 +196,23 @@ def get_context_window(model: str) -> int:
 # ---------------------------------------------------------------------------
 
 
-def summarize_messages(messages: list[dict[str, Any]]) -> dict[str, Any]:
+# Ceiling on the rolling summary of older messages (~500 tokens). It is
+# re-sent on every model call of every turn, and a chat channel reuses one
+# thread for months: uncapped, it grew ~330 chars per past exchange forever.
+SUMMARY_MAX_CHARS = 2000
+
+
+def summarize_messages(
+    messages: list[dict[str, Any]], max_chars: int = SUMMARY_MAX_CHARS
+) -> dict[str, Any]:
     """Create a compressed summary of a batch of messages.
 
     This is a rule-based summarizer (no LLM call needed). It extracts
-    key information and discards verbose tool outputs.
+    key information and discards verbose tool outputs. The points are kept
+    newest first within ``max_chars``: the exchanges just before the
+    verbatim window matter most, and the oldest are the first to go.
     """
-    user_points: list[str] = []
-    assistant_points: list[str] = []
+    points: list[tuple[str, str]] = []
     tool_actions: list[str] = []
 
     for msg in messages:
@@ -212,18 +226,43 @@ def summarize_messages(messages: list[dict[str, Any]]) -> dict[str, Any]:
 
         if role == "user":
             # Keep first 200 chars of each user message
-            user_points.append(text[:200].strip())
+            points.append(("user", text[:200].strip()))
 
         elif role == "assistant":
             # Keep first 300 chars of each assistant response
-            assistant_points.append(text[:300].strip())
+            points.append(("assistant", text[:300].strip()))
 
         elif role == "tool":
             name = msg.get("name", "unknown")
             # Just note the tool was called, don't keep the full result
             tool_actions.append(name)
 
+    def newest_within(items: list[str], budget: int) -> list[str]:
+        kept: list[str] = []
+        used = 0
+        for point in reversed(items):
+            cost = len(point) + 3  # the " | " joining it to its neighbour
+            if used + cost > budget:
+                break
+            kept.append(point)
+            used += cost
+        kept.reverse()
+        return kept
+
+    # The person's own words get first claim on the budget: they are short
+    # and carry what has to survive (preferences, decisions, names), while
+    # the assistant's longer answers mostly restate them. The assistant
+    # gets whatever the user points leave, and at least a quarter.
+    all_user = [point for role, point in points if role == "user"]
+    all_assistant = [point for role, point in points if role == "assistant"]
+    user_points = newest_within(all_user, max_chars - max_chars // 4)
+    user_used = sum(len(point) + 3 for point in user_points)
+    assistant_points = newest_within(all_assistant, max_chars - user_used)
+    omitted = len(points) - len(user_points) - len(assistant_points)
+
     summary_parts: list[str] = []
+    if omitted:
+        summary_parts.append(f"(The {omitted} oldest points are left out.)")
     if user_points:
         summary_parts.append("User asked: " + " | ".join(user_points))
     if assistant_points:
@@ -271,6 +310,12 @@ def compress_tool_result(result: str, max_chars: int = 2000) -> str:
 # ---------------------------------------------------------------------------
 
 
+# Built-in tools the assistant's everyday answers depend on (looking things
+# up, and today's date for anything time-relative). Offered whenever they
+# exist, however many connector tools compete for the bounded array.
+CORE_TOOL_NAMES = frozenset({"web.search", "web.fetch_page", "reminders.now"})
+
+
 def select_offered_tools(
     tools: list[dict[str, Any]],
     active_connectors: list[str],
@@ -305,10 +350,21 @@ def select_offered_tools(
     active = {c.lower() for c in active_connectors}
 
     def rank(tool: dict[str, Any]) -> tuple[int, str]:
-        # Tools from a connector the user has actually enabled come first;
-        # everything else keeps a stable alphabetical order behind them.
+        # The core built-ins are never trimmed: the runtime lists built-in
+        # types among the "active" connectors, and alphabetically web.*
+        # sorts last, so one 16-tool connector used to push web.search off
+        # the array and the assistant silently lost the ability to look
+        # anything up. Then tools from a connector the user has actually
+        # enabled; everything else keeps a stable alphabetical order.
+        name = tool.get("name", "")
         connector = (tool.get("connector_type") or "").lower()
-        return (0 if connector in active else 1, tool.get("name", ""))
+        if name in CORE_TOOL_NAMES:
+            tier = 0
+        elif connector in active:
+            tier = 1
+        else:
+            tier = 2
+        return (tier, name)
 
     return sorted(tools, key=rank)[:max_tools]
 
