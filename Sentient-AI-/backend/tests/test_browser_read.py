@@ -599,6 +599,64 @@ async def test_handoff_ends_the_turn_with_a_picture(kit, fakesite):
     assert (await run(kit, "handoff", reason=""))["ok"] is False
 
 
+async def guard_state(kit):
+    _toolkit, sessions = kit
+    session = await sessions.get("u1", mode="account", task_id="t1")
+    return session, guard.egress_state(session.context)
+
+
+@pytest.mark.asyncio
+async def test_the_person_signs_in_during_a_handoff_and_the_agent_reads_the_signed_in_page(kit, fakesite):
+    await run(kit, "open", url=fakesite.url("/login"))
+    assert (await run(kit, "handoff", reason="Please sign in"))["needs_human"]["kind"] == "requested"
+    session, state = await guard_state(kit)
+    assert state.human_driving is True
+    # The person, in Crawler's window: the login POST goes through.
+    page = await session.page()
+    await page.fill("input[name=username]", "krish")
+    await page.fill("input[name=password]", "hunter2")
+    await page.locator("button").click()
+    await page.wait_for_url("**/home")
+    assert state.blocked == []
+    # "done": the first read sees the signed-in page, no second handoff,
+    # and the window is shut before the agent touches the page.
+    result = await run(kit, "snapshot")
+    assert result["ok"] is True and "needs_human" not in result and result["url"].endswith("/home")
+    assert any("Signed in" in line for line in result["outline"])
+    assert state.human_driving is False
+    # From here a form submit in the agent's page is read-tier again.
+    await run(kit, "open", url=fakesite.url("/post"))
+    await page.locator("button").click()
+    await guard.settle_blocked_navigation(page)
+    assert state.blocked[-1]["reason"].startswith("non-GET top-level navigation")
+
+
+@pytest.mark.asyncio
+async def test_a_detected_challenge_is_a_handoff_too_and_stays_cleared_once_the_person_is_through(kit, fakesite):
+    assert (await run(kit, "open", url=fakesite.url("/sso/otp")))["needs_human"]["kind"] == "otp"
+    session, state = await guard_state(kit)
+    assert state.human_driving is True
+    page = await session.page()
+    await page.fill("#otp", "123456")
+    await page.locator("button").click()
+    await page.wait_for_load_state("domcontentloaded")
+    result = await run(kit, "snapshot")
+    assert result["ok"] is True and "needs_human" not in result
+    assert any("Thanks" in line for line in result["outline"]) and state.blocked == []
+    assert state.human_driving is False
+
+
+@pytest.mark.asyncio
+async def test_closing_the_session_ends_a_pending_handoff(kit, fakesite):
+    _toolkit, sessions = kit
+    await run(kit, "open", url=fakesite.url("/login"))
+    await run(kit, "handoff", reason="Please sign in")
+    _session, state = await guard_state(kit)
+    assert state.human_driving is True
+    await sessions.close("u1")
+    assert state.human_driving is False
+
+
 @pytest.mark.asyncio
 async def test_notes_come_back_with_every_observation(kit, fakesite):
     await run(kit, "open", url=fakesite.url("/grades"))

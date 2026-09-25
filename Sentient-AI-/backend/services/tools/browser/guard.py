@@ -3,7 +3,8 @@
 Three gates: ``check_url`` on every model-supplied URL before a goto; a
 ``context.route`` handler that re-checks every top-level navigation the
 browser makes on its own (redirects, links) and aborts non-GET top-level
-navigations from read-tier actions; and ``consequential(page, ref)``, the
+navigations from read-tier actions (not the person's own, while a handoff
+is pending: ``EgressState.human_driving``); and ``consequential(page, ref)``, the
 live-page facts that decide whether a click is a read. Loopback is
 allowed only under ``CRAWLER_ALLOW_LOOPBACK_FOR_TESTS=1`` (the fake
 site), read at call time, never in production paths.
@@ -103,11 +104,18 @@ def classify_target(facts: dict[str, Any]) -> Optional[str]:
 @dataclass
 class EgressState:
     """Per-context guard state. ``write_allowed`` is flipped by the write
-    tier around one approved action (phase 3); ``blocked`` is the audit
-    trail the toolkit and the tests read."""
+    tier around one approved action (phase 3). ``human_driving`` is set by
+    the toolkit while a handoff is pending: from the moment it hands the
+    page to the person (``needs_human``) until the agent's next action on
+    this context. While it is set the person's own submit (a sign-in form
+    in Crawler's window) passes the read-tier block; the address checks
+    still apply. It resets on the agent's next action and when the
+    context closes. ``blocked`` is the audit trail the toolkit and the
+    tests read."""
 
     account_mode: bool
     write_allowed: bool = False
+    human_driving: bool = False
     blocked: list[dict[str, str]] = field(default_factory=list)
 
 
@@ -250,6 +258,10 @@ class Guard:
         async def handler(route: "Route", request: "Request") -> None:
             await self._route(route, request, state)
 
+        def closed(_context: "BrowserContext") -> None:
+            state.human_driving = False  # a pending handoff ends with its window
+
+        context.on("close", closed)
         await context.route("**/*", handler)
 
     async def _route(self, route: "Route", request: "Request", state: EgressState) -> None:
@@ -258,7 +270,7 @@ class Guard:
                 await route.continue_()
                 return
             url = request.url
-            if request.method != "GET" and not state.write_allowed:
+            if request.method != "GET" and not (state.write_allowed or state.human_driving):
                 await self._block(
                     route, state, url=url,
                     reason="non-GET top-level navigation from a read-tier action",
@@ -269,8 +281,9 @@ class Guard:
                 await self._block(route, state, url=url, reason=reason)
                 return
             if request.method != "GET":
-                # An approved write. Forwarded as-is; its redirect lands on a
-                # GET the browser follows unseen (phase 3 tightens this).
+                # An approved write, or the person's own submit during a
+                # handoff. Forwarded as-is; its redirect lands on a GET the
+                # browser follows unseen (phase 3 tightens this).
                 await route.continue_()
                 return
             response = await route.fetch(max_redirects=0)

@@ -261,6 +261,7 @@ class BrowserReadToolkit:
             if action not in _UNCOUNTED:
                 session.task.actions += 1
             try:
+                await self._take_back(session)
                 return await handler(session, **params)
             except Exception as exc:  # last resort: never raise into the agent loop
                 _log_failure("browser_action_failed", exc, action=action)
@@ -390,7 +391,14 @@ class BrowserReadToolkit:
     ) -> dict[str, Any]:
         """End the turn: the person clears the challenge (or does what the
         model asked for) and resumes. The masked picture goes to them.
+        Until the agent's next action on this session the person is
+        driving Crawler's window, so their own submit (the sign-in form)
+        must pass the guard's read-tier block: ``EgressState.human_driving``,
+        closed again by ``_take_back``.
         (Phase 4 hook: ``platform.bring_to_front`` belongs here.)"""
+        state = self._guard.egress_state(session.context)
+        if state is not None:
+            state.human_driving = True
         payload: dict[str, Any] = {
             "kind": kind,
             "detail": detail,
@@ -404,6 +412,17 @@ class BrowserReadToolkit:
         if image is not None:
             payload["user_image"] = image
         return {"ok": False, "needs_human": payload, "mode": session.mode}
+
+    async def _take_back(self, session: BrowserSession) -> None:
+        """The agent is acting again, so the person is no longer driving:
+        shut the handoff window before anything touches the page, then let
+        the navigation their last click started land, so the first read
+        after "done" sees the signed-in page and not the form."""
+        state = self._guard.egress_state(session.context)
+        if state is None or not state.human_driving:
+            return
+        state.human_driving = False
+        await self._settle(await session.page())
 
     async def _jpeg(self, page: Any, ref: Optional[str]) -> str:
         """Masked JPEG data URL of the page or of one element. Raises

@@ -427,14 +427,18 @@ How to run each row:
    second Chrome icon).
 2. The plan: you sign in to Canvas in that window (MFA on your phone), then
    reply `done`, and the same task resumes with its caps carried over.
-3. **In the current build that sign-in will most likely fail.** Browser
-   control is read-only for now, and its network guard aborts every
-   non-GET page navigation in Crawler's window, including a sign-in form
-   you submit there by hand (the page ends at `net::ERR_BLOCKED_BY_CLIENT`
-   and the backend logs `browser_egress_blocked … reason=non-GET top-level
-   navigation from a read-tier action`). Signing in inside the window is
-   phase 2 of the browser-control spec. Until then, sign in to the same
-   profile while Crawler's browser is closed:
+3. Sign in inside that window. Browser control is read-only for the
+   agent, but while the handoff is pending (from the "take over" message
+   until the agent's next browser step) the network guard treats the
+   window as yours and lets your own form submit through; it is read-only
+   again the moment the task resumes after `done`. Look for: the login
+   lands on Canvas (not on `net::ERR_BLOCKED_BY_CLIENT`), and the backend
+   log has no `browser_egress_blocked … reason=non-GET top-level
+   navigation from a read-tier action` line for it. A hop to a private or
+   loopback address is still blocked, handoff or not.
+4. If the sign-in fails inside the window even so (write down the URL the
+   page ended on and the `browser_egress_blocked` line, if any), sign in
+   to the same profile while Crawler's browser is closed:
 
    ```sh
    # 1. ctrl+C the backend in tab 1 (this closes Crawler's Chrome window)
@@ -445,9 +449,8 @@ How to run each row:
    # 3. quit that Chrome (cmd+Q), start the backend again (1.4), then reply "done" or send 5b again
    ```
 
-4. If Canvas still asks you to sign in after that, write it down (the
-   session did not survive, or the school's single sign-on posts back to
-   Canvas, which the guard blocks), mark 5b as blocked, and check Canvas
+5. If Canvas still asks you to sign in after that, write it down (the
+   session did not survive), mark 5b as blocked, and check Canvas
    through the Canvas connector instead (Connectors > Add Connector >
    Canvas, with an access token from Canvas > Account > Settings >
    "+ New access token"): `What's due this week on Canvas?`
@@ -725,10 +728,11 @@ grep -qs 'brew shellenv' <profile> || echo 'eval "$(/opt/homebrew/bin/brew shell
 Also checked offline: the runtime's prompt guard rates the 5h texts
 `high threat detected: ignore_instructions, system_prompt_extract`, and a
 reply that quotes the page rates the same, which is why 5h(2) can end as
-"Response redacted due to security policy."; and the existing guard test
-that submits a form POST in Crawler's browser context
-(`tests/test_browser_guard.py -k post`, 3 passed) is what row 5b's warning
-is based on.
+"Response redacted due to security policy."; and the guard and toolkit
+tests that submit a login form in Crawler's browser context while a
+handoff is pending, and again after the agent's next step
+(`tests/test_browser_guard.py tests/test_browser_read.py -k handoff`,
+8 passed), are what row 5b's sign-in step is based on.
 
 ## Appendix B: native versus container
 

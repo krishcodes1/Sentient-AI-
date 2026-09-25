@@ -121,6 +121,51 @@ async def test_guard_aborts_a_read_tier_post_but_not_when_write_is_allowed(guard
     assert "Thanks" in await page.content()
 
 
+async def sign_in_by_hand(page) -> None:
+    """What the person does in Crawler's window during a handoff."""
+    await page.fill("input[name=username]", "krish")
+    await page.fill("input[name=password]", "hunter2")
+    await page.locator("button").click()
+
+
+@pytest.mark.asyncio
+async def test_guard_lets_the_person_submit_a_login_while_a_handoff_is_pending(guarded, fakesite):
+    _g, page = guarded
+    state = egress_state(page.context)
+    await page.goto(fakesite.url("/login"))
+    state.human_driving = True  # the toolkit set this when it handed over
+    await sign_in_by_hand(page)
+    await page.wait_for_url("**/home")
+    assert "Signed in" in await page.content() and state.blocked == []
+    state.human_driving = False  # the agent acted again
+    await page.goto(fakesite.url("/login"))
+    await sign_in_by_hand(page)
+    await settle_blocked_navigation(page)
+    assert state.blocked[-1]["reason"].startswith("non-GET top-level navigation")
+
+
+@pytest.mark.asyncio
+async def test_guard_still_blocks_a_private_address_post_while_a_handoff_is_pending(guarded, fakesite):
+    _g, page = guarded
+    state = egress_state(page.context)
+    state.human_driving = True
+    await page.goto(fakesite.url("/login"))
+    await page.evaluate("document.querySelector('form').action = 'http://10.0.0.1/login?sid=SECRET'")
+    await sign_in_by_hand(page)
+    await settle_blocked_navigation(page)
+    assert state.blocked[-1]["url"] == "http://10.0.0.1/login" and "10.0.0.1" in state.blocked[-1]["reason"]
+    assert page.url.startswith("chrome-error://")
+
+
+@pytest.mark.asyncio
+async def test_a_pending_handoff_ends_when_its_context_closes(guarded):
+    _g, page = guarded
+    state = egress_state(page.context)
+    state.human_driving = True
+    await page.context.close()
+    assert state.human_driving is False
+
+
 @pytest.mark.asyncio
 async def test_guard_leaves_fetch_and_subframes_alone(guarded, fakesite):
     _g, page = guarded
@@ -355,6 +400,18 @@ async def test_route_aborts_a_read_tier_post(no_system_dns):
     await Guard(resolver=public_resolver)._route(route, FakeRequest("https://shop.example/buy", method="POST"), state)
     assert route.calls == [("abort", "blockedbyclient")]
     assert state.blocked[-1]["reason"].startswith("non-GET top-level navigation")
+
+
+@pytest.mark.asyncio
+async def test_route_forwards_the_persons_post_during_a_handoff_but_still_checks_the_address(no_system_dns):
+    state = _state()
+    state.human_driving = True
+    route = FakeRoute()
+    await Guard(resolver=public_resolver)._route(route, FakeRequest("https://canvas.school.edu/login", method="POST"), state)
+    assert route.calls == [("continue", None)] and state.blocked == []
+    route = FakeRoute()
+    await Guard(resolver=private_resolver)._route(route, FakeRequest("http://intranet.example/login", method="POST"), state)
+    assert route.calls == [("abort", "blockedbyclient")] and "10.0.0.1" in state.blocked[-1]["reason"]
 
 
 @pytest.mark.asyncio
