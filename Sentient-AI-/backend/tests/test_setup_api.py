@@ -911,6 +911,40 @@ async def test_registration_after_setup_follows_the_owners_switch(client, env):
     assert closed.json()["detail"] == "Registration is disabled on this server"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("allow", "env_locked", "expected_open"),
+    [(True, False, True), (False, False, False), (True, True, False)],
+    ids=["open", "closed", "env-locked"],
+)
+async def test_anonymous_status_agrees_with_register(
+    client, env, monkeypatch, allow, env_locked, expected_open
+):
+    """The sign-in page hides "Create one" on registration_open, so the
+    status an anonymous caller sees must match what /auth/register does,
+    and carry nothing beyond the same booleans."""
+    token = await _owner_token(client)
+    await client.post(
+        "/api/setup/complete", json={"allow_registration": allow}, headers=auth_headers(token)
+    )
+    if env_locked:
+        # Set after the owner opened it: the lock still wins.
+        monkeypatch.setattr(settings, "ALLOW_REGISTRATION", False, raising=False)
+
+    body = (await client.get("/api/setup/status")).json()
+    assert body == {
+        "needs_setup": False,
+        "has_owner": True,
+        "provider_configured": False,
+        "setup_completed": True,
+        "secrets_unreadable": False,
+        "registration_open": expected_open,
+        "registration_env_locked": env_locked,
+    }
+    joined = await client.post("/api/auth/register", json=_LATE)
+    assert joined.status_code == (201 if expected_open else 403)
+
+
 # ---------------------------------------------------------------------------
 # Input shape: model ids, keys, bot tokens
 # ---------------------------------------------------------------------------

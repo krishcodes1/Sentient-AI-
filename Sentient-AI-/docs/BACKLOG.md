@@ -62,7 +62,7 @@ Still open: a Telegram `/stop` writes no audit row of its own (the web stop's `s
 |---|---|---|---|---|
 | E1 | **Brand artwork**: logo, emblem, wordmark for "Crawler AI" (light + dark), replacing the 4 old files | `frontend/public/brand/`, `Brand.tsx` (drop the interim text wordmark) | login and sidebar show the new mark | M |
 | E2 | **Shipped.** **Screenshots inline in web chat**: the send response and the stream's `done` event carry the turn's screenshots as `images` (base64 PNG/JPEG/WebP data URLs only, at most 3, never saved) and keep them on screen through an approval's refetch; a reloaded thread shows "Screenshot not kept — ask again to see it", a 4th screenshot in one reply "not shown (limit of 3 per reply)" | `api/routes/agent.py _turn_images`, `Chat.tsx ToolCallBadge`, `components/ToolScreenshot.tsx` | done: tool images render as images. Still open: the turn resumed after a web approval shows no screenshot until asked again | S |
-| E3 | Login page: hide "Create one" when registration is closed; show the setup-in-progress hint (partly done) | `Login.tsx` | no 403 dead ends | S |
+| E3 | **Shipped.** Login page: hide "Create one" when registration is closed; show the setup-in-progress hint | `Login.tsx` (reads `registration_open` from `GET /setup/status`) | done: no 403 dead ends; a register refused with 403 asks the status again and shows the matching hint (new accounts off, or finish setup) | S |
 | E4 | Mobile pass on the wizard, Permissions and Settings ▸ Server (375 px) | those pages | no horizontal scroll, 44 px targets | S |
 | E5 | "Promote to owner" (second admin) in Settings, so the last-owner guard has a path | `api/routes/auth.py`, Settings | audited, tested | S |
 

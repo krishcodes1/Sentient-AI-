@@ -1,6 +1,6 @@
 /**
- * Sign-in / create-account page, with a password reveal and a link to /setup while setup is still
- * in progress.
+ * Sign-in / create-account page, with a password reveal, a link to /setup while setup is still
+ * in progress, and a plain hint in place of "Create one" while new accounts are off.
  *
  * Why it exists: It is the only app route reachable without a session; it asks the setup status so
  * it never offers a "Create one" link that would 403.
@@ -9,12 +9,15 @@
 import { useEffect, useId, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ArrowRight, Eye, EyeOff, HardDrive, Server } from "lucide-react";
-import { getSetupStatus, login, register } from "@/services/api";
+import { ApiError, getSetupStatus, login, register } from "@/services/api";
 import Brand, { Wordmark } from "@/components/Brand";
 import ThemeToggle from "@/components/ThemeToggle";
 import type { SetupStatus } from "@/types";
 
 const labelCls = "block text-sm font-medium mb-1.5";
+
+const REGISTRATION_CLOSED_HINT =
+  "New accounts are off. Ask the owner of this Crawler to turn them on.";
 
 export default function Login() {
   const navigate = useNavigate();
@@ -26,13 +29,18 @@ export default function Login() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null);
+  // /auth/register answered 403 after setup was complete: the owner closed
+  // sign-up after this page loaded.
+  const [registerRefused, setRegisterRefused] = useState(false);
   const nameId = useId();
   const emailId = useId();
   const passwordId = useId();
 
-  // Registration is closed server-side until setup finishes (see
-  // /api/auth/register), so while that's true the "Create one" link would
-  // just lead to a 403. Ask once and swap it for a more honest hint.
+  // Registration is closed server-side until setup finishes, and after
+  // that whenever the owner's switch or ALLOW_REGISTRATION=false keeps it
+  // closed (see /api/auth/register), so "Create one" would just lead to a
+  // 403. Ask on load (and again after a refused sign-up, below) and swap
+  // it for a more honest hint.
   useEffect(() => {
     let cancelled = false;
     getSetupStatus()
@@ -49,6 +57,11 @@ export default function Login() {
   }, []);
 
   const setupInProgress = !!setupStatus && !setupStatus.setup_completed;
+  // Only a status that says so closes it; unknown keeps the toggle.
+  const registrationClosed =
+    registerRefused || (!!setupStatus && setupStatus.registration_open === false);
+  // Never leave the form in a register mode the server would refuse.
+  const registering = isRegister && !setupInProgress && !registrationClosed;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -56,14 +69,27 @@ export default function Login() {
     setLoading(true);
 
     try {
-      if (isRegister) {
+      if (registering) {
         await register({ email, password, name });
       } else {
         await login({ email, password });
       }
       navigate("/");
     } catch (err) {
-      setError((err as Error).message || "Authentication failed");
+      // Register refused with 403: the status this page holds is stale or
+      // was never known. Ask again so the footer can say why (setup still
+      // in progress, or new accounts off); if that fails too, show the
+      // server's own reason.
+      const fresh =
+        registering && err instanceof ApiError && err.status === 403
+          ? await getSetupStatus().catch(() => null)
+          : null;
+      if (fresh) {
+        setSetupStatus(fresh);
+        if (fresh.setup_completed) setRegisterRefused(true);
+      } else {
+        setError((err as Error).message || "Authentication failed");
+      }
     } finally {
       setLoading(false);
     }
@@ -125,7 +151,7 @@ export default function Login() {
           }}
         >
           <div className="flex items-baseline justify-between mb-[18px]">
-            <h1 className="h3 m-0">{isRegister ? "Create account" : "Sign in"}</h1>
+            <h1 className="h3 m-0">{registering ? "Create account" : "Sign in"}</h1>
             <span className="eyebrow" style={{ letterSpacing: "0.14em" }}>
               local only
             </span>
@@ -146,7 +172,7 @@ export default function Login() {
           )}
 
           <form onSubmit={handleSubmit} className="flex flex-col gap-3.5">
-            {isRegister && (
+            {registering && (
               <div>
                 <label htmlFor={nameId} className={labelCls}>
                   Full name
@@ -198,7 +224,7 @@ export default function Login() {
                 <input
                   id={passwordId}
                   type={showPassword ? "text" : "password"}
-                  autoComplete={isRegister ? "new-password" : "current-password"}
+                  autoComplete={registering ? "new-password" : "current-password"}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none transition-colors pr-12"
@@ -255,39 +281,51 @@ export default function Login() {
             >
               {loading
                 ? "Please wait..."
-                : isRegister
+                : registering
                 ? "Create account"
                 : "Continue to gateway"}
               {!loading && <ArrowRight size={15} strokeWidth={2} aria-hidden />}
             </button>
           </form>
 
-          {setupInProgress ? (
+          {/* Always mounted, so a hint that replaces the toggle after a
+              refused sign-up is announced, not only drawn. */}
+          <div role="status">
+            {setupInProgress ? (
+              <p
+                className="text-center text-sm mt-5"
+                style={{ color: "var(--text-secondary)" }}
+              >
+                {setupStatus?.has_owner ? (
+                  "Setup is in progress — sign in as the owner to finish it."
+                ) : (
+                  <>
+                    Don't have an account?{" "}
+                    <Link
+                      to="/setup"
+                      className="font-medium hover:underline"
+                      style={{ color: "var(--accent-primary)" }}
+                    >
+                      Set up this Crawler
+                    </Link>
+                  </>
+                )}
+              </p>
+            ) : registrationClosed ? (
+              <p
+                className="text-center text-sm mt-5"
+                style={{ color: "var(--text-secondary)" }}
+              >
+                {REGISTRATION_CLOSED_HINT}
+              </p>
+            ) : null}
+          </div>
+          {!setupInProgress && !registrationClosed && (
             <p
               className="text-center text-sm mt-5"
               style={{ color: "var(--text-secondary)" }}
             >
-              {setupStatus?.has_owner ? (
-                "Setup is in progress — sign in as the owner to finish it."
-              ) : (
-                <>
-                  Don't have an account?{" "}
-                  <Link
-                    to="/setup"
-                    className="font-medium hover:underline"
-                    style={{ color: "var(--accent-primary)" }}
-                  >
-                    Set up this Crawler
-                  </Link>
-                </>
-              )}
-            </p>
-          ) : (
-            <p
-              className="text-center text-sm mt-5"
-              style={{ color: "var(--text-secondary)" }}
-            >
-              {isRegister
+              {registering
                 ? "Already have an account?"
                 : "Don't have an account?"}{" "}
               <button
@@ -299,7 +337,7 @@ export default function Login() {
                 className="font-medium hover:underline"
                 style={{ color: "var(--accent-primary)" }}
               >
-                {isRegister ? "Sign in" : "Create one"}
+                {registering ? "Sign in" : "Create one"}
               </button>
             </p>
           )}
