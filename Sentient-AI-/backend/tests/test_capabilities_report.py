@@ -448,11 +448,14 @@ def test_default_context_reads_playwright_and_the_platform_channel(monkeypatch):
 
     monkeypatch.setattr(system, "playwright_installed", lambda: True)
     monkeypatch.setattr(
-        platform_pkg, "current", lambda: SimpleNamespace(browser_channel=lambda: "msedge")
+        platform_pkg,
+        "current",
+        lambda: SimpleNamespace(name="windows", browser_channel=lambda: "msedge"),
     )
     context = capabilities.default_context()
     assert context.playwright_installed is True
     assert context.browser_channel == "msedge"
+    assert context.host_platform == "windows"
 
 
 def test_default_context_container_has_no_channel(monkeypatch):

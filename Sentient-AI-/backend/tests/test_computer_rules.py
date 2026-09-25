@@ -701,7 +701,9 @@ def test_availability_needs_the_platform_backend():
     cap = cc.build_capability(backend_available=missing)
     result = cap.availability(ctx("darwin"))
     assert result.available is False and "not installed" in result.reason
-    assert asked == ["darwin"]
+    # The platform layer's name (what wire_services selects the backend
+    # with), derived from sys.platform when the context carries none.
+    assert asked == ["mac"]
 
     ok = cc.build_capability(backend_available=lambda platform: (True, ""))
     assert ok.availability(ctx("darwin")).available is True

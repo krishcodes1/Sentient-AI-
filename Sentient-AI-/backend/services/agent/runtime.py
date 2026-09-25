@@ -25,6 +25,7 @@ from typing import Any, Callable, Mapping, Optional, Protocol
 import structlog
 
 from core.config import PROVIDER_KEY_FIELDS, Settings
+from services.agent import cancel as agent_cancel
 from services.agent.approvals import (
     ApprovalStore,
     InMemoryApprovalStore,
@@ -141,6 +142,9 @@ read-only crypto data, user-registered MCP servers).
   clicking through menus. Use note(text) to keep a fact you will need after
   more pages. When a page needs a person (sign-in, a puzzle), call
   handoff(reason) and stop.
+- Computer playbook (only when desktop.act is offered): to operate an app,
+  call desktop.observe first, then act on the refs in its outline; one
+  action per approval, and never ask the user for a password or type one.
 </capabilities>
 
 <chain_of_command>
@@ -286,7 +290,15 @@ def redact_binary_for_model(value: Any) -> Any:
 # Per-tool result budgets (contracts §7): a page outline is the whole point
 # of a browser round, so it keeps 8000 chars where a connector result keeps
 # the context manager's 2000 default. Keyed by tool-name prefix.
-RESULT_CHAR_BUDGETS: dict[str, int] = {"browser.": 8000}
+# desktop.observe returns up to 12000 outline chars when asked (6000 by
+# default) and every desktop.act a default outline; the budgets are the
+# JSON the model is shown (quoting and indent add about a sixth), so the
+# refs are not cut out of the middle. desktop.screenshot keeps the default.
+RESULT_CHAR_BUDGETS: dict[str, int] = {
+    "browser.": 8000,
+    "desktop.observe": 18000,
+    "desktop.act": 11000,
+}
 
 
 def is_browser_tool(name: Any) -> bool:
@@ -594,6 +606,14 @@ class ToolExecutor:
         the task a task-scoped toolkit (the browser) keeps state for; it is
         the runtime's, carried across approval and handoff resumes."""
         return {"result": f"Tool '{tool_name}' executed successfully", "data": {}}
+
+    def describe_approval(
+        self, tool_name: str, arguments: Mapping[str, Any], user_id: str
+    ) -> Optional[str]:
+        """The approval card's sentence for this call, built from facts the
+        executor knows (``Click "Send" in Mail``), or None for the runtime's
+        generic reason. Must not run the tool or touch anything."""
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -1096,6 +1116,33 @@ class AgentRuntime:
             observation_slots.append((len(follow_up) - 1, tool_results))
         return follow_up
 
+    # Longest executor-written card sentence kept (the toolkit's are far
+    # shorter; this only bounds a misbehaving executor).
+    _APPROVAL_REASON_CHARS = 300
+
+    def _approval_reason(
+        self, tool_name: str, arguments: dict[str, Any], user_id: str
+    ) -> str:
+        """The ``reason`` an approval card shows (web and Telegram alike):
+        the executor's fact-built sentence when it has one (desktop.act:
+        ``Click "Send" in Mail``), else the generic line. A describer that
+        fails or answers nothing usable falls back; it never blocks the
+        approval flow."""
+        generic = f"Tool '{tool_name}' requires explicit user approval"
+        describe = getattr(self._executor, "describe_approval", None)
+        if not callable(describe):
+            return generic
+        try:
+            sentence = describe(tool_name, arguments, user_id)
+        except Exception as exc:
+            logger.warning(
+                "approval_describe_failed", tool=tool_name, error_type=type(exc).__name__
+            )
+            return generic
+        if not isinstance(sentence, str) or not sentence.strip():
+            return generic
+        return sentence.strip()[: self._APPROVAL_REASON_CHARS]
+
     @staticmethod
     def _summarize_result(result: Any, limit: int = 500) -> str:
         try:
@@ -1189,7 +1236,11 @@ class AgentRuntime:
         saving a new key mid-turn (``invalidate_providers``) retires it
         instead of closing it under the next model round. The returned
         response names the (provider, model) pair that actually ran.
+
+        A new turn lifts the user's stop request (``services.agent.cancel``):
+        the stop was for the task that was running, not for every later one.
         """
+        agent_cancel.clear(user_id)
         messages = self._with_system_prompt(messages, memory_block, permissions_text)
         turn_provider, turn_model = await self._select_provider(llm_provider, llm_model)
         async with self._lease(turn_provider, turn_model) as provider:
@@ -1465,7 +1516,7 @@ class AgentRuntime:
                         user_id=user_id,
                         tool_name=tc.name,
                         arguments=tc.arguments,
-                        reason=f"Tool '{tc.name}' requires explicit user approval",
+                        reason=self._approval_reason(tc.name, tc.arguments, user_id),
                         conversation_id=conversation_id,
                         ttl_minutes=self._approval_ttl_minutes,
                         # Tell the human WHY this one deserves scrutiny when

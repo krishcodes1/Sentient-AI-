@@ -8,11 +8,14 @@ apps on the Mac or PC the way a person does. The package keeps the safety rules
 backend per platform, plus an in-memory fake for tests) apart, so each can be
 tested on its own and no test ever touches the real desktop.
 
-Wiring (not done here): construct ``ComputerToolkit(select_backend(platform),
-cancel_flag=...)`` in ``wire_services`` and route ``desktop.observe`` /
-``desktop.act`` to ``execute("observe" | "act", params, user_id=...)``;
-``describe(params, user_id=...)`` gives the approval-card sentence and
-``precheck(params, user_id=...)`` a refusal that needs no approval card.
+Wiring: ``main.wire_services`` builds ``ComputerToolkit(select_backend(
+platform.name), cancel_flag=services.agent.cancel.is_cancelled)``; the
+executor's ``desktop`` entry routes ``desktop.observe`` / ``desktop.act`` to
+``execute("observe" | "act", params, user_id=...)``, and
+``describe(params, user_id=...)`` is the approval card's sentence for
+``desktop.act`` (``ConnectorToolExecutor.describe_approval``).
+``precheck(params, user_id=...)`` (a refusal that needs no approval card) is
+not wired yet.
 """
 
 from services.tools.computer.backend import (

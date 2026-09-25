@@ -42,7 +42,9 @@ the toolkit the caller's identity rather than anything in the tool
 arguments. ``system`` installs optional software onto the host from a
 fixed allowlist; its install action is the one built-in that always goes
 through the approval card, and the executor refuses it unapproved.
-``desktop`` reads this computer's display and is off by default.
+``desktop`` reads this computer's display and, with computer_control,
+operates its apps (desktop.act, which like the install always goes
+through the approval card); both capabilities are off by default.
 
 Every built-in tool belongs to a capability (``services/capabilities``)
 the owner can switch off, except the few in ``ALWAYS_ON_TOOLS``. That
@@ -68,6 +70,7 @@ from typing import Any, Awaitable, Callable, Iterable, Literal, Mapping, Optiona
 
 import structlog
 
+from services.agent import cancel as agent_cancel
 from services.agent.permissions import (
     ActionCategory,
     PermissionEngine,
@@ -89,6 +92,12 @@ from services.tools.browser import handoff as browser_handoff
 from services.tools.browser.actions import ACTIONS as BROWSER_ACTIONS
 from services.tools.browser.actions import BrowserReadToolkit
 from services.tools.browser.session import BrowserSessionManager
+from services.tools.computer import ComputerToolkit, UnavailableBackend
+from services.tools.computer.outline import DEFAULT_MAX_CHARS as DESKTOP_DEFAULT_CHARS
+from services.tools.computer.outline import MAX_CHARS_LIMIT as DESKTOP_MAX_CHARS
+from services.tools.computer.toolkit import ACT_ACTIONS as DESKTOP_ACT_ACTIONS
+from services.tools.computer.toolkit import MAX_TEXT_CHARS as DESKTOP_MAX_TEXT
+from services.tools.computer.toolkit import OBSERVE_ACTIONS as DESKTOP_OBSERVE_ACTIONS
 from services.tools.desktop import DesktopToolkit
 from services.tools.reminders import ReminderToolkit
 from services.tools.system import ALLOWLIST as SYSTEM_CAPABILITIES
@@ -439,8 +448,12 @@ CONNECTOR_CATALOG: dict[str, list[ToolSpec]] = {
             ),
         ),
     ],
-    # Built-in, capability "screen" (off by default): the owner turns it on
-    # in Settings → Permissions. Reads the display; never types or clicks.
+    # Built-in, two capabilities, both off by default (the owner turns them
+    # on in Settings → Permissions): "screen" owns screenshot (reads the
+    # display); "computer_control" owns observe (READ: the front window as
+    # an outline with refs) and act (WRITE: one click, keystroke or app
+    # switch per call, each behind the approval card). One flat schema per
+    # tool, the ``action`` enum picking the toolkit action, as browser.read.
     "desktop": [
         ToolSpec(
             "screenshot",
@@ -449,6 +462,75 @@ CONNECTOR_CATALOG: dict[str, list[ToolSpec]] = {
             "they are looking at or to send them a screenshot of the computer.",
             ActionCategory.READ,
             _schema(display={"type": "integer", "description": "Display index, 0 = main"}),
+        ),
+        ToolSpec(
+            "observe",
+            "Look at the apps on this computer; always do this before "
+            "desktop.act. outline(app?) returns the front window (or the named "
+            "app's) as lines like '- button \"Send\" [ref=d12]'; act on those "
+            "refs, which last until the next outline. apps lists the running "
+            "apps; windows(app?) lists their windows with an index. Password "
+            "fields show [redacted]. Runs without approval.",
+            ActionCategory.READ,
+            _schema(
+                action={
+                    "type": "string",
+                    "enum": list(DESKTOP_OBSERVE_ACTIONS),
+                    "description": "Which observation to make",
+                    "required": True,
+                },
+                app={
+                    "type": "string",
+                    "description": "outline, windows: an app's name, e.g. 'TextEdit' (default: the frontmost app)",
+                },
+                max_chars={
+                    "type": "integer",
+                    "description": (
+                        f"outline: most characters to return (default "
+                        f"{DESKTOP_DEFAULT_CHARS}, at most {DESKTOP_MAX_CHARS})"
+                    ),
+                },
+            ),
+        ),
+        ToolSpec(
+            "act",
+            "Operate an app on this computer, one action per call; the owner "
+            "approves every call before it runs. Call desktop.observe first "
+            "and prefer refs from its latest outline: click(ref) or "
+            "double_click(ref) (x and y only when no ref exists); type(text, "
+            "ref?) types into the ref or the focused field; key(keys) presses "
+            "one combo such as cmd+s; scroll(direction); open_app(app); "
+            "focus_window(app, index?). The result says what was done and "
+            "carries a fresh outline. Crawler never types into password "
+            "fields, never acts in password managers, terminals or system "
+            "settings, and never enters payment details: ask the owner to do "
+            "those steps.",
+            ActionCategory.WRITE,
+            _schema(
+                action={
+                    "type": "string",
+                    "enum": list(DESKTOP_ACT_ACTIONS),
+                    "description": "Which action to take",
+                    "required": True,
+                },
+                ref={
+                    "type": "string",
+                    "description": "click, double_click, type: an element ref from the latest outline, e.g. d12",
+                },
+                x={"type": "integer", "description": "click, double_click: screen x in points, only when no ref exists"},
+                y={"type": "integer", "description": "click, double_click: screen y in points, only when no ref exists"},
+                text={
+                    "type": "string",
+                    "description": f"type: the text to type (at most {DESKTOP_MAX_TEXT} characters)",
+                },
+                keys={"type": "string", "description": "key: one combo, modifiers then a key, e.g. cmd+s or enter"},
+                direction={"type": "string", "enum": ["up", "down"], "description": "scroll: which way"},
+                app={"type": "string", "description": "open_app, focus_window: the app's name, e.g. 'Calculator'"},
+                index={
+                    "type": "integer",
+                    "description": "focus_window: a window index from observe windows (0 = the app's front window)",
+                },
+            ),
         ),
     ],
     # Built-in, capability "browser_control" (off by default): the agent
@@ -508,8 +590,12 @@ _BUILTIN_STANCE: dict[str, str] = {
     "web": "auto_approve",
     "reminders": "auto_approve",
     "system": "user_confirm",
-    # Reads are auto by policy, so this changes nothing for the one action
-    # there is; the capability switch (off by default) is the real gate.
+    # Reads (screenshot, observe) are auto by policy, so this changes
+    # nothing for them; the capability switches are the real gate there.
+    # It is what keeps desktop.act (WRITE) on the approval card when the
+    # account default is auto_approve: the stricter tier wins, so no
+    # account setting can make an action on the owner's computer run
+    # unattended.
     "desktop": "user_confirm",
     # Same for browser.read today; browser.act and browser.login must keep
     # their approval card under every account default, like system does.
@@ -1199,7 +1285,8 @@ class ConnectorToolExecutor:
     ``approved=True`` means the call already passed the explicit user
     approval flow; it unlocks connector actions that demand per-call
     confirmation, and it is the only thing that lets a ``system`` write
-    (installing software) run at all. The flag can never come from tool
+    (installing software) or a ``desktop.act`` (operating an app on this
+    computer) run at all. The flag can never come from tool
     arguments — any LLM-supplied ``user_confirmed`` value is stripped
     before dispatch.
 
@@ -1221,12 +1308,21 @@ class ConnectorToolExecutor:
         desktop_toolkit: Optional[DesktopToolkit] = None,
         browser_toolkit: Optional[BrowserReadToolkit] = None,
         capability_gate: Optional[CapabilityGate] = None,
+        computer_toolkit: Optional[ComputerToolkit] = None,
     ) -> None:
         self._session_factory = session_factory
         web = web_toolkit or WebToolkit()
         reminders = reminder_toolkit or ReminderToolkit(session_factory)
         system = system_toolkit or SystemToolkit()
         desktop = desktop_toolkit or DesktopToolkit()
+        # Never a real backend by default: main.py hands in the toolkit built
+        # on this platform's backend. Unwired, desktop.observe and
+        # desktop.act answer "not available" and touch nothing.
+        computer = computer_toolkit or ComputerToolkit(
+            UnavailableBackend("Computer control is not set up in this process."),
+            cancel_flag=agent_cancel.is_cancelled,
+        )
+        self._computer = computer
         # Nothing launches here: the manager starts a browser on the first
         # browser.read. main.py hands in the one built for this platform.
         browser = browser_toolkit or BrowserReadToolkit(
@@ -1261,10 +1357,20 @@ class ConnectorToolExecutor:
                 confirm=frozenset({write}),
                 confirm_note="installs software on this machine",
             ),
+            # screenshot is the screen toolkit's; observe and act are the
+            # computer toolkit's, which keeps refs per user, so it gets the
+            # executor's user_id. act is WRITE: it runs only re-dispatched
+            # with approved=True after the owner said yes to its card.
             "desktop": _Builtin(
                 "Desktop",
-                lambda a, p, uid, ok: desktop.execute(a, p),
-                frozenset({read}),
+                lambda a, p, uid, ok: (
+                    desktop.execute(a, p)
+                    if a == "screenshot"
+                    else computer.execute(a, p, user_id=uid)
+                ),
+                frozenset({read, write}),
+                confirm=frozenset({write}),
+                confirm_note="operates an app on this computer",
             ),
             # browser.read's own ``action`` argument names the toolkit
             # action; the tool-level action ("read") is the tier. The task
@@ -1289,6 +1395,23 @@ class ConnectorToolExecutor:
         # calls (connector instances are per-call) within this process.
         self._limiters: dict[uuid_module.UUID, Any] = {}
         self._mcp_dispatcher: Optional[Any] = None
+
+    def describe_approval(
+        self, tool_name: str, arguments: Mapping[str, Any], user_id: str
+    ) -> Optional[str]:
+        """The approval card's sentence for a call, when this executor can
+        state it from facts rather than the model's words; None otherwise
+        (the runtime then uses its generic reason).
+
+        Only ``desktop.act`` has one: the computer toolkit names the real
+        element and app from the user's latest outline (``Click "Send" in
+        Mail``, ``Type 42 characters into "Subject" in Mail``). It calls no
+        backend, so building a card never touches the screen.
+        """
+        resolved = resolve_tool(tool_name)
+        if resolved is None or (resolved.connector_type, resolved.action) != ("desktop", "act"):
+            return None
+        return self._computer.describe(arguments, user_id=user_id)
 
     def _get_mcp_dispatcher(self):
         if self._mcp_dispatcher is None:

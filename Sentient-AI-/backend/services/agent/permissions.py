@@ -118,10 +118,17 @@ _DEFAULT_POLICIES: dict[tuple[str, ActionCategory], PermissionTier] = {
     ("system", ActionCategory.DELETE): PermissionTier.HARD_BLOCKED,
     ("system", ActionCategory.EXECUTE): PermissionTier.HARD_BLOCKED,
     ("system", ActionCategory.FINANCIAL): PermissionTier.HARD_BLOCKED,
-    # desktop: a picture of the screen is a read; there is no write surface
-    # yet (input control is a later capability with its own rows).
+    # desktop: a picture of the screen (desktop.screenshot) and an outline
+    # of the front window (desktop.observe) are reads. desktop.act clicks,
+    # types, presses keys and opens apps on the owner's computer: WRITE,
+    # so every call goes through the approval card (and _BUILTIN_STANCE
+    # keeps it there under every account default). This was HARD_BLOCKED
+    # until computer_control existed; the toolkit's hard rules (password
+    # fields, blocked apps and key combos, payment forms, the stop flag)
+    # still refuse what no approval can allow. Nothing here deletes or
+    # runs commands, and money never moves through it: blocked outright.
     ("desktop", ActionCategory.READ): PermissionTier.AUTO_APPROVE,
-    ("desktop", ActionCategory.WRITE): PermissionTier.HARD_BLOCKED,
+    ("desktop", ActionCategory.WRITE): PermissionTier.USER_CONFIRM,
     ("desktop", ActionCategory.DELETE): PermissionTier.HARD_BLOCKED,
     ("desktop", ActionCategory.EXECUTE): PermissionTier.HARD_BLOCKED,
     ("desktop", ActionCategory.FINANCIAL): PermissionTier.HARD_BLOCKED,

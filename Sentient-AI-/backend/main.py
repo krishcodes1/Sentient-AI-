@@ -50,6 +50,7 @@ from api.routes import (
     telegram,
     usage,
 )
+from services.agent import cancel as agent_cancel
 from services.agent.approvals import DbApprovalStore
 from services.agent.runtime import AgentRuntime
 from services.agent.tool_registry import (
@@ -68,6 +69,8 @@ from services.tools.browser import guard as browser_guard
 from services.tools.browser import handoff as browser_handoff
 from services.tools.browser.actions import BrowserReadToolkit
 from services.tools.browser.session import BrowserSessionManager
+from services.tools.computer import ComputerToolkit
+from services.tools.computer import backend as computer_backend
 
 logger = structlog.get_logger(__name__)
 
@@ -259,6 +262,15 @@ async def wire_services(
         headless=platform.name == "container", platform=platform
     )
     app.state.browser_sessions = browser_sessions
+    # desktop.observe / desktop.act run on this platform's backend (Mac or
+    # Windows; an unavailable stand-in anywhere else, the container
+    # included). Nothing is loaded or touched until the first call, and the
+    # computer_control switch (off by default) gates every one. The stop
+    # flag is the per-user one each new turn clears.
+    computer_toolkit = ComputerToolkit(
+        computer_backend.select_backend(platform.name),
+        cancel_flag=agent_cancel.is_cancelled,
+    )
     app.state.agent_runtime = AgentRuntime(
         config=settings,
         permission_engine=RuntimePermissionAdapter(
@@ -271,6 +283,7 @@ async def wire_services(
             browser_toolkit=BrowserReadToolkit(
                 browser_sessions, guard=browser_guard, handoff=browser_handoff
             ),
+            computer_toolkit=computer_toolkit,
         ),
         audit_service=RuntimeAuditLogger(session_factory=session_factory),
         approval_store=approval_store,

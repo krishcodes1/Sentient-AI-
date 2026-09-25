@@ -11,15 +11,19 @@ Control this computer: desktop.observe, desktop.act.
 
 Availability: not in a container, macOS or Windows only, and the platform's
 control backend must import (pyobjc on macOS, uiautomation on Windows). The
-backend check is injected (``build_capability(backend_available=...)``), so
-reports and tests never import an OS toolkit they do not need.
+platform is the platform layer's name (``services.platform.current().name``,
+carried in ``ReportContext.host_platform``), the same one ``wire_services``
+selects the backend with, so the report and the wired toolkit agree. The
+backend check is ``select_backend(name).available()`` unless one is injected
+(``build_capability(backend_available=...)``); tests inject fakes and never
+import an OS toolkit.
 Probe: on macOS, ``AXIsProcessTrustedWithOptions`` without a prompt; denied →
 the Accessibility pane, and steps naming the binary that needs the grant.
 Windows needs no grant; windows running as administrator cannot be controlled
 (UIPI), which the probe detail and ``desktop.observe`` say.
 
-Declared only: the coordinator appends ``CAPABILITY`` to ``REGISTRY`` when
-the desktop catalog gains ``observe`` and ``act``.
+Registered in ``services.capabilities.REGISTRY``; the ``desktop`` catalog
+entry carries ``observe`` and ``act``.
 """
 
 from __future__ import annotations
@@ -118,10 +122,27 @@ def _open_accessibility_settings() -> None:
 
 def _default_backend_available(platform: str) -> tuple[bool, str]:
     # Imported here: the toolkit package is not needed to build a report
-    # until this capability is actually asked about.
-    from services.tools.computer.backend import select_backend
+    # until this capability is actually asked about. Looked up on the
+    # module at call time, so the test suite's guard (a stand-in for every
+    # real backend) applies here too.
+    from services.tools.computer import backend as computer_backend
 
-    return select_backend(platform).available()
+    return computer_backend.select_backend(platform).available()
+
+
+_LAYER_NAMES = {"darwin": "mac", "win32": "windows"}
+
+
+def platform_of(ctx: ReportContext) -> str:
+    """The platform layer's name for the host ("mac", "windows", "linux",
+    "container"): the report's own when it carries one, else derived from
+    ``sys.platform`` and the container marker (older or hand-built
+    contexts)."""
+    if ctx.host_platform:
+        return ctx.host_platform
+    if ctx.in_container:
+        return "container"
+    return _LAYER_NAMES.get(ctx.platform, "linux")
 
 
 # ── capability ─────────────────────────────────────────────────────────────
@@ -131,17 +152,18 @@ def make_availability(
     backend_available: BackendCheck,
 ) -> Callable[[ReportContext], Availability]:
     def availability(ctx: ReportContext) -> Availability:
-        if ctx.in_container:
+        platform = platform_of(ctx)
+        if ctx.in_container or platform == "container":
             return Availability(
                 False,
                 "Not available in this environment (container). It works when Crawler runs "
                 "directly on your Mac or PC.",
             )
-        if ctx.platform not in ("darwin", "win32"):
+        if platform not in ("mac", "windows"):
             return Availability(
                 False, "Controlling the computer is supported on macOS and Windows only."
             )
-        ok, reason = backend_available(ctx.platform)
+        ok, reason = backend_available(platform)
         if not ok:
             return Availability(
                 False, reason or "The control component for this system is not installed."
@@ -155,13 +177,14 @@ def make_probe(
     trusted: Callable[[], Optional[bool]],
 ) -> Callable[[ReportContext], ProbeResult]:
     def probe(ctx: ReportContext) -> ProbeResult:
-        if ctx.platform == "win32":
+        platform = platform_of(ctx)
+        if platform == "windows":
             return ProbeResult(
                 "not_required",
                 "Windows needs no permission. Windows that run as administrator cannot be "
                 "controlled (Windows blocks it).",
             )
-        if ctx.platform != "darwin":
+        if platform != "mac":
             return ProbeResult("unknown", "No permission check on this platform.")
         granted = trusted()
         if granted is None:

@@ -52,6 +52,11 @@ class ReportContext:
     # would drive ("chrome" / "msedge"; "" when there is none).
     playwright_installed: bool = False
     browser_channel: str = ""
+    # For computer_control: ``services.platform.current().name`` ("mac" |
+    # "windows" | "linux" | "container"), which honours CRAWLER_PLATFORM
+    # and the container marker. "" when not gathered; a rule that needs it
+    # then derives it from ``platform`` and ``in_container``.
+    host_platform: str = ""
 
 
 @dataclass(frozen=True)

@@ -9,6 +9,7 @@ import structlog
 
 from services.capabilities import (
     browser_control,
+    computer_control,
     installs,
     reminders,
     screen,
@@ -35,6 +36,7 @@ REGISTRY: tuple[Capability, ...] = (
     installs.CAPABILITY,
     telegram.CAPABILITY,
     browser_control.CAPABILITY,
+    computer_control.CAPABILITY,
 )
 
 # Tools no capability gates. Listed explicitly so that a new built-in tool
@@ -97,6 +99,7 @@ def default_context(*, telegram_configured: bool = False) -> ReportContext:
     from services import platform as platform_layer
     from services.tools.system import browser_installed, playwright_installed
 
+    layer = platform_layer.current()
     return ReportContext(
         in_container=in_container(),
         platform=platform_name(),
@@ -104,7 +107,8 @@ def default_context(*, telegram_configured: bool = False) -> ReportContext:
         browser_installed=browser_installed(),
         executable=crawler_executable(),
         playwright_installed=playwright_installed(),
-        browser_channel=platform_layer.current().browser_channel() or "",
+        browser_channel=layer.browser_channel() or "",
+        host_platform=layer.name,
     )
 
 

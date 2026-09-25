@@ -58,6 +58,25 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # no
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _no_real_computer_backend(monkeypatch):
+    """No test drives or loads the real desktop. ``select_backend`` is the
+    only way to the Mac or Windows backend (wire_services builds the
+    toolkit with it, and the computer_control report asks it whether the
+    backend imports), so every test gets an unavailable stand-in unless it
+    injects its own fake. Tests of select_backend itself import it by name
+    and are unaffected."""
+    from services.tools.computer import backend as computer_backend
+
+    monkeypatch.setattr(
+        computer_backend,
+        "select_backend",
+        lambda _platform_name: computer_backend.UnavailableBackend(
+            "Tests never use a real computer backend."
+        ),
+    )
+
+
 @pytest_asyncio.fixture
 async def session_factory():
     """Test database with all tables created.
