@@ -73,13 +73,29 @@ router = APIRouter(prefix="/setup", tags=["setup"])
 # Suggested model ids per provider, best default first. The wizard offers
 # these as choices; any id the provider accepts still works, because the
 # save path runs a real completion against it before storing anything.
+#
+# Every suggestion is a current, tool-calling, image-reading model with a
+# list price in services/usage/pricing.py (tests enforce the price), so the
+# cost line never reads "unknown" for a model the wizard picked. Checked
+# 2026-09-24 against the vendors' model pages:
+# - gemini: Google's picks for new projects are 3.5 Flash-Lite and 3.8
+#   Flash; 3.1 Flash-Lite is the cheapest. The 2.5 models are now limited
+#   to accounts that already used them, so a new key cannot reach them
+#   (https://ai.google.dev/gemini-api/docs/models).
+# - anthropic: Sonnet 5 is the balanced model, Haiku 4.5 the cheapest
+#   (https://platform.claude.com/docs/en/about-claude/models/overview).
+# - openai: GPT-6 Luna is OpenAI's cheapest current model; GPT-5.4 nano
+#   and GPT-5.6 Luna are low-cost GPT-5 models with no shutdown date
+#   (https://developers.openai.com/api/docs/models,
+#   https://developers.openai.com/api/docs/deprecations). GPT-6 Astra is
+#   left out on purpose: it cannot call tools over Chat Completions.
 SUGGESTED_MODELS: dict[str, list[str]] = {
     # 2.5 Flash is refused for new API keys ("no longer available to new
     # users"), so it is not offered. Each id here has a price in
     # services/usage/pricing.py.
-    "gemini": ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash"],
+    "gemini": ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.1-flash-lite"],
     "anthropic": ["claude-sonnet-5", "claude-haiku-4-5-20251001"],
-    "openai": ["gpt-4o-mini"],
+    "openai": ["gpt-6-luna", "gpt-5.4-nano", "gpt-5.6-luna"],
     "grok": ["grok-4.3"],
     "deepseek": ["deepseek-flash"],
     "groq": ["openai/gpt-oss-120b"],

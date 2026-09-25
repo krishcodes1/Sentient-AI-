@@ -167,8 +167,11 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: Optional[str] = None
     GEMINI_API_KEY: Optional[str] = None
     # Gemini "thinking" tokens on browser rounds (spec §10): 0 turns thinking
-    # off for the step-by-step page reading, where it only adds cost. Other
-    # rounds are unchanged (the API default).
+    # off for the step-by-step page reading, where it only adds cost (on
+    # Gemini 3 and later, which cannot switch it off, 0 asks for the lowest
+    # thinking level the model accepts, and any other value, -1 "dynamic"
+    # included, leaves the model at its default level). Other rounds are
+    # unchanged (the API default).
     GEMINI_THINKING_BUDGET: int = 0
     GROK_API_KEY: Optional[str] = None
     DEEPSEEK_API_KEY: Optional[str] = None

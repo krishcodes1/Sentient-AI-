@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import abc
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
 
@@ -200,8 +201,9 @@ class LLMResponse:
       never sent would read as "nothing was cached" when the truth is
       "this vendor does not say".
     - ``cache_write_tokens``: the part of ``input_tokens`` written to the
-      cache at a surcharge. Only Anthropic bills cache writes; everyone
-      else reports a true 0.
+      cache at a surcharge. Anthropic bills cache writes, and so does
+      OpenAI on GPT-5.6 and later (services/usage/pricing.py prices both);
+      everyone else reports a true 0.
     """
     content: str
     tool_calls: list[ToolCall] = field(default_factory=list)
@@ -308,7 +310,45 @@ class AnthropicProvider(LLMProvider):
     supports_vision = True
     _provider_name = "anthropic"
 
-    def __init__(self, api_key: str, model: str = "claude-sonnet-4-20250514"):
+    # Output budget for models that only think when asked to (Haiku 4.5,
+    # Sonnet 4.x, Opus 4.x): the reply text plus any tool calls.
+    _MAX_TOKENS = 4096
+    # Models that think before answering without being asked. Thinking is
+    # on by default on Claude Sonnet 5 and Opus 5 and cannot be turned off
+    # on Opus 5.5, Fable 5.x and Mythos 5.x, and thinking tokens count
+    # toward max_tokens
+    # (https://platform.claude.com/docs/en/build-with-claude/thinking), so
+    # the 4096 budget above could be spent on thinking alone and come back
+    # as an empty reply. These get the roomier budget the thinking docs use
+    # and an explicit effort level.
+    _THINKS_BY_DEFAULT_PREFIXES = (
+        "claude-sonnet-5",
+        "claude-opus-5",
+        "claude-fable-",
+        "claude-mythos-",
+    )
+    _THINKING_MAX_TOKENS = 16000
+    # Time allowed for one non-streamed reply from those models. The shared
+    # 120s budget is a read timeout, and complete() receives nothing until
+    # the whole reply (thinking included) is written, so a long think plus
+    # answer could time out and be retried even though nothing is hung.
+    # 450s is the Anthropic SDK's own allowance for a non-streamed 16000-
+    # token reply (one hour per 128k output tokens, anthropic/_base_client.py
+    # _calculate_nonstreaming_timeout), which it would use if the client
+    # timeout were not overridden. Anthropic: "Expect longer response times
+    # when thinking is active"
+    # (https://platform.claude.com/docs/en/build-with-claude/thinking).
+    # stream() keeps the shared budget: events keep arriving while it runs.
+    _THINKING_REQUEST_TIMEOUT_SECONDS = 450.0
+    # Effort is how these models are told how much to reason, and so what a
+    # request costs (https://platform.claude.com/docs/en/build-with-claude/effort).
+    # Sonnet 5 defaults to "high"; "medium" is Anthropic's cost-saving step
+    # down for it and already the default on Opus 5.5. It is one constant
+    # per model on purpose: changing effort between requests invalidates
+    # the prompt cache.
+    _EFFORT = "medium"
+
+    def __init__(self, api_key: str, model: str = "claude-sonnet-5"):
         import anthropic
         self._client = anthropic.AsyncAnthropic(
             api_key=api_key,
@@ -436,20 +476,45 @@ class AnthropicProvider(LLMProvider):
                 calls.append(ToolCall(id=block.id, name=block.name, arguments=block.input or {}))
         return calls
 
+    @property
+    def thinks_by_default(self) -> bool:
+        """Whether this model thinks unasked (see _THINKS_BY_DEFAULT_PREFIXES)."""
+        return self._model.lower().startswith(self._THINKS_BY_DEFAULT_PREFIXES)
+
     def _build_kwargs(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None
     ) -> dict[str, Any]:
         system, msgs = self._convert_messages(messages)
-        kwargs: dict[str, Any] = {"model": self._model, "max_tokens": 4096, "messages": msgs}
+        thinks = self.thinks_by_default
+        kwargs: dict[str, Any] = {
+            "model": self._model,
+            "max_tokens": self._THINKING_MAX_TOKENS if thinks else self._MAX_TOKENS,
+            "messages": msgs,
+        }
         if system:
             kwargs["system"] = self._system_blocks(system)
         anthropic_tools = self._convert_tools(tools)
         if anthropic_tools:
             kwargs["tools"] = anthropic_tools
+        # Deliberately never sent: temperature/top_p/top_k (a non-default
+        # value is a 400 on Opus 4.7 and later and on Sonnet 5), tool_choice
+        # (forcing a tool is a 400 on Opus 5.5 and Fable 5.1) and a
+        # "thinking" block (disabling it is a 400 on Opus 5.5; the model
+        # default is what every thinking model here should run with).
+        if thinks:
+            # Through extra_body rather than the SDK's output_config
+            # argument: requirements.txt admits SDK releases that predate
+            # it, and an unknown keyword argument is a TypeError before any
+            # request leaves. extra_body lands in the JSON body verbatim.
+            kwargs["extra_body"] = {"output_config": {"effort": self._EFFORT}}
         return kwargs
 
     async def complete(self, messages, tools=None) -> LLMResponse:
         kwargs = self._build_kwargs(messages, tools)
+        if self.thinks_by_default:
+            # Per request, not on the client: the other models, and every
+            # stream, keep the shared 120s budget.
+            kwargs["timeout"] = self._THINKING_REQUEST_TIMEOUT_SECONDS
 
         import anthropic
         try:
@@ -458,12 +523,30 @@ class AnthropicProvider(LLMProvider):
             raise ProviderError(
                 "anthropic", getattr(exc, "status_code", None), str(exc)[:300]
             ) from None
+        # Only text blocks are the reply. thinking/redacted_thinking blocks
+        # (and, on Opus 5.5, the text it writes between tool calls, which
+        # comes back as a thinking block) are never shown or stored.
         text_parts = [b.text for b in resp.content if getattr(b, "type", None) == "text"]
+        tool_calls = self._parse_tool_calls(resp.content)
+        if getattr(resp, "stop_reason", None) == "max_tokens" and (
+            tool_calls or not "".join(text_parts).strip()
+        ):
+            # Thinking shares max_tokens with the reply. Cut off before any
+            # text, the turn would be stored as a blank answer; cut off
+            # during a tool call, the last call's input may be incomplete,
+            # and running a half-written desktop or browser action is worse
+            # than failing the turn.
+            raise ProviderError(
+                "anthropic",
+                None,
+                "the model reached its output limit (max_tokens) before finishing "
+                "its reply, so nothing was run. Try again or ask for a smaller step.",
+            )
         usage = self._usage(resp.usage)
         self._log_cache_usage(usage)
         return LLMResponse(
             content="".join(text_parts),
-            tool_calls=self._parse_tool_calls(resp.content),
+            tool_calls=tool_calls,
             model=resp.model,
             usage=usage,
         )
@@ -571,19 +654,31 @@ class OpenAICompatibleProvider(LLMProvider):
         ``usage.prompt_tokens_details.cached_tokens`` (OpenAI, xAI, Groq);
         DeepSeek reports the same fact as ``prompt_cache_hit_tokens``.
         Vendors that share the schema but report neither simply omit it.
-        Automatic caching has no write surcharge on any of these vendors,
-        so the write count is a true zero.
+
+        Cache writes: OpenAI bills them at 1.25x the input rate on GPT-5.6
+        and later (GPT-6 Luna included) and reports them as
+        ``usage.prompt_tokens_details.cache_write_tokens``
+        (https://developers.openai.com/api/docs/guides/prompt-caching,
+        https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/retrieve),
+        so that count is passed through when present (and priced at that
+        rate by services/usage/pricing.py). Older OpenAI models
+        and the other vendors here have no write surcharge and do not send
+        the field, so their write count is a true zero. The count is part
+        of ``prompt_tokens`` like the cached share, so input is still
+        taken as-is.
         """
         if raw is None:
             return {"input_tokens": 0, "output_tokens": 0, "cache_write_tokens": 0}
+        details = getattr(raw, "prompt_tokens_details", None)
+        # The SDK's models keep fields newer than the installed release, so
+        # a field the pinned SDK does not declare is still readable here.
+        written = getattr(details, "cache_write_tokens", None)
         usage = {
             "input_tokens": raw.prompt_tokens,
             "output_tokens": raw.completion_tokens,
-            "cache_write_tokens": 0,
+            "cache_write_tokens": written if isinstance(written, int) and written > 0 else 0,
         }
-        cached = getattr(
-            getattr(raw, "prompt_tokens_details", None), "cached_tokens", None
-        )
+        cached = getattr(details, "cached_tokens", None)
         if not isinstance(cached, int):
             cached = getattr(raw, "prompt_cache_hit_tokens", None)
         if isinstance(cached, int):
@@ -605,15 +700,55 @@ class OpenAICompatibleProvider(LLMProvider):
                 calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=args))
         return calls
 
-    async def complete(self, messages, tools=None) -> LLMResponse:
-        self._reject_images(messages)
+    def _model_fields(self, has_tools: bool) -> dict[str, Any]:
+        """Extra top-level request fields a particular model needs.
+
+        None here: every vendor that shares this class takes the plain
+        request. A subclass whose own models need a field overrides this,
+        so a model id typed into a Groq or Mistral account can never pick up
+        an OpenAI-only parameter its vendor would reject.
+        """
+        return {}
+
+    def _check_tools_supported(self, has_tools: bool) -> None:
+        """Refuse, before sending, a tool request this model cannot serve."""
+
+    def _request_kwargs(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        *,
+        stream: bool = False,
+    ) -> dict[str, Any]:
+        """The chat-completions request shared by complete() and stream().
+
+        Deliberately absent: ``max_tokens`` (reasoning models reject it in
+        favour of ``max_completion_tokens``) and ``temperature`` (reasoning
+        models accept only the default while they reason). Leaving both
+        out is valid for every model on every vendor here.
+        """
+        oai_tools = self._convert_tools(tools)
+        self._check_tools_supported(bool(oai_tools))
         kwargs: dict[str, Any] = {
             "model": self._model,
             "messages": self._convert_messages(messages),
         }
-        oai_tools = self._convert_tools(tools)
+        if stream:
+            kwargs["stream"] = True
         if oai_tools:
             kwargs["tools"] = oai_tools
+        extra = self._model_fields(bool(oai_tools))
+        if extra:
+            # extra_body rather than named SDK arguments: requirements.txt
+            # admits SDK releases that predate them, and an unknown keyword
+            # is a TypeError before the request is sent. The fields land in
+            # the JSON body verbatim either way.
+            kwargs["extra_body"] = extra
+        return kwargs
+
+    async def complete(self, messages, tools=None) -> LLMResponse:
+        self._reject_images(messages)
+        kwargs = self._request_kwargs(messages, tools)
 
         import openai
         try:
@@ -643,14 +778,7 @@ class OpenAICompatibleProvider(LLMProvider):
 
     async def stream(self, messages, tools=None):
         self._reject_images(messages)
-        kwargs: dict[str, Any] = {
-            "model": self._model,
-            "messages": self._convert_messages(messages),
-            "stream": True,
-        }
-        oai_tools = self._convert_tools(tools)
-        if oai_tools:
-            kwargs["tools"] = oai_tools
+        kwargs = self._request_kwargs(messages, tools, stream=True)
         stream = await self._client.chat.completions.create(**kwargs)
         async for chunk in stream:
             delta = chunk.choices[0].delta if chunk.choices else None
@@ -663,8 +791,36 @@ class OpenAIProvider(OpenAICompatibleProvider):
 
     supports_vision = True
 
+    # GPT-6 Sol and Luna accept function tools on Chat Completions only
+    # with reasoning_effort "none"; both default to "medium"
+    # (https://developers.openai.com/api/docs/guides/latest-model,
+    # https://developers.openai.com/api/docs/models/gpt-6-luna). Prefixes
+    # so dated snapshots match too. GPT-5.x and older models take tools at
+    # any effort and are sent nothing extra.
+    _TOOLS_NEED_NO_REASONING_PREFIXES = ("gpt-6-sol", "gpt-6-luna")
+    # GPT-6 Astra cannot call functions through Chat Completions at all
+    # (https://developers.openai.com/api/docs/guides/function-calling), and
+    # rejects reasoning_effort "none".
+    _NO_CHAT_TOOLS_PREFIXES = ("gpt-6-astra",)
+
     def __init__(self, api_key: str, model: str = "gpt-4o"):
         super().__init__(api_key=api_key, model=model, provider_name="openai")
+
+    def _model_fields(self, has_tools: bool) -> dict[str, Any]:
+        if has_tools and self._model.lower().startswith(self._TOOLS_NEED_NO_REASONING_PREFIXES):
+            return {"reasoning_effort": "none"}
+        return {}
+
+    def _check_tools_supported(self, has_tools: bool) -> None:
+        if has_tools and self._model.lower().startswith(self._NO_CHAT_TOOLS_PREFIXES):
+            # Said here rather than left to a 400: the vendor's error names
+            # an endpoint the person cannot change, this names the fix.
+            raise ProviderError(
+                "openai",
+                None,
+                f"{self._model} cannot use tools through the Chat Completions API "
+                "Crawler AI calls. Choose gpt-6-luna or gpt-6-sol in Settings.",
+            )
 
 
 class GrokProvider(OpenAICompatibleProvider):
@@ -728,13 +884,29 @@ class GeminiProvider(LLMProvider):
     supports_vision = True
     _provider_name = "gemini"
     # Models whose thinkingBudget may be 0 (thinking off). 2.5 Pro rejects 0
-    # with a 400 ("only works in thinking mode"), 2.0 has no thinkingConfig
-    # and the 3.x family uses thinkingLevel — on those a browser round keeps
-    # the API default rather than failing every call. Any model id the
-    # provider accepts can be saved (setup.py), so this cannot assume Flash.
+    # with a 400 ("only works in thinking mode") and 2.0 has no
+    # thinkingConfig; on those a browser round keeps the API default rather
+    # than failing every call. Any model id the provider accepts can be
+    # saved (setup.py), so this cannot assume Flash.
     _THINKING_OFF_MODEL_PREFIXES = ("gemini-2.5-flash",)
+    # Gemini 3 and later take thinkingConfig.thinkingLevel instead, and no
+    # Flash or Flash-Lite model can turn thinking fully off, so "as little
+    # as possible" means the lowest level the model accepts. "minimal" is a
+    # 400 on 3.7/3.8 Flash and 3.1 Pro; "low" is accepted by every text
+    # model in the table, so it is the choice for anything not listed as
+    # taking "minimal"
+    # (https://ai.google.dev/gemini-api/docs/generate-content/thinking).
+    # thinkingLevel and thinkingBudget together are a 400, so only one is
+    # ever sent.
+    _THINKING_LEVEL_MODEL_RE = re.compile(r"^gemini-(\d+)(?:\.\d+)?-")
+    _MINIMAL_THINKING_PREFIXES = (
+        "gemini-3-flash",
+        "gemini-3.5-flash",  # also 3.5 Flash-Lite
+        "gemini-3.6-flash",
+        "gemini-3.1-flash-lite",
+    )
 
-    def __init__(self, api_key: str, model: str = "gemini-2.5-flash"):
+    def __init__(self, api_key: str, model: str = "gemini-3.5-flash-lite"):
         self._api_key = api_key
         # Gemini model ids are lowercase; normalise so a misconfigured
         # "Gemini-2.5-Flash" still resolves. The REST resource name
@@ -756,19 +928,39 @@ class GeminiProvider(LLMProvider):
         return f"{self._base_url}/models/{self._model}:{action}"
 
     @property
+    def _uses_thinking_level(self) -> bool:
+        match = self._THINKING_LEVEL_MODEL_RE.match(self._model)
+        return match is not None and int(match.group(1)) >= 3
+
+    @property
     def supports_thinking_budget(self) -> bool:
         """complete()/stream() honour ``thinking_budget`` (the runtime turns
         thinking off on browser rounds); providers without this flag keep
         their plain signature and are never passed it."""
-        return self._model.startswith(self._THINKING_OFF_MODEL_PREFIXES)
+        return (
+            self._model.startswith(self._THINKING_OFF_MODEL_PREFIXES) or self._uses_thinking_level
+        )
 
     def _generation_config(self, thinking_budget: Optional[int]) -> dict[str, Any]:
         # REST field names per the v1beta GenerateContentRequest:
-        # generationConfig.thinkingConfig.thinkingBudget (Gemini 2.5 models).
-        # Dropped for models that would reject it, so a direct caller cannot
-        # turn a working model into a 400 either.
+        # generationConfig.thinkingConfig.thinkingBudget (Gemini 2.5 Flash)
+        # or .thinkingLevel (Gemini 3 and later). Dropped for models that
+        # would reject it, so a direct caller cannot turn a working model
+        # into a 400 either. No temperature is ever set: Google asks for the
+        # default 1.0 on Gemini 3, where lower values can make it loop.
         if thinking_budget is None or not self.supports_thinking_budget:
             return {}
+        if self._uses_thinking_level:
+            # Only a budget of exactly 0 ("thinking off", what the runtime
+            # sends by default) maps to a level: the lowest one. Any other
+            # budget has no level equivalent, and -1 means "dynamic", a
+            # request for MORE thinking, not less
+            # (https://ai.google.dev/gemini-api/docs/generate-content/thinking),
+            # so the model keeps its own default.
+            if int(thinking_budget) != 0:
+                return {}
+            level = "minimal" if self._model.startswith(self._MINIMAL_THINKING_PREFIXES) else "low"
+            return {"generationConfig": {"thinkingConfig": {"thinkingLevel": level}}}
         return {"generationConfig": {"thinkingConfig": {"thinkingBudget": int(thinking_budget)}}}
 
     @staticmethod
@@ -898,6 +1090,10 @@ class GeminiProvider(LLMProvider):
         tool_calls: list[ToolCall] = []
 
         for i, part in enumerate(parts):
+            if part.get("thought"):
+                # A thought summary (only sent when includeThoughts is
+                # asked for, which it never is here) is not the reply.
+                continue
             if "text" in part:
                 text_parts.append(part["text"])
             elif "functionCall" in part:
@@ -940,8 +1136,16 @@ class GeminiProvider(LLMProvider):
             payload["tools"] = gemini_tools
 
         try:
+            # alt=sse is the documented streaming form: one compact JSON
+            # chunk per "data:" line. Without it Google streams one
+            # pretty-printed JSON array whose objects span many lines, which
+            # no line-by-line reader can parse
+            # (https://ai.google.dev/gemini-api/docs/generate-content/text-generation).
             async with self._client.stream(
-                "POST", self._build_url("streamGenerateContent"), json=payload
+                "POST",
+                self._build_url("streamGenerateContent"),
+                params={"alt": "sse"},
+                json=payload,
             ) as resp:
                 try:
                     # The body of a streamed response has not been read yet, so
@@ -954,11 +1158,15 @@ class GeminiProvider(LLMProvider):
                 except httpx.HTTPStatusError as exc:
                     _raise_provider_error("gemini", exc)
                 async for line in resp.aiter_lines():
+                    line = line.removeprefix("data:").strip()
                     if not line:
                         continue
                     try:
+                        # "[" / "," prefixes: a single-line array element.
                         chunk = json.loads(line.lstrip("[,"))
                     except json.JSONDecodeError:
+                        continue
+                    if not isinstance(chunk, dict):
                         continue
                     # Gemini emits trailing chunks that carry only usageMetadata
                     # with an EMPTY candidates list. A dict .get default does not
@@ -969,7 +1177,7 @@ class GeminiProvider(LLMProvider):
                         continue
                     parts = candidates[0].get("content", {}).get("parts", []) or []
                     for part in parts:
-                        if "text" in part:
+                        if "text" in part and not part.get("thought"):
                             yield part["text"]
         except httpx.TransportError as exc:
             _raise_transport_error("gemini", exc)

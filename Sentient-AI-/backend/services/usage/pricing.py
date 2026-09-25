@@ -40,8 +40,18 @@ from typing import NamedTuple, Optional
 PRICING_AS_OF = "2026-09-24"
 
 # Anthropic bills a (5-minute, ephemeral) cache write at 1.25x the input
-# rate. No other provider here charges for writing its cache.
+# rate.
 ANTHROPIC_CACHE_WRITE_MULTIPLIER = 1.25
+# OpenAI bills a cache write at 1.25x the input rate on GPT-5.6 and later
+# (GPT-6 Luna included), and reports writes only for those models
+# (services/agent/providers.OpenAICompatibleProvider._usage), so every write
+# count it sends bills at this rate. No other provider here charges for
+# writing its cache.
+OPENAI_CACHE_WRITE_MULTIPLIER = 1.25
+_CACHE_WRITE_MULTIPLIERS = {
+    "anthropic": ANTHROPIC_CACHE_WRITE_MULTIPLIER,
+    "openai": OPENAI_CACHE_WRITE_MULTIPLIER,
+}
 
 
 class ModelPrice(NamedTuple):
@@ -251,9 +261,7 @@ def estimate_cost_usd(
     written = max(cache_write_tokens or 0, 0)
     uncached = max(input_tokens - read - written, 0)
     cached_rate = price.input if price.cached_input is None else price.cached_input
-    write_rate = price.input
-    if (provider or "").strip().lower() == "anthropic":
-        write_rate *= ANTHROPIC_CACHE_WRITE_MULTIPLIER
+    write_rate = price.input * _CACHE_WRITE_MULTIPLIERS.get((provider or "").strip().lower(), 1.0)
     return round(
         (
             uncached * price.input

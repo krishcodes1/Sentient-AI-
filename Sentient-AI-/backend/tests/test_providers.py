@@ -377,7 +377,9 @@ async def test_anthropic_omits_system_and_tools_when_absent(fake_anthropic):
     kwargs = provider._client.create_calls[0]
     assert "system" not in kwargs
     assert "tools" not in kwargs
-    assert kwargs["model"] == "claude-sonnet-4-20250514"
+    # The default is a live model: claude-sonnet-4-20250514 was retired on
+    # 2026-06-15, so a provider built without a model id would only 404.
+    assert kwargs["model"] == "claude-sonnet-5"
 
 
 def test_anthropic_tool_schema_conversion():
@@ -829,7 +831,8 @@ async def test_gemini_stream_yields_text_and_skips_unparseable_lines(transport):
     chunks = [c async for c in provider.stream([{"role": "user", "content": "hi"}])]
 
     assert chunks == ["Hel", "lo"]
-    assert str(transport.last_request.url).endswith(":streamGenerateContent")
+    assert transport.last_request.url.path.endswith(":streamGenerateContent")
+    assert transport.last_request.url.params["alt"] == "sse"
     await provider.aclose()
 
 

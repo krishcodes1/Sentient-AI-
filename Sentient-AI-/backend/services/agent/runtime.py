@@ -7,7 +7,8 @@ no caller can execute a tool without them.
 
 Connects to: services/agent/providers.py (model calls), the tool registry
 and executors, prompt_guard, the approval store, the audit log,
-context_manager, and the per-user stop requests in services/agent/cancel.py.
+context_manager, services/usage/pricing.py (the browser spend cap's
+prices), and the per-user stop requests in services/agent/cancel.py.
 Used by: api/routes/agent.py (web chat, streaming, approvals and the
 Telegram appliers); main.py builds the single instance.
 
@@ -51,6 +52,8 @@ from services.agent.providers import (
     content_text,
     create_provider,
 )
+from services.usage.pricing import _PRICES as _LISTED_PRICES
+from services.usage.pricing import estimate_turn_cost_usd, pricing_model_for
 
 logger = structlog.get_logger(__name__)
 
@@ -596,19 +599,60 @@ def turn_ending_reply(round_results: list[dict[str, Any]], task_id: str) -> Opti
     return None
 
 
-# Gemini 2.5 Flash list prices per token (spec §2's model); an estimate for
-# the per-task spend cap, not a bill. Measured cost replaces this in the docs.
-_USD_PER_INPUT_TOKEN = 0.30 / 1_000_000
-_USD_PER_OUTPUT_TOKEN = 2.50 / 1_000_000
-
 # (user_id, task_id, usd) -> None; main.py wires it to the browser sessions.
 BrowserSpendSink = Callable[[str, str, float], Awaitable[None]]
 
+# The (provider, model) pairs already logged as having no list price, so the
+# spend cap's fallback is logged once per model rather than every round.
+_UNPRICED_LOGGED: set[tuple[str, str]] = set()
 
-def estimate_usd(usage: Mapping[str, Any]) -> float:
-    return float(usage.get("input_tokens") or 0) * _USD_PER_INPUT_TOKEN + float(
-        usage.get("output_tokens") or 0
-    ) * _USD_PER_OUTPUT_TOKEN
+
+def _highest_listed_rates() -> tuple[float, float]:
+    """USD per 1M (input, output) tokens: the highest rates of any model in
+    services/usage/pricing.py, what the spend cap charges a model that has
+    no price of its own."""
+    return (
+        max(price.input for price in _LISTED_PRICES.values()),
+        max(price.output for price in _LISTED_PRICES.values()),
+    )
+
+
+def estimate_usd(
+    usage: Mapping[str, Any],
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+    served_model: Optional[str] = None,
+) -> float:
+    """What one model call cost, estimated for the per-task browser spend cap
+    (spec §10): its token counts priced on the model that ran it, with the
+    list prices the per-reply cost line uses (services/usage/pricing.py,
+    ``served_model`` included when the vendor names one). An estimate for
+    the cap, not a bill.
+
+    A model with no listed price (a new release, a mistyped id) is charged
+    at the highest listed input and output rates, so the cap trips early
+    rather than late, and that is logged once per model.
+    """
+    cost = estimate_turn_cost_usd(provider, model, dict(usage), served_model)
+    if cost is not None:
+        return cost
+    key = (
+        (provider or "").strip().lower(),
+        (pricing_model_for(provider, model, served_model) or "").strip().lower(),
+    )
+    if key not in _UNPRICED_LOGGED:
+        _UNPRICED_LOGGED.add(key)
+        logger.warning(
+            "browser_spend_unpriced_model",
+            provider=key[0],
+            model=key[1],
+            detail="No list price; the spend cap charges the highest listed rates.",
+        )
+    input_rate, output_rate = _highest_listed_rates()
+    return (
+        float(usage.get("input_tokens") or 0) * input_rate
+        + float(usage.get("output_tokens") or 0) * output_rate
+    ) / 1_000_000
 
 
 def _stored_to_pending(action: StoredAction) -> PendingApproval:
@@ -2500,7 +2544,14 @@ class AgentRuntime:
             ):
                 try:
                     await self._browser_spend(
-                        user_id, task_id, estimate_usd(llm_response.usage or {})
+                        user_id,
+                        task_id,
+                        estimate_usd(
+                            llm_response.usage or {},
+                            turn_provider,
+                            turn_model,
+                            llm_response.served_model,
+                        ),
                     )
                 except Exception as exc:  # noqa: BLE001 - accounting must never fail a turn
                     logger.warning("browser_spend_record_failed", error=str(exc)[:200])

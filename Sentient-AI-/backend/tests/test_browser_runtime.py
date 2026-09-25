@@ -1,7 +1,8 @@
 """Runtime changes for browser rounds (contracts §7): task id threading,
 result budgets, per-line redaction, the latest-observation policy, the
-task_facts block, caps and needs_human ending the turn, spend accounting,
-Gemini thinking budget and the Telegram preview flag."""
+task_facts block, caps and needs_human ending the turn, spend accounting
+priced on the model that ran (an unpriced model at the highest listed
+rates), Gemini thinking budget and the Telegram preview flag."""
 
 from __future__ import annotations
 
@@ -236,12 +237,149 @@ async def test_needs_human_ends_the_turn_and_keeps_the_picture_for_the_channel(k
 # -- spend accounting ----------------------------------------------------------------
 
 
-def test_estimate_usd_uses_flash_prices():
+# A model the spend tests run on: $0.30 in / $2.50 out per 1M tokens, so
+# 1,000 in and 100 out is $0.0003 + $0.00025.
+FLASH_LITE = ("gemini", "gemini-3.5-flash-lite")
+
+
+def test_estimate_usd_prices_the_model_that_ran():
     from services.agent.runtime import estimate_usd
 
-    assert estimate_usd({"input_tokens": 1_000_000, "output_tokens": 0}) == pytest.approx(0.30)
-    assert estimate_usd({"input_tokens": 0, "output_tokens": 1_000_000}) == pytest.approx(2.50)
-    assert estimate_usd({}) == 0.0
+    usage = {"input_tokens": 1_000_000, "output_tokens": 1_000_000}
+    assert estimate_usd(usage, *FLASH_LITE) == pytest.approx(0.30 + 2.50)
+    assert estimate_usd(usage, "anthropic", "claude-sonnet-5") == pytest.approx(2.00 + 10.00)
+    assert estimate_usd(usage, "openai", "gpt-6-luna") == pytest.approx(0.10 + 0.50)
+    # A moving alias is priced on the model the vendor says served it.
+    assert estimate_usd(
+        usage, "gemini", "gemini-flash-lite-latest", "gemini-3.8-flash"
+    ) == pytest.approx(0.75 + 3.75)
+    # A local model costs nothing, so it never adds to the cap.
+    assert estimate_usd(usage, "ollama", "llama3.3") == 0.0
+    assert estimate_usd({}, *FLASH_LITE) == 0.0
+
+
+def test_the_spend_cap_prices_gpt_6_luna_cache_writes_as_openai_bills_them():
+    # GPT-5.6 and later bill a cache write at 1.25x input (providers.py
+    # passes the count through): 10,000 written at $0.10 x 1.25 plus 1,000
+    # out at $0.50, per 1M.
+    from services.agent.runtime import estimate_usd
+
+    usage = {"input_tokens": 10_000, "output_tokens": 1_000, "cache_write_tokens": 10_000}
+    assert estimate_usd(usage, "openai", "gpt-6-luna") == pytest.approx(0.00175)
+
+
+def test_an_unpriced_model_is_charged_the_highest_listed_rates_and_logged_once():
+    from structlog.testing import capture_logs
+
+    from services.agent import runtime as runtime_module
+    from services.usage.pricing import _PRICES
+
+    runtime_module._UNPRICED_LOGGED.discard(("anthropic", "claude-future-9"))
+    top_in = max(price.input for price in _PRICES.values())
+    top_out = max(price.output for price in _PRICES.values())
+    usage = {"input_tokens": 1_000_000, "output_tokens": 1_000_000}
+    with capture_logs() as logs:
+        first = runtime_module.estimate_usd(usage, "anthropic", "claude-future-9")
+        second = runtime_module.estimate_usd(usage, "anthropic", "claude-future-9")
+    assert first == second == pytest.approx(top_in + top_out)
+    # Never cheaper than any model that has a price.
+    for provider, model in _PRICES:
+        assert first >= runtime_module.estimate_usd(usage, provider, model), model
+    unpriced = [e for e in logs if e["event"] == "browser_spend_unpriced_model"]
+    assert [(e["provider"], e["model"]) for e in unpriced] == [("anthropic", "claude-future-9")]
+
+
+class CappedBrowser:
+    """browser.read that refuses once the task's recorded spend reaches the
+    cap, with the real toolkit's own check and refusal; the spend sink adds
+    to the same task, as main.browser_spend_sink does."""
+
+    def __init__(self) -> None:
+        from services.tools.browser.session import TaskState
+
+        self.task = TaskState(task_id="t1")
+        self.ran = 0
+
+    async def execute(self, tool_name, arguments, user_id, approved=False, *, task_id=None):
+        from services.tools.browser.actions import BrowserReadToolkit
+
+        refusal = BrowserReadToolkit._cap_refusal(self.task)
+        if refusal is not None:
+            return refusal
+        self.ran += 1
+        return outline_result(self.ran)
+
+    async def add_spend(self, user_id: str, task_id: str, usd: float) -> None:
+        self.task.spend_usd += usd
+
+
+async def _browse(pair: tuple[str, str], usage: dict[str, int]) -> tuple[CappedBrowser, Any]:
+    """A turn on *pair* that reads the page every round (up to the round
+    limit), each model call billed *usage*."""
+    browser = CappedBrowser()
+    provider = RecordingProvider(
+        [
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCall(id=f"c{i}", name="browser.read", arguments={"action": "snapshot"})],
+                usage=usage,
+            )
+            for i in range(settings.MAX_TOOL_ROUNDS)
+        ]
+        + [LLMResponse(content="done")]
+    )
+    runtime = runtime_with(provider, browser, browser_spend=browser.add_spend)
+    use_provider(runtime, provider, pair=pair)
+    response = await runtime.chat(
+        messages=[{"role": "user", "content": "go"}],
+        tools=[BROWSER_TOOL],
+        user_id="u1",
+        task_id="t1",
+        llm_provider=pair[0],
+        llm_model=pair[1],
+    )
+    return browser, response
+
+
+@pytest.mark.asyncio
+async def test_the_spend_cap_trips_at_claude_sonnet_5s_real_spend():
+    # 25,000 in and 1,000 out on Sonnet 5 is $0.05 + $0.01 a round: four
+    # rounds are $0.24, the fifth takes the task to $0.30, and the sixth
+    # read is refused. Priced as Gemini 2.5 Flash (the old flat rate) the
+    # same rounds were $0.01 each and the cap never tripped.
+    browser, response = await _browse(
+        ("anthropic", "claude-sonnet-5"), {"input_tokens": 25_000, "output_tokens": 1_000}
+    )
+    assert browser.ran == 5
+    assert response.content.startswith("This task has spent about $0.30 (the cap is $0.25).")
+    # The round whose read was refused was billed too, and is recorded.
+    assert browser.task.spend_usd == pytest.approx(0.36)
+
+
+@pytest.mark.asyncio
+async def test_the_spend_cap_does_not_trip_early_on_gpt_6_luna():
+    # 200,000 in and 4,000 out on GPT-6 Luna is $0.022 a round: every round
+    # of the turn runs. At the old flat Flash rate ($0.07 a round) the fifth
+    # read would have been refused.
+    browser, response = await _browse(
+        ("openai", "gpt-6-luna"), {"input_tokens": 200_000, "output_tokens": 4_000}
+    )
+    assert browser.ran == settings.MAX_TOOL_ROUNDS
+    assert browser.task.spend_usd == pytest.approx(0.022 * settings.MAX_TOOL_ROUNDS)
+    # The turn ends on the round limit, never on the spend cap.
+    assert response.content.startswith("done") and "cap is" not in response.content
+
+
+@pytest.mark.asyncio
+async def test_the_spend_cap_trips_early_on_a_model_with_no_price():
+    # Charged at the highest listed rates, one round of 25,000 in and 1,000
+    # out is already past the cap: the second read is refused.
+    browser, response = await _browse(
+        ("anthropic", "claude-future-9"), {"input_tokens": 25_000, "output_tokens": 1_000}
+    )
+    assert browser.ran == 1
+    assert browser.task.spend_usd >= 0.25
+    assert response.content.startswith("This task has spent about $")
 
 
 @pytest.mark.asyncio
@@ -258,7 +396,8 @@ async def test_each_browser_round_reports_its_estimated_spend_to_the_sink():
         LLMResponse(content="done"),
     ])
     runtime = runtime_with(provider, executor, browser_spend=sink)
-    await runtime.chat(messages=[{"role": "user", "content": "go"}], tools=[BROWSER_TOOL, WEB_TOOL], user_id="u1", task_id="t1")
+    use_provider(runtime, provider, pair=FLASH_LITE)
+    await runtime.chat(messages=[{"role": "user", "content": "go"}], tools=[BROWSER_TOOL, WEB_TOOL], user_id="u1", task_id="t1", llm_provider=FLASH_LITE[0], llm_model=FLASH_LITE[1])
     assert seen == [("u1", "t1", pytest.approx(0.0003 + 0.00025))]  # only the browser round
 
 
@@ -372,7 +511,8 @@ async def test_a_round_that_ends_the_turn_still_reports_its_spend():
         LLMResponse(content="", tool_calls=[ToolCall(id="c1", name="browser.read", arguments={"action": "open"})], usage={"input_tokens": 1000, "output_tokens": 100}),
     ])
     runtime = runtime_with(provider, executor, browser_spend=sink)
-    response = await runtime.chat(messages=[{"role": "user", "content": "go"}], tools=[BROWSER_TOOL], user_id="u1", task_id="t9")
+    use_provider(runtime, provider, pair=FLASH_LITE)
+    response = await runtime.chat(messages=[{"role": "user", "content": "go"}], tools=[BROWSER_TOOL], user_id="u1", task_id="t9", llm_provider=FLASH_LITE[0], llm_model=FLASH_LITE[1])
     assert response.content.startswith("I need you to take over in the browser")
     assert seen == [("u1", "t9", pytest.approx(0.0003 + 0.00025))]
 
@@ -385,7 +525,7 @@ async def test_a_round_that_ends_the_turn_still_reports_its_spend():
         ("gemini-2.5-flash-lite", True),
         ("gemini-2.5-pro", False),  # thinking cannot be turned off: 0 is a 400
         ("gemini-2.0-flash", False),  # no thinkingConfig at all
-        ("gemini-3.7-flash", False),  # thinkingLevel family: leave the API default
+        ("gemini-3.7-flash", True),  # thinkingLevel family: the lowest level instead
     ],
 )
 async def test_the_thinking_budget_is_only_sent_to_models_that_accept_zero(model, sends):

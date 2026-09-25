@@ -152,6 +152,27 @@ def test_anthropic_cache_writes_bill_at_a_premium():
     ) == pytest.approx(expected)
 
 
+def test_openai_cache_writes_bill_at_a_premium():
+    from services.usage import estimate_cost_usd
+
+    # gpt-6-luna reports its cache writes (GPT-5.6 and later bill them at
+    # 1.25x input): 1M prompt = 100k fresh + 300k read + 600k written.
+    # 100k x $0.10 + 300k x $0.01 + 600k x $0.10 x 1.25 + 10k out x $0.50
+    expected = (100_000 * 0.10 + 300_000 * 0.01 + 600_000 * 0.125 + 10_000 * 0.50) / 1_000_000
+    assert estimate_cost_usd(
+        "openai",
+        "gpt-6-luna",
+        1_000_000,
+        10_000,
+        cache_read_tokens=300_000,
+        cache_write_tokens=600_000,
+    ) == pytest.approx(expected)
+    # No other provider here charges for a write: it bills as plain input.
+    assert estimate_cost_usd(
+        "grok", "grok-4.3", 1_000_000, 0, cache_write_tokens=600_000
+    ) == pytest.approx(1.25)
+
+
 def test_a_model_without_a_cached_rate_bills_cached_tokens_in_full():
     from services.usage import estimate_cost_usd
 

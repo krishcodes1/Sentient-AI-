@@ -428,7 +428,7 @@ it already has.
 | `DATABASE_URL` | Yes | PostgreSQL connection string. Default works with Docker. |
 | `REDIS_URL` | Recommended | Redis connection string (used for shared rate limiting; the API falls back to in-memory rate limiting if Redis is unreachable). Default works with Docker. |
 | `LLM_PROVIDER` | Yes | Which AI to use: `anthropic`, `openai`, `gemini`, `grok`, `deepseek`, `groq`, `mistral`, or `ollama`. Optional when using the wizard, which can set this instead. |
-| `LLM_MODEL` | Yes | Model name (e.g., `claude-sonnet-5`, `gpt-4o`, `gemini-2.5-flash`). Optional when using the wizard. |
+| `LLM_MODEL` | Yes | Model name (e.g., `claude-sonnet-5`, `gpt-6-luna`, `gemini-3.5-flash-lite`). Optional when using the wizard. |
 | `ANTHROPIC_API_KEY` | If using Anthropic | Get from [console.anthropic.com](https://console.anthropic.com). Optional when using the wizard — see above. |
 | `OPENAI_API_KEY` | If using OpenAI | Get from [platform.openai.com](https://platform.openai.com/api-keys). Optional when using the wizard. |
 | `GEMINI_API_KEY` | If using Gemini | Get from [aistudio.google.com](https://aistudio.google.com/apikey). Optional when using the wizard. |
