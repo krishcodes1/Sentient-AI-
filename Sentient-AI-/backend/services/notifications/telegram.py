@@ -200,6 +200,22 @@ def _usage_line(outcome: dict[str, Any]) -> Optional[str]:
     )
 
 
+def _with_turn_notes(reply: str, outcome: dict[str, Any]) -> str:
+    """*reply* with what the turn left for the person to do: the approval
+    it parked (its card is already in the chat) and the calls security
+    policy blocked. A message turn and the turn resumed after an approval
+    report both the same way, so their replies read the same."""
+    if outcome.get("pending_approvals"):
+        names = ", ".join(outcome["pending_approvals"])
+        reply += (
+            f"\n\n\U0001f510 Waiting on your approval for: {names}. "
+            "The request is in this chat — or send /pending."
+        )
+    if outcome.get("blocked"):
+        reply += "\n\n⛔ Blocked by security policy: " + ", ".join(outcome["blocked"])
+    return reply
+
+
 def _expires_in_text(expires_at_iso: str) -> str:
     try:
         expires = datetime.fromisoformat(expires_at_iso)
@@ -818,18 +834,7 @@ class TelegramService:
                         text=f"⚠️ {outcome['error']}"[:_MESSAGE_CHUNK],
                     )
                     return
-                reply = (outcome.get("content") or "").strip()
-                if outcome.get("pending_approvals"):
-                    names = ", ".join(outcome["pending_approvals"])
-                    reply += (
-                        f"\n\n\U0001f510 Waiting on your approval for: {names}. "
-                        "The request is in this chat — or send /pending."
-                    )
-                if outcome.get("blocked"):
-                    reply += (
-                        "\n\n⛔ Blocked by security policy: "
-                        + ", ".join(outcome["blocked"])
-                    )
+                reply = _with_turn_notes((outcome.get("content") or "").strip(), outcome)
                 if not reply:
                     reply = "(The assistant returned no text.)"
                 # Photos first, so the text (which ends with the usage line)
@@ -1070,8 +1075,14 @@ class TelegramService:
             )
         summary = outcome.get("summary")
         if summary:
-            # The resumed turn's reply, in full and with its own usage line.
-            await self._send_reply(chat_id, str(summary), outcome)
+            # The resumed turn's reply, in full and with its own usage line,
+            # after the photos it captured and with the card it parked or
+            # the block it met named, as a message turn's reply is.
+            for image in outcome.get("images") or []:
+                await self._send_photo(
+                    chat_id, image.get("data_url", ""), image.get("caption", "")
+                )
+            await self._send_reply(chat_id, _with_turn_notes(str(summary), outcome), outcome)
 
 
 class NotifyingApprovalStore:

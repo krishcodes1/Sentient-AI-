@@ -156,6 +156,10 @@ read-only crypto data, user-registered MCP servers).
 - Computer playbook (only when desktop.act is offered): to operate an app,
   call desktop.observe first, then act on the refs in its outline; one
   action per approval, and never ask the user for a password or type one.
+  After an approved act, read the outline it returns (or call
+  desktop.observe, which needs no approval) before asking for another act,
+  and answer from that outline when it shows what was asked: a calendar's
+  month view lists each day's events under its date.
 </capabilities>
 
 <chain_of_command>
@@ -415,6 +419,15 @@ def tool_call_facts(arguments: Any) -> dict[str, str]:
 TASK_FACTS_CHAR_CAP = 2000
 BROWSER_CLOSING_LINE = "Continue the task; call the next browser action or answer when done."
 GENERIC_CLOSING_LINE = "Using this data, answer the user's most recent request."
+# Closes the message a turn resumed after an approved desktop.act starts
+# from (approved_call_message): the act's result carries a fresh outline,
+# so the model reads before it asks to act again.
+DESKTOP_RESUME_CLOSING_LINE = (
+    "Continue the task from the outline in this result (an act's is its 'then'): "
+    "answer the user's request from it when it shows what was asked. If it does "
+    "not, call desktop.observe first (it needs no approval); ask for another "
+    "desktop.act only for a step the outline shows is needed."
+)
 
 
 def render_task_facts(*, notes: list[str], summaries: list[str]) -> str:
@@ -1440,7 +1453,11 @@ class AgentRuntime:
         return blocks
 
     def _wrap_tool_results(
-        self, tool_results: list[dict[str, Any]], *, task_facts: str = ""
+        self,
+        tool_results: list[dict[str, Any]],
+        *,
+        task_facts: str = "",
+        closing: Optional[str] = None,
     ) -> str:
         """Wrap tool outputs in a spotlighted untrusted-data envelope.
 
@@ -1465,7 +1482,7 @@ class AgentRuntime:
 
         ``task_facts`` (browser rounds only) is appended as one more fenced
         block after the results and switches the closing line to the
-        browser one.
+        browser one; ``closing`` replaces the closing line outright.
         """
         boundary = secrets.token_hex(8)
         blocks: list[str] = []
@@ -1528,7 +1545,29 @@ class AgentRuntime:
             "user.\n\n"
             + "\n\n".join(blocks)
             + "\n\n"
-            + (BROWSER_CLOSING_LINE if task_facts else GENERIC_CLOSING_LINE)
+            + (closing or (BROWSER_CLOSING_LINE if task_facts else GENERIC_CLOSING_LINE))
+        )
+
+    def approved_call_message(self, tool_name: str, result: Any) -> str:
+        """The user-role message the turn resumed after an approval starts
+        from (api/routes/agent._resume_after_approval): the approved call's
+        result in the same fenced envelope a tool round's results come back
+        in, whole (the per-tool budget, so a desktop.act's fresh outline
+        keeps its refs), followed by what to do with it.
+
+        A user turn, not the transcript's "[Approved] Executed" assistant
+        row: a history that ends on an assistant turn reads to a provider as
+        a continuation of the model's own words (Gemini answers one with an
+        empty completion), and it puts the result outside the envelope that
+        marks it as data."""
+        closing = DESKTOP_RESUME_CLOSING_LINE if tool_name == "desktop.act" else None
+        wrapped = self._wrap_tool_results(
+            [{"tool_call_id": "approved", "name": tool_name, "result": result}],
+            closing=closing,
+        )
+        return (
+            f"[Approved] Executed '{tool_name}'. The owner approved this action and it "
+            f"ran; its result follows.\n\n{wrapped}"
         )
 
     def _task_facts_for(self, tool_results: list[dict[str, Any]], summaries: list[str]) -> str:

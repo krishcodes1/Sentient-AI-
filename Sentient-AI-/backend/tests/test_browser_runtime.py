@@ -794,6 +794,9 @@ async def test_a_channel_approval_strips_account_urls_from_the_resumed_reply(cli
         async def approve_action(self, action_id, user_id, *, task_id=None):
             return {"ok": True, "tool": "google_workspace.send_email", "result": "sent", "conversation_id": conv["id"]}
 
+        def approved_call_message(self, tool_name, result):
+            return f"[Approved] Executed '{tool_name}'. Result: {result}"
+
         async def chat(self, **kwargs):
             return AgentResponse(
                 content="Done: https://canvas.example.edu/grades?student=42#top",

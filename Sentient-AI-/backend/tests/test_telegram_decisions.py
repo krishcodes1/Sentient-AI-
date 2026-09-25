@@ -850,6 +850,12 @@ async def test_stopping_the_bot_takes_no_new_message_while_a_started_call_ends(
         await service.start()
         assert await _wait_for(executor.started.is_set)
         stopping = asyncio.create_task(service.stop())
+        # The poller is gone before the message arrives. Handed over any
+        # earlier, the poller (which wakes every 10 ms here, in step with
+        # _wait_for) could fetch it and be cancelled by stop() inside its
+        # account lookup; a query cancelled mid-flight invalidates the
+        # pooled connection, and this in-memory database goes with it.
+        assert await _wait_for(lambda: service._task is None)
         fake_api.get_updates.append(_text_update(2, 8181, "what is on my calendar"))
         await asyncio.sleep(0.3)
         assert not stopping.done()  # waiting for the started call

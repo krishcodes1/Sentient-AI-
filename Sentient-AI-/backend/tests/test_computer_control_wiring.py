@@ -181,6 +181,9 @@ def test_descriptions_say_observe_first_prefer_refs_and_every_act_is_approved():
     assert "ref" in act.lower() and "prefer" in act.lower()
     assert "approve" in act.lower()
     assert "password" in act.lower()
+    # An act comes back with a fresh outline: the model reads (free) before
+    # it asks for the next act, instead of asking to look by acting.
+    assert "fresh outline: read it (or call desktop.observe, no approval) before asking" in act
 
 
 # ── 2. policy ────────────────────────────────────────────────────────────────
@@ -661,8 +664,54 @@ def test_prompt_tells_the_model_how_to_operate_apps():
 
     section = SECURITY_SYSTEM_PROMPT.split("<capabilities>")[1].split("</capabilities>")[0]
     line = next(ln for ln in section.split("- ") if "desktop.observe" in ln)
-    for fragment in ("desktop.observe", "ref", "one action per approval", "password"):
+    for fragment in (
+        "desktop.observe",
+        "ref",
+        "one action per approval",
+        "password",
+        # Seen live: after an approved open_app the model asked for another
+        # act (focus_window) instead of reading the screen, which is free.
+        "After an approved act, read the outline it returns",
+        "desktop.observe, which needs no approval",
+        "answer from that outline when it shows what was asked",
+        "month view lists each day's events under its date",
+    ):
         assert fragment in " ".join(line.split()), fragment
+
+
+def test_the_resumed_turn_after_an_approved_act_is_told_to_read_before_acting():
+    """The message a turn resumed after an approved desktop.act starts from
+    carries the act's result whole, fenced as data, and ends by telling the
+    model to answer from the outline or observe (free) before another act;
+    any other tool's keeps the generic closing line."""
+    from core.config import settings
+    from services.agent.runtime import (
+        DESKTOP_RESUME_CLOSING_LINE,
+        GENERIC_CLOSING_LINE,
+        AgentRuntime,
+    )
+
+    runtime = AgentRuntime(config=settings)
+    # As big as an act's fresh outline gets (the toolkit's DEFAULT_MAX_CHARS).
+    outline = [f'- static text "Event number {i}" [ref=d{i}]' for i in range(1, 130)]
+    assert sum(len(line) for line in outline) > 5000
+    result = {
+        "ok": True,
+        "did": "open Calendar",
+        "then": {"ok": True, "app": "Calendar", "outline": outline, "refs": 129},
+    }
+    message = runtime.approved_call_message("desktop.act", result)
+    assert message.startswith("[Approved] Executed 'desktop.act'.")
+    assert '<tool_result_' in message and 'name="desktop.act"' in message
+    # Whole, within the desktop.act budget (the transcript row would have
+    # cut it at 2000 characters): the last ref is still there.
+    assert "Event number 129" in message and "chars truncated" not in message
+    assert message.rstrip().endswith(DESKTOP_RESUME_CLOSING_LINE)
+    for fragment in ("desktop.observe first (it needs no approval)", "another desktop.act only"):
+        assert fragment in DESKTOP_RESUME_CLOSING_LINE, fragment
+
+    other = runtime.approved_call_message("google_workspace.send_email", {"ok": True})
+    assert other.rstrip().endswith(GENERIC_CLOSING_LINE)
 
 
 # ── 7. main.wire_services ────────────────────────────────────────────────────

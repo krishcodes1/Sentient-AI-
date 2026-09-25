@@ -502,7 +502,8 @@ CONNECTOR_CATALOG: dict[str, list[ToolSpec]] = {
             "ref?) types into the ref or the focused field; key(keys) presses "
             "one combo such as cmd+s; scroll(direction); open_app(app); "
             "focus_window(app, index?). The result says what was done and "
-            "carries a fresh outline. Crawler never types into password "
+            "carries a fresh outline: read it (or call desktop.observe, no "
+            "approval) before asking for another act. Crawler never types into password "
             "fields, never acts in password managers, terminals or system "
             "settings, and never enters payment details: ask the owner to do "
             "those steps.",

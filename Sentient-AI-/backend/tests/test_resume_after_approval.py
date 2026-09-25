@@ -21,6 +21,8 @@ and is recorded, so a resume failure must never fail the request.
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 
 from tests.conftest import auth_headers, make_user, use_provider
@@ -151,6 +153,71 @@ async def test_approval_resumes_the_task(client, session_factory):
         assert provider.calls, "the runtime never called the provider to resume"
         history = provider.calls[0]
         assert any("[Approved] Executed" in str(m.get("content", "")) for m in history)
+    finally:
+        app.dependency_overrides.pop(agent_routes.get_runtime, None)
+
+
+@pytest.mark.asyncio
+async def test_the_resumed_turn_gets_the_result_whole_as_a_user_turn(client, session_factory):
+    """The resumed turn's history ends on a user turn carrying the approved
+    call's result in the runtime's tool-result envelope, whole — not on the
+    transcript's assistant row, which is cut at 2000 characters and, as the
+    last message, reads to a provider as the model's own unfinished turn."""
+    from api.routes import agent as agent_routes
+    from main import app
+    from models.conversation import Message
+    from services.agent.providers import LLMResponse
+    from sqlalchemy import select
+
+    provider = ScriptedProvider(
+        [LLMResponse(content="Drafted; approve the card."), LLMResponse(content="Sent.")]
+    )
+    big = {"ok": True, "result": "delivered", "thread": "x" * 3000 + " LAST-WORD"}
+    runtime, _ = _runtime(session_factory, provider, RecordingExecutor(result=big))
+    app.dependency_overrides[agent_routes.get_runtime] = lambda: runtime
+    try:
+        user, token = await make_user(session_factory, "resume-whole@example.com")
+        conv = (
+            await client.post(
+                "/api/agent/conversations", headers=auth_headers(token), json={}
+            )
+        ).json()
+        await client.post(
+            f"/api/agent/conversations/{conv['id']}/messages",
+            headers=auth_headers(token),
+            json={"content": "email my prof"},
+        )
+        action = await _park_action(session_factory, user, conv["id"])
+        decided = await client.post(
+            f"/api/agent/approvals/{action.action_id}",
+            headers=auth_headers(token),
+            json={"approved": True},
+        )
+        assert decided.status_code == 200
+
+        history = [m for m in provider.calls[-1] if m.get("role") != "system"]
+        assert history[-1]["role"] == "user"
+        assert history[-1]["content"].startswith("[Approved] Executed 'google_workspace.send_email'.")
+        assert "LAST-WORD" in history[-1]["content"], "the result was cut"
+        assert 'name="google_workspace.send_email"' in history[-1]["content"]
+        # The decision row is not in the model's history as an assistant turn.
+        assert not any(
+            m["role"] == "assistant" and "[Approved] Executed" in str(m["content"])
+            for m in history
+        )
+        # It is still the transcript's record of the decision.
+        async with session_factory() as session:
+            rows = list(
+                (
+                    await session.execute(
+                        select(Message)
+                        .where(Message.conversation_id == uuid.UUID(conv["id"]))
+                        .order_by(Message.created_at)
+                    )
+                ).scalars()
+            )
+        assert any(r.content.startswith("[Approved] Executed") for r in rows)
+        assert rows[-1].content == "Sent."
     finally:
         app.dependency_overrides.pop(agent_routes.get_runtime, None)
 
