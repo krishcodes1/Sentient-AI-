@@ -167,9 +167,10 @@ def _required_chromium_dirs(package_dir: Path) -> Optional[list[str]]:
 
 # The only things the agent can install. Keyed by the name the model
 # passes; every command is spelled out here and nowhere else. The pip
-# requirement is pinned to the major line web.py was written against, and
-# ``sys.executable`` targets the interpreter running the backend, so the
-# package lands where the screenshot tool will import it from.
+# requirement is pinned to the minor line the browser toolkit was written
+# against (see requirements.txt), and ``sys.executable`` targets the
+# interpreter running the backend, so the package lands where the
+# screenshot tool will import it from.
 ALLOWLIST: dict[str, Installable] = {
     "browser": Installable(
         description=(
@@ -178,7 +179,7 @@ ALLOWLIST: dict[str, Installable] = {
         ),
         size_hint="~150-300 MB download",
         steps=(
-            (sys.executable, "-m", "pip", "install", "playwright>=1.45,<2.0"),
+            (sys.executable, "-m", "pip", "install", "playwright>=1.63,<1.64"),
             (sys.executable, "-m", "playwright", "install", "chromium"),
         ),
         detect=browser_installed,

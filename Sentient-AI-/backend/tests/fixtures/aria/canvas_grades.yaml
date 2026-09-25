@@ -1,0 +1,87 @@
+- generic [active] [ref=e1] [box=8,16,1264,1934]:
+  - banner [ref=e2] [box=8,16,1264,54]:
+    - link "Dashboard" [box=8,16,0,0]:
+      - /url: /
+    - list [ref=e4] [box=8,16,1264,54]:
+      - listitem [ref=e5] [box=48,16,1224,18]:
+        - link "Courses" [ref=e6] [cursor=pointer] [box=48,16,52,18]:
+          - /url: /courses
+      - listitem [ref=e7] [box=48,34,1224,18]:
+        - link "Calendar" [ref=e8] [cursor=pointer] [box=48,34,58,18]:
+          - /url: /calendar
+      - listitem [ref=e9] [box=48,52,1224,18]:
+        - link "Inbox 2" [ref=e10] [cursor=pointer] [box=48,52,49,18]:
+          - /url: /inbox
+  - generic [ref=e11] [box=8,86,1264,446]:
+    - navigation "breadcrumbs" [ref=e12] [box=8,86,1264,18]:
+      - link "CS 101" [ref=e13] [cursor=pointer] [box=8,86,48,18]:
+        - /url: /courses/123
+      - text: ›
+      - link "Grades" [ref=e14] [cursor=pointer] [box=69,86,45,18]:
+        - /url: /courses/123/grades?sort=due#content
+    - heading "Grades for Krish Q" [level=1] [ref=e15] [box=8,125,1264,37]
+    - generic [ref=e16] [box=8,184,1264,39]:
+      - text: Arrange by
+      - combobox "Arrange by" [ref=e17] [box=84,184,77,19]:
+        - option "Due date" [selected] [box=0,0,0,0]
+        - option "Title" [box=0,0,0,0]
+      - generic [ref=e18] [box=8,203,1264,20]:
+        - checkbox "Show only graded assignments" [ref=e19] [box=12,206,13,13]
+        - text: Show only graded assignments
+    - table [ref=e20] [box=8,223,456,202]:
+      - caption [ref=e21] [box=8,223,456,18]: Assignments
+      - rowgroup [ref=e22] [box=10,243,452,20]:
+        - row [ref=e23] [box=10,243,452,20]:
+          - columnheader "Name" [ref=e24] [box=10,243,164,20]
+          - columnheader "Due" [ref=e25] [box=176,243,126,20]
+          - columnheader "Status" [ref=e26] [box=304,243,68,20]
+          - columnheader "Score" [ref=e27] [box=374,243,40,20]
+          - columnheader "Out of" [ref=e28] [box=416,243,46,20]
+      - rowgroup [ref=e29] [box=10,265,452,158]:
+        - row [ref=e30] [box=10,265,452,38]:
+          - 'rowheader "Homework 1: Variables Homework" [ref=e31] [box=10,265,164,38]':
+            - 'link "Homework 1: Variables" [ref=e32] [cursor=pointer] [box=11,266,162,18]':
+              - /url: /courses/123/assignments/9001
+            - generic [ref=e33] [box=11,284,162,18]: Homework
+          - cell "Sep 20 by 11:59pm" [ref=e34] [box=176,265,126,38]
+          - cell "Missing" [ref=e35] [box=304,265,68,38]
+          - 'cell "- Score: not yet graded" [ref=e37] [box=374,265,40,38]':
+            - text: "-"
+            - generic [ref=e38] [box=379,274,1,1]: "Score: not yet graded"
+          - cell "10" [ref=e39] [box=416,265,46,38]
+        - row [ref=e40] [box=10,305,452,38]:
+          - 'rowheader "Quiz 2: Loops Quizzes" [ref=e41] [box=10,305,164,38]':
+            - 'link "Quiz 2: Loops" [ref=e42] [cursor=pointer] [box=44,306,96,18]':
+              - /url: /courses/123/assignments/9002
+            - generic [ref=e43] [box=11,324,162,18]: Quizzes
+          - cell "Sep 22 by 11:59pm" [ref=e44] [box=176,305,126,38]
+          - cell "Late" [ref=e45] [box=304,305,68,38]
+          - cell "7" [ref=e47] [box=374,305,40,38]
+          - cell "10" [ref=e48] [box=416,305,46,38]
+        - row [ref=e49] [box=10,345,452,38]:
+          - rowheader "Essay draft Writing" [ref=e50] [box=10,345,164,38]:
+            - link "Essay draft" [ref=e51] [cursor=pointer] [box=53,346,78,18]:
+              - /url: /courses/123/assignments/9003
+            - generic [ref=e52] [box=11,364,162,18]: Writing
+          - cell "Sep 15 by 11:59pm" [ref=e53] [box=176,345,126,38]
+          - cell "Submitted" [ref=e54] [box=304,345,68,38]
+          - cell "8.5" [ref=e55] [box=374,345,40,38]
+          - cell "10" [ref=e56] [box=416,345,46,38]
+        - row [ref=e57] [box=10,385,452,38]:
+          - rowheader "Project proposal Projects" [ref=e58] [box=10,385,164,38]:
+            - link "Project proposal" [ref=e59] [cursor=pointer] [box=36,386,113,18]:
+              - /url: /courses/123/assignments/9004
+            - generic [ref=e60] [box=11,404,162,18]: Projects
+          - cell "Oct 1 by 11:59pm" [ref=e61] [box=176,385,126,38]
+          - cell "Missing" [ref=e62] [box=304,385,68,38]
+          - cell "-" [ref=e64] [box=374,385,40,38]
+          - cell "25" [ref=e65] [box=416,385,46,38]
+    - complementary "Sidebar" [ref=e66] [box=8,445,1264,87]:
+      - heading "Total" [level=2] [ref=e67] [box=8,445,1264,28]
+      - generic [ref=e68] [box=8,493,1264,18]: 82.5%
+      - button "Show all details" [ref=e69] [box=8,511,109,21]
+  - contentinfo [ref=e71] [box=8,1932,1264,18]:
+    - link "Help" [ref=e72] [cursor=pointer] [box=8,1932,31,18]:
+      - /url: /help?nav=1
+    - link "Privacy policy" [ref=e73] [cursor=pointer] [box=43,1932,93,18]:
+      - /url: /privacy

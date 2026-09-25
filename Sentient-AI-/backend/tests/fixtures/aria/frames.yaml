@@ -1,0 +1,23 @@
+- generic [active] [ref=e1] [box=8,21,1264,260]:
+  - heading "Course materials" [level=1] [ref=e2] [box=8,21,1264,37]
+  - iframe [ref=e3] [box=8,120,404,124]:
+    - generic [ref=f1e1] [box=8,8,384,104]:
+      - heading "Latest grade" [level=2] [ref=f1e2] [box=8,8,384,28]
+      - 'link "Quiz 2: Loops 7/10" [ref=f1e3] [cursor=pointer] [box=8,57,124,18]':
+        - /url: /courses/123/grades?x=1#top
+      - button "Refresh" [ref=f1e4] [box=132,56,63,21]
+  - iframe [ref=e4] [box=416,80,404,164]:
+    - generic [ref=f2e2] [box=8,8,384,42]:
+      - generic [ref=f2e3] [box=8,9,241,18]:
+        - text: Card number
+        - textbox "Card number" [ref=f2e4] [box=96,8,153,21]: 4111 1111 1111 1111
+      - generic [ref=f2e5] [box=8,9,274,39]:
+        - text: CVC
+        - textbox "CVC" [ref=f2e6] [box=8,29,153,21]: "123"
+      - button "Pay $42.00" [ref=f2e7] [box=161,29,83,21]
+  - iframe [ref=e5] [box=824,180,204,64]:
+    - button "Inline srcdoc button" [ref=f3e2] [box=8,8,132,21]
+  - paragraph [ref=e6] [box=8,264,1264,18]:
+    - text: Questions?
+    - link "Ask in discussions" [ref=e7] [cursor=pointer] [box=83,264,119,18]:
+      - /url: /courses/123/discussion_topics

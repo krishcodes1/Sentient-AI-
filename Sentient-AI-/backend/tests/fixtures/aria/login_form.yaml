@@ -1,0 +1,16 @@
+- main [ref=e2] [box=8,8,1264,140]:
+  - img "Example University" [ref=e3] [box=8,8,144,18]
+  - heading "Sign in" [level=1] [ref=e4] [box=8,47,1264,37]
+  - generic [ref=e5] [box=8,106,1264,22]:
+    - text: NetID
+    - textbox "NetID" [ref=e6] [box=48,107,153,21]: krishq
+    - text: Password
+    - textbox "Password" [ref=e7] [box=266,107,153,21]: hunter2!
+    - text: Verification code
+    - textbox "Verification code" [ref=e8] [box=532,107,153,21]: "123456"
+    - generic [ref=e9] [box=689,108,216,18]:
+      - checkbox "Don't ask again on this device" [ref=e10] [box=693,109,13,13]
+      - text: Don't ask again on this device
+    - button "Log in" [ref=e11] [box=909,107,52,21]
+    - link "Forgot password?" [ref=e12] [cursor=pointer] [box=965,108,114,18]:
+      - /url: /idp/reset?user=krishq

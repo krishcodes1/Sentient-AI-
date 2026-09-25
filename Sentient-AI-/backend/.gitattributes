@@ -1,0 +1,4 @@
+# The aria fixtures are compared byte-for-byte with what Playwright emits
+# (tests/fixtures/aria/regenerate.py); core.autocrlf on Windows must not
+# rewrite them to CRLF.
+tests/fixtures/aria/*.yaml text eol=lf

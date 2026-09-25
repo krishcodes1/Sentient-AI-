@@ -1,0 +1,107 @@
+- generic [active] [ref=e1] [box=8,8,1264,2004]:
+  - banner [ref=e2] [box=8,8,1264,22]:
+    - link "Flights" [ref=e3] [cursor=pointer] [box=8,9,44,18]:
+      - /url: /travel/flights?hl=en
+    - button "Main menu" [ref=e4] [box=52,8,28,22]: ☰
+  - search "Flight search" [ref=e5] [box=8,30,1264,50]:
+    - radiogroup "Trip type" [ref=e6] [box=8,30,1264,20]:
+      - generic [ref=e7] [box=8,32,94,18]:
+        - radio "Round trip" [checked] [ref=e8] [box=13,33,13,13]
+        - text: Round trip
+      - generic [ref=e9] [box=102,32,82,18]:
+        - radio "One way" [ref=e10] [box=107,33,13,13]
+        - text: One way
+    - combobox "Where from?" [ref=e11] [box=8,55,153,21]: San Francisco SFO
+    - combobox "Where to?" [ref=e12] [box=165,55,153,21]: Tokyo TYO
+    - textbox "Departure" [ref=e13] [box=322,55,153,21]: Sun, Oct 12
+    - textbox "Return" [ref=e14] [box=479,55,153,21]: Sun, Oct 19
+    - generic [ref=e15] [cursor=pointer] [box=636,50,68,30]: Search
+  - region "Filters" [ref=e16] [box=8,80,1264,21]:
+    - button "Stops" [ref=e17] [box=8,80,50,21]
+    - button "Airlines" [ref=e18] [box=58,80,60,21]
+    - button "Bags" [ref=e19] [box=118,80,46,21]
+    - combobox "Sort by" [ref=e20] [box=168,81,83,19]:
+      - option "Top flights" [selected] [box=0,0,0,0]
+      - option "Price" [box=0,0,0,0]
+      - option "Duration" [box=0,0,0,0]
+  - heading "Best departing flights" [level=2] [ref=e21] [box=8,121,1264,28]
+  - paragraph [ref=e22] [box=8,169,1264,18]: Ranked based on price and convenience. Prices include required taxes + fees for 1 adult.
+  - list "Best departing flights" [ref=e23] [box=8,203,1264,739]:
+    - listitem [ref=e24] [box=48,203,1224,180]:
+      - link "10:40 AM – 2:05 PM+1 United 11 hr 25 min · SFO–NRT Nonstop 612 kg CO2e $612 round trip" [ref=e25] [cursor=pointer] [box=48,203,1224,150]:
+        - /url: /travel/flights/booking?tfs=CBwQAhopEgoyMDI2LTEwLTEy&f=0&hl=en
+        - generic [ref=e26] [box=67,222,1186,22]:
+          - text: 10:40 AM – 2:05 PM
+          - superscript [ref=e27] [box=204,222,14,15]: "+1"
+        - generic [ref=e28] [box=67,244,1186,18]: United
+        - generic [ref=e29] [box=67,262,1186,18]: 11 hr 25 min · SFO–NRT
+        - generic [ref=e30] [box=67,280,1186,18]: Nonstop
+        - generic [ref=e31] [box=67,298,1186,18]: 612 kg CO2e
+        - generic [ref=e32] [box=67,316,1186,18]: $612 round trip
+      - generic [ref=e33] [cursor=pointer] [box=48,353,101,30]: Select flight
+    - listitem [ref=e34] [box=48,389,1224,180]:
+      - link "1:15 PM – 4:30 PM+1 ANA 11 hr 15 min · SFO–HND Nonstop 598 kg CO2e $688 round trip" [ref=e35] [cursor=pointer] [box=48,389,1224,150]:
+        - /url: /travel/flights/booking?tfs=CBwQAhopEgoyMDI2LTEwLTEy&f=1&hl=en
+        - generic [ref=e36] [box=67,408,1186,22]:
+          - text: 1:15 PM – 4:30 PM
+          - superscript [ref=e37] [box=194,408,14,15]: "+1"
+        - generic [ref=e38] [box=67,430,1186,18]: ANA
+        - generic [ref=e39] [box=67,448,1186,18]: 11 hr 15 min · SFO–HND
+        - generic [ref=e40] [box=67,466,1186,18]: Nonstop
+        - generic [ref=e41] [box=67,484,1186,18]: 598 kg CO2e
+        - generic [ref=e42] [box=67,502,1186,18]: $688 round trip
+      - generic [ref=e43] [cursor=pointer] [box=48,539,101,30]: Select flight
+    - listitem [ref=e44] [box=48,575,1224,180]:
+      - link "7:55 AM – 3:40 PM+1 Delta 15 hr 45 min · SFO–HND 1 stop · SEA 701 kg CO2e $541 round trip" [ref=e45] [cursor=pointer] [box=48,575,1224,150]:
+        - /url: /travel/flights/booking?tfs=CBwQAhopEgoyMDI2LTEwLTEy&f=2&hl=en
+        - generic [ref=e46] [box=67,594,1186,22]:
+          - text: 7:55 AM – 3:40 PM
+          - superscript [ref=e47] [box=196,594,14,15]: "+1"
+        - generic [ref=e48] [box=67,617,1186,18]: Delta
+        - generic [ref=e49] [box=67,635,1186,18]: 15 hr 45 min · SFO–HND
+        - generic [ref=e50] [box=67,653,1186,18]: 1 stop · SEA
+        - generic [ref=e51] [box=67,671,1186,18]: 701 kg CO2e
+        - generic [ref=e52] [box=67,689,1186,18]: $541 round trip
+      - generic [ref=e53] [cursor=pointer] [box=48,726,101,30]: Select flight
+    - listitem [ref=e54] [box=48,762,1224,180]:
+      - link "11:30 PM – 5:15 AM+2 ZIPAIR 13 hr 45 min · SFO–NRT Nonstop 640 kg CO2e $489 round trip" [ref=e55] [cursor=pointer] [box=48,762,1224,150]:
+        - /url: /travel/flights/booking?tfs=CBwQAhopEgoyMDI2LTEwLTEy&f=3&hl=en
+        - generic [ref=e56] [box=67,781,1186,22]:
+          - text: 11:30 PM – 5:15 AM
+          - superscript [ref=e57] [box=203,781,14,15]: "+2"
+        - generic [ref=e58] [box=67,803,1186,18]: ZIPAIR
+        - generic [ref=e59] [box=67,821,1186,18]: 13 hr 45 min · SFO–NRT
+        - generic [ref=e60] [box=67,839,1186,18]: Nonstop
+        - generic [ref=e61] [box=67,857,1186,18]: 640 kg CO2e
+        - generic [ref=e62] [box=67,875,1186,18]: $489 round trip
+      - generic [ref=e63] [cursor=pointer] [box=48,912,101,30]: Select flight
+  - button "View more flights" [ref=e64] [box=8,958,117,21]
+  - heading "Other departing flights" [level=2] [ref=e66] [box=8,1599,1264,28]
+  - list "Other departing flights" [ref=e67] [box=8,1647,1264,331]:
+    - listitem [ref=e68] [box=48,1647,1224,162]:
+      - link "6:00 AM – 1:10 PM+1 Air Canada 17 hr 10 min · SFO–NRT 1 stop · YVR $455 round trip" [ref=e69] [cursor=pointer] [box=48,1647,1224,132]:
+        - /url: /travel/flights/booking?tfs=CBwQAhopEgoyMDI2LTEwLTEy&f=4&hl=en
+        - generic [ref=e70] [box=67,1666,1186,22]:
+          - text: 6:00 AM – 1:10 PM
+          - superscript [ref=e71] [box=196,1666,14,15]: "+1"
+        - generic [ref=e72] [box=67,1688,1186,18]: Air Canada
+        - generic [ref=e73] [box=67,1706,1186,18]: 17 hr 10 min · SFO–NRT
+        - generic [ref=e74] [box=67,1724,1186,18]: 1 stop · YVR
+        - generic [ref=e75] [box=67,1742,1186,18]: $455 round trip
+      - generic [ref=e76] [cursor=pointer] [box=48,1779,101,30]: Select flight
+    - listitem [ref=e77] [box=48,1815,1224,162]:
+      - link "9:10 PM – 6:25 AM+2 Philippine Airlines 18 hr 15 min · SFO–NRT 1 stop · MNL $432 round trip" [ref=e78] [cursor=pointer] [box=48,1815,1224,132]:
+        - /url: /travel/flights/booking?tfs=CBwQAhopEgoyMDI2LTEwLTEy&f=5&hl=en
+        - generic [ref=e79] [box=67,1834,1186,22]:
+          - text: 9:10 PM – 6:25 AM
+          - superscript [ref=e80] [box=196,1834,14,15]: "+2"
+        - generic [ref=e81] [box=67,1857,1186,18]: Philippine Airlines
+        - generic [ref=e82] [box=67,1875,1186,18]: 18 hr 15 min · SFO–NRT
+        - generic [ref=e83] [box=67,1893,1186,18]: 1 stop · MNL
+        - generic [ref=e84] [box=67,1911,1186,18]: $432 round trip
+      - generic [ref=e85] [cursor=pointer] [box=48,1948,101,30]: Select flight
+  - contentinfo [ref=e86] [box=8,1994,1264,18]:
+    - link "About" [ref=e87] [cursor=pointer] [box=8,1994,40,18]:
+      - /url: /travel/flights/about?hl=en
+    - link "Terms" [ref=e88] [cursor=pointer] [box=52,1994,40,18]:
+      - /url: /policies/terms?hl=en

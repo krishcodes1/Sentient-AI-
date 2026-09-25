@@ -45,7 +45,7 @@ from services.tools.web import WebToolkit
 from tests.conftest import use_provider
 
 BROWSER_STEPS = [
-    [sys.executable, "-m", "pip", "install", "playwright>=1.45,<2.0"],
+    [sys.executable, "-m", "pip", "install", "playwright>=1.63,<1.64"],
     [sys.executable, "-m", "playwright", "install", "chromium"],
 ]
 SYSTEM_TOOLS = {"system.capabilities", "system.install_capability"}

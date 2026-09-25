@@ -1,0 +1,19 @@
+- generic [active] [ref=e1] [box=8,21,1264,79]:
+  - heading "Checkout" [level=1] [ref=e2] [box=8,21,1264,37]
+  - generic [ref=e3] [box=8,80,1264,21]:
+    - generic [ref=e4] [box=8,81,247,18]:
+      - text: Name on card
+      - textbox "Name on card" [ref=e5] [box=102,80,153,21]: Krish Q
+    - generic [ref=e6] [box=259,81,241,18]:
+      - text: Card number
+      - textbox "Card number" [ref=e7] [box=347,80,153,21]: 4242 4242 4242 4242
+    - generic [ref=e8] [box=504,81,201,18]:
+      - text: Expiry
+      - textbox "Expiry" [ref=e9] [box=551,80,153,21]: 12/28
+    - generic [ref=e10] [box=708,81,190,18]:
+      - text: CVC
+      - textbox "CVC" [ref=e11] [box=745,80,153,21]: "987"
+    - generic [ref=e12] [box=902,81,234,18]:
+      - text: Promo code
+      - textbox "Promo code" [ref=e13] [box=983,80,153,21]: SAVE10
+    - button "Place order" [ref=e14] [box=1140,80,84,21]
