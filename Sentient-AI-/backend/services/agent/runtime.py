@@ -5,6 +5,12 @@ Why it exists: The chat route, the approval endpoints and the Telegram poller
 all need the same loop with the same ordering of checks; one AgentRuntime means
 no caller can execute a tool without them.
 
+Connects to: services/agent/providers.py (model calls), the tool registry
+and executors, prompt_guard, the approval store, the audit log,
+context_manager, and the per-user stop flag in services/agent/cancel.py.
+Used by: api/routes/agent.py (web chat, streaming, approvals and the
+Telegram appliers); main.py builds the single instance.
+
 Agent runtime — orchestrates LLM calls, tool execution, permission
 checks, prompt scanning, approval flow, and audit logging.
 """
@@ -32,6 +38,7 @@ from services.agent.approvals import (
     StoredAction,
 )
 from services.agent.context_manager import ContextManager, compress_tool_result
+from services.agent.prompt_guard import _INVISIBLE_CHARS as _HIDDEN_CHARS
 from services.agent.prompt_guard import PromptGuard as InjectionScanEngine
 from services.agent.taint import TaintTracker
 from services.agent.providers import (
@@ -263,6 +270,28 @@ class AgentResponse:
     # say, since NULL there means "whatever the install used at the time".
     provider: str = ""
     model: str = ""
+    # The model id the provider says actually served the turn, when it
+    # reports one (Gemini's ``modelVersion``). Differs from ``model`` when
+    # ``model`` is a moving alias such as ``gemini-flash-latest``; empty
+    # when the provider does not say.
+    served_model: str = ""
+
+
+@dataclass
+class TurnUsage:
+    """What a turn has consumed so far, filled in while it runs.
+
+    Pass one to :meth:`AgentRuntime.chat` as ``usage_sink``: ``provider``
+    and ``model`` are set once the turn's model is chosen, ``usage`` is
+    summed as each model call returns, and ``served_model`` follows the
+    vendor's report. A caller whose turn is cancelled or fails mid-loop can
+    still record (and price) the calls that were already billed.
+    """
+
+    usage: dict[str, int] = field(default_factory=dict)
+    provider: str = ""
+    model: str = ""
+    served_model: str = ""
 
 
 # Tool results may carry binary payloads (a screenshot as a data URL). Those
@@ -1016,9 +1045,23 @@ class AgentRuntime:
         for tr in tool_results:
             model_view = redact_binary_for_model(tr.get("result"))
             try:
-                payload = json.dumps(model_view, default=str, indent=2)
+                # Compact, and non-ASCII kept as itself: indentation and
+                # \uXXXX escapes are pure overhead to the model, and they
+                # ate a large share of the per-result budget below, so the
+                # same cap now carries more of the actual data.
+                payload = json.dumps(
+                    model_view, default=str, ensure_ascii=False, separators=(",", ":")
+                )
             except (TypeError, ValueError):
                 payload = str(model_view)
+            # ...except characters that render as nothing (zero-width, bidi
+            # controls, Unicode "tag" letters): raw, they can carry text the
+            # model reads and a person never sees. They go back to the
+            # visible \uXXXX form the ASCII serialization always gave them,
+            # before the cap below, so they cannot inflate past it.
+            payload = _HIDDEN_CHARS.sub(
+                lambda m: json.dumps(m.group())[1:-1], payload
+            )
             payload = compress_tool_result(
                 payload,
                 result_char_budget(tr.get("name"), self._context_manager.max_tool_result_chars),
@@ -1169,15 +1212,23 @@ class AgentRuntime:
         if isinstance(result, dict):
             redacted_any = False
             cleaned: dict[str, Any] = {}
+            # What is left once the flagged items are gone, for the residual
+            # scan. The redaction markers are left out of it: a marker's
+            # reason names the pattern that fired ("...jailbreak_keywords"),
+            # so scanning it tripped the guard on its own marker and threw
+            # away every clean item alongside the one bad one.
+            remainder: dict[str, Any] = {}
             for key, value in result.items():
                 if isinstance(value, list) and value:
                     new_list: list[Any] = []
+                    kept: list[Any] = []
                     for item in value:
                         item_scan = await self._guard.scan_output(
                             str(item), user_id
                         )
                         if item_scan.get("safe", True):
                             new_list.append(item)
+                            kept.append(item)
                         else:
                             redacted_any = True
                             # A list of lines (a page outline) keeps its shape:
@@ -1193,10 +1244,12 @@ class AgentRuntime:
                                     }
                                 )
                     cleaned[key] = new_list
+                    remainder[key] = kept
                 else:
                     cleaned[key] = value
+                    remainder[key] = value
             if redacted_any:
-                residual = await self._guard.scan_output(str(redact_binary_for_model(cleaned)), user_id)
+                residual = await self._guard.scan_output(str(redact_binary_for_model(remainder)), user_id)
                 if residual.get("safe", True):
                     return cleaned
         return {"redacted": True, "reason": scan.get("reason")}
@@ -1217,6 +1270,7 @@ class AgentRuntime:
         event_sink: Optional[Callable[[dict[str, Any]], Awaitable[None]]] = None,
         permissions_text: Optional[str] = None,
         task_id: Optional[str] = None,
+        usage_sink: Optional[TurnUsage] = None,
     ) -> AgentResponse:
         """Process a conversation turn.
 
@@ -1239,10 +1293,16 @@ class AgentRuntime:
 
         A new turn lifts the user's stop request (``services.agent.cancel``):
         the stop was for the task that was running, not for every later one.
+        ``usage_sink``, when given, is filled in while the turn runs (see
+        :class:`TurnUsage`); its ``usage`` dict is the returned response's
+        ``usage`` on success, and still holds what was billed so far if the
+        turn is cancelled or fails mid-loop.
         """
         agent_cancel.clear(user_id)
         messages = self._with_system_prompt(messages, memory_block, permissions_text)
         turn_provider, turn_model = await self._select_provider(llm_provider, llm_model)
+        if usage_sink is not None:
+            usage_sink.provider, usage_sink.model = turn_provider, turn_model
         async with self._lease(turn_provider, turn_model) as provider:
             response = await self._run_turn(
                 provider,
@@ -1254,6 +1314,7 @@ class AgentRuntime:
                 conversation_id,
                 event_sink,
                 task_id,
+                usage_sink,
             )
         response.provider, response.model = turn_provider, turn_model
         return response
@@ -1269,6 +1330,7 @@ class AgentRuntime:
         conversation_id: Optional[str],
         event_sink: Optional[Callable[[dict[str, Any]], Awaitable[None]]],
         task_id: Optional[str] = None,
+        usage_sink: Optional[TurnUsage] = None,
     ) -> AgentResponse:
         """The body of :meth:`chat`: scanning, context management and the
         bounded tool loop, on a provider the caller holds a lease on."""
@@ -1356,7 +1418,13 @@ class AgentRuntime:
         tool_results: list[dict[str, Any]] = []
         pending_approvals: list[PendingApproval] = []
         blocked_actions: list[BlockedAction] = []
-        total_usage: dict[str, int] = {}
+        # Summed per model call, in place, so a caller's sink sees every
+        # billed call even if the turn never returns (cancelled, or a later
+        # call fails).
+        total_usage: dict[str, int] = (
+            usage_sink.usage if usage_sink is not None else {}
+        )
+        served_model = ""
         final_content = ""
         rounds_used = 0
         hit_round_limit = False
@@ -1393,6 +1461,9 @@ class AgentRuntime:
             )
             for k, v in llm_response.usage.items():
                 total_usage[k] = total_usage.get(k, 0) + v
+            served_model = llm_response.served_model or served_model
+            if usage_sink is not None:
+                usage_sink.served_model = served_model
 
             if not llm_response.tool_calls:
                 final_content = llm_response.content
@@ -1781,7 +1852,7 @@ class AgentRuntime:
         if not tool_results and not pending_approvals and not blocked_actions:
             try:
                 self._context_manager.cache_response(
-                    messages, final_content, total_usage, scope=cache_scope
+                    messages, final_content, dict(total_usage), scope=cache_scope
                 )
             except Exception as exc:
                 logger.warning("context_cache_failed", error=str(exc))
@@ -1792,6 +1863,7 @@ class AgentRuntime:
             pending_approvals=pending_approvals,
             blocked_actions=blocked_actions,
             usage=total_usage,
+            served_model=served_model,
         )
 
     # ------------------------------------------------------------------

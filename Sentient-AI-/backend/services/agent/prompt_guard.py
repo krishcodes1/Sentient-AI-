@@ -5,6 +5,11 @@ Why it exists: The runtime scans user input, tool output and model output, and
 the memory service screens saved facts; keeping the patterns and the
 normalisation in one place means every path sees the same defenses.
 
+Connects to: nothing external; regex and heuristic layers only.
+Used by: RuntimePromptGuard in services/agent/runtime.py (user input, tool
+results, final output; its invisible-character set also escapes tool
+results sent to the model) and services/memory.py (saved facts).
+
 Multi-layer prompt injection defense for Crawler AI.
 
 Provides pattern matching, heuristic analysis, and output validation
@@ -77,7 +82,10 @@ _HOMOGLYPH_MAP: dict[str, str] = {
 _INVISIBLE_CHARS = re.compile(
     r"[\u200b\u200c\u200d\u200e\u200f\u2060\u2061\u2062\u2063\u2064"
     r"\ufeff\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5"
-    r"\u180e\u2000-\u200a\u202a-\u202e\u2066-\u2069\ufff9-\ufffb]"
+    r"\u180e\u2000-\u200a\u202a-\u202e\u2066-\u2069\ufff9-\ufffb"
+    # Unicode "tag" characters: an invisible twin of every ASCII letter,
+    # used to smuggle whole sentences that no reader ever sees.
+    r"\U000e0000-\U000e007f]"
 )
 
 # Separator characters used to splice a word ("i-g-n-o-r-e") so a literal
