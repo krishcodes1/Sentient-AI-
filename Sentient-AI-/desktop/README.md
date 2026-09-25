@@ -145,6 +145,10 @@ updater (its own key, stored as a secret) are planned for later releases.
 ## Headless-Mac test checklist
 
 What CI cannot cover — Gatekeeper, the tray, real Docker — is checked by hand on the test Mac.
+This checklist covers the app itself. The app runs the Docker stack, where computer control and
+"See my screen" are unavailable; the live test of every agent flow (browser and computer control,
+approvals, stop, cost lines) runs the backend natively instead:
+[`docs/testing/headless-mac-full-test.md`](../docs/testing/headless-mac-full-test.md).
 The app needs a logged-in **GUI session**: connect with Screen Sharing (Finder → Go → Connect
 to Server → `vnc://<mac-name>.local`). SSH alone is enough for building and for the `docker`
 checks below, not for the windows.

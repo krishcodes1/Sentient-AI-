@@ -62,7 +62,7 @@ message with the verdict.
 ## API routes (`backend/api/routes/`)
 
 - `_deps.py` — shared deps: `installation_service(request)`, `require_admin`.
-- `agent.py` — conversations CRUD, send/stream message, approvals list/decide; the biggest route file (turn orchestration glue).
+- `agent.py` — conversations CRUD, send/stream message, approvals list/decide, `POST /agent/stop` (the web Stop button), and the chat/decision appliers the Telegram bot runs; the biggest route file (turn orchestration glue).
 - `auth.py` — register/login/refresh, profile & password change, account export/delete, settings.
 - `capabilities.py` — capability report + owner-only switch updates + install trigger.
 - `connectors.py` — connector CRUD, credential validation, health stats.
@@ -75,7 +75,8 @@ message with the verdict.
 
 ## Agent runtime (`backend/services/agent/`)
 
-- `runtime.py` — `AgentRuntime`: provider leasing, system-prompt assembly, `chat`/`stream_chat`/`_run_turn`, approval resume, image handling.
+- `runtime.py` — `AgentRuntime`: provider leasing, system-prompt assembly, `chat`/`stream_chat`/`_run_turn`, approval resume, image handling; stop checks at step boundaries, the executor's pre-card checks (`precheck_approval`, `approval_arguments`), the latest-observation policy for browser and desktop outlines, desktop results audited as facts only, and the browser spend estimate priced per model.
+- `cancel.py` — per-user stop requests (the web Stop button, Telegram `/stop`): each piece of work takes a mark when accepted and a stop ends work marked before it; the runtime and the computer toolkit check it.
 - `providers.py` — `LLMProvider` abstraction: `AnthropicProvider`, `OpenAICompatibleProvider` (OpenAI/Grok/DeepSeek/Groq/Ollama), tool-call/content normalization.
 - `prompt_guard.py` — multi-layer prompt-injection scanner: normalization (base64/hex/homoglyph/zero-width), pattern detection, threat levels.
 - `taint.py` — CaMeL-lite taint tracking: flags untrusted tool-result content flowing into later tool arguments, escalates auto-approved writes.
@@ -132,7 +133,7 @@ message with the verdict.
 
 ## Notifications (`backend/services/notifications/`)
 
-- `telegram.py` — long-polling `TelegramService`: link-code linking, `/status`/`/help`, message + callback (approve/deny) handling, `NotifyingApprovalStore`.
+- `telegram.py` — long-polling `TelegramService`: link-code linking, `/stop`/`/new`/`/pending`/`/usage`/`/help`, message + callback (approve/deny) handling as per-chat tracked tasks, the per-reply cost line, `NotifyingApprovalStore`.
 - `telegram_manager.py` — starts/restarts/stops the poller at runtime as settings change; serializes concurrent apply calls.
 - `progress.py` — `TurnProgress`: turns a running turn's tool_call events into short fact-only lines ("Opening canvas.nyit.edu…") and paces them (2 s grace, one per 4 s, no repeats, 6 per turn, the reply at least 1 s after the last line).
 - `reminders.py` — `ReminderService`: delivers due reminders (Telegram when linked).
@@ -169,7 +170,7 @@ Migrations (`backend/alembic/versions/`), oldest first:
 ## Backend tests (`backend/tests/`, one theme per file)
 
 `conftest.py` sets dummy env vars, DB session fixtures, auth helpers. Themes:
-account export · admin role/tier · agent-loop security · vision/image turns · approval arg re-scanning · approval flow (DB+memory stores, concurrency) · auth-event audit trail · audit event→status mapping · HMAC audit hashing · audit service chaining · audit stats endpoint · auth hardening (XFF, lockout) · capabilities HTTP API · capabilities registry invariants · capability report logic · capability gating at both call sites · concurrency/failure modes · connector behavior (Canvas/Google/Robinhood) · connector route policy · context manager budgets/windows · conversation lifecycle routes · conversation search · desktop screenshot tool · executor security (credentials, scopes) · installation service · MCP integration · MCP client protocol · MCP DNS pinning (rebinding) · persistent memory CRUD · memory search · message usage/attachments · legacy-DB migration adoption · migration schema drift · network policy (SSRF per connector) · Ollama streaming errors · production-hardening config checks · prompt-guard false positives · prompt-guard normalization evasion · prompt-injection red-team suite · provider layer (Anthropic/OpenAI-compatible) · query-efficiency regressions · reminder tools · reminder CRUD/sweeper · resume-after-approval · route-level security · lazy provider resolution · security-middleware ordering · session refresh · Settings/account validation · setup wizard API · SSRF address policy · stream resilience/audit ordering · SSE streaming · built-in system tools (install allowlist) · taint tracking · Telegram approval channel · Telegram manager lifecycle · tool registry/executor · token usage accounting · per-user LLM follows install default · audit-log verifier CLI · built-in web tools · app wiring (`test_wiring.py`).
+account export · admin role/tier · agent-loop security · vision/image turns · approval arg re-scanning · approval flow (DB+memory stores, concurrency) · auth-event audit trail · audit event→status mapping · HMAC audit hashing · audit service chaining · audit stats endpoint · auth hardening (XFF, lockout) · capabilities HTTP API · capabilities registry invariants · capability report logic · capability gating at both call sites · concurrency/failure modes · connector behavior (Canvas/Google/Robinhood) · connector route policy · context manager budgets/windows · conversation lifecycle routes · conversation search · desktop screenshot tool · executor security (credentials, scopes) · installation service · MCP integration · MCP client protocol · MCP DNS pinning (rebinding) · persistent memory CRUD · memory search · message usage/attachments · legacy-DB migration adoption · migration schema drift · network policy (SSRF per connector) · Ollama streaming errors · production-hardening config checks · prompt-guard false positives · prompt-guard normalization evasion · prompt-injection red-team suite · provider layer (Anthropic/OpenAI-compatible) · query-efficiency regressions · reminder tools · reminder CRUD/sweeper · resume-after-approval · route-level security · lazy provider resolution · security-middleware ordering · session refresh · Settings/account validation · setup wizard API · SSRF address policy · stream resilience/audit ordering · SSE streaming · built-in system tools (install allowlist) · taint tracking · Telegram approval channel · Telegram decisions answered at once and run off the poll loop (`test_telegram_decisions.py`) · Telegram progress lines (`test_telegram_progress.py`) · Telegram cost line, linked account only and `/stop` (`test_telegram_cost_safety.py`) · stop requests and the runtime's stop boundaries (`test_agent_cancel.py`, `test_runtime_stop.py`) · desktop acts refused before the card and cards tied to their screen (`test_computer_precheck.py`) · desktop latest-observation policy (`test_desktop_observation_policy.py`) · current provider model families (`test_provider_model_families.py`) · Telegram manager lifecycle · tool registry/executor · token usage accounting · per-user LLM follows install default · audit-log verifier CLI · built-in web tools · app wiring (`test_wiring.py`).
 
 ## Frontend pages (`frontend/src/pages/`)
 
@@ -182,6 +183,7 @@ account export · admin role/tier · agent-loop security · vision/image turns �
 - `Setup.tsx` — first-run wizard: owner account → provider → Telegram → permissions → summary.
 - `AuditLogs.tsx` — audit log browser + integrity verification.
 - `approvalCountdown.ts` — shared TTL-countdown hook for approval cards (kept out of Chat's chunk so Dashboard doesn't pull in react-markdown).
+- `approvalArguments.ts` — `shownArguments`: the arguments an approval card displays, without the `_screen` key a `desktop.act` card stores (shared by Chat and Dashboard).
 
 ## Frontend components (`frontend/src/components/`)
 
@@ -219,7 +221,7 @@ account export · admin role/tier · agent-loop security · vision/image turns �
 
 ## Frontend tests (grouped by theme)
 
-Component tests mirror their component 1:1 (`CapabilityList`, `ChatComposer`, `ConfirmDialog`, `ErrorBoundary`, `MarkdownMessage`, `ProviderErrorText`, `TokenUsage`, `UsagePanel`, `Layout`). Page tests: `Dashboard.test.tsx`, `Settings.test.tsx`, `Setup.test.tsx`, `approvalCountdown.test.ts`. Service tests: `api.test.ts` (general client), `api.approvals.test.ts`, `api.refresh.test.ts` (401→refresh flow), `api.setup.test.ts`. `theme.test.tsx` (theme persistence/sync), `App.test.tsx` (routing/setup redirect). `test/` holds shared fixtures, not tests: `setup.ts` (jsdom matchMedia polyfill), `http.ts` (fetch/location doubles), `capabilities.ts` and `usage.ts` (realistic fixture bodies).
+Component tests mirror their component 1:1 (`CapabilityList`, `ChatComposer`, `ConfirmDialog`, `ErrorBoundary`, `MarkdownMessage`, `ProviderErrorText`, `TokenUsage`, `UsagePanel`, `Layout`). Page tests: `Dashboard.test.tsx`, `Settings.test.tsx`, `Setup.test.tsx`, `Chat.stop.test.tsx` (the Stop button asks the server and keeps the stream), `approvalCountdown.test.ts`, `approvalArguments.test.ts`. Service tests: `api.test.ts` (general client), `api.approvals.test.ts`, `api.refresh.test.ts` (401→refresh flow), `api.setup.test.ts`, `api.stop.test.ts`. `theme.test.tsx` (theme persistence/sync), `App.test.tsx` (routing/setup redirect). `test/` holds shared fixtures, not tests: `setup.ts` (jsdom matchMedia polyfill), `http.ts` (fetch/location doubles), `capabilities.ts` and `usage.ts` (realistic fixture bodies).
 
 ## Docker & CI
 
@@ -237,5 +239,6 @@ Component tests mirror their component 1:1 (`CapabilityList`, `ChatComposer`, `C
 - `docs/team-handoff-2026-09-23.md` — handoff notes for the capabilities/setup-wizard work that landed on `feat/full-platform-completion`.
 - `docs/superpowers/specs/2026-09-23-capabilities-and-setup-wizard-design.md` — design doc for that work.
 - `docs/superpowers/plans/2026-09-23-capabilities-and-setup-wizard.md` — implementation plan for that work.
+- `docs/testing/headless-mac-full-test.md` — the full live test on the headless test Mac (native install, wizard, Telegram, macOS grants, every agent flow); `docs/testing/computer-control-headless-mac.md` is the low-level computer-control smoke test.
 - `backend/alembic/README.md` — migration workflow + pre-Alembic adoption.
 - `backend/services/capabilities/README.md` — how to add a capability (five steps, referenced above).

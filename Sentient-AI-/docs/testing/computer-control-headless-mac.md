@@ -11,6 +11,11 @@ What gets exercised: the real `MacBackend` (pyobjc: accessibility tree,
 Quartz events, NSWorkspace) under the real `ComputerToolkit`, with every
 hard rule in the path. The script is `backend/scripts/computer_control_smoke.py`.
 
+This is the low-level smoke test. To test the whole product live on the
+same Mac (native install, setup wizard, Telegram, browser and computer
+control through the agent, approvals, stop, cost lines) with real Gemini,
+Claude and GPT keys, follow [headless-mac-full-test.md](headless-mac-full-test.md).
+
 ## 0. What you need
 
 - The test Mac (macOS 13 or later), logged in to a GUI session with an
@@ -52,7 +57,8 @@ In a Terminal on the test Mac (through Screen Sharing):
 ```sh
 git clone https://github.com/krishcodes1/Sentient-AI-.git
 cd Sentient-AI-/Sentient-AI-/backend
-git checkout <the branch with computer control>
+git checkout main
+git pull
 python3 -m venv .venv-cc
 . .venv-cc/bin/activate
 # Full backend deps (includes pyobjc on macOS):
@@ -74,6 +80,12 @@ This prints the real interpreter behind the venv, for example
 `/opt/homebrew/Cellar/python@3.12/3.12.x/Frameworks/Python.framework/Versions/3.12/bin/python3.12`
 or `/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12`.
 The smoke script prints the same path on its first line.
+
+Framework builds of Python start that interpreter as the `Python.app`
+beside it: a running process shows up in `ps` as
+`.../Versions/3.x/Resources/Python.app/Contents/MacOS/Python` (seen with
+the python.org 3.13 build). If a grant to the `bin/python3.x` path does not
+take, add that `Python.app` as well.
 
 ## 4. Grant Accessibility and Screen Recording
 
@@ -141,7 +153,7 @@ the mouse or keyboard while it runs. Each line is a check:
 | the text is in the document | a fresh outline shows the value | outline values |
 | press cmd+a | selects all | key grammar, modifiers released |
 | cmd+s opens the Save sheet / escape cancels the Save sheet | the save dialog opens and is cancelled | spec section 7: save-dialog cancel |
-| Stop cancels the next action | sets the per-user cancel flag; the next key press is refused and never sent | kill switch (`/stop`, web Stop) |
+| Stop cancels the next action | sets the per-user cancel flag; the next key press is refused and never sent | kill switch (`/stop`, `POST /api/agent/stop`) |
 | refuse to open Terminal (live) | `open_app Terminal` is refused before any backend call | blocked apps |
 | Safari test page shows a secure field | opens a local page with a password input in Safari; the outline shows `value=[redacted]` | secure values never read |
 | refuse typing into the password field | typing by its ref is refused and never sent | never type into a secure field |
@@ -187,6 +199,8 @@ tccutil reset Accessibility
 tccutil reset ScreenCapture
 ```
 
-Not covered here: `/stop` from Telegram and the web Stop button end to end
-(the script sets the same per-user cancel flag they set), and the Windows
-backend, which gets the same script-style check on the team's Windows VM.
+Not covered here: `/stop` from Telegram and the web Stop button
+(`POST /api/agent/stop`) end to end (the script sets the same per-user
+cancel flag they set; the full guide's row 5g tests them live), and the
+Windows backend, which gets the same script-style check on the team's
+Windows VM.

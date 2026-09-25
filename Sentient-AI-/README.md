@@ -401,6 +401,14 @@ See `backend/services/capabilities/README.md` if you're adding a new one —
 declaring a capability there is what drives the switch, the gating, and the
 prompt text; nothing else needs to change.
 
+**Testing everything live on a Mac.** Browser control and computer control
+need the backend running directly on the Mac, not in Docker.
+[`docs/testing/headless-mac-full-test.md`](docs/testing/headless-mac-full-test.md)
+is the step-by-step checklist: native install, the wizard with Gemini,
+Claude and GPT, Telegram, the macOS permission grants, and every live flow
+with what to expect. [`docs/testing/computer-control-headless-mac.md`](docs/testing/computer-control-headless-mac.md)
+is the lower-level smoke test of the Mac computer-control backend.
+
 ---
 
 ## Environment Variables

@@ -14,35 +14,21 @@ What to build next, cut into pieces one person can own. Read `docs/team-handoff-
 | ID | Item | Where | Done when | Size |
 |---|---|---|---|---|
 | A1 | **Sender verification**: store the Telegram user id at link time; require `from.id` to match on messages and button callbacks; accept private chats only | `services/notifications/telegram.py` | a message from another account in the same chat is ignored and audited | S |
-| A2 | **`/stop`** command on Telegram (the web Stop button already stops the task; see "A2 details" below the table) | `telegram.py _handle_message`, `_handle_help` | a /stop sent during a long Telegram turn ends it at its next step with the "Stopped." reply; the runtime's `turn_stopped` audit row is written | S |
+| A2 | **Shipped.** **`/stop`** on Telegram and the web Stop button (see "A2 as shipped" below the table) | `telegram.py _handle_stop`, `api/routes/agent.py stop_running_task`, `Chat.tsx handleStop`, `services/agent/cancel.py` | done: a long turn stops at its next step (web) or at once (Telegram, once a step already running has finished); the web stop writes `stop_requested` and `turn_stopped` rows. Still open: an audit row for a Telegram `/stop` | S |
 | A3 | **Inbound photos, documents and captions** (only `text` is read today) → attachments on the user message; images fed to vision models | `telegram.py _handle_message`, `agent.py build_chat_applier` | a photo sent from the phone reaches the model | S |
 | A4 | **Voice notes → text** (Gemini audio or local Whisper), 20 MB cap | `telegram.py`, a `services/tools/transcribe.py` | a voice note becomes a normal turn | M |
 | A5 | `/model`, `/budget`, `/usage` polish; stream replies by editing the message every ~1 s | `telegram.py` | visible typing progress on the phone | S |
-| A6 | Mid-turn progress lines ("Taking a screenshot…") from runtime events | `runtime.py event_sink` → `telegram.py` | progress appears before the final reply | S |
+| A6 | **Shipped.** Mid-turn progress lines ("Taking a screenshot…") from runtime events, for message turns and the turn resumed after an approval | `runtime.py event_sink` → `services/notifications/progress.py` → `telegram.py` | done: progress appears before the final reply | S |
 
-**A2 details.** What already works:
+**A2 as shipped.**
 
-- `POST /api/agent/stop` records a stop for the signed-in user (`services.agent.cancel.request_cancel`), and the web Stop button calls it.
-- A stop ends the running task at its next step: the runtime checks before every model round and every tool call, and computer control before every desktop action. A tool call that has started is never cut short. The turn then ends with a short "Stopped." reply, saved like any other reply.
-- Approval cards that are waiting stay approvable after a stop. Approve runs that one action (the tap came after the stop), and the task it resumes stays stopped. Nothing denies pending cards.
-- On Telegram, Approve/Deny runs off the poll loop, so a /stop is received while an approved action or its resumed turn runs.
+- The web Stop button calls `POST /api/agent/stop`, which records a stop for the signed-in user (`services.agent.cancel.request_cancel`) and a `stop_requested` audit row. The runtime checks before every model round and every tool call, and computer control before every desktop action; a tool call that has started is never cut short. The turn then ends with a short "Stopped." reply on the open stream, saved like any other reply, with a `turn_stopped` row and a `user_stopped` row for each step it skipped. If the server has not ended the turn within 10 s, the page cuts its stream.
+- Telegram `/stop` (Rafi, #34) records the same stop and also cancels that chat's running tasks (message turns and approval decisions): nothing more is sent for that request, and the reply is "⏹ Stopped. Nothing more will be sent for that request." A tool call already running, or an approval card being stored, still finishes and gets its audit row first (`runtime._RunsToEnd`); a call whose intent row was being written does not start, and gets a `user_stopped` row after it. Stopping the bot (server shutdown, or turning Telegram off) takes no new message first, then waits at most 10 s for such a call. The transcript gets "[Stopped before the reply was finished.]" with the tokens billed so far and the tool calls that ran.
+- A stop ends the work accepted before it and nothing later: a new message or an Approve tap takes a fresh mark, so nothing has to lift a stop. A stop from either channel reaches the account's work on both, including a Telegram message still queued behind the chat's running turn (it takes its mark when it arrives).
+- Approval cards that are waiting stay approvable after a stop; nothing denies them. Approve runs that one action (the tap came after the stop), and the turn it resumes ends as "Stopped." before its first model call. Telegram's `/stop` reply says so when cards are waiting ("1 action is still waiting for your approval (/pending). Approving it runs that one action; its task stays stopped."), including when nothing was running. An approval already running when `/stop` arrives still finishes its action and records it; only the turn after it is cancelled.
+- On Telegram, Approve/Deny is answered at once ("Approving…" / "Denying…") and runs off the poll loop, so `/stop` is received while an approved action or its resumed turn runs.
 
-What is left: Telegram `/stop` calls `request_cancel(user_id)` directly in `_handle_message`, not through the per-chat lock (the running turn holds that lock). Add the import with the others, then the command next to `/new`:
-
-```python
-from services.agent import cancel as agent_cancel
-
-        elif command == "/stop":
-            user_id = await self._user_for_chat(chat_id)
-            if user_id:
-                agent_cancel.request_cancel(user_id)
-                text = "Stopping: the running task ends before its next step."
-            else:
-                text = _NOT_LINKED_TEXT
-            await self._api("sendMessage", chat_id=chat_id, text=text)
-```
-
-and add `"/stop — stop the running task\n"` to the command list in `_handle_help`. `tests/test_telegram_decisions.py` adds the command this way in a subclass; point those tests at the real command once it lands.
+Still open: a Telegram `/stop` writes no audit row of its own (the web stop's `stop_requested` has no Telegram twin), and the turn it cancels writes no `turn_stopped` row.
 
 ## Track B — Cost control (blocks nothing, saves money every day)
 | ID | Item | Where | Done when | Size |
