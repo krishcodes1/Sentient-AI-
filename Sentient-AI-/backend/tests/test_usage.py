@@ -7,6 +7,10 @@ Why it exists: Guards the billing data the platform's cost reporting depends
 on, including that summary queries stay a single query and that timezone-
 bucketed "today" windows are correct across a daylight-saving change.
 
+Connects to: services/usage, the agent routes and the Telegram bot, with
+the model and the Bot API faked.
+Used by: pytest (CI backend jobs).
+
 Token usage: every assistant persistence path records what a turn used
 and which model produced it, and the summary adds those rows up per
 account, per window and per model without leaking across accounts.
@@ -29,7 +33,7 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import select
 
-from tests.conftest import auth_headers, make_user
+from tests.conftest import auth_headers, make_user, telegram_dm
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 
@@ -832,7 +836,7 @@ async def test_telegram_usage_command(session_factory, monkeypatch):
 
     service = TelegramService(token="123:fake", session_factory=session_factory)
     try:
-        await service._handle_message({"chat": {"id": 5150}, "text": "/usage"})
+        await service._handle_message(telegram_dm(5150, "/usage"))
         text = api.sent_messages()[-1]["text"]
         assert "estimate" in text.lower()
         # Telegram cannot learn the reader's zone, so it says whose day it is.
@@ -840,13 +844,14 @@ async def test_telegram_usage_command(session_factory, monkeypatch):
         assert "Last 30 days: 103,234 tokens" in text
         assert "$" in text
 
-        await service._handle_message({"chat": {"id": 5150}, "text": "/help"})
+        await service._handle_message(telegram_dm(5150, "/help"))
         assert "/usage" in api.sent_messages()[-1]["text"]
 
-        # An unlinked chat learns nothing about anyone's usage.
-        await service._handle_message({"chat": {"id": 6160}, "text": "/usage"})
-        assert "not linked" in api.sent_messages()[-1]["text"]
-        assert "tokens" not in api.sent_messages()[-1]["text"]
+        # An unlinked chat learns nothing about anyone's usage: it is
+        # ignored outright, so nothing new is sent.
+        sent_before = len(api.sent_messages())
+        await service._handle_message(telegram_dm(6160, "/usage"))
+        assert len(api.sent_messages()) == sent_before
     finally:
         await service._client.aclose()
 

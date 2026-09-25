@@ -1,11 +1,20 @@
-"""Runs the Telegram bot: long-polls updates, links accounts by one-time code,
-pushes approval cards, and applies Approve/Deny presses through the shared
-decision pipeline.
+"""Runs the Telegram bot: long-polls updates, serves only the linked
+Telegram account, turns its messages into agent turns (each reply ending
+with that turn's token and cost line), handles /stop, links accounts by
+one-time code, pushes approval cards, and applies Approve/Deny presses
+through the shared decision pipeline.
 
 Why it exists: Approvals must be decidable away from a computer and without a
 public webhook URL; the Telegram manager starts this service, and
 NotifyingApprovalStore wraps the approval store so every pending action is
 pushed.
+
+Connects to: the Telegram Bot API (httpx long polling and sends), the
+User table (links), the chat and decision appliers from
+api/routes/agent.py, the approval store, services/usage (cost line and
+/usage) and the stop flag in services/agent/cancel.py.
+Used by: TelegramManager, which starts and stops it; main.py wires its
+appliers; reminders and approval notifications send through it.
 
 Telegram delivery for the human-approval flow.
 
@@ -24,8 +33,16 @@ Design notes:
   the bot receives proves control of both the Crawler AI session (which
   minted the code) and the Telegram account (which sent it). Chat ids are
   never accepted from user input.
+- Only the linked Telegram account is served. Every inbound message and
+  button press must come from a private chat whose sender IS that chat
+  (``from.id == chat.id``), and that chat must be linked to an active
+  account; anything else is dropped before any lookup beyond the one that
+  proves it, with no reply. A group can therefore never be linked, and a
+  second person can never act through someone else's chat.
 - Only the linked chat can decide an approval, and the decision callback
   re-checks ownership server-side (the store scopes by user_id).
+- Each chat's in-flight work (agent turns and approval decisions) runs as
+  tracked tasks, so /stop can cancel exactly that chat's work.
 - The bot token is a server-wide secret from the environment; it is never
   sent to the frontend. Requests go only to https://api.telegram.org.
 - Every network call is wrapped: a Telegram outage degrades to "no push
@@ -46,18 +63,15 @@ from typing import Any, Awaitable, Callable, Coroutine, Optional
 
 import httpx
 import structlog
-from sqlalchemy import select
+from sqlalchemy import select, update
+
+from services.agent import cancel as agent_cancel
 
 logger = structlog.get_logger(__name__)
 
 # How long a /start link code stays valid. Short: it is single-use and the
 # user taps it within seconds of the Settings page showing it.
 LINK_CODE_TTL_MINUTES = 10
-
-_NOT_LINKED_TEXT = (
-    "This chat is not linked to a Crawler AI account. Open Crawler AI \u2192 "
-    "Settings \u2192 Telegram approvals and tap Connect."
-)
 
 # callback_data prefixes (Telegram caps callback_data at 64 bytes; a uuid
 # is 36 chars, so prefix + uuid fits comfortably).
@@ -75,6 +89,18 @@ ChatCallback = Callable[..., Awaitable[dict[str, Any]]]
 # Telegram rejects messages over 4096 chars; leave headroom for the
 # continuation marker.
 _MESSAGE_CHUNK = 3900
+
+# Bot API methods whose text Telegram may decorate with a link preview. A
+# preview is a card the reader did not ask for, and Telegram's servers fetch
+# the URL at once: a reply built from a page the agent read can carry a URL
+# with private data (spec §9). Disabled for these in _api, the one place
+# every text send and edit goes through.
+_TEXT_METHODS = frozenset({"sendMessage", "editMessageText"})
+
+# How long /stop waits for the cancelled work to finish unwinding before it
+# answers. Unwinding is an aborted HTTP request plus one DB write, so this
+# is a ceiling for a wedged tool, not an expected wait.
+_STOP_WAIT_S = 10.0
 
 # Telegram serves a bot token's getUpdates to one poller at a time and
 # answers the other with 409. Every retry from this side terminates the
@@ -121,6 +147,41 @@ def _chunks(text: str, size: int = _MESSAGE_CHUNK) -> list[str]:
     return out
 
 
+def _own_private_chat(chat: Any, sender: Any) -> Optional[int]:
+    """The chat id when ``sender`` is a person writing in their own private
+    chat with the bot, else None.
+
+    In a private chat Telegram sets ``chat.id`` to the other party's user
+    id, so ``from.id == chat.id`` pins the chat to exactly one Telegram
+    account. Groups, channels, bots and anything malformed get None.
+    """
+    chat = chat if isinstance(chat, dict) else {}
+    sender = sender if isinstance(sender, dict) else {}
+    chat_id = chat.get("id")
+    if chat.get("type") != "private":
+        return None
+    if not isinstance(chat_id, int) or isinstance(chat_id, bool):
+        return None
+    if sender.get("is_bot") or sender.get("id") != chat_id:
+        return None
+    return chat_id
+
+
+def _usage_line(outcome: dict[str, Any]) -> Optional[str]:
+    """The per-reply footer for an outcome that reports its turn's usage,
+    else None (see services.usage.format_turn_usage_line)."""
+    if not isinstance(outcome.get("usage"), dict):
+        return None
+    from services.usage import format_turn_usage_line
+
+    return format_turn_usage_line(
+        outcome["usage"],
+        outcome.get("provider"),
+        outcome.get("model"),
+        outcome.get("served_model"),
+    )
+
+
 def _expires_in_text(expires_at_iso: str) -> str:
     try:
         expires = datetime.fromisoformat(expires_at_iso)
@@ -152,7 +213,9 @@ class TelegramService:
         # One turn at a time per chat (messages from a person are ordered),
         # while different chats — and the poll loop itself — keep moving.
         self._chat_locks: dict[int, asyncio.Lock] = {}
-        self._chat_tasks: set[asyncio.Task[None]] = set()
+        # In-flight work per chat (turns, approval decisions): what /stop
+        # cancels, and only ever for the chat that sent it.
+        self._chat_tasks: dict[int, set[asyncio.Task[None]]] = {}
         self._client = httpx.AsyncClient(
             base_url=f"https://api.telegram.org/bot{token}",
             timeout=httpx.Timeout(35.0, connect=10.0),
@@ -172,7 +235,7 @@ class TelegramService:
         logger.info("telegram_poller_started")
 
     async def stop(self) -> None:
-        for task in list(self._chat_tasks):
+        for task in self._all_chat_tasks():
             task.cancel()
         await self.wait_for_chats()
         if self._task is not None:
@@ -186,8 +249,25 @@ class TelegramService:
 
     async def wait_for_chats(self) -> None:
         """Wait for in-flight chat turns (tests, shutdown)."""
-        if self._chat_tasks:
-            await asyncio.gather(*self._chat_tasks, return_exceptions=True)
+        tasks = self._all_chat_tasks()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _all_chat_tasks(self) -> list[asyncio.Task[None]]:
+        return [task for tasks in self._chat_tasks.values() for task in tasks]
+
+    def _track(self, chat_id: int, coro: Coroutine[Any, Any, None], name: str) -> None:
+        """Run one piece of a chat's work as a task /stop can find."""
+        task = asyncio.create_task(coro, name=name)
+        tasks = self._chat_tasks.setdefault(chat_id, set())
+        tasks.add(task)
+
+        def forget(done: asyncio.Task[None]) -> None:
+            tasks.discard(done)
+            if not tasks and self._chat_tasks.get(chat_id) is tasks:
+                del self._chat_tasks[chat_id]
+
+        task.add_done_callback(forget)
 
     # ── Telegram API helpers ─────────────────────────────────────────────
 
@@ -201,11 +281,11 @@ class TelegramService:
         The one exception is a 409 from ``getUpdates``, raised as
         ``_PollerConflict``: it needs a backoff and a single explanation
         from the poll loop, not a generic warning on every retry.
+
+        Every text send or edit goes out with link previews disabled; this
+        is the single choke point, so no reply path can forget it.
         """
-        if method in ("sendMessage", "editMessageText"):
-            # A page the agent read could make the reply carry a URL with
-            # private data; Telegram's servers fetch previews instantly
-            # (spec §9). One place, so no caller can forget it.
+        if method in _TEXT_METHODS:
             params.setdefault("link_preview_options", {"is_disabled": True})
         try:
             resp = await self._client.post(f"/{method}", json=params)
@@ -456,50 +536,103 @@ class TelegramService:
             await self._handle_callback(update["callback_query"])
 
     async def _user_for_chat(self, chat_id: Any) -> Optional[str]:
-        """The account a chat is linked to, or None. Linking is the only
-        way a chat id ever gets attached, so this is the authorization
-        check for every inbound command."""
+        """The active account a chat is linked to, or None. Linking is the
+        only way a chat id ever gets attached, so this is the authorization
+        check for every inbound command. A chat that (through data from
+        before links were made exclusive) matches more than one account is
+        refused rather than guessed."""
         from models.user import User
 
+        if chat_id is None:
+            return None
         async with self._session_factory() as session:
-            user = (
-                await session.execute(
-                    select(User).where(User.telegram_chat_id == chat_id)
+            users = (
+                (
+                    await session.execute(
+                        select(User).where(User.telegram_chat_id == chat_id).limit(2)
+                    )
                 )
-            ).scalar_one_or_none()
-            return str(user.id) if user is not None else None
+                .scalars()
+                .all()
+            )
+        if len(users) != 1:
+            if users:
+                logger.warning("telegram_chat_linked_to_several_accounts", chat_id=chat_id)
+            return None
+        user = users[0]
+        return str(user.id) if user.is_active else None
 
     async def _handle_message(self, message: dict[str, Any]) -> None:
-        chat_id = message.get("chat", {}).get("id")
         text = (message.get("text") or "").strip()
+        # A1, step 1 (no I/O): only a person writing in their own private
+        # chat. Group, channel and bot messages are dropped silently.
+        chat_id = _own_private_chat(message.get("chat"), message.get("from"))
         if chat_id is None or not text:
             return
         command, _, argument = text.partition(" ")
-        # Group clients suffix commands with the bot's name ("/start@bot").
+        # Clients may suffix commands with the bot's name ("/start@bot").
         command = command.split("@", 1)[0].lower()
         if command == "/start":
+            # Linking is the one thing an unlinked chat may do: the one-time
+            # code proves control of the Crawler AI account.
             await self._handle_start(chat_id, argument.strip())
+            return
+        # A1, step 2: the chat must be linked to an active account, checked
+        # before anything else happens. Anyone else gets no reply at all.
+        user_id = await self._user_for_chat(chat_id)
+        if user_id is None:
+            logger.info("telegram_message_from_unlinked_chat_ignored", chat_id=chat_id)
+            return
+        if command == "/stop":
+            await self._handle_stop(chat_id, user_id)
         elif command == "/pending":
-            await self._handle_pending(chat_id)
+            await self._handle_pending(chat_id, user_id)
         elif command == "/new":
             await self._handle_new(chat_id)
         elif command == "/usage":
-            await self._handle_usage(chat_id)
-        elif command in ("/help", "/settings"):
-            await self._handle_help(chat_id)
+            await self._handle_usage(chat_id, user_id)
         elif command.startswith("/"):
             await self._handle_help(chat_id)
         else:
-            await self._handle_chat(chat_id, text)
+            await self._handle_chat(chat_id, user_id, text)
 
-    async def _handle_pending(self, chat_id: Any) -> None:
+    async def _handle_stop(self, chat_id: int, user_id: str) -> None:
+        """Cancel this chat's running turn, and any messages queued behind
+        it. The tasks are cancelled, not asked to finish: provider calls
+        abort, nothing further is sent for them, and the transcript records
+        the stop. Another chat's tasks are never touched.
+
+        The account's stop flag is raised too: a desktop action runs in a
+        worker thread that task cancellation cannot interrupt, and
+        computer control checks the flag before every step. The runtime
+        lowers it when this account's next turn starts."""
+        agent_cancel.request_cancel(user_id)
+        running = [t for t in self._chat_tasks.get(chat_id, ()) if not t.done()]
+        if not running:
+            await self._api(
+                "sendMessage", chat_id=chat_id, text="Nothing is running right now."
+            )
+            return
+        for task in running:
+            task.cancel()
+        _, still_running = await asyncio.wait(running, timeout=_STOP_WAIT_S)
+        logger.info(
+            "telegram_stop", chat_id=chat_id, cancelled=len(running), lingering=len(still_running)
+        )
+        await self._api(
+            "sendMessage",
+            chat_id=chat_id,
+            text=(
+                "⏹ Stopped. Nothing more will be sent for that request."
+                if not still_running
+                else "⏹ Stopping — nothing more will be sent for that request."
+            ),
+        )
+
+    async def _handle_pending(self, chat_id: int, user_id: str) -> None:
         """Re-send every approval still waiting on this account, so a card
         that was dismissed, scrolled past, or sent while the phone was off
         can always be recovered from the chat itself."""
-        user_id = await self._user_for_chat(chat_id)
-        if user_id is None:
-            await self._api("sendMessage", chat_id=chat_id, text=_NOT_LINKED_TEXT)
-            return
         from services.agent.approvals import DbApprovalStore
 
         pending = await DbApprovalStore(self._session_factory).list_pending(user_id)
@@ -513,115 +646,123 @@ class TelegramService:
         for action in pending:
             await self.notify_pending(action)
 
-    async def _handle_help(self, chat_id: Any) -> None:
-        if await self._user_for_chat(chat_id) is None:
-            text = _NOT_LINKED_TEXT
-        else:
-            text = (
-                "Just type a task or a question and the assistant answers "
-                "here \u2014 with the same tools, memory and safety checks as "
-                "the web app. When an action needs your permission, the "
-                "request appears with Approve / Deny buttons.\n\n"
-                "/new \u2014 start a fresh conversation\n"
-                "/pending \u2014 re-send every action waiting for your decision\n"
-                "/usage \u2014 tokens used today and over the last 30 days\n"
-                "/help \u2014 this message"
-            )
+    async def _handle_help(self, chat_id: int) -> None:
+        # Only reached for a linked chat (see _handle_message).
+        text = (
+            "Just type a task or a question and the assistant answers "
+            "here \u2014 with the same tools, memory and safety checks as "
+            "the web app. When an action needs your permission, the "
+            "request appears with Approve / Deny buttons. Each reply ends "
+            "with what it used, e.g. \u201c5.3k tokens \u00b7 \u2248$0.002\u201d.\n\n"
+            "/stop \u2014 stop the request that is running now\n"
+            "/new \u2014 start a fresh conversation\n"
+            "/pending \u2014 re-send every action waiting for your decision\n"
+            "/usage \u2014 tokens used today and over the last 30 days\n"
+            "/help \u2014 this message"
+        )
         await self._api("sendMessage", chat_id=chat_id, text=text)
 
-    async def _handle_usage(self, chat_id: Any) -> None:
+    async def _handle_usage(self, chat_id: int, user_id: str) -> None:
         """Token totals for the linked account, from the same aggregation
         the dashboard reads, so the two can never disagree."""
-        user_id = await self._user_for_chat(chat_id)
-        if user_id is None:
-            await self._api("sendMessage", chat_id=chat_id, text=_NOT_LINKED_TEXT)
-            return
         from services.usage import format_usage_text, usage_summary
 
         async with self._session_factory() as session:
             summary = await usage_summary(session, uuid_module.UUID(user_id))
         await self._api("sendMessage", chat_id=chat_id, text=format_usage_text(summary))
 
-    async def _handle_new(self, chat_id: Any) -> None:
-        if await self._user_for_chat(chat_id) is None:
-            await self._api("sendMessage", chat_id=chat_id, text=_NOT_LINKED_TEXT)
-            return
-        self._fresh_chats.add(int(chat_id))
+    async def _handle_new(self, chat_id: int) -> None:
+        self._fresh_chats.add(chat_id)
         await self._api(
             "sendMessage",
             chat_id=chat_id,
             text="Fresh start \u2014 your next message begins a new conversation.",
         )
 
-    async def _handle_chat(self, chat_id: Any, text: str) -> None:
+    async def _handle_chat(self, chat_id: int, user_id: str, text: str) -> None:
         """Turn a plain message into an agent turn for the linked account.
 
         The turn runs as a background task: an LLM turn with tool calls can
-        take a minute, and the poll loop must keep receiving button presses
-        and other chats meanwhile. A per-chat lock keeps one person's
+        take a minute, and the poll loop must keep receiving button presses,
+        /stop and other chats meanwhile. A per-chat lock keeps one person's
         messages in order.
         """
-        user_id = await self._user_for_chat(chat_id)
-        if user_id is None:
-            await self._api("sendMessage", chat_id=chat_id, text=_NOT_LINKED_TEXT)
-            return
         if self.chat is None:
             await self._handle_help(chat_id)
             return
-        chat_key = int(chat_id)
-        fresh = chat_key in self._fresh_chats
-        self._fresh_chats.discard(chat_key)
-        task = asyncio.create_task(
-            self._run_chat(chat_key, user_id, text, fresh),
-            name=f"telegram-chat-{chat_key}",
+        fresh = chat_id in self._fresh_chats
+        self._fresh_chats.discard(chat_id)
+        self._track(
+            chat_id,
+            self._run_chat(chat_id, user_id, text, fresh),
+            name=f"telegram-chat-{chat_id}",
         )
-        self._chat_tasks.add(task)
-        task.add_done_callback(self._chat_tasks.discard)
 
     async def _run_chat(
         self, chat_id: int, user_id: str, text: str, fresh: bool
     ) -> None:
-        lock = self._chat_locks.setdefault(chat_id, asyncio.Lock())
-        async with lock:
-            # First indicator is sent inline so it shows before the turn
-            # starts; the task only refreshes it while the turn runs.
-            await self._api("sendChatAction", chat_id=chat_id, action="typing")
-            typing = asyncio.create_task(self._keep_typing(chat_id))
-            try:
-                assert self.chat is not None
-                outcome = await self.chat(user_id, text, new_conversation=fresh)
-            except Exception as exc:
-                logger.error("telegram_chat_failed", chat_id=chat_id, error=str(exc))
-                outcome = {"error": "The assistant hit an unexpected error."}
-            finally:
-                typing.cancel()
-            if outcome.get("error"):
-                await self._api(
-                    "sendMessage",
-                    chat_id=chat_id,
-                    text=f"\u26a0\ufe0f {outcome['error']}"[:_MESSAGE_CHUNK],
-                )
-                return
-            reply = (outcome.get("content") or "").strip()
-            if outcome.get("pending_approvals"):
-                names = ", ".join(outcome["pending_approvals"])
-                reply += (
-                    f"\n\n\U0001f510 Waiting on your approval for: {names}. "
-                    "The request is in this chat \u2014 or send /pending."
-                )
-            if outcome.get("blocked"):
-                reply += (
-                    "\n\n\u26d4 Blocked by security policy: "
-                    + ", ".join(outcome["blocked"])
-                )
-            if not reply:
-                reply = "(The assistant returned no text.)"
-            for chunk in _chunks(reply):
-                await self._api("sendMessage", chat_id=chat_id, text=chunk)
-            for image in outcome.get("images") or []:
-                await self._send_photo(
-                    chat_id, image.get("data_url", ""), image.get("caption", "")
-                )
+        started = False
+        try:
+            lock = self._chat_locks.setdefault(chat_id, asyncio.Lock())
+            async with lock:
+                started = True
+                # First indicator is sent inline so it shows before the turn
+                # starts; the task only refreshes it while the turn runs.
+                await self._api("sendChatAction", chat_id=chat_id, action="typing")
+                typing = asyncio.create_task(self._keep_typing(chat_id))
+                try:
+                    assert self.chat is not None
+                    outcome = await self.chat(user_id, text, new_conversation=fresh)
+                except Exception as exc:
+                    logger.error("telegram_chat_failed", chat_id=chat_id, error=str(exc))
+                    outcome = {"error": "The assistant hit an unexpected error."}
+                finally:
+                    typing.cancel()
+                if outcome.get("error"):
+                    await self._api(
+                        "sendMessage",
+                        chat_id=chat_id,
+                        text=f"⚠️ {outcome['error']}"[:_MESSAGE_CHUNK],
+                    )
+                    return
+                reply = (outcome.get("content") or "").strip()
+                if outcome.get("pending_approvals"):
+                    names = ", ".join(outcome["pending_approvals"])
+                    reply += (
+                        f"\n\n\U0001f510 Waiting on your approval for: {names}. "
+                        "The request is in this chat — or send /pending."
+                    )
+                if outcome.get("blocked"):
+                    reply += (
+                        "\n\n⛔ Blocked by security policy: "
+                        + ", ".join(outcome["blocked"])
+                    )
+                if not reply:
+                    reply = "(The assistant returned no text.)"
+                # Photos first, so the text (which ends with the usage line)
+                # is the last thing the turn sends.
+                for image in outcome.get("images") or []:
+                    await self._send_photo(
+                        chat_id, image.get("data_url", ""), image.get("caption", "")
+                    )
+                await self._send_reply(chat_id, reply, outcome)
+        except asyncio.CancelledError:
+            if fresh and not started:
+                # Stopped while still queued behind another turn: the /new
+                # it carried was never used, so keep it for the next message.
+                self._fresh_chats.add(chat_id)
+            raise
+
+    async def _send_reply(self, chat_id: int, text: str, outcome: dict[str, Any]) -> None:
+        """Send a reply in Telegram-sized chunks, ending with the turn's
+        usage line when the outcome reports usage. The line is appended
+        after every other suffix and before chunking, so it is the last
+        thing in the last message however long the reply is."""
+        line = _usage_line(outcome)
+        if line:
+            text = f"{text}\n\n{line}"
+        for chunk in _chunks(text):
+            await self._api("sendMessage", chat_id=chat_id, text=chunk)
 
     async def _keep_typing(self, chat_id: int) -> None:
         # Telegram clears the indicator after ~5s; refresh it while a turn
@@ -667,6 +808,14 @@ class TelegramService:
                     ),
                 )
                 return
+            # One chat, one account: linking here moves the chat off any
+            # other account it was linked to, so the lookup behind every
+            # later message can never find two owners.
+            await session.execute(
+                update(User)
+                .where(User.telegram_chat_id == int(chat_id), User.id != user.id)
+                .values(telegram_chat_id=None)
+            )
             user.telegram_chat_id = int(chat_id)
             # Single-use: the code dies the moment it links.
             user.telegram_link_code = None
@@ -688,7 +837,9 @@ class TelegramService:
         callback_id = callback.get("id")
         data = callback.get("data") or ""
         message = callback.get("message") or {}
-        chat_id = message.get("chat", {}).get("id")
+        # A1: the button must be pressed by the person whose private chat
+        # holds the card — callback.from, not just the chat the card is in.
+        chat_id = _own_private_chat(message.get("chat"), callback.get("from"))
         message_id = message.get("message_id")
 
         async def answer(text: str) -> None:
@@ -710,25 +861,57 @@ class TelegramService:
             action_id=action_id,
         )
 
-        # Authorization: the pressing chat must be a linked chat, and the
+        # Authorization: the pressing account must own a linked chat, and the
         # decision runs scoped to THAT user (the store rejects foreign or
-        # already-decided actions).
-        from models.user import User
-
-        async with self._session_factory() as session:
-            user = (
-                await session.execute(
-                    select(User).where(User.telegram_chat_id == chat_id)
-                )
-            ).scalar_one_or_none()
-            user_id = str(user.id) if user is not None else None
-        if user_id is None:
+        # already-decided actions). Checked before anything is decided.
+        user_id = await self._user_for_chat(chat_id)
+        if chat_id is None or user_id is None:
+            logger.info("telegram_callback_from_unlinked_account_ignored")
             await answer("This chat is not linked to a Crawler AI account.")
             return
         if self.decide is None:
             await answer("Approvals are not available right now.")
             return
 
+        # An approval runs the tool and then a whole resumed agent turn, so
+        # it runs as this chat's tracked work: the poll loop stays free
+        # (other chats, /stop), it queues behind a running turn instead of
+        # racing it in the same conversation, and /stop can cancel it.
+        self._track(
+            chat_id,
+            self._run_decision(
+                chat_id, user_id, action_id, approved, message, message_id, answer
+            ),
+            name=f"telegram-decision-{chat_id}",
+        )
+
+    async def _run_decision(
+        self,
+        chat_id: int,
+        user_id: str,
+        action_id: str,
+        approved: bool,
+        message: dict[str, Any],
+        message_id: Any,
+        answer: Callable[[str], Awaitable[None]],
+    ) -> None:
+        lock = self._chat_locks.setdefault(chat_id, asyncio.Lock())
+        async with lock:
+            await self._apply_decision(
+                chat_id, user_id, action_id, approved, message, message_id, answer
+            )
+
+    async def _apply_decision(
+        self,
+        chat_id: int,
+        user_id: str,
+        action_id: str,
+        approved: bool,
+        message: dict[str, Any],
+        message_id: Any,
+        answer: Callable[[str], Awaitable[None]],
+    ) -> None:
+        assert self.decide is not None
         try:
             outcome = await self.decide(user_id, action_id, approved)
         except Exception as exc:
@@ -753,7 +936,7 @@ class TelegramService:
         await answer(verdict)
         # Freeze the card: replace the buttons with the decision so it
         # can't be pressed twice from the chat history.
-        if chat_id is not None and message_id is not None:
+        if message_id is not None:
             original = message.get("text") or "Approval request"
             await self._api(
                 "editMessageText",
@@ -762,10 +945,9 @@ class TelegramService:
                 text=f"{original}\n\n— {verdict} from this chat.",
             )
         summary = outcome.get("summary")
-        if summary and chat_id is not None:
-            await self._api(
-                "sendMessage", chat_id=chat_id, text=str(summary)[:3500]
-            )
+        if summary:
+            # The resumed turn's reply, in full and with its own usage line.
+            await self._send_reply(chat_id, str(summary), outcome)
 
 
 class NotifyingApprovalStore:

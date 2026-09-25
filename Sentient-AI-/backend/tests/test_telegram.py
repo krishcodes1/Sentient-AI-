@@ -7,6 +7,11 @@ Why it exists: Guards the identity boundary between a Telegram chat and the
 account it can approve actions for; the Bot API is faked at the transport level
 so this exercises the service's real request and response code.
 
+Connects to: services/notifications/telegram.py and the agent appliers,
+with the Bot API faked at the httpx transport.
+Used by: pytest (CI backend jobs); FakeTelegramAPI is reused by
+test_usage.py and test_telegram_cost_safety.py.
+
 Telegram approval-channel tests: linking security, decision
 authorization, and the notifying approval-store decorator.
 
@@ -26,7 +31,7 @@ import httpx
 import pytest
 from sqlalchemy import select
 
-from tests.conftest import auth_headers, make_user
+from tests.conftest import auth_headers, make_user, telegram_dm
 
 
 class FakeTelegramAPI:
@@ -95,9 +100,7 @@ async def test_link_code_flow_links_chat_and_is_single_use(
     assert link["bot_username"] == fake_api.username
     code = link["link_url"].split("start=")[1]
 
-    await service._handle_message(
-        {"chat": {"id": 424242}, "text": f"/start {code}"}
-    )
+    await service._handle_message(telegram_dm(424242, f"/start {code}"))
 
     async with session_factory() as session:
         row = (
@@ -108,9 +111,7 @@ async def test_link_code_flow_links_chat_and_is_single_use(
         assert row.telegram_link_code is None
 
     # Replaying the same code must not re-link (it is gone).
-    await service._handle_message(
-        {"chat": {"id": 999999}, "text": f"/start {code}"}
-    )
+    await service._handle_message(telegram_dm(999999, f"/start {code}"))
     async with session_factory() as session:
         row = (
             await session.execute(select(User).where(User.id == user.id))
@@ -138,7 +139,7 @@ async def test_expired_link_code_is_rejected(session_factory, fake_api):
         )
         await session.commit()
 
-    await service._handle_message({"chat": {"id": 555}, "text": f"/start {code}"})
+    await service._handle_message(telegram_dm(555, f"/start {code}"))
 
     async with session_factory() as session:
         row = (
@@ -160,10 +161,16 @@ async def test_callback_from_unlinked_chat_is_refused(session_factory, fake_api)
     await service._handle_callback(
         {
             "id": "cb1",
+            "from": {"id": 31337, "is_bot": False},
             "data": "apv:some-action-id",
-            "message": {"chat": {"id": 31337}, "message_id": 1, "text": "x"},
+            "message": {
+                "chat": {"id": 31337, "type": "private"},
+                "message_id": 1,
+                "text": "x",
+            },
         }
     )
+    await service.wait_for_chats()
     assert decisions == []  # never reached the decision pipeline
     answers = [p for m, p in fake_api.calls if m == "answerCallbackQuery"]
     assert answers and "not linked" in answers[0]["text"]
@@ -194,10 +201,17 @@ async def test_callback_from_linked_chat_decides_as_that_user(
     await service._handle_callback(
         {
             "id": "cb2",
+            "from": {"id": 777001, "is_bot": False},
             "data": "dny:action-abc",
-            "message": {"chat": {"id": 777001}, "message_id": 2, "text": "req"},
+            "message": {
+                "chat": {"id": 777001, "type": "private"},
+                "message_id": 2,
+                "text": "req",
+            },
         }
     )
+    # The decision runs as the chat's tracked work, off the poll loop.
+    await service.wait_for_chats()
     assert decisions == [(str(user.id), "action-abc", False)]
     # The card is frozen (buttons replaced by the verdict).
     edits = [p for m, p in fake_api.calls if m == "editMessageText"]
@@ -324,13 +338,13 @@ async def test_status_and_link_routes(client, session_factory, fake_api):
 
 
 @pytest.mark.asyncio
-async def test_plain_message_from_unlinked_chat_gets_link_instructions(
-    session_factory, fake_api
-):
+async def test_plain_message_from_unlinked_chat_is_ignored(session_factory, fake_api):
+    """A1: a Telegram account that is not linked gets no reply at all —
+    the bot does not even confirm it serves anyone."""
     service = _make_service(session_factory)
-    await service._handle_message({"chat": {"id": 101}, "text": "hello?"})
-    sent = fake_api.sent_messages()
-    assert len(sent) == 1 and "not linked" in sent[0]["text"]
+    await service._handle_message(telegram_dm(101, "hello?"))
+    await service.wait_for_chats()
+    assert fake_api.calls == []
     await service._client.aclose()
 
 
@@ -352,11 +366,11 @@ async def test_help_and_pending_for_linked_chat(session_factory, fake_api):
     service = _make_service(session_factory)
 
     # Any non-command text gets the command list, not silence.
-    await service._handle_message({"chat": {"id": 202}, "text": "what now"})
+    await service._handle_message(telegram_dm(202, "what now"))
     assert "/pending" in fake_api.sent_messages()[-1]["text"]
 
     # Nothing pending → say so, no cards.
-    await service._handle_message({"chat": {"id": 202}, "text": "/pending"})
+    await service._handle_message(telegram_dm(202, "/pending"))
     assert "Nothing is waiting" in fake_api.sent_messages()[-1]["text"]
 
     async with session_factory() as session:
@@ -375,7 +389,7 @@ async def test_help_and_pending_for_linked_chat(session_factory, fake_api):
 
     # With a pending action, /pending re-sends the card with live buttons —
     # the group-style "/pending@bot" spelling must work too.
-    await service._handle_message({"chat": {"id": 202}, "text": "/pending@sentientai_test_bot"})
+    await service._handle_message(telegram_dm(202, "/pending@sentientai_test_bot"))
     card = fake_api.sent_messages()[-1]
     assert "canvas.submit_assignment" in card["text"]
     buttons = card["reply_markup"]["inline_keyboard"][0]
@@ -387,10 +401,9 @@ async def test_help_and_pending_for_linked_chat(session_factory, fake_api):
 @pytest.mark.asyncio
 async def test_pending_from_unlinked_chat_reveals_nothing(session_factory, fake_api):
     service = _make_service(session_factory)
-    await service._handle_message({"chat": {"id": 303}, "text": "/pending"})
-    sent = fake_api.sent_messages()
-    assert len(sent) == 1 and "not linked" in sent[0]["text"]
-    assert "reply_markup" not in sent[0]
+    await service._handle_message(telegram_dm(303, "/pending"))
+    # Unlinked: ignored outright, so no card (and nothing else) is sent.
+    assert fake_api.sent_messages() == []
     await service._client.aclose()
 
 
@@ -420,7 +433,7 @@ async def test_plain_text_from_linked_chat_runs_a_turn_and_replies(
 
     service = _make_service(session_factory)
     service.chat = chat
-    await service._handle_message({"chat": {"id": 404}, "text": "price of Ergotron HX?"})
+    await service._handle_message(telegram_dm(404, "price of Ergotron HX?"))
     await service.wait_for_chats()
 
     assert calls == [(str(user.id), "price of Ergotron HX?", False)]
@@ -441,10 +454,10 @@ async def test_new_command_starts_a_fresh_conversation_once(session_factory, fak
 
     service = _make_service(session_factory)
     service.chat = chat
-    await service._handle_message({"chat": {"id": 505}, "text": "/new"})
+    await service._handle_message(telegram_dm(505, "/new"))
     assert "Fresh start" in fake_api.sent_messages()[-1]["text"]
-    await service._handle_message({"chat": {"id": 505}, "text": "first"})
-    await service._handle_message({"chat": {"id": 505}, "text": "second"})
+    await service._handle_message(telegram_dm(505, "first"))
+    await service._handle_message(telegram_dm(505, "second"))
     await service.wait_for_chats()
     # Only the message right after /new opens a new conversation.
     assert seen == [True, False]
@@ -465,11 +478,11 @@ async def test_chat_error_and_pending_are_surfaced(session_factory, fake_api):
 
     service = _make_service(session_factory)
     service.chat = chat
-    await service._handle_message({"chat": {"id": 606}, "text": "boom"})
+    await service._handle_message(telegram_dm(606, "boom"))
     await service.wait_for_chats()
     assert "quota" in fake_api.sent_messages()[-1]["text"]
 
-    await service._handle_message({"chat": {"id": 606}, "text": "email my professor"})
+    await service._handle_message(telegram_dm(606, "email my professor"))
     await service.wait_for_chats()
     last = fake_api.sent_messages()[-1]["text"]
     assert "I drafted the email." in last and "google_workspace.send_email" in last
@@ -485,7 +498,7 @@ async def test_long_reply_is_split_into_telegram_sized_messages(session_factory,
 
     service = _make_service(session_factory)
     service.chat = chat
-    await service._handle_message({"chat": {"id": 707}, "text": "long one"})
+    await service._handle_message(telegram_dm(707, "long one"))
     await service.wait_for_chats()
     sent = fake_api.sent_messages()
     assert len(sent) >= 3 and all(len(m["text"]) <= 4096 for m in sent)
@@ -557,11 +570,13 @@ async def test_screenshots_from_a_turn_are_sent_as_photos(session_factory, fake_
 
     service = _make_service(session_factory)
     service.chat = chat
-    await service._handle_message({"chat": {"id": 808}, "text": "screenshot flights"})
+    await service._handle_message(telegram_dm(808, "screenshot flights"))
     await service.wait_for_chats()
     methods = [m for m, _ in fake_api.calls]
-    assert methods[-2:] == ["sendMessage", "sendPhoto"]
-    assert fake_api.calls[-1][1]["_multipart_bytes"] > 100
+    # Photos go first so the text — which ends with the usage line when the
+    # turn reports usage — is the last thing the turn sends.
+    assert methods[-2:] == ["sendPhoto", "sendMessage"]
+    assert fake_api.calls[-2][1]["_multipart_bytes"] > 100
     await service._client.aclose()
 
 

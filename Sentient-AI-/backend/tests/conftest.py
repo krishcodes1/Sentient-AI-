@@ -6,6 +6,11 @@ Why it exists: Guards against a fixture regression breaking every test file at
 once, and keeps the SECRET_KEY, ENCRYPTION_KEY, and DATABASE_URL setup used
 across the whole suite in one place.
 
+Connects to: the FastAPI app, an in-memory SQLite database (or Postgres
+via TEST_DATABASE_URL) and the auth helpers.
+Used by: pytest, for every test module; telegram_dm builds a realistic
+private Telegram message for the bot tests.
+
 Test setup. Sets dummy env vars before any project modules import,
 because core.config.Settings is instantiated at import time and requires
 SECRET_KEY and ENCRYPTION_KEY.
@@ -179,6 +184,22 @@ async def make_user(session_factory, email: str = "user@example.com"):
 
 def auth_headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+def telegram_dm(
+    chat_id: int, text: str, *, sender_id: int | None = None, chat_type: str = "private"
+) -> dict:
+    """A Telegram ``message`` the way the Bot API delivers one: a person
+    (``from``) writing in a chat. In a private chat the chat id IS the
+    sender's user id; pass ``sender_id``/``chat_type`` to build anything
+    else (someone else in a group, a mismatched sender, ...)."""
+    sender = chat_id if sender_id is None else sender_id
+    return {
+        "message_id": 1,
+        "from": {"id": sender, "is_bot": False, "first_name": "Test"},
+        "chat": {"id": chat_id, "type": chat_type},
+        "text": text,
+    }
 
 
 def _source_defaults_now(source) -> tuple[str, str]:
