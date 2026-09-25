@@ -1228,7 +1228,12 @@ class ConnectorToolExecutor:
         arguments: dict[str, Any],
         user_id: str,
         approved: bool = False,
+        *,
+        task_id: Optional[str] = None,
     ) -> dict[str, Any]:
+        # ``task_id`` is the runtime's task identity (see
+        # ToolExecutor.execute); no family here keeps per-task state yet, so
+        # it is accepted and unused until the browser toolkit takes it.
         from services.mcp.integration import is_mcp_tool
 
         if is_mcp_tool(tool_name):

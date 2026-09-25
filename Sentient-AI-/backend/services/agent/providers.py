@@ -718,6 +718,12 @@ class GeminiProvider(LLMProvider):
 
     supports_vision = True
     _provider_name = "gemini"
+    # Models whose thinkingBudget may be 0 (thinking off). 2.5 Pro rejects 0
+    # with a 400 ("only works in thinking mode"), 2.0 has no thinkingConfig
+    # and the 3.x family uses thinkingLevel — on those a browser round keeps
+    # the API default rather than failing every call. Any model id the
+    # provider accepts can be saved (setup.py), so this cannot assume Flash.
+    _THINKING_OFF_MODEL_PREFIXES = ("gemini-2.5-flash",)
 
     def __init__(self, api_key: str, model: str = "gemini-2.5-flash"):
         self._api_key = api_key
@@ -736,6 +742,22 @@ class GeminiProvider(LLMProvider):
 
     def _build_url(self, action: str = "generateContent") -> str:
         return f"{self._base_url}/models/{self._model}:{action}"
+
+    @property
+    def supports_thinking_budget(self) -> bool:
+        """complete()/stream() honour ``thinking_budget`` (the runtime turns
+        thinking off on browser rounds); providers without this flag keep
+        their plain signature and are never passed it."""
+        return self._model.startswith(self._THINKING_OFF_MODEL_PREFIXES)
+
+    def _generation_config(self, thinking_budget: Optional[int]) -> dict[str, Any]:
+        # REST field names per the v1beta GenerateContentRequest:
+        # generationConfig.thinkingConfig.thinkingBudget (Gemini 2.5 models).
+        # Dropped for models that would reject it, so a direct caller cannot
+        # turn a working model into a 400 either.
+        if thinking_budget is None or not self.supports_thinking_budget:
+            return {}
+        return {"generationConfig": {"thinkingConfig": {"thinkingBudget": int(thinking_budget)}}}
 
     @staticmethod
     def _convert_parts(content: Any) -> list[dict[str, Any]]:
@@ -817,9 +839,12 @@ class GeminiProvider(LLMProvider):
             usage["cache_read_tokens"] = cached
         return usage
 
-    async def complete(self, messages, tools=None) -> LLMResponse:
+    async def complete(
+        self, messages, tools=None, *, thinking_budget: Optional[int] = None
+    ) -> LLMResponse:
         system_instruction, contents = self._convert_messages(messages)
         payload: dict[str, Any] = {"contents": contents}
+        payload.update(self._generation_config(thinking_budget))
         if system_instruction:
             payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
         gemini_tools = self._convert_tools(tools)
@@ -887,9 +912,10 @@ class GeminiProvider(LLMProvider):
             usage=usage,
         )
 
-    async def stream(self, messages, tools=None):
+    async def stream(self, messages, tools=None, *, thinking_budget: Optional[int] = None):
         system_instruction, contents = self._convert_messages(messages)
         payload: dict[str, Any] = {"contents": contents}
+        payload.update(self._generation_config(thinking_budget))
         if system_instruction:
             payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
         gemini_tools = self._convert_tools(tools)

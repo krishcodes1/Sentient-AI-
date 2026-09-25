@@ -36,7 +36,7 @@ class RecordingExecutor:
         self.calls = []
         self._result = result if result is not None else {"ok": True, "result": "executed"}
 
-    async def execute(self, tool_name, arguments, user_id, approved=False):
+    async def execute(self, tool_name, arguments, user_id, approved=False, *, task_id=None):
         self.calls.append({"tool": tool_name, "arguments": arguments, "approved": approved})
         return self._result
 

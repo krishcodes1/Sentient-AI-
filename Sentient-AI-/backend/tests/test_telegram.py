@@ -698,3 +698,16 @@ async def test_persisting_poller_conflict_is_reannounced_after_an_hour(
 
     assert len(telegram_log.events("telegram_poller_conflict")) == 2
     await service._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_every_outgoing_message_disables_link_previews(session_factory, fake_api):
+    service = _make_service(session_factory)
+    await service._api("sendMessage", chat_id=1, text="see https://canvas.school.edu/courses/1?x=1")
+    await service._api("editMessageText", chat_id=1, message_id=2, text="edited")
+    await service._api("answerCallbackQuery", callback_query_id="q")
+    by_method = dict(fake_api.calls)
+    assert by_method["sendMessage"]["link_preview_options"] == {"is_disabled": True}
+    assert by_method["editMessageText"]["link_preview_options"] == {"is_disabled": True}
+    assert "link_preview_options" not in by_method["answerCallbackQuery"]
+    await service._client.aclose()

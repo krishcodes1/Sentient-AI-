@@ -166,6 +166,10 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: Optional[str] = None
     OPENAI_API_KEY: Optional[str] = None
     GEMINI_API_KEY: Optional[str] = None
+    # Gemini "thinking" tokens on browser rounds (spec §10): 0 turns thinking
+    # off for the step-by-step page reading, where it only adds cost. Other
+    # rounds are unchanged (the API default).
+    GEMINI_THINKING_BUDGET: int = 0
     GROK_API_KEY: Optional[str] = None
     DEEPSEEK_API_KEY: Optional[str] = None
     GROQ_API_KEY: Optional[str] = None

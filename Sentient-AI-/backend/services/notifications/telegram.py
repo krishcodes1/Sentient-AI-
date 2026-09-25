@@ -202,6 +202,11 @@ class TelegramService:
         ``_PollerConflict``: it needs a backoff and a single explanation
         from the poll loop, not a generic warning on every retry.
         """
+        if method in ("sendMessage", "editMessageText"):
+            # A page the agent read could make the reply carry a URL with
+            # private data; Telegram's servers fetch previews instantly
+            # (spec §9). One place, so no caller can forget it.
+            params.setdefault("link_preview_options", {"is_disabled": True})
         try:
             resp = await self._client.post(f"/{method}", json=params)
             data = resp.json()

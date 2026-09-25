@@ -398,7 +398,7 @@ class _InvalidatingExecutor:
         self._holder = runtime_holder
         self.calls = 0
 
-    async def execute(self, tool_name, arguments, user_id, approved=False):
+    async def execute(self, tool_name, arguments, user_id, approved=False, *, task_id=None):
         self.calls += 1
         self._holder["rt"].invalidate_providers()
         await asyncio.sleep(0)  # give a (wrongly) scheduled close its chance
@@ -654,7 +654,7 @@ async def test_stream_chat_forwards_permissions_text(monkeypatch):
 
 
 class _ScreenshotExecutor:
-    async def execute(self, tool_name, arguments, user_id, approved=False):
+    async def execute(self, tool_name, arguments, user_id, approved=False, *, task_id=None):
         return {"ok": True, "url": "https://example.com", "image": "data:image/png;base64,AAAA"}
 
 

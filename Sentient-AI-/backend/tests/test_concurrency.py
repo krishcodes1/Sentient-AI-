@@ -64,7 +64,7 @@ class CountingExecutor:
         self._result = result if result is not None else {"ok": True, "result": "sent"}
         self._fail_marker = fail_marker
 
-    async def execute(self, tool_name, arguments, user_id, approved=False):
+    async def execute(self, tool_name, arguments, user_id, approved=False, *, task_id=None):
         self.calls.append(
             {
                 "tool": tool_name,
@@ -86,7 +86,7 @@ class ExplodingExecutor:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    async def execute(self, tool_name, arguments, user_id, approved=False):
+    async def execute(self, tool_name, arguments, user_id, approved=False, *, task_id=None):
         self.calls.append(tool_name)
         await asyncio.sleep(0)
         raise RuntimeError("connector unavailable")

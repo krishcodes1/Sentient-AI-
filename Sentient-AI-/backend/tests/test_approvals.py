@@ -172,7 +172,7 @@ class RecordingExecutor:
     def __init__(self):
         self.calls = []
 
-    async def execute(self, tool_name, arguments, user_id, approved=False):
+    async def execute(self, tool_name, arguments, user_id, approved=False, *, task_id=None):
         self.calls.append(
             {"tool": tool_name, "arguments": arguments, "approved": approved}
         )
