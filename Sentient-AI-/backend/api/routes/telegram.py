@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,6 +28,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.database import get_db
 from models.user import User
 from services.auth import get_current_user
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/telegram", tags=["telegram"])
 
@@ -96,8 +99,21 @@ async def remove_telegram_link(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    """Unlink this account's Telegram chat (approvals stop being pushed)."""
+    """Unlink this account's Telegram chat (approvals stop being pushed).
+    The apps allowed for a week from Telegram end with the link
+    (services.agent.app_approvals), so linking the same chat again later
+    does not bring them back."""
     current_user.telegram_chat_id = None
     current_user.telegram_link_code = None
     current_user.telegram_link_expires_at = None
     await db.flush()
+    runtime = getattr(request.app.state, "agent_runtime", None)
+    if runtime is not None:
+        try:
+            await runtime.app_approvals.revoke_channel(
+                user_id=str(current_user.id), kind="telegram"
+            )
+        except Exception as exc:
+            # Unlinked either way: a Telegram approval only holds while its
+            # chat is the linked one (api/routes/agent.linked_channel).
+            logger.warning("telegram_unlink_app_approvals_not_revoked", error=str(exc)[:200])

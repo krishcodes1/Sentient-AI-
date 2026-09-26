@@ -34,6 +34,15 @@ import structlog
 
 from core.config import PROVIDER_KEY_FIELDS, Settings
 from services.agent import cancel as agent_cancel
+from services.agent.app_approvals import (
+    REMEMBER_WEEK,
+    TOOL as WEEKLY_APPROVAL_TOOL,
+    AppApprovalStore,
+    Channel,
+    InMemoryAppApprovalStore,
+    WeeklyApproval,
+    weekly_app_for,
+)
 from services.agent.approvals import (
     ApprovalStore,
     InMemoryApprovalStore,
@@ -293,6 +302,19 @@ class PendingApproval:
     # page; browser.act: the page with the target outlined), as a data URL, read from the executor at render time
     # (``ToolExecutor.approval_image``) and never stored with the card.
     image: Optional[str] = None
+    # The app this card may be allowed for a week ("Calendar"), for its
+    # "Allow for 7 days" button (services.agent.app_approvals); None when
+    # the card offers only Approve and Deny.
+    weekly_app: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class _WeeklyRun:
+    """A desktop.act a weekly app approval covers: the approval, and the
+    arguments to run it with (bound to the screen, as a card's would be)."""
+
+    approval: WeeklyApproval
+    arguments: dict[str, Any]
 
 
 @dataclass()
@@ -930,7 +952,20 @@ def _stored_to_pending(action: StoredAction, image: Optional[str] = None) -> Pen
         conversation_id=action.conversation_id,
         risk_note=action.risk_note,
         image=image,
+        weekly_app=weekly_app_for(action.tool_name, action.arguments),
     )
+
+
+def _weekly_audit_fields(weekly: Optional[_WeeklyRun]) -> dict[str, Any]:
+    """What an act's audit rows add when a weekly app approval ran it: the
+    approval's id and app, so the log shows which acts ran without a card."""
+    if weekly is None:
+        return {}
+    return {
+        "approval": "weekly",
+        "app_approval_id": weekly.approval.id,
+        "app": weekly.approval.app,
+    }
 
 
 # Policies recorded when a tool is refused by its capability
@@ -1384,6 +1419,7 @@ class AgentRuntime:
         approval_store: ApprovalStore | None = None,
         settings_source: Optional[ProviderSettingsSource] = None,
         browser_spend: Optional[BrowserSpendSink] = None,
+        app_approval_store: AppApprovalStore | None = None,
     ):
         self._config = config
         # No provider is built here: a fresh install has no key yet, and the
@@ -1403,6 +1439,11 @@ class AgentRuntime:
         self._audit = audit_service or AuditService()
         self._executor = tool_executor or ToolExecutor()
         self._approvals: ApprovalStore = approval_store or InMemoryApprovalStore()
+        # Apps the owner allowed for a week from a card, per chat or device
+        # (services.agent.app_approvals); main.py injects the database store.
+        self._app_approvals: AppApprovalStore = (
+            app_approval_store or InMemoryAppApprovalStore()
+        )
         # Told each browser round's estimated cost so the toolkit's per-task
         # spend cap can see it (spec §10); None when no browser is wired.
         self._browser_spend = browser_spend
@@ -2123,6 +2164,94 @@ class AgentRuntime:
             return image
         return None
 
+    async def _weekly_run(
+        self,
+        user_id: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        channel: Optional[Channel],
+        task_id: str,
+    ) -> Optional[_WeeklyRun]:
+        """The weekly app approval that covers this call from *channel*, with
+        the arguments to run it with, or None: the call then goes to its card
+        as usual. Only a desktop.act, only one the toolkit's own checks do
+        not refuse (the card path refuses those, before any card), bound to
+        the screen as its card would be, and only in an app on the weekly
+        list that the owner allowed from this same chat or browser. A store
+        that fails answers None: a card, never an act nobody allowed."""
+        if channel is None or tool_name != WEEKLY_APPROVAL_TOOL:
+            return None
+        if self._precheck_approval(tool_name, arguments, user_id) is not None:
+            return None
+        bound = await self._approval_arguments(tool_name, arguments, user_id, task_id=task_id)
+        app = weekly_app_for(tool_name, bound)
+        if app is None:
+            return None
+        try:
+            approval = await self._app_approvals.find(user_id=user_id, app=app, channel=channel)
+        except Exception as exc:
+            logger.warning(
+                "weekly_approval_lookup_failed", tool=tool_name, error_type=type(exc).__name__
+            )
+            return None
+        if approval is None or not approval.holds_for(channel):
+            return None
+        return _WeeklyRun(approval=approval, arguments=bound)
+
+    async def _record_weekly_use(self, weekly: _WeeklyRun) -> None:
+        """Count an act a weekly approval ran (the Settings list shows when
+        it was last used). Best effort: the act already ran."""
+        try:
+            await self._app_approvals.record_use(weekly.approval.id)
+        except Exception as exc:
+            logger.warning("weekly_approval_use_not_recorded", error_type=type(exc).__name__)
+
+    async def _allow_for_week(
+        self, action: StoredAction, user_id: str, channel: Optional[Channel]
+    ) -> Optional[WeeklyApproval]:
+        """Allow an approved card's app for a week from *channel*: when the
+        card offered it (a desktop.act in an app on the weekly list) and the
+        decision came from a channel an approval can be tied to. None
+        otherwise, and the card counts as approved once. The grant is
+        audited; one whose audit row cannot be written is taken back, since
+        acts nobody looks at must never run on an approval the log does not
+        show."""
+        app = weekly_app_for(action.tool_name, action.arguments)
+        if app is None or channel is None:
+            return None
+        try:
+            approval = await self._app_approvals.allow(
+                user_id=user_id, app=app, channel=channel, source_action_id=action.action_id
+            )
+        except Exception as exc:
+            logger.error("weekly_approval_not_saved", error_type=type(exc).__name__)
+            return None
+        try:
+            await self._audit.log(
+                {
+                    "event": "app_approval_granted",
+                    "user_id": user_id,
+                    "tool": action.tool_name,
+                    "app": approval.app,
+                    "channel": approval.channel_kind,
+                    "app_approval_id": approval.id,
+                    "expires_at": approval.expires_at.isoformat(),
+                    "action_id": action.action_id,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        except Exception as exc:
+            logger.error("audit_write_failed_app_approval", error=str(exc)[:200])
+            try:
+                await self._app_approvals.revoke(user_id=user_id, approval_id=approval.id)
+            except Exception as revoke_exc:
+                logger.error(
+                    "weekly_approval_unaudited_not_revoked",
+                    error_type=type(revoke_exc).__name__,
+                )
+            return None
+        return approval
+
     def _precheck_approval(
         self, tool_name: str, arguments: dict[str, Any], user_id: str
     ) -> Optional[PrecheckRefusal]:
@@ -2290,6 +2419,7 @@ class AgentRuntime:
         usage_sink: Optional[TurnUsage] = None,
         stop_mark: Optional[int] = None,
         loaded_tools: Optional[LoadedTools] = None,
+        channel: Optional[Channel] = None,
     ) -> AgentResponse:
         """Process a conversation turn.
 
@@ -2332,6 +2462,11 @@ class AgentRuntime:
         :class:`LoadedTools`): it shapes the offered tool array, and a
         tools.find call updates it in place. The caller persists it when
         ``changed`` is set. Omitted, tools.find still works for this turn.
+
+        ``channel`` is where the request came from (the Telegram chat, or the
+        browser's device id): a desktop.act in an app the owner allowed for a
+        week from that same channel runs without a card
+        (services.agent.app_approvals). None uses no weekly approval.
         """
         if stop_mark is None:
             stop_mark = agent_cancel.mark(user_id)
@@ -2361,9 +2496,16 @@ class AgentRuntime:
                     task_id,
                     usage_sink,
                     loaded_tools,
+                    channel,
                 )
         response.provider, response.model = turn_provider, turn_model
         return response
+
+    @property
+    def app_approvals(self) -> AppApprovalStore:
+        """The weekly app approvals store (listing and revoking, for the
+        Settings page and Telegram's /apps)."""
+        return self._app_approvals
 
     async def _run_turn(
         self,
@@ -2378,6 +2520,7 @@ class AgentRuntime:
         task_id: Optional[str] = None,
         usage_sink: Optional[TurnUsage] = None,
         loaded_tools: Optional[LoadedTools] = None,
+        channel: Optional[Channel] = None,
     ) -> AgentResponse:
         """The body of :meth:`chat`: scanning, context management and the
         bounded tool loop, on a provider the caller holds a lease on."""
@@ -2748,6 +2891,18 @@ class AgentRuntime:
                     )
                     continue
 
+                # A desktop.act in an app the owner allowed for a week, from
+                # this same chat or browser, runs now instead of parking a
+                # card (services.agent.app_approvals), with the arguments a
+                # card would store, so the toolkit holds it to the same
+                # screen. Never on tainted arguments: those get a card with
+                # the risk note.
+                weekly: Optional[_WeeklyRun] = None
+                if permission == "requires_approval" and taint_reason is None:
+                    weekly = await self._weekly_run(user_id, tc.name, tc.arguments, channel, task_id)
+                    if weekly is not None:
+                        permission = "approved"
+
                 if permission == "requires_approval":
                     # Stop boundary again: the checks above can wait on the
                     # database, and a stop that landed meanwhile skips this
@@ -2884,6 +3039,7 @@ class AgentRuntime:
                                         "conversation_id": stored.conversation_id,
                                         "risk_note": stored.risk_note,
                                         "image": pending.image,
+                                        "weekly_app": pending.weekly_app,
                                     },
                                 }
                             )
@@ -2923,6 +3079,7 @@ class AgentRuntime:
                                 "user_id": user_id,
                                 "tool": tc.name,
                                 "arguments": tc.arguments,
+                                **_weekly_audit_fields(weekly),
                                 "timestamp": datetime.now(timezone.utc).isoformat(),
                             }
                         )
@@ -2972,7 +3129,8 @@ class AgentRuntime:
                     break
 
                 # Execute the tool. ``approved=True`` only when the user's
-                # own connector tier auto-approved this write — standing
+                # own connector tier auto-approved this write, or the owner
+                # allowed this app for the week (``weekly``) — standing
                 # consent replaces the per-call approval flow. Once it has
                 # started, nothing stops half-way until the call is audited
                 # and in the turn's results, a chat's /stop included: it may
@@ -2989,9 +3147,9 @@ class AgentRuntime:
                         result = await section.run(
                             self._executor.execute(
                                 tc.name,
-                                tc.arguments,
+                                weekly.arguments if weekly is not None else tc.arguments,
                                 user_id,
-                                approved=approved_via_tier,
+                                approved=approved_via_tier or weekly is not None,
                                 task_id=task_id,
                             )
                         )
@@ -3080,6 +3238,7 @@ class AgentRuntime:
                                     "result_summary": self._summarize_result(
                                         desktop_result_for_audit(tc.name, result)
                                     ),
+                                    **_weekly_audit_fields(weekly),
                                     "timestamp": datetime.now(timezone.utc).isoformat(),
                                 }
                             )
@@ -3090,6 +3249,8 @@ class AgentRuntime:
                             tool=tc.name,
                             error=str(exc),
                         )
+                    if weekly is not None:
+                        await section.run(self._record_weekly_use(weekly))
 
                     # Fold this result into the taint corpus BEFORE the next
                     # tool call is evaluated, so a write in a later round that
@@ -3398,6 +3559,7 @@ class AgentRuntime:
         task_id: Optional[str] = None,
         stop_mark: Optional[int] = None,
         loaded_tools: Optional[LoadedTools] = None,
+        channel: Optional[Channel] = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Streaming variant — yields dicts with ``type`` and ``data`` keys.
 
@@ -3439,9 +3601,10 @@ class AgentRuntime:
 
         ``task_id`` (per-task browser caps), ``stop_mark`` (the mark the
         caller took when it accepted the message, so a stop pressed before
-        the turn starts still ends it) and ``loaded_tools`` (updated in place
+        the turn starts still ends it), ``loaded_tools`` (updated in place
         by tools.find; read it once ``done`` arrives, or in ``on_orphaned``)
-        are handed to :meth:`chat` unchanged.
+        and ``channel`` (the browser the request came from, for weekly app
+        approvals) are handed to :meth:`chat` unchanged.
         """
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
@@ -3464,6 +3627,7 @@ class AgentRuntime:
                 task_id=task_id,
                 stop_mark=stop_mark,
                 loaded_tools=loaded_tools,
+                channel=channel,
             )
         )
 
@@ -3626,13 +3790,24 @@ class AgentRuntime:
         }
 
     async def approve_action(
-        self, action_id: str, user_id: str, *, task_id: Optional[str] = None
+        self,
+        action_id: str,
+        user_id: str,
+        *,
+        task_id: Optional[str] = None,
+        remember: Optional[str] = None,
+        channel: Optional[Channel] = None,
     ) -> dict[str, Any]:
         """Execute a previously-pending tool call after user approval.
 
         Ownership, single-use, and expiry are enforced by the approval
         store; the executor receives ``approved=True`` so connectors that
         demand per-call confirmation can proceed.
+
+        ``remember="week"`` is the card's "Allow for 7 days" button: the
+        card's app is also allowed for a week for requests from *channel*
+        (the chat or browser the tap came from), when the card offered it.
+        The result then carries ``weekly`` (the app and the expiry).
 
         The result carries ``resume_stop_mark``, the stop mark for the turn
         that resumes the task (``chat(stop_mark=...)``); it is not for
@@ -3712,6 +3887,15 @@ class AgentRuntime:
                 )
             }
 
+        # "Allow for 7 days": made before the act runs, so it holds even
+        # when this one act is refused (the screen changed meanwhile): the
+        # owner's choice was about the app.
+        weekly = (
+            await self._allow_for_week(action, user_id, channel)
+            if remember == REMEMBER_WEEK
+            else None
+        )
+
         # Stops and approvals (services.agent.cancel):
         # - The approved action runs under the tap's mark. Tapping Approve
         #   is the user's newest instruction, so a stop pressed before it
@@ -3784,9 +3968,12 @@ class AgentRuntime:
                 error=str(exc),
             )
 
-        return {
+        ran: dict[str, Any] = {
             "tool": action.tool_name,
             "result": result,
             "conversation_id": action.conversation_id,
             "resume_stop_mark": resume_mark,
         }
+        if weekly is not None:
+            ran["weekly"] = {"app": weekly.app, "expires_at": weekly.expires_at.isoformat()}
+        return ran
