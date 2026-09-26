@@ -810,7 +810,8 @@ async def test_a_look_at_another_app_later_in_the_round_cannot_move_the_card():
     # A round ends on its card: an outline asked for after the parked call
     # is never taken (parked_round), so it cannot replace the screen the
     # card was made from. If the owner brings Messages to the front while
-    # the card waits, the live rules still keep the typing out of it.
+    # the card waits, the approved typing brings Mail back first and goes
+    # into Mail's field, never into the Messages chat box.
     turn = Turn(mail_and_messages())
     response = await turn.run(
         OBSERVE,
@@ -827,11 +828,18 @@ async def test_a_look_at_another_app_later_in_the_round_cannot_move_the_card():
     assert [(r["tool"], r["arguments"]) for r in rows] == [
         ("desktop.observe", {"action": "outline", "app": "Messages"})
     ]
+    def keyboard_follows_the_front_app(fake: FakeBackend, event: tuple[Any, ...]) -> None:
+        # As on a real desktop: the app brought to the front gets the
+        # keyboard back, in the field it last had focused.
+        if event[:2] == ("focus_window", "Mail"):
+            fake.focused_handle = "subject"
+
+    turn.fake.on_event = keyboard_follows_the_front_app
     turn.fake.front, turn.fake.focused_handle = "Messages", "imsg"
     outcome = await turn.runtime.approve_action(pending.action_id, U1)
-    assert turn.fake.events == []  # nothing typed into the Messages chat box
-    result = outcome["result"]
-    assert result["refused"] is True and result["rule"] == "frontmost_changed", outcome
+    assert outcome["result"]["ok"] is True, outcome
+    assert turn.fake.events == [("focus_window", "Mail", 0), ("type", "I quit\n", "subject")]
+    assert "imsg" not in turn.fake.values  # nothing typed into the Messages chat box
 
 
 @pytest.mark.asyncio

@@ -171,6 +171,27 @@ that demand per-call confirmation (`user_confirmed=True` is injected on
 retry). A model-supplied `user_confirmed` argument is **stripped** before
 dispatch, so the LLM cannot smuggle its own consent.
 
+**Weekly app approvals** (`services/agent/app_approvals.py`, spec
+`docs/superpowers/specs/2026-09-25-weekly-app-approvals-design.md`): a
+`desktop.act` card in an app on `rules.WEEKLY_APPS` (Calendar, Reminders,
+Notes, Contacts, Clock, Calculator and similar local apps with no store) also
+offers "Allow <app> for 7 days". Pressing it approves the card and lets later
+acts in that one app run without a card, until the week is up. The approval
+is tied to the channel it was given from: the linked Telegram chat (checked
+again against the account's linked chat on every turn), or one browser, by a
+random device id the web app sends as `X-Crawler-Device` and the server keeps
+only as a SHA-256. A turn from anywhere else, or with no channel, gets cards
+as before. What still applies inside an allowed app: every computer-control
+hard rule, the prompt-guard argument scan, and the taint gate (an act whose
+arguments came from untrusted tool data gets a card with the risk note).
+Browsers, mail and chat apps, stores and file managers are never on the list,
+so money and messages keep a card per action. Approvals are listed and
+revoked from Settings → Permissions and Telegram `/apps`; unlinking Telegram
+revokes the ones given from it. Grants, revocations and every act a weekly
+approval ran are audited (`app_approval_granted`, `app_approval_revoked`,
+`approval: "weekly"` on the act's rows). A grant the audit log cannot record
+is taken back.
+
 ## Financial safety (four layers)
 
 1. The permission engine hard-blocks the FINANCIAL category and a name

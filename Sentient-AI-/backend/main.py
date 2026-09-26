@@ -41,6 +41,7 @@ from api.middleware.security import (
 )
 from api.routes import (
     agent,
+    app_approvals,
     audit,
     auth,
     capabilities,
@@ -53,6 +54,7 @@ from api.routes import (
     vault,
 )
 from services.agent import cancel as agent_cancel
+from services.agent.app_approvals import DEVICE_HEADER, DbAppApprovalStore
 from services.agent.approvals import DbApprovalStore
 from services.agent.runtime import AgentRuntime
 from services.agent.tool_registry import (
@@ -374,6 +376,7 @@ async def wire_services(
         approval_store=approval_store,
         settings_source=installation,
         browser_spend=browser_spend_sink(browser_sessions),
+        app_approval_store=DbAppApprovalStore(session_factory=session_factory),
     )
     logger.info("agent_runtime_initialized")
 
@@ -452,7 +455,8 @@ app.add_middleware(
     # Enumerate exactly what the SPA uses; wildcards + credentials is a
     # combination browsers reject and an unnecessarily wide surface anyway.
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
+    # DEVICE_HEADER: the browser's device id, for weekly app approvals.
+    allow_headers=["Authorization", "Content-Type", "X-Request-ID", DEVICE_HEADER],
 )
 
 # ── Routers ───────────────────────────────────────────────────────────────────
@@ -467,6 +471,7 @@ app.include_router(usage.router, prefix="/api")
 app.include_router(capabilities.router, prefix="/api")
 app.include_router(setup.router, prefix="/api")
 app.include_router(vault.router, prefix="/api")  # vault
+app.include_router(app_approvals.router, prefix="/api")
 
 
 @app.get("/")

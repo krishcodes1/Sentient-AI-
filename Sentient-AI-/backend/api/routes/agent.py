@@ -53,6 +53,7 @@ from services.auth import get_current_user
 from services.capabilities.prompt import render_permissions_block
 from services.memory import render_memory_block
 from services.agent import cancel as agent_cancel
+from services.agent.app_approvals import DEVICE_HEADER, Channel
 from services.agent.context_manager import compress_tool_result
 from services.agent.providers import ProviderError, ProviderNotConfigured
 from services.agent.runtime import (
@@ -206,6 +207,24 @@ class UserRateLimiter:
 
 
 _user_rate_limiter = UserRateLimiter()
+
+
+def web_channel(request: Request) -> Optional[Channel]:
+    """The browser a web request came from, by the device id the web app
+    sends (``X-Crawler-Device``), for weekly app approvals; None without a
+    usable one (the turn then uses no weekly approval)."""
+    return Channel.web(request.headers.get(DEVICE_HEADER))
+
+
+def linked_channel(user: User, channel: Optional[Channel]) -> Optional[Channel]:
+    """*channel* as a channel applier may use it: a Telegram channel only
+    while it is the user's linked chat, so an approval given from a chat
+    never applies once Telegram is linked to another one."""
+    if channel is None:
+        return None
+    if channel.kind == "telegram" and channel.key != str(user.telegram_chat_id):
+        return None
+    return channel
 
 
 def get_runtime(request: Request) -> AgentRuntime:
@@ -426,6 +445,10 @@ class PendingApprovalOut(BaseModel):
     # served from the executor's memory while the card is pending and never
     # stored; None for every other card.
     image: Optional[str] = None
+    # The app the card's "Allow for 7 days" button allows ("Calendar"), or
+    # None when the card offers only Approve and Deny
+    # (services.agent.app_approvals).
+    weekly_app: Optional[str] = None
 
 
 class BlockedActionOut(BaseModel):
@@ -449,6 +472,16 @@ class AgentTurnResponse(BaseModel):
 
 class ApprovalDecisionRequest(BaseModel):
     approved: bool
+    # "week": the card's "Allow for 7 days" button. Also allows the card's
+    # app for a week for requests from this browser (the X-Crawler-Device
+    # header); without the header, or on a card that offers no week, the
+    # card is approved once.
+    remember: Optional[Literal["week"]] = None
+
+
+class WeeklyApprovalOut(BaseModel):
+    app: str
+    expires_at: str
 
 
 class ApprovalDecisionResponse(BaseModel):
@@ -456,13 +489,15 @@ class ApprovalDecisionResponse(BaseModel):
     call itself took (a checkout's confirmation page), for the live web
     view only, as a turn's ``images`` are; ``message_id`` is the transcript
     row that records the decision, which they belong under (its saved
-    tool call keeps the placeholder, spec §9)."""
+    tool call keeps the placeholder, spec §9). ``weekly`` is the app the
+    decision allowed for a week, and until when."""
 
     action_id: str
     approved: bool
     result: Optional[Dict[str, Any]] = None
     images: list[TurnImageOut] = []
     message_id: Optional[str] = None
+    weekly: Optional[WeeklyApprovalOut] = None
 
 
 # ---------------------------------------------------------------------------
@@ -917,6 +952,7 @@ async def send_message(
             permissions_text=permissions_text,
             task_id=task_id,
             stop_mark=stop_mark,
+            channel=web_channel(request),
         )
     except ProviderNotConfigured as exc:
         # Not an upstream failure: no key for the provider this turn needs.
@@ -979,6 +1015,7 @@ async def send_message(
                 conversation_id=pa.conversation_id,
                 risk_note=pa.risk_note,
                 image=pa.image,
+                weekly_app=pa.weekly_app,
             )
             for pa in agent_response.pending_approvals
         ],
@@ -1119,6 +1156,7 @@ async def stream_message(
     user_provider = current_user.llm_provider
     user_model = current_user.llm_model
     user_id_str = str(current_user.id)
+    channel = web_channel(request)
 
     # Release the pooled connection for the duration of the stream: the
     # session object stays usable (persistence below reacquires briefly),
@@ -1164,6 +1202,7 @@ async def stream_message(
                     permissions_text=permissions_text,
                     task_id=task_id,
                     stop_mark=stop_mark,
+                    channel=channel,
                 ):
                     etype = event.get("type", "message")
                     data = event.get("data", {})
@@ -1300,6 +1339,7 @@ async def list_pending_approvals(
             conversation_id=p.conversation_id,
             risk_note=p.risk_note,
             image=p.image,
+            weekly_app=p.weekly_app,
         )
         for p in pending
     ]
@@ -1469,6 +1509,7 @@ async def _resume_after_approval(
     stop_mark: Optional[int] = None,
     on_event: Optional[EventSink] = None,
     approved: Optional[ApprovedCall] = None,
+    channel: Optional[Channel] = None,
 ) -> Optional[ResumedTurn]:
     """Run one more agent turn after an approved action executed.
 
@@ -1497,6 +1538,9 @@ async def _resume_after_approval(
 
     ``on_event``, when given, receives this turn's progress events live (a
     channel's progress lines).
+
+    ``channel`` is the chat or browser the decision came from: the resumed
+    turn's acts in an app allowed for a week from there need no card.
     """
     rows = await _recent_messages(db, conversation.id)
     if approved is not None:
@@ -1549,6 +1593,7 @@ async def _resume_after_approval(
             usage_sink=turn,
             stop_mark=stop_mark,
             event_sink=on_event,
+            channel=channel,
         )
     except asyncio.CancelledError:
         # Stopped from a chat channel mid-turn: keep the calls already
@@ -1642,11 +1687,17 @@ async def _apply_decision(
     approved: bool,
     installation: Any = None,
     on_event: Optional[EventSink] = None,
+    remember: Optional[str] = None,
+    channel: Optional[Channel] = None,
 ) -> Dict[str, Any]:
     """Decide a pending action, persist the outcome into its conversation,
     and (on approval) run the resumed agent turn. Shared by the HTTP route
     and out-of-band decision channels (Telegram); returns the runtime's
     result dict, or {"error": ...} for unknown/expired/foreign actions.
+
+    ``remember="week"`` with the ``channel`` the decision came from also
+    allows the card's app for a week (``AgentRuntime.approve_action``); the
+    result then carries ``weekly``. The resumed turn runs with that channel.
 
     The decision, the tool it runs and the transcript row recording it
     finish together even if this call is cancelled (a chat's /stop): a
@@ -1662,7 +1713,9 @@ async def _apply_decision(
     # the same per-task browser caps as the turn that parked it.
     task_id = await _parked_task_id(db, current_user, action_id) if approved else None
     result, conversation, recorded = await _finish_even_if_cancelled(
-        _decide_and_record(db, runtime, current_user, action_id, approved, task_id)
+        _decide_and_record(
+            db, runtime, current_user, action_id, approved, task_id, remember, channel
+        )
     )
     # For the resumed turn only; never shown to the user.
     resume_stop_mark = result.pop("resume_stop_mark", None)
@@ -1707,6 +1760,7 @@ async def _apply_decision(
             stop_mark=resume_stop_mark,
             on_event=on_event,
             approved=approved_call,
+            channel=channel,
         )
         if resumed is not None:
             db.add(resumed.message)
@@ -1758,16 +1812,24 @@ async def _decide_and_record(
     action_id: str,
     approved: bool,
     task_id: Optional[str] = None,
+    remember: Optional[str] = None,
+    channel: Optional[Channel] = None,
 ) -> tuple[Dict[str, Any], Optional[Conversation], Optional[Message]]:
     """Apply the decision (on approval: run the tool under ``task_id``'s
-    caps) and commit the transcript row that records it. Returns the
+    caps, and with ``remember="week"`` allow its app for a week from
+    ``channel``) and commit the transcript row that records it. Returns the
     runtime's result, the conversation the row went into and the row
     itself (both None when there was none to write)."""
     # Release the pooled connection before the decision: an approval
     # executes the real tool (connector/MCP HTTP), which does not need it.
     await db.commit()
 
-    if approved:
+    if approved and remember:
+        # "Allow for 7 days"; a plain approval calls the runtime as before.
+        result = await runtime.approve_action(
+            action_id, str(current_user.id), task_id=task_id, remember=remember, channel=channel
+        )
+    elif approved:
         result = await runtime.approve_action(action_id, str(current_user.id), task_id=task_id)
     else:
         result = await runtime.deny_action(action_id, str(current_user.id))
@@ -1835,7 +1897,12 @@ def build_decision_applier(app: Any, session_factory: Any = async_session):
     commit at the end.
 
     ``on_event``, when given, receives the resumed turn's progress events
-    live, as ``build_chat_applier``'s does for a message turn."""
+    live, as ``build_chat_applier``'s does for a message turn.
+
+    ``channel`` is the chat the tap came from and ``remember="week"`` its
+    "Allow for 7 days" button; a Telegram channel counts only while it is
+    the user's linked chat (``linked_channel``). The outcome carries
+    ``weekly`` when the app was allowed."""
 
     async def apply(
         user_id: str,
@@ -1843,6 +1910,8 @@ def build_decision_applier(app: Any, session_factory: Any = async_session):
         approved: bool,
         *,
         on_event: Optional[EventSink] = None,
+        remember: Optional[str] = None,
+        channel: Optional[Channel] = None,
     ) -> Dict[str, Any]:
         runtime: Optional[AgentRuntime] = getattr(app.state, "agent_runtime", None)
         if runtime is None:
@@ -1863,6 +1932,8 @@ def build_decision_applier(app: Any, session_factory: Any = async_session):
                 approved,
                 getattr(app.state, "installation", None),
                 on_event=on_event,
+                remember=remember,
+                channel=linked_channel(user, channel),
             )
             await db.commit()
 
@@ -1908,6 +1979,8 @@ def build_decision_applier(app: Any, session_factory: Any = async_session):
             "status": "approved" if approved else "denied",
             "summary": summary,
             **outcome,
+            # The app the tap allowed for a week, for the card's own line.
+            **({"weekly": result["weekly"]} if result.get("weekly") else {}),
         }
 
     return apply
@@ -2075,7 +2148,11 @@ def build_chat_applier(app: Any, session_factory: Any = async_session):
     mark it took when the message arrived, so a /stop sent while the message
     waited for its turn also ends it; omitted, the mark is taken on entry.
 
-    ``on_event``, when given, receives the turn's progress events live."""
+    ``on_event``, when given, receives the turn's progress events live.
+
+    ``channel`` is the chat the message came from, for weekly app
+    approvals; a Telegram channel counts only while it is the user's
+    linked chat (``linked_channel``)."""
 
     async def chat(
         user_id: str,
@@ -2084,6 +2161,7 @@ def build_chat_applier(app: Any, session_factory: Any = async_session):
         new_conversation: bool = False,
         stop_mark: Optional[int] = None,
         on_event: Optional[EventSink] = None,
+        channel: Optional[Channel] = None,
     ) -> Dict[str, Any]:
         # Accepted: a stop from here on ends this turn, setup included.
         if stop_mark is None:
@@ -2150,6 +2228,7 @@ def build_chat_applier(app: Any, session_factory: Any = async_session):
             )
             conversation_id = conversation.id
             provider, model = user.llm_provider, user.llm_model
+            channel = linked_channel(user, channel)
             # The user message is durable from here; release the pooled
             # connection for the (possibly long) turn.
             await db.commit()
@@ -2178,6 +2257,7 @@ def build_chat_applier(app: Any, session_factory: Any = async_session):
                 usage_sink=turn,
                 stop_mark=stop_mark,
                 event_sink=on_event,
+                channel=channel,
             )
         except asyncio.CancelledError:
             # /stop: the reply will never come. Close the turn in the
@@ -2291,6 +2371,8 @@ async def decide_approval(
         action_id,
         body.approved,
         getattr(request.app.state, "installation", None),
+        remember=body.remember,
+        channel=web_channel(request),
     )
     if "error" in result:
         raise HTTPException(
@@ -2302,6 +2384,7 @@ async def decide_approval(
     result.pop("assistant_notes", None)
     images = result.pop("decision_images", None) or []
     message_id = result.pop("decision_message_id", None)
+    weekly = result.pop("weekly", None)
     # The pictures travel once, checked, in ``images``; the result keeps
     # the placeholder, as the transcript row and the model's view do.
     if "result" in result:
@@ -2313,6 +2396,7 @@ async def decide_approval(
         result=result,
         images=[TurnImageOut(**image) for image in images],
         message_id=message_id,
+        weekly=WeeklyApprovalOut(**weekly) if weekly else None,
     )
 
 

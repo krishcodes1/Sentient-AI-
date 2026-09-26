@@ -55,6 +55,11 @@ import ToolScreenshot from "@/components/ToolScreenshot";
 import { hasDroppedScreenshot } from "@/components/toolScreenshots";
 import ApprovalPicture from "@/components/ApprovalPicture";
 import PurchaseApproval from "@/components/PurchaseApproval";
+import WeeklyAppButton, {
+  WeeklyAllowedNote,
+  type ApprovalDecision,
+  type WeeklyGrant,
+} from "@/components/WeeklyAppButton";
 import ChatComposer from "@/components/ChatComposer";
 import { ConversationTokenTotal, MessageTokenCaption } from "@/components/TokenUsage";
 import { DESKTOP_QUERY, useMediaQuery } from "@/hooks/useMediaQuery";
@@ -196,7 +201,7 @@ function ApprovalCard({
   onDecide,
 }: {
   approval: PendingApproval;
-  onDecide: (approved: boolean) => Promise<void>;
+  onDecide: (...decision: ApprovalDecision) => Promise<void>;
 }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -205,11 +210,11 @@ function ApprovalCard({
   // disable the buttons instead of letting the user walk into that.
   const expired = remaining !== null && remaining <= 0;
 
-  const handle = async (approved: boolean) => {
+  const handle = async (...decision: ApprovalDecision) => {
     setPending(true);
     setError(null);
     try {
-      await onDecide(approved);
+      await onDecide(...decision);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -350,6 +355,11 @@ function ApprovalCard({
           Deny
         </button>
       </div>
+      <WeeklyAppButton
+        approval={approval}
+        disabled={pending || expired}
+        onAllow={() => handle(true, "week")}
+      />
     </div>
   );
 }
@@ -388,6 +398,8 @@ export default function Chat() {
   const [messagesError, setMessagesError] = useState<string | null>(null);
   const [messagesRetryKey, setMessagesRetryKey] = useState(0);
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
+  // The app the last decision allowed for a week, shown under the cards.
+  const [weeklyAllowed, setWeeklyAllowed] = useState<WeeklyGrant | null>(null);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [sending, setSending] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -494,6 +506,7 @@ export default function Chat() {
     setFailedTurn(null);
     setAtBottom(true);
     setApprovals([]);
+    setWeeklyAllowed(null);
     setMessagesError(null);
     if (activeConv) setLoadingMessages(true);
     else setMessages([]);
@@ -777,6 +790,7 @@ export default function Chat() {
     };
     setMessages((prev) => [...prev, optimisticUser, streamingAssistant]);
     setFailedTurn(null);
+    setWeeklyAllowed(null);
     setSending(true);
     setStreamStatus(null);
     // A message the reader just sent is theirs to follow, wherever they had
@@ -942,12 +956,13 @@ export default function Chat() {
     }
   };
 
-  const handleApprovalDecision = async (actionId: string, approved: boolean) => {
-    const decided = await decideApproval(actionId, approved);
+  const handleApprovalDecision = async (actionId: string, ...decision: ApprovalDecision) => {
+    const decided = await decideApproval(actionId, ...decision);
     // Record before removing: a poll that was already in flight must not
     // put this card back on screen.
     decidedApprovals.current.add(actionId);
     setApprovals((prev) => prev.filter((pa) => pa.action_id !== actionId));
+    setWeeklyAllowed(decided.weekly ?? null);
     // The backend persists an assistant message with the tool outcome —
     // refetch the thread so the result of the decision is visible.
     if (activeConv) {
@@ -1506,12 +1521,13 @@ export default function Chat() {
                   <ApprovalCard
                     key={pa.action_id}
                     approval={pa}
-                    onDecide={(approved) => handleApprovalDecision(pa.action_id, approved)}
+                    onDecide={(...decision) => handleApprovalDecision(pa.action_id, ...decision)}
                   />
                 ))}
               </div>
             </div>
           )}
+          {weeklyAllowed && <WeeklyAllowedNote weekly={weeklyAllowed} className="ml-11" />}
           {/* A turn that never reached the server. The user's message is
               still on screen above; this offers it back rather than making
               them retype it (or re-pick the images). */}
