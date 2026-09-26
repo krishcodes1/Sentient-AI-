@@ -154,7 +154,11 @@ async def client(session_factory):
     # TRUSTED_PROXIES setting. Relying on X-Forwarded-For for isolation only
     # works when the peer is a trusted proxy; a distinct peer is faithful to
     # "these are different external clients" and independent of that config.
-    fake_ip = f"198.51.100.{uuid.uuid4().int % 254 + 1}"
+    # 64 random bits from IPv6's documentation range (2001:db8::/32, never
+    # routed and outside TRUSTED_PROXIES): a /24 gave 254 addresses, and with
+    # thousands of clients two tests sometimes shared a lockout bucket.
+    h = uuid.uuid4().hex
+    fake_ip = f"2001:db8::{h[0:4]}:{h[4:8]}:{h[8:12]}:{h[12:16]}"
     transport = httpx.ASGITransport(app=app, client=(fake_ip, 54321))
     async with httpx.AsyncClient(
         transport=transport,
