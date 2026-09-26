@@ -16,6 +16,7 @@ import type {
   AgentTurnResponse,
   PendingApproval,
   ApprovalDecisionResponse,
+  AppApproval,
   Connector,
   ConnectorHealthEntry,
   ConnectorTestResult,
@@ -41,6 +42,10 @@ import type {
   VaultItemView,
   VaultItems,
 } from "@/types";
+// Every request below, the raw fetches included, names this browser in
+// X-Crawler-Device, so an app allowed for a week from here applies only to
+// requests from here.
+import { deviceHeader } from "@/services/deviceId";
 
 const API_BASE = "/api";
 
@@ -186,7 +191,7 @@ export async function ensureFreshToken(): Promise<void> {
   if (!refreshInFlight) {
     refreshInFlight = fetch(`${API_BASE}/auth/refresh`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Authorization: `Bearer ${token}`, ...deviceHeader() },
     })
       .then(async (response) => {
         if (!response.ok) return;
@@ -214,6 +219,7 @@ async function request<T>(
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
+    ...deviceHeader(),
     ...((options.headers as Record<string, string>) || {}),
   };
 
@@ -307,7 +313,7 @@ export function logout(): void {
   if (token) {
     void fetch(`${API_BASE}/auth/logout`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Authorization: `Bearer ${token}`, ...deviceHeader() },
       keepalive: true,
     }).catch(() => {});
   }
@@ -438,6 +444,7 @@ export async function streamMessage(
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        ...deviceHeader(),
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
       body: turnBody(content, images),
@@ -557,14 +564,33 @@ export async function getPendingApprovals(): Promise<PendingApproval[]> {
   return request<PendingApproval[]>("/agent/approvals");
 }
 
+/**
+ * Approve or deny a parked tool call. `remember: "week"` comes from a card's
+ * "Allow {app} for 7 days" button: it approves this act and allows the app
+ * for 7 days, for requests from this browser. Without it the body is
+ * `{approved}` alone, exactly as before the weekly button existed.
+ */
 export async function decideApproval(
   actionId: string,
-  approved: boolean
+  approved: boolean,
+  remember?: "week"
 ): Promise<ApprovalDecisionResponse> {
   return request<ApprovalDecisionResponse>(`/agent/approvals/${actionId}`, {
     method: "POST",
-    body: JSON.stringify({ approved }),
+    body: JSON.stringify(remember ? { approved, remember } : { approved }),
   });
+}
+
+/** Settings ▸ Permissions ▸ Apps allowed for a week: this account's live
+ *  weekly app approvals, from Telegram and from every browser. */
+export async function listAppApprovals(): Promise<AppApproval[]> {
+  return request<AppApproval[]>("/agent/app-approvals");
+}
+
+/** End a weekly app approval now; the next act in that app gets a card
+ *  again. 404 when it is not this account's or no longer live. */
+export async function revokeAppApproval(id: string): Promise<void> {
+  return request<void>(`/agent/app-approvals/${id}`, { method: "DELETE" });
 }
 
 /**
@@ -803,7 +829,7 @@ export async function deleteVaultItem(id: string): Promise<void> {
 export async function exportAccount(): Promise<void> {
   const token = localStorage.getItem("auth_token");
   const response = await fetch(`${API_BASE}/auth/export`, {
-    headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    headers: { ...deviceHeader(), ...(token ? { Authorization: `Bearer ${token}` } : {}) },
   });
   if (!response.ok) {
     if (response.status === 401) handleUnauthorized();
@@ -898,7 +924,7 @@ export async function unlinkTelegram(): Promise<void> {
  * endpoint is public and a leftover token from a wiped install is noise.
  */
 export async function getSetupStatus(): Promise<SetupStatus> {
-  const response = await fetch(`${API_BASE}/setup/status`);
+  const response = await fetch(`${API_BASE}/setup/status`, { headers: deviceHeader() });
   if (!response.ok) {
     throw new ApiError(`Request failed: ${response.statusText}`, response.status);
   }

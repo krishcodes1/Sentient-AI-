@@ -235,6 +235,10 @@ export interface PendingApproval {
    *  a data URL. Held in the server's memory only, so it is absent after a
    *  restart and never on any other tool's card. */
   image?: string | null;
+  /** The app a desktop.act card can be allowed in for a week ("Calendar"),
+   *  offering "Allow Calendar for 7 days" beside Approve / Deny. Null or
+   *  absent: the card has no weekly option. */
+  weekly_app?: string | null;
 }
 
 /**
@@ -279,6 +283,24 @@ export interface ApprovalDecisionResponse {
   images?: TurnImage[];
   /** The transcript row that records the decision, which `images` belong under. */
   message_id?: string | null;
+  /** The app the weekly button allowed, and until when. Null when the act
+   *  was approved once only (no `remember`, or no usable device header). */
+  weekly?: { app: string; expires_at: string } | null;
+}
+
+/**
+ * GET /agent/app-approvals: an app Crawler may act in without a card until
+ * `expires_at`, for requests from the Telegram chat or the browser it was
+ * allowed from. `this_device` marks a web row allowed from this browser.
+ */
+export interface AppApproval {
+  id: string;
+  app: string;
+  channel: "telegram" | "web";
+  this_device: boolean;
+  granted_at: string;
+  expires_at: string;
+  last_used_at: string | null;
 }
 
 export interface ConnectorHealthEntry {
