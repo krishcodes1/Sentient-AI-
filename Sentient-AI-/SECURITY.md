@@ -86,6 +86,18 @@ in code, and what is still open.
   duration of a single dispatch. `services/agent/tool_registry.py`.
 - Audit rows and logs pass through a sanitizer that redacts secret-shaped
   keys and values (tokens, API keys, JWTs, card numbers). `services/audit.py`.
+  Token formats are matched wherever they appear inside a string: Slack
+  (`xoxb-`, `xoxp-` and the other `xox?-` kinds, `xapp-`), GitHub
+  (`github_pat_`, `ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`), Notion
+  (`secret_`, `ntn_`), Google (`ya29.` access tokens, `1//` refresh tokens,
+  `GOCSPX-` client secrets), Microsoft (`EwB...` personal access tokens,
+  `M.C...`/`M.R...` personal refresh tokens and codes, `0.A`/`1.A` work and
+  school refresh tokens) and full JWTs. Prefixes that also occur in prose
+  need a long unbroken body, so ordinary words survive. Keys named
+  `code_verifier`, `device_code` or `client_secret` are redacted, and so is
+  a key that is exactly `code`, `state`, `auth_code` or `oauth_code`/
+  `oauth_state` (matched whole, so `statement` or `zip_code` are kept).
+  Covered by `tests/test_audit_token_patterns.py`.
 
 ## Permission model
 
@@ -104,6 +116,27 @@ action (READ / WRITE / DELETE / EXECUTE / FINANCIAL) per connector:
 Robinhood reads are `user_confirm` — even *viewing* financial data requires
 consent per action. All FINANCIAL category actions are `hard_blocked`.
 
+Connectors declared in `services/connectors/registry.py` get generated
+default rows (READ `auto_approve`, WRITE/DELETE/EXECUTE `user_confirm`,
+FINANCIAL `hard_blocked`); a hand-written row in `permissions.py` always
+wins, and the registry refuses any FINANCIAL row that is not
+`hard_blocked`. The gmail, google_calendar and github DELETE rows are
+`user_confirm` (they were `admin_only`), so the approval card can appear.
+
+**Always-confirm actions.** Some actions get an approval card under every
+tier, even on a connector the user set to `auto_approve`: every DELETE (the
+registry refuses a DELETE without the flag), and every send, reply,
+forward, post, comment, review, merge, file write that may land on a
+default branch, release publish, workflow dispatch, run cancel, share and
+share link. The flag (`ToolSpec.always_confirm`) is enforced at three
+independent points in `services/agent/tool_registry.py`: `build_tools`
+never offers such a tool as auto-run, the runtime permission adapter turns
+an "approved" decision into "requires approval", and the executor refuses
+the call unless a human approved it, before any rate-limit slot or network
+request is spent. Connector methods for non-READ actions also raise
+`UserConfirmationRequired` before any request unless the executor passes
+the approval through.
+
 The owner is the first account to register, which on a self-hosted install
 is whoever deployed it. There is no UI to transfer or grant the role; see
 "Known gaps" below.
@@ -118,7 +151,8 @@ is whoever deployed it. There is no UI to transfer or grant the role; see
 
 **Capability switches** (`services/capabilities/`) are a third, orthogonal
 control: coarse, owner-only toggles (Browse the web, Screenshots of
-websites, See my screen, Reminders, Install optional software, Telegram)
+websites, See my screen, Reminders, Install optional software, Telegram,
+Slack chat and approvals)
 set in the setup wizard or Settings → Permissions, on top of the action
 tiers and scopes above.
 
@@ -254,26 +288,152 @@ requires the human clicking Approve.
 ## Network security
 
 `core/network_security.py`, enforced via an httpx request hook installed on
-every connector client (covers redirects too):
+every connector client. Connectors do not follow redirects by default; a
+download call that opts in follows at most three, and every hop runs the
+same hook. A connector with no network policy set refuses every request
+(fail closed), and the check (which resolves DNS) runs in a worker thread
+so it never blocks the event loop.
 
-- **SSRF protection** — outbound URLs resolve through a blocklist of private,
+- **SSRF protection**: outbound URLs resolve through a blocklist of private,
   loopback, link-local, CGN, multicast, and IPv4-mapped-IPv6 ranges; only
   http/https schemes are allowed. MCP requests get the same check.
 - **The checked address is the connected address.** Checking a hostname and
   then letting the socket resolve it again leaves a window in which a
   hostile DNS server answers with a public address for the check and an
-  internal one for the connection. MCP clients therefore *pin* the
-  addresses that passed the check and dial only those; a host with no
-  validated pin is refused rather than resolved, so the failure mode is
-  closed. `services/mcp/client.py`, covered by
-  `tests/test_mcp_dns_pinning.py`.
-- **Per-connector allowlists (deny-by-default)** — Canvas may reach only
-  `*.instructure.com` `/api/v1/` and the OAuth token endpoint
-  `/login/oauth2/token`, Google only the specific googleapis hosts and
-  paths, Robinhood only `trading.robinhood.com` read-only crypto paths
-  (`/api/v1/crypto/trading/accounts/`, `/api/v1/crypto/trading/holdings/`,
-  `/api/v1/crypto/marketdata/`) — order/trade endpoints are not
-  allowlisted, so trades are blocked at the network layer as well.
+  internal one for the connection. Connector clients, MCP clients and the
+  web tools therefore *pin* the addresses that passed the check and dial
+  only those (`core/http_pinning.py`); a host with no validated pin is
+  refused rather than resolved, and a transport that cannot be pinned is a
+  refusal, never a fallback. Covered by `tests/test_mcp_dns_pinning.py` and
+  `tests/test_connector_pinning.py`.
+- **Policy rules**: `https_only` policies refuse plain http and any port
+  but 443; exact hosts are matched before wildcards regardless of list
+  order; a `*` glob is allowed only in the leftmost label and never
+  crosses a dot; a host with no path prefixes allows nothing. Download
+  hosts (`redirect_hosts`) are reachable only by GET without our
+  credentials. WebSocket endpoints are checked separately
+  (`check_websocket_policy`: wss, port 443, exact hosts, public addresses)
+  without widening the http/https scheme allowlist.
+- **Error text**: connector errors report the HTTP status, a short vendor
+  error code and a fixed hint, never the vendor's response body (which can
+  echo a token).
+- **Per-connector allowlists (deny-by-default).** Each connector's
+  `NetworkSpec` (in its module, turned into a policy by
+  `services/connectors/registry.py` at import) names exact hosts and path
+  prefixes; the registry refuses a host with no path prefix, and every
+  connector except Canvas is https-only. Canvas may reach only
+  `*.instructure.com` (or the Canvas host the user configured) `/api/v1/`
+  and the OAuth token endpoint `/login/oauth2/token`. Robinhood only reaches `trading.robinhood.com`
+  read-only crypto paths (`/api/v1/crypto/trading/accounts/`,
+  `/api/v1/crypto/trading/holdings/`, `/api/v1/crypto/marketdata/`): order
+  and trade endpoints are not allowlisted, so trades are blocked at the
+  network layer as well. Google reaches only the Gmail, Calendar, Drive,
+  Docs, Sheets and People API paths plus its OAuth token, revoke and
+  consent endpoints. Microsoft reaches only `graph.microsoft.com/v1.0/me/`
+  and the `login.microsoftonline.com` token and device-code endpoints.
+  GitHub reaches the `api.github.com` paths its actions use and the
+  `github.com` device-code and token endpoints. Notion reaches only the
+  `api.notion.com/v1/` endpoints its actions use. Slack reaches
+  `slack.com/api/` and its file upload host, and its Socket Mode sockets
+  may open only to `wss-primary.slack.com`, `wss-backup.slack.com` and
+  `wss.slack.com`. File downloads that redirect (OneDrive content, GitHub
+  Actions logs) may follow only to the listed storage hosts, by GET,
+  without our credentials.
+
+## Connector sign-in (OAuth broker)
+
+Google, Microsoft and GitHub connectors can be connected by signing in
+instead of pasting a token. One broker handles every provider
+(`services/connectors/oauth.py`, routes in `api/routes/oauth.py`, flow rows
+in the `oauth_states` table):
+
+- **No secrets in source.** Client ids (and Google's secret) come only from
+  `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`,
+  `MICROSOFT_OAUTH_CLIENT_ID` and `GITHUB_OAUTH_CLIENT_ID` in the
+  environment (`services/connectors/oauth_config.py`), default empty. An
+  empty one leaves that sign-in unavailable, and the start route answers
+  503 naming the variable, never a value. Microsoft and GitHub are public
+  clients with no secret; Google's "Desktop app" secret is one Google itself
+  does not treat as confidential, and it still stays out of the repository.
+  Setup: `docs/connectors-setup.md`.
+- **State.** Each browser sign-in gets 32 random bytes of `state`. Only its
+  HMAC-SHA256 is stored, keyed from `ENCRYPTION_KEY` under its own domain
+  label, so a database reader cannot complete someone's flow. A flow expires
+  after 10 minutes and is single use: exactly one callback can move it out
+  of `pending` (a conditional update), and a replay is refused and audited
+  as `state_reused`. A user may have at most 10 sign-ins in flight.
+- **PKCE.** Every browser sign-in sends an S256 code challenge; the
+  verifier (64 random bytes) is stored encrypted and wiped when the flow
+  completes.
+- **Fixed redirect URI.** The redirect URI is built only from
+  `OAUTH_REDIRECT_BASE` (validated at boot as a bare `http(s)` origin: no
+  path, query, fragment or user info) plus `/api/oauth/callback/<provider>`,
+  never from the request's Host header, so a forged header cannot send a
+  code elsewhere. Our parameters also override any `authorize_params` a
+  connector declares.
+- **The callback page.** `/api/oauth/callback/<provider>` is the one
+  connector route without a bearer token (the stored state is what binds it
+  to a user). It returns static HTML with no script, the same body for every
+  failure, and never echoes the code or state. It is sent with
+  `Referrer-Policy: no-referrer` and `Cache-Control: no-store`, and it
+  shares the stricter login rate-limit bucket.
+- **Access-log scrubbing.** The callback URL carries the code and state, so
+  the query string is stripped from uvicorn's access-log lines for that
+  path (`core/logging_config.py`), and the production nginx logs that
+  location with the path only and no Referer, keeping only `crit` error
+  lines there (`docker/Dockerfile.frontend`). The broker's own log lines
+  name flows by id and carry no code, state, verifier, device code or
+  token.
+- **Strict token handling.** Token responses are validated (types, sizes,
+  positive expiry) and stored encrypted like every other credential. A
+  provider's error text is never shown to the user; the status route
+  reports fixed messages and only ever shows a user their own flows. When
+  the token response lists the granted scopes, the connector records only
+  those, so a permission the user declined on the consent screen never
+  becomes a tool; a sign-in that granted none of the requested scopes
+  fails.
+- **Refresh.** Before a tool call or connection test, an access token that
+  expires within 120 s is refreshed under a per-connector lock and saved
+  before use. A refused refresh token asks the user to reconnect; a refusal
+  of the server's own client (`invalid_client` and similar) says so
+  instead, since reconnecting cannot fix it. A call the provider refuses as
+  unauthenticated gets at most one forced refresh and one retry; a 403 (a
+  missing scope) never does.
+- **Revoke on delete.** Deleting a connector commits first, then revokes
+  its grant at the provider in the background (best effort, audited as
+  `oauth_revoked`). Google and Slack have revoke endpoints that need no
+  client secret. GitHub (its revoke needs the app's secret), Microsoft (the
+  only option signs the user out everywhere) and Notion (internal
+  integrations have none) do not, so the user removes the grant on the
+  provider's site.
+- **Audit.** Completed sign-ins (`oauth_connected`, with the granted scopes)
+  and failed ones (with a short reason code) are written to the user's audit
+  chain.
+
+## Slack DM channel
+
+A user can chat with Crawler and approve actions in a Slack DM, using the
+bot and app-level tokens stored on their own Slack connector
+(`services/notifications/slack.py`, `slack_manager.py`, owner switch
+"Slack chat and approvals"):
+
+- **Linking.** The connector card mints a one-time code (10 minutes, 5 per
+  minute per user, only its HMAC stored, compared in constant time). The
+  Slack account that DMs that code to the Crawler bot becomes the only one
+  the channel serves; Slack user ids are never taken from the browser.
+- **Every event is checked** before anything else: it must be a DM, written
+  by a person (no bot, no subtype), in the workspace the bot token belongs
+  to, from the linked Slack user. Slack Connect partner teams and
+  redelivered events are dropped. Anyone else gets no reply.
+- **Socket.** The Socket Mode URL is checked with `check_websocket_policy`
+  (wss, port 443, the three Slack hosts, public addresses) and dialled at
+  the validated address with TLS checked against the real host name. The
+  URL carries a ticket and is never logged, and neither is any token.
+- **Approvals** use the same decision pipeline as the web and Telegram, and
+  the card shows every argument in full with the arguments digest.
+- **One socket per Slack app.** Slack hands each event to any one open
+  connection of an app, so connectors sharing an app are grouped and only
+  one runs; the others report `app_token_in_use`.
 
 ## Audit log
 
@@ -391,9 +551,41 @@ Tracked honestly so nobody mistakes this for finished security work:
   `token_epoch` claim checked against the user row). Signing out is
   client-side: the token stays technically valid until it expires, so
   password change is the lever for revoking access across devices.
-- **OAuth UX** — Canvas/Google connectors accept pasted tokens; a proper
-  redirect-based OAuth flow (the PKCE plumbing already exists in the
-  connector classes) is the intended replacement.
+- **Consent phishing.** The state ties a callback to the user who
+  *started* a sign-in; whoever approves the consent links *their* provider
+  account to the starter's connector. For browser sign-in this is closed
+  off: with the default loopback `OAUTH_REDIRECT_BASE`
+  (`http://127.0.0.1:3000`) only a browser on the server's machine can
+  finish a flow, and with any other base the start response sets an
+  HttpOnly, SameSite=Lax cookie scoped to the callback path (an HMAC of the
+  state), and a callback without it ends the flow before the code is
+  exchanged. A device-code sign-in (GitHub, and Microsoft's fallback)
+  cannot be bound this way (RFC 8628 section 5.4): on a shared server, a
+  registered user could send someone their `user_code` and receive that
+  person's grant. The code is shown only to the user who started the flow.
+  An owner who does not trust every account on a shared server can leave
+  `GITHUB_OAUTH_CLIENT_ID` empty so GitHub is connected with pasted tokens.
+- **Sign-in coverage.** Canvas, Notion, Slack and Robinhood still take
+  pasted tokens only, and GitHub also accepts a pasted token. Client ids come
+  from the environment only; an owner setting for them in the UI is not
+  built yet.
+- **Revoke gaps.** Deleting a GitHub, Microsoft or Notion connector cannot
+  revoke its grant (see "Revoke on delete"), and Slack's app-level token
+  (`xapp-`) can only be deleted on the Slack app's page. The user removes
+  those grants on the provider's site.
+- **Coarse provider scopes.** GitHub's OAuth `repo` scope is read and write
+  on every private repository the user can reach. Crawler's own catalog
+  scopes still decide which tools exist, but the stored token could do
+  more; a fine-grained personal access token limited to chosen
+  repositories is the least-privilege option. `workflow` is never
+  requested.
+- **Google app status.** A Google OAuth app left in "Testing" issues
+  refresh tokens that expire after 7 days, and an unverified app shows
+  Google's warning screen; see `docs/connectors-setup.md`.
+- **Slack DM channel.** One backend process per install: two processes (or
+  two deployments) on one Slack app would split its DMs and button presses
+  at random. Two different app-level tokens of the same Slack app, pasted
+  with two different bot tokens, cannot be detected and would split too.
 - **Admin role** — the first account to register owns the deployment
   (`users.is_admin`). An `admin_only` connector is usable only by that
   account; for everyone else it contributes no tools at all. There is no UI

@@ -129,6 +129,8 @@ class InstallationService:
         # Fingerprints of blobs already reported as undecryptable, so a
         # lost key logs once per blob rather than on every cache refresh.
         self._warned_blobs: set[str] = set()
+        # Whether a Slack DM channel runs (set_slack_status); none by default.
+        self._slack_running: Callable[[], bool] = lambda: False
 
     # ── loading ────────────────────────────────────────────────────────
 
@@ -232,6 +234,12 @@ class InstallationService:
     def on_change(self, callback: ChangeCallback) -> None:
         self._callbacks.append(callback)
 
+    def set_slack_status(self, running: Callable[[], bool]) -> None:
+        """Where the report reads whether a Slack DM channel runs (the Slack
+        manager's ``is_running``). The manager calls ``invalidate()`` when
+        that changes, so the cached report follows it."""
+        self._slack_running = running
+
     async def _changed(self, topic: str) -> None:
         self.invalidate()
         for cb in list(self._callbacks):
@@ -303,7 +311,10 @@ class InstallationService:
         return await self.report()
 
     async def context(self) -> ReportContext:
-        return registry.default_context(telegram_configured=bool(await self.telegram_token()))
+        return registry.default_context(
+            telegram_configured=bool(await self.telegram_token()),
+            slack_configured=bool(self._slack_running()),
+        )
 
     def _cached_view(self) -> Optional[_ReportView]:
         cached = self._report_view

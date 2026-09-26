@@ -15,6 +15,10 @@ httpx>=0.26.0,<1.0.0
 # imports it directly to replace connect-time DNS with validated, pinned
 # addresses, so it is a real dependency and not only httpx's.
 httpcore>=1.0.0,<2.0.0
+# Socket Mode client for the Slack DM channel (services/notifications/slack.py).
+# Already pulled in by uvicorn[standard]; declared because the channel imports
+# websockets.asyncio.client directly and passes sock=/proxy=, which need 15+.
+websockets>=15.0,<18.0
 redis>=5.0.0,<6.0.0
 anthropic>=0.40.0,<1.0.0
 openai>=1.10.0,<2.0.0

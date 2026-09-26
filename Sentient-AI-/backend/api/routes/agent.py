@@ -58,6 +58,7 @@ from services.agent.providers import ProviderError, ProviderNotConfigured
 from services.agent.runtime import (
     AgentRuntime,
     EventSink,
+    LoadedTools,
     TurnUsage,
     is_browser_tool,
     redact_binary_for_model,
@@ -496,10 +497,19 @@ async def _build_tools_and_memory(
             ConnectorConfig.is_active.is_(True),
         )
     )
-    connector_rows = list(conn_result.scalars().all())
+    from api.routes.connectors import connector_type_available
+    from models.connector import connector_type_key
+
+    # A row whose type left the registry (or the legacy "custom") is never
+    # offered: skipping it here keeps one stale row from failing the turn.
+    connector_rows = [
+        c
+        for c in conn_result.scalars().all()
+        if connector_type_available(c.connector_type)
+    ]
     connector_specs = [
         ConnectorSpec(
-            connector_type=c.connector_type.value,
+            connector_type=connector_type_key(c.connector_type),
             is_active=c.is_active,
             granted_scopes=tuple(c.granted_scopes) if c.granted_scopes else None,
             permission_tier=(
@@ -528,7 +538,7 @@ async def _build_tools_and_memory(
             excluded_labels = {
                 slugify_label(c.display_name)
                 for c in connector_rows
-                if c.connector_type.value == "mcp"
+                if connector_type_key(c.connector_type) == "mcp"
                 and effective_tier(
                     c.permission_tier.value if c.permission_tier else None,
                     current_user.default_permission_tier,
@@ -884,6 +894,9 @@ async def send_message(
         db,
         getattr(request.app.state, "installation", None),
     )
+    # The tools this conversation loaded through tools.find (already on the
+    # row read above: no extra query). The turn updates it in place.
+    loaded_tools = LoadedTools.from_stored(conversation.loaded_tools)
 
     # Release the pooled connection before the LLM turn: committing ends
     # the transaction, so the minutes a slow provider can take are not
@@ -904,6 +917,7 @@ async def send_message(
             permissions_text=permissions_text,
             task_id=task_id,
             stop_mark=stop_mark,
+            loaded_tools=loaded_tools,
         )
     except ProviderNotConfigured as exc:
         # Not an upstream failure: no key for the provider this turn needs.
@@ -940,6 +954,9 @@ async def send_message(
     )
     db.add(assistant_message)
     conversation.updated_at = datetime.now(timezone.utc)
+    if loaded_tools.changed:
+        # Rides the updated_at UPDATE above: no statement of its own.
+        conversation.loaded_tools = loaded_tools.names
     await db.flush()
     await db.refresh(assistant_message)
 
@@ -998,6 +1015,7 @@ async def _persist_assistant_detached(
     usage: Optional[Dict[str, Any]] = None,
     llm_provider: Optional[str] = None,
     llm_model: Optional[str] = None,
+    loaded_tools: Optional[LoadedTools] = None,
 ) -> None:
     """Persist an assistant turn outside any request session.
 
@@ -1020,6 +1038,8 @@ async def _persist_assistant_detached(
             conversation = await session.get(Conversation, conversation_id)
             if conversation is not None:
                 conversation.updated_at = datetime.now(timezone.utc)
+                if loaded_tools is not None and loaded_tools.changed:
+                    conversation.loaded_tools = loaded_tools.names
             await session.commit()
         logger.info(
             "assistant_turn_persisted_after_disconnect",
@@ -1101,6 +1121,8 @@ async def stream_message(
         db,
         installation,
     )
+    # Updated in place by the turn (tools.find); saved with the reply below.
+    loaded_tools = LoadedTools.from_stored(conversation.loaded_tools)
     conv_id = conversation.id
     user_provider = current_user.llm_provider
     user_model = current_user.llm_model
@@ -1122,6 +1144,7 @@ async def stream_message(
             response.usage,
             response.provider,
             response.model,
+            loaded_tools,
         )
 
     async def event_stream():
@@ -1150,6 +1173,7 @@ async def stream_message(
                     permissions_text=permissions_text,
                     task_id=task_id,
                     stop_mark=stop_mark,
+                    loaded_tools=loaded_tools,
                 ):
                     etype = event.get("type", "message")
                     data = event.get("data", {})
@@ -1218,6 +1242,8 @@ async def stream_message(
                 )
                 db.add(assistant)
                 conversation.updated_at = datetime.now(timezone.utc)
+                if loaded_tools.changed:
+                    conversation.loaded_tools = loaded_tools.names
                 await db.flush()
                 await db.refresh(assistant)
                 assistant_out = MessageResponse.model_validate(assistant).model_dump()
@@ -1255,6 +1281,7 @@ async def stream_message(
                         usage_payload,
                         turn_provider,
                         turn_model,
+                        loaded_tools,
                     )
                 )
 
@@ -1507,6 +1534,7 @@ async def _resume_after_approval(
     tools, memory_block, permissions_text = await _build_tools_and_memory(
         mcp_catalog, current_user, db, installation
     )
+    loaded_tools = LoadedTools.from_stored(conversation.loaded_tools)
     # Return the pooled connection before the (potentially minutes-long)
     # resumed turn; everything written so far — the decision message — is
     # durable from here.
@@ -1526,6 +1554,7 @@ async def _resume_after_approval(
             usage_sink=turn,
             stop_mark=stop_mark,
             event_sink=on_event,
+            loaded_tools=loaded_tools,
         )
     except asyncio.CancelledError:
         # Stopped from a chat channel mid-turn: keep the calls already
@@ -1533,6 +1562,10 @@ async def _resume_after_approval(
         db.add(_unfinished_turn_message(conversation.id, turn, _STOPPED_REPLY))
         await db.commit()
         raise
+    if loaded_tools.changed:
+        # Written with the caller's flush (it bumps updated_at in the same
+        # UPDATE) or the session's final commit.
+        conversation.loaded_tools = loaded_tools.names
     if not (agent_response.content or "").strip():
         return None
     message = Message(
@@ -1883,6 +1916,12 @@ def build_decision_applier(app: Any, session_factory: Any = async_session):
 # One per user, reused across messages, so the transcript is visible and
 # resumable from the web app like any other conversation.
 TELEGRAM_CONVERSATION_TITLE = "Telegram"
+SLACK_CONVERSATION_TITLE = "Slack"
+# build_chat_applier's ``channel`` keyword: each channel keeps its own thread.
+CHANNEL_CONVERSATION_TITLES: Dict[str, str] = {
+    "telegram": TELEGRAM_CONVERSATION_TITLE,
+    "slack": SLACK_CONVERSATION_TITLE,
+}
 
 # Most tool-captured images one channel turn delivers (the web chat's
 # toolScreenshots.ts names the same limit in its note).
@@ -2016,7 +2055,9 @@ def _turn_images(tool_calls: Any) -> list[dict[str, Any]]:
     return images
 
 
-def build_chat_applier(app: Any, session_factory: Any = async_session):
+def build_chat_applier(
+    app: Any, session_factory: Any = async_session, *, channel: str = "telegram"
+):
     """Async callback for chat arriving over an out-of-band channel:
     (user_id, text, new_conversation=False) -> outcome dict. Runs the same
     turn pipeline as POST /conversations/{id}/messages — rate limit,
@@ -2024,11 +2065,18 @@ def build_chat_applier(app: Any, session_factory: Any = async_session):
     tiering, approvals, audit), persisted assistant message with usage —
     with its own DB session. Returns {"error": str} instead of raising.
 
+    ``channel`` ("telegram" or "slack") picks the conversation the turns
+    write into (CHANNEL_CONVERSATION_TITLES); an unknown one is a bug and
+    raises ValueError here, at wiring time.
+
     ``stop_mark`` (``services.agent.cancel.mark``) lets the channel pass the
     mark it took when the message arrived, so a /stop sent while the message
     waited for its turn also ends it; omitted, the mark is taken on entry.
 
     ``on_event``, when given, receives the turn's progress events live."""
+    if channel not in CHANNEL_CONVERSATION_TITLES:
+        raise ValueError(f"Unknown chat channel: {channel!r}")
+    conversation_title = CHANNEL_CONVERSATION_TITLES[channel]
 
     async def chat(
         user_id: str,
@@ -2071,16 +2119,14 @@ def build_chat_applier(app: Any, session_factory: Any = async_session):
                         select(Conversation)
                         .where(
                             Conversation.user_id == user.id,
-                            Conversation.title == TELEGRAM_CONVERSATION_TITLE,
+                            Conversation.title == conversation_title,
                         )
                         .order_by(Conversation.updated_at.desc())
                         .limit(1)
                     )
                 ).scalar_one_or_none()
             if conversation is None:
-                conversation = Conversation(
-                    user_id=user.id, title=TELEGRAM_CONVERSATION_TITLE
-                )
+                conversation = Conversation(user_id=user.id, title=conversation_title)
                 db.add(conversation)
                 await db.flush()
 
@@ -2101,6 +2147,7 @@ def build_chat_applier(app: Any, session_factory: Any = async_session):
             tools, memory_block, permissions_text = await _build_tools_and_memory(
                 mcp_catalog, user, db, installation
             )
+            loaded_tools = LoadedTools.from_stored(conversation.loaded_tools)
             conversation_id = conversation.id
             provider, model = user.llm_provider, user.llm_model
             # The user message is durable from here; release the pooled
@@ -2131,6 +2178,7 @@ def build_chat_applier(app: Any, session_factory: Any = async_session):
                 usage_sink=turn,
                 stop_mark=stop_mark,
                 event_sink=on_event,
+                loaded_tools=loaded_tools,
             )
         except asyncio.CancelledError:
             # /stop: the reply will never come. Close the turn in the
@@ -2187,6 +2235,8 @@ def build_chat_applier(app: Any, session_factory: Any = async_session):
                 )
             )
             conversation.updated_at = datetime.now(timezone.utc)
+            if loaded_tools.changed:
+                conversation.loaded_tools = loaded_tools.names
             await db.commit()
 
         # Images a tool captured (web.screenshot, desktop.screenshot,

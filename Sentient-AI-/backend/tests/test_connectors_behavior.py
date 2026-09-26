@@ -255,7 +255,8 @@ async def test_execute_maps_timeout_and_http_status_to_connector_error():
     with pytest.raises(ConnectorError) as exc_info:
         await failing.execute("read", {})
     assert "HTTP 503 from Stub" in str(exc_info.value)
-    assert "upstream down" in str(exc_info.value)
+    # The vendor body is never echoed: an error body can quote a token.
+    assert "upstream down" not in str(exc_info.value)
     # A server-side failure is not an auth failure: the user has nothing to
     # re-authorize, so it must stay a plain ConnectorError.
     assert not isinstance(exc_info.value, AuthenticationError)
@@ -1322,7 +1323,8 @@ def test_factory_builds_the_right_class(connector_type, credentials, expected_cl
 @pytest.mark.parametrize(
     "connector_type,credentials,expected_fragment",
     [
-        ("slack", {"token": "x"}, "Unsupported connector type"),
+        # A key no connector module registers (and never will).
+        ("not_a_connector", {"token": "x"}, "Unsupported connector type"),
         # 'mcp' passes credential validation but has no connector class:
         # MCP servers are dispatched by services.mcp, not this factory.
         ("mcp", {"url": "https://mcp.example.com/rpc"}, "Unsupported connector type"),
@@ -1365,15 +1367,38 @@ def test_factory_applies_rate_limit_and_timeout_overrides():
     assert default._timeout == BaseConnector.DEFAULT_TIMEOUT_S
 
 
+def _sample_credential(field) -> str:
+    """An obviously fake value of the right shape for one credential field.
+
+    A token-style placeholder prefix (``xoxb-...``, ``ghp_...``) is kept so
+    a connector that checks the prefix accepts the sample.
+    """
+    import re
+
+    if field is None:  # broker-only connector: a stored access_token
+        return "test-value"
+    if field.type == "url":
+        return "https://s.instructure.com"
+    prefix = re.match(r"^([A-Za-z0-9]+[-_])", field.placeholder)
+    return f"{prefix.group(1) if prefix else ''}test-value"
+
+
 def test_validate_credentials_accepts_documented_shapes():
     from services.connectors.factory import CREDENTIAL_REQUIREMENTS, validate_credentials
+    from services.connectors.registry import REGISTRY
 
+    # Derived from each registered definition's required fields, so a new
+    # connector is covered without editing this test.
     samples = {
-        "canvas": {"base_url": "https://s.instructure.com", "access_token": "t"},
-        "google_workspace": {"access_token": "t"},
-        "robinhood": {"api_key": "k", "api_secret": "s"},
-        "mcp": {"url": "https://mcp.example.com/rpc"},
+        definition.key: {
+            key: _sample_credential(
+                next((f for f in definition.auth.fields if f.key == key), None)
+            )
+            for key in definition.auth.required_credentials
+        }
+        for definition in REGISTRY
     }
+    samples["mcp"] = {"url": "https://mcp.example.com/rpc"}
     assert set(samples) == set(CREDENTIAL_REQUIREMENTS)
     for connector_type, credentials in samples.items():
-        assert validate_credentials(connector_type, credentials) == []
+        assert validate_credentials(connector_type, credentials) == [], connector_type

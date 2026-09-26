@@ -48,6 +48,10 @@ except ImportError:  # redis is in requirements.txt; guard anyway
 
 logger = structlog.get_logger(__name__)
 
+# The OAuth broker's browser redirect target (api/routes/oauth.py). It takes
+# no bearer token, so it shares the login routes' stricter rate-limit bucket.
+OAUTH_CALLBACK_PREFIX = "/api/oauth/callback/"
+
 
 # ------------------------------------------------------------------ #
 # Security Headers
@@ -92,6 +96,14 @@ class SecurityHeadersMiddleware:
     # Swagger / ReDoc paths that need relaxed CSP
     _DOCS_PATHS = {"/docs", "/docs/", "/redoc", "/redoc/", "/openapi.json"}
 
+    # The OAuth callback page is reached with ?code=...&state=... in its
+    # URL. It must never leak that URL in a Referer header or be cached.
+    _OAUTH_CALLBACK_PREFIX = OAUTH_CALLBACK_PREFIX
+    _OAUTH_CALLBACK_HEADERS = {
+        "Referrer-Policy": "no-referrer",
+        "Cache-Control": "no-store",
+    }
+
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
 
@@ -101,6 +113,7 @@ class SecurityHeadersMiddleware:
             return
 
         is_docs_path = scope["path"] in self._DOCS_PATHS
+        is_oauth_callback = scope["path"].startswith(self._OAUTH_CALLBACK_PREFIX)
 
         async def send_with_headers(message: Message) -> None:
             if message["type"] == "http.response.start":
@@ -109,6 +122,9 @@ class SecurityHeadersMiddleware:
                     headers[header] = value
                 if is_docs_path:
                     headers["Content-Security-Policy"] = self._DOCS_CSP
+                if is_oauth_callback:
+                    for header, value in self._OAUTH_CALLBACK_HEADERS.items():
+                        headers[header] = value
             await send(message)
 
         await self.app(scope, receive, send_with_headers)
@@ -148,6 +164,8 @@ class RateLimitMiddleware:
     # brute-forcing is throttled long before the general API limit. The
     # wizard's owner step creates an account too, so it shares the bucket.
     AUTH_PATHS = ("/api/auth/login", "/api/auth/register", "/api/setup/owner")
+    # Matched by prefix (one per provider): unauthenticated like login.
+    AUTH_PATH_PREFIXES = (OAUTH_CALLBACK_PREFIX,)
 
     # After a Redis failure, wait this long before trying to reconnect.
     REDIS_RETRY_SECONDS = 30.0
@@ -353,7 +371,8 @@ class RateLimitMiddleware:
         # nothing is copied, so building one here is cheap.
         client_ip = self._get_client_ip(Request(scope))
 
-        is_auth_path = scope["path"] in self.AUTH_PATHS
+        path = scope["path"]
+        is_auth_path = path in self.AUTH_PATHS or path.startswith(self.AUTH_PATH_PREFIXES)
         bucket_key = f"{client_ip}:auth" if is_auth_path else client_ip
         limit = self.auth_max_requests if is_auth_path else self.max_requests
 

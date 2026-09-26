@@ -293,8 +293,19 @@ def test_auto_approve_tier_makes_write_tools_auto():
         [ConnectorSpec("google_workspace", permission_tier="auto_approve")],
         user_default_tier="auto_approve",
     )
+    create = next(t for t in tools if t.name == "google_workspace.create_event")
+    assert create.permission_tier == "auto"
+
+
+def test_auto_approve_tier_never_makes_send_email_auto():
+    # send_email is always_confirm: an email cannot be recalled, so the
+    # approval card stays under every tier, including auto_approve.
+    tools = build_tools(
+        [ConnectorSpec("google_workspace", permission_tier="auto_approve")],
+        user_default_tier="auto_approve",
+    )
     send = next(t for t in tools if t.name == "google_workspace.send_email")
-    assert send.permission_tier == "auto"
+    assert send.permission_tier == "approval"
 
 
 def test_auto_approve_tier_is_floored_by_user_default():

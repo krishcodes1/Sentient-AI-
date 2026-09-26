@@ -1,15 +1,18 @@
-"""Implements the Google Workspace connector: OAuth 2.0 + PKCE with incremental
-scopes, plus Gmail and Google Calendar actions.
+"""Implements the Google Workspace connector: Gmail, Calendar, Drive, Docs, Sheets
+and Contacts actions, token refresh, health check and revoke, plus its
+``DEFINITION`` for the connector registry.
 
-Why it exists: The factory constructs it for tool execution; Google endpoints,
-MIME encoding and email-body sanitisation stay here so the rest of the platform
-only sees ConnectorResponse.
+Why it exists: the registry-driven factory builds this class for every Google
+tool call; the OAuth broker (services/connectors/oauth.py) signs users in with
+the ``OAuthSpec`` declared here, and legacy rows keep working with a pasted
+access token (plus optional refresh token and client pair). The per-API action
+groups live in ``services/connectors/google_api/`` (one mixin per API); this
+module assembles them, owns sign-in state and declares scopes, network reach
+and permission keys.
 
-Google Workspace connector for Crawler AI.
-
-Provides Gmail and Google Calendar access via OAuth 2.0 + PKCE
-with incremental authorization.  All email body content is
-sanitized via PromptGuard before reaching the LLM layer.
+External services: Google's OAuth endpoints (oauth2.googleapis.com,
+accounts.google.com) and the Gmail, Calendar, Drive, Docs, Sheets and People
+REST APIs. Depends on ``base``, ``definition`` and ``google_api``.
 """
 
 from __future__ import annotations
@@ -17,118 +20,200 @@ from __future__ import annotations
 import base64
 import hashlib
 import secrets
-from email.mime.text import MIMEText
 from typing import Any, Optional
 from urllib.parse import urlencode
 
-import httpx
 import structlog
 
-from .base import (
-    AuthenticationError,
-    BaseConnector,
-    ConnectorError,
-    PromptGuard,
-    UserConfirmationRequired,
-    path_segment,
+from .base import AuthenticationError, ConnectorError, RateLimitExceededError
+from .definition import (
+    AuthSpec,
+    ConnectorDefinition,
+    CredentialField,
+    NetworkSpec,
+    OAuthSpec,
+    ToolSpec,
 )
+from .google_api.calendar import CALENDAR_ACTIONS, CalendarActions
+from .google_api.client import (
+    AUTHORIZE_URL,
+    CALENDAR_API,
+    DRIVE_API,
+    GMAIL_API,
+    PEOPLE_API,
+    REVOKE_URL,
+    SCOPE_BASE,
+    TOKEN_URL,
+    error_status,
+)
+from .google_api.contacts import CONTACTS_ACTIONS, ContactsActions
+from .google_api.docs import DOCS_ACTIONS, DocsActions
+from .google_api.drive import DRIVE_ACTIONS, DriveActions
+from .google_api.gmail import GMAIL_ACTIONS, GmailActions
+from .google_api.sheets import SHEETS_ACTIONS, SheetsActions
 
 logger = structlog.get_logger(__name__)
 
+# The tool catalog. Each Google surface keeps its own permission key (gmail,
+# google_calendar, google_drive, google_docs, google_sheets, google_contacts)
+# so each has its own policy rows. The legacy Gmail and Calendar actions come
+# first, in their original order.
+ACTIONS: tuple[ToolSpec, ...] = (
+    GMAIL_ACTIONS + CALENDAR_ACTIONS + DRIVE_ACTIONS + DOCS_ACTIONS + SHEETS_ACTIONS + CONTACTS_ACTIONS
+)
 
-class GoogleWorkspaceConnector(BaseConnector):
-    """Connector for Gmail and Google Calendar APIs."""
+# Catalog scope -> least-privilege Google scopes.
+# - gmail.send only sends new mail (send_email); drafts, replies and
+#   forwards use gmail.compose ("manage drafts and send"); label changes
+#   and trash need gmail.modify (never the full https://mail.google.com/).
+# - drive.write is the full "drive" scope on purpose: drive.file only
+#   reaches files this app created or the user opened with a picker, so
+#   moving, renaming, sharing or trashing the user's existing files would
+#   fail with "not found".
+SCOPE_MAP: dict[str, tuple[str, ...]] = {
+    "gmail.read": (f"{SCOPE_BASE}gmail.readonly",),
+    "gmail.send": (f"{SCOPE_BASE}gmail.send",),
+    "gmail.compose": (f"{SCOPE_BASE}gmail.compose",),
+    "gmail.modify": (f"{SCOPE_BASE}gmail.modify",),
+    "calendar.read": (f"{SCOPE_BASE}calendar.readonly",),
+    "calendar.write": (f"{SCOPE_BASE}calendar.events",),
+    "drive.read": (f"{SCOPE_BASE}drive.readonly",),
+    "drive.write": (f"{SCOPE_BASE}drive",),
+    "docs.read": (f"{SCOPE_BASE}documents.readonly",),
+    "docs.write": (f"{SCOPE_BASE}documents",),
+    "sheets.read": (f"{SCOPE_BASE}spreadsheets.readonly",),
+    "sheets.write": (f"{SCOPE_BASE}spreadsheets",),
+    "contacts.read": (f"{SCOPE_BASE}contacts.readonly",),
+    "contacts.write": (f"{SCOPE_BASE}contacts",),
+}
 
+OAUTH = OAuthSpec(
+    provider="google",
+    authorize_url=AUTHORIZE_URL,
+    token_url=TOKEN_URL,
+    revoke_url=REVOKE_URL,
+    client_id_setting="GOOGLE_OAUTH_CLIENT_ID",
+    client_secret_setting="GOOGLE_OAUTH_CLIENT_SECRET",
+    scope_map=SCOPE_MAP,
+    authorize_params={
+        "access_type": "offline",
+        "include_granted_scopes": "true",
+        "prompt": "consent",
+    },
+)
+
+_DEFAULT_REDIRECT_BASE = "http://127.0.0.1:3000"
+
+
+def _broker_client() -> tuple[str, str]:
+    """The installation's Google OAuth client pair, for broker-made rows.
+
+    Broker rows store no client pair: the refresh must use the client that
+    issued the grant, which is the installation's (read through the broker's
+    resolver). An unconfigured server gives empty values, so a refresh then
+    fails with a clear "reconnect" message instead of a crash.
+    """
+    from services.connectors.oauth_config import OAuthNotConfigured, resolve_client
+
+    try:
+        client = resolve_client(OAUTH, label="Google")
+    except OAuthNotConfigured:
+        logger.info("google_oauth_client_not_configured")
+        return "", ""
+    return client.client_id, client.client_secret
+
+
+class GoogleWorkspaceConnector(
+    GmailActions, CalendarActions, DriveActions, DocsActions, SheetsActions, ContactsActions
+):
+    """Connector for the Google Workspace APIs (one instance per tool call)."""
+
+    # Scopes the legacy generate_auth_url requests when given none.
     GMAIL_SCOPES = [
-        "https://www.googleapis.com/auth/gmail.readonly",
-        "https://www.googleapis.com/auth/gmail.compose",
+        f"{SCOPE_BASE}gmail.readonly",
+        f"{SCOPE_BASE}gmail.compose",
     ]
     CALENDAR_SCOPES = [
-        "https://www.googleapis.com/auth/calendar.readonly",
-        "https://www.googleapis.com/auth/calendar.events",
+        f"{SCOPE_BASE}calendar.readonly",
+        f"{SCOPE_BASE}calendar.events",
     ]
 
-    _ACTION_MAP: dict[str, str] = {
-        "get_messages": "get_messages",
-        "get_message": "get_message",
-        "send_email": "send_email",
-        "search_emails": "search_emails",
-        "get_events": "get_events",
-        "create_event": "create_event",
-        "check_availability": "check_availability",
-    }
-
-    def __init__(
-        self,
-        client_id: str,
-        client_secret: str,
-        redirect_uri: str = "http://localhost:8000/oauth/callback/google",
-        timeout_s: Optional[float] = None,
-    ) -> None:
-        super().__init__(timeout_s=timeout_s, rate_limit=60)
-        self._client_id = client_id
-        self._client_secret = client_secret
-        self._redirect_uri = redirect_uri
-        self._access_token: Optional[str] = None
-        self._refresh_token: Optional[str] = None
-        self._granted_scopes: set[str] = set()
-        self._pkce_verifier: Optional[str] = None
-
-    # -- Properties ----------------------------------------------------------
-
-    @property
-    def name(self) -> str:
-        return "Google Workspace"
-
-    @property
-    def connector_type(self) -> str:
-        return "productivity"
+    # The dispatch allow-map comes from ACTIONS, so they cannot drift apart.
+    _ACTIONS = frozenset(spec.action for spec in ACTIONS)
+    SUPPORTS_REVOKE = True
 
     @property
     def required_scopes(self) -> list[str]:
         return self.GMAIL_SCOPES + self.CALENDAR_SCOPES
 
-    # -- OAuth 2.0 + PKCE with incremental auth ------------------------------
+    @classmethod
+    def from_credentials(
+        cls, credentials: dict[str, Any], *, timeout_s: Optional[float] = None
+    ) -> GoogleWorkspaceConnector:
+        """Build an instance; the client pair is only used for refresh.
+
+        A pasted-token row carries its own client pair (the client that
+        issued its refresh token). A broker row (``oauth_provider`` google)
+        carries none and refreshes with the installation's client.
+        """
+        client_id = str(credentials.get("client_id") or "")
+        client_secret = str(credentials.get("client_secret") or "")
+        if not client_id and credentials.get("oauth_provider") == OAUTH.provider:
+            client_id, client_secret = _broker_client()
+        return cls(client_id=client_id, client_secret=client_secret, timeout_s=timeout_s)
+
+    # -- OAuth 2.0 + PKCE (legacy helpers; the broker owns new sign-ins) --------
+
+    @property
+    def redirect_uri(self) -> str:
+        """The explicit redirect URI, else the broker's callback for Google."""
+        if self._explicit_redirect_uri:
+            return self._explicit_redirect_uri
+        from core.config import settings
+
+        base = str(getattr(settings, "OAUTH_REDIRECT_BASE", "") or _DEFAULT_REDIRECT_BASE)
+        return f"{base.rstrip('/')}/api/oauth/callback/google"
 
     def generate_auth_url(self, scopes: list[str] | None = None) -> tuple[str, str]:
-        """Build Google OAuth URL with PKCE.
+        """Build a Google consent URL with PKCE; returns ``(url, code_verifier)``.
 
-        Supports *incremental authorization*: pass a subset of scopes to
-        request only what is needed right now; further scopes can be
-        requested later via a second auth round-trip.
-
-        Returns ``(authorization_url, code_verifier)``.
+        Supports incremental authorization: pass a subset of scopes to
+        request only what is needed now.
         """
         requested = scopes or self.required_scopes
         self._pkce_verifier = secrets.token_urlsafe(64)
         digest = hashlib.sha256(self._pkce_verifier.encode()).digest()
         code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
-
         params = {
             "client_id": self._client_id,
             "response_type": "code",
-            "redirect_uri": self._redirect_uri,
+            "redirect_uri": self.redirect_uri,
             "scope": " ".join(requested),
             "code_challenge": code_challenge,
             "code_challenge_method": "S256",
-            "access_type": "offline",
-            "prompt": "consent",
-            "include_granted_scopes": "true",  # incremental auth
+            **OAUTH.authorize_params,
             "state": secrets.token_urlsafe(32),
         }
-        url = f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"
-        return url, self._pkce_verifier
+        return f"{AUTHORIZE_URL}?{urlencode(params)}", self._pkce_verifier
 
     async def authenticate(self, credentials: dict[str, Any]) -> bool:
-        """Complete OAuth token exchange or accept a raw token.
+        """Accept stored tokens, or exchange a one-time code.
 
-        Accepted keys:
-        - ``access_token`` (+ optional ``refresh_token``): use directly.
-        - ``code`` + ``code_verifier``: PKCE exchange.
+        Accepted keys: ``access_token`` (+ optional ``refresh_token``,
+        ``expires_at``, ``granted_scopes``), or ``code`` + ``code_verifier``
+        for a PKCE exchange. No network call for stored tokens.
         """
-        if token := credentials.get("access_token"):
+        token = credentials.get("access_token")
+        if isinstance(token, str) and token:
             self._access_token = token
-            self._refresh_token = credentials.get("refresh_token")
+            refresh = credentials.get("refresh_token")
+            self._refresh_token = refresh if isinstance(refresh, str) and refresh else None
+            expires_at = credentials.get("expires_at")
+            if isinstance(expires_at, (int, float)) and not isinstance(expires_at, bool):
+                self._expires_at = int(expires_at)
+            granted = credentials.get("granted_scopes")
+            if isinstance(granted, list):
+                self._granted_scopes = {s for s in granted if isinstance(s, str)}
             self._authenticated = True
             self._log.info("authenticated_with_token")
             return True
@@ -136,47 +221,31 @@ class GoogleWorkspaceConnector(BaseConnector):
         code = credentials.get("code")
         verifier = credentials.get("code_verifier") or self._pkce_verifier
         if not code or not verifier:
-            raise AuthenticationError(
-                "Provide 'access_token' or 'code'+'code_verifier'."
-            )
-
-        client = self._get_client()
+            raise AuthenticationError("Provide 'access_token' or 'code'+'code_verifier'.")
+        form = {
+            "grant_type": "authorization_code",
+            "client_id": self._client_id,
+            "redirect_uri": self.redirect_uri,
+            "code": code,
+            "code_verifier": verifier,
+        }
+        if self._client_secret:
+            form["client_secret"] = self._client_secret
         try:
-            resp = await client.post(
-                "https://oauth2.googleapis.com/token",
-                data={
-                    "grant_type": "authorization_code",
-                    "client_id": self._client_id,
-                    "client_secret": self._client_secret,
-                    "redirect_uri": self._redirect_uri,
-                    "code": code,
-                    "code_verifier": verifier,
-                },
-            )
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise AuthenticationError(
-                f"Google OAuth token exchange failed: {exc.response.status_code}"
-            ) from exc
-
-        data = resp.json()
-        self._access_token = data["access_token"]
-        self._refresh_token = data.get("refresh_token")
-        self._granted_scopes = set(data.get("scope", "").split())
+            payload = await self._request_json("POST", TOKEN_URL, data=form, authorized=False)
+        except ConnectorError as exc:
+            raise AuthenticationError(f"Google OAuth token exchange failed: {exc}") from None
+        if not isinstance(payload, dict):
+            raise AuthenticationError("Google OAuth token exchange failed: malformed response.")
+        self._apply_token_payload(payload)
         self._authenticated = True
-        self._log.info("authenticated_via_oauth", scopes=list(self._granted_scopes))
+        self._log.info("authenticated_via_oauth", scopes=sorted(self._granted_scopes))
         return True
 
-    def updated_credentials(
-        self, original: dict[str, Any]
-    ) -> dict[str, Any] | None:
-        """Return a credentials dict to persist when this session produced
-        tokens the stored credentials don't have — a refresh rotated the
-        access token, or a one-time OAuth code was exchanged. ``None`` when
-        nothing changed. Without persisting these, every refreshed token
-        died with the connector instance and the user had to re-paste a
-        fresh token every hour.
-        """
+    def updated_credentials(self, original: dict[str, Any]) -> dict[str, Any] | None:
+        """Credentials to persist when this session produced new tokens (a
+        refresh, possibly rotating the refresh token, or a code exchange);
+        ``None`` when nothing changed."""
         if not self._access_token:
             return None
         if self._access_token == original.get("access_token") and (
@@ -187,330 +256,36 @@ class GoogleWorkspaceConnector(BaseConnector):
         updated["access_token"] = self._access_token
         if self._refresh_token:
             updated["refresh_token"] = self._refresh_token
+        if self._expires_at is not None:
+            updated["expires_at"] = self._expires_at
+        if "code" in original and self._granted_scopes:
+            updated["granted_scopes"] = sorted(self._granted_scopes)
         # A consumed one-time authorization code must never be replayed.
         updated.pop("code", None)
         updated.pop("code_verifier", None)
         return updated
 
-    async def _refresh_access_token(self) -> None:
-        if not self._refresh_token:
-            raise AuthenticationError("No refresh token available.")
-        client = self._get_client()
-        resp = await client.post(
-            "https://oauth2.googleapis.com/token",
-            data={
-                "grant_type": "refresh_token",
-                "client_id": self._client_id,
-                "client_secret": self._client_secret,
-                "refresh_token": self._refresh_token,
-            },
-        )
-        try:
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            # Google answers a revoked or expired grant with 400
-            # invalid_grant. That is a re-auth prompt, not an outage, so it
-            # must not reach BaseConnector.execute as a bare HTTPStatusError.
-            raise AuthenticationError(
-                f"Google token refresh failed: {exc.response.status_code}"
-            ) from exc
-        data = resp.json()
-        self._access_token = data["access_token"]
-
-    # -- Internal HTTP helpers -----------------------------------------------
-
-    def _headers(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {self._access_token}"}
-
-    async def _gapi_get(self, url: str, params: dict[str, Any] | None = None) -> Any:
-        client = self._get_client()
-        resp = await client.get(url, headers=self._headers(), params=params)
-        if resp.status_code == 401 and self._refresh_token:
-            await self._refresh_access_token()
-            resp = await client.get(url, headers=self._headers(), params=params)
-        resp.raise_for_status()
-        return resp.json()
-
-    async def _gapi_post(self, url: str, json_body: dict[str, Any]) -> Any:
-        client = self._get_client()
-        resp = await client.post(url, headers=self._headers(), json=json_body)
-        if resp.status_code == 401 and self._refresh_token:
-            await self._refresh_access_token()
-            resp = await client.post(url, headers=self._headers(), json=json_body)
-        resp.raise_for_status()
-        return resp.json()
-
-    # -- Gmail methods -------------------------------------------------------
-
-    async def get_messages(
-        self, query: str = "", max_results: int = 20
-    ) -> list[dict[str, Any]]:
-        """List Gmail messages matching *query* (Gmail search syntax)."""
-        data = await self._gapi_get(
-            "https://gmail.googleapis.com/gmail/v1/users/me/messages",
-            params={"q": query, "maxResults": max_results},
-        )
-        messages: list[dict[str, Any]] = []
-        for msg_stub in data.get("messages", []):
-            detail = await self.get_message(msg_stub["id"])
-            messages.append(detail)
-        return messages
-
-    # Order matters: the whole tree is searched for text/plain before
-    # text/html is considered at all, so a plain part buried three levels
-    # deep still wins over a top-level HTML alternative.
-    _BODY_MIME_PREFERENCE: tuple[str, ...] = ("text/plain", "text/html")
-
-    @staticmethod
-    def _decode_part_data(part: dict[str, Any]) -> str:
-        """Decode a MIME part's base64url body, tolerating missing padding."""
-        encoded = part.get("body", {}).get("data", "")
-        if not encoded:
-            return ""
-        return base64.urlsafe_b64decode(encoded + "==").decode("utf-8", errors="replace")
-
-    @classmethod
-    def _find_part(cls, part: dict[str, Any], mime_type: str) -> str:
-        """Depth-first search for the first *mime_type* part carrying data."""
-        if part.get("mimeType") == mime_type:
-            decoded = cls._decode_part_data(part)
-            if decoded:
-                return decoded
-        for child in part.get("parts", []):
-            found = cls._find_part(child, mime_type)
-            if found:
-                return found
-        return ""
-
-    @classmethod
-    def _extract_body(cls, payload: dict[str, Any]) -> str:
-        """Pull the readable text out of a Gmail ``payload`` MIME tree.
-
-        The walk has to recurse: Gmail wraps the text/plain part in a
-        multipart/alternative child as soon as the message carries an
-        attachment or is multipart/mixed, so scanning only the top level of
-        ``payload["parts"]`` returns an empty body for most real mail while
-        subject/from/snippet still populate — a silent truncation the caller
-        cannot detect. text/html is accepted only as a last resort: markup is
-        worse to read than plain text but far better than nothing, and the
-        body is sanitized by PromptGuard either way.
-        """
-        for mime_type in cls._BODY_MIME_PREFERENCE:
-            body = cls._find_part(payload, mime_type)
-            if body:
-                return body
-        return ""
-
-    async def get_message(self, message_id: str) -> dict[str, Any]:
-        """Fetch a single Gmail message by ID with content sanitization."""
-        raw = await self._gapi_get(
-            "https://gmail.googleapis.com/gmail/v1/users/me/messages/"
-            f"{path_segment(message_id)}",
-            params={"format": "full"},
-        )
-        # Extract useful fields
-        headers_list = raw.get("payload", {}).get("headers", [])
-        header_map = {h["name"].lower(): h["value"] for h in headers_list}
-
-        body_data = self._extract_body(raw.get("payload", {}))
-
-        # Sanitize email body before returning
-        sanitized_body, _ = PromptGuard.scan(body_data)
-
-        return {
-            "id": raw.get("id"),
-            "thread_id": raw.get("threadId"),
-            "subject": header_map.get("subject", ""),
-            "from": header_map.get("from", ""),
-            "to": header_map.get("to", ""),
-            "date": header_map.get("date", ""),
-            "snippet": raw.get("snippet", ""),
-            "body": sanitized_body,
-            "label_ids": raw.get("labelIds", []),
-        }
-
-    async def send_email(
-        self,
-        to: str,
-        subject: str,
-        body: str,
-        *,
-        user_confirmed: bool = False,
-    ) -> dict[str, Any]:
-        """Send an email, gated behind explicit user confirmation.
-
-        **Requires USER_CONFIRM**. Without confirmation nothing leaves the
-        process: the preview handed to ``UserConfirmationRequired`` is built
-        from the arguments, and the message is only composed and sent once
-        ``user_confirmed`` is set.
-
-        No Gmail draft is staged for the preview, deliberately. The approval
-        flow re-invokes this method with the *same* arguments plus
-        ``user_confirmed=True`` (``ConnectorToolExecutor._dispatch``), so a
-        draft id minted here cannot survive the round-trip and the confirmed
-        send could never adopt it; and on denial nothing calls the connector
-        at all, so there is no point where a staged draft could be cleaned
-        up. Either way the draft would be orphaned in the user's real
-        mailbox — on approval alongside the sent copy, on denial forever.
-        """
-        if not user_confirmed:
-            preview = body if len(body) <= 500 else body[:500] + "..."
-            raise UserConfirmationRequired(
-                action="send_email",
-                details=(
-                    f"Send email to '{to}' with subject '{subject}'?\n"
-                    f"Body:\n{preview}\n"
-                    "Nothing has been created or sent yet; confirm to send."
-                ),
-            )
-
-        mime = MIMEText(body)
-        mime["to"] = to
-        mime["subject"] = subject
-        raw_msg = base64.urlsafe_b64encode(mime.as_bytes()).decode()
-
-        send_resp = await self._gapi_post(
-            "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
-            json_body={"raw": raw_msg},
-        )
-        return {
-            "status": "sent",
-            "message_id": send_resp.get("id"),
-            "thread_id": send_resp.get("threadId"),
-        }
-
-    async def search_emails(self, query: str) -> list[dict[str, Any]]:
-        """Search Gmail using Gmail search syntax."""
-        return await self.get_messages(query=query, max_results=25)
-
-    # -- Calendar methods ----------------------------------------------------
-
-    async def get_events(
-        self,
-        time_min: Optional[str] = None,
-        time_max: Optional[str] = None,
-    ) -> list[dict[str, Any]]:
-        """Fetch calendar events within a time window (RFC 3339 strings).
-
-        Defaults to the next 7 days when no window is given, matching the
-        tool catalog where both parameters are optional.
-        """
-        time_min, time_max = self._default_window(time_min, time_max)
-        data = await self._gapi_get(
-            "https://www.googleapis.com/calendar/v3/calendars/primary/events",
-            params={
-                "timeMin": time_min,
-                "timeMax": time_max,
-                "singleEvents": True,
-                "orderBy": "startTime",
-                "maxResults": 100,
-            },
-        )
-        return data.get("items", [])
-
-    async def create_event(
-        self,
-        event_data: dict[str, Any],
-        *,
-        user_confirmed: bool = False,
-    ) -> dict[str, Any]:
-        """Create a calendar event.
-
-        **Requires USER_CONFIRM** before the event is actually created.
-        """
-        if not user_confirmed:
-            summary = event_data.get("summary", "Untitled event")
-            start = event_data.get("start", {})
-            raise UserConfirmationRequired(
-                action="create_event",
-                details=(
-                    f"Create calendar event '{summary}' starting at "
-                    f"{start.get('dateTime', start.get('date', '?'))}? "
-                    "Please confirm."
-                ),
-            )
-
-        return await self._gapi_post(
-            "https://www.googleapis.com/calendar/v3/calendars/primary/events",
-            json_body=event_data,
-        )
-
-    @staticmethod
-    def _default_window(
-        time_min: Optional[str], time_max: Optional[str]
-    ) -> tuple[str, str]:
-        from datetime import datetime, timedelta, timezone
-
-        now = datetime.now(timezone.utc)
-        return (
-            time_min or now.isoformat(),
-            time_max or (now + timedelta(days=7)).isoformat(),
-        )
-
-    async def check_availability(
-        self,
-        time_min: Optional[str] = None,
-        time_max: Optional[str] = None,
-    ) -> dict[str, Any]:
-        """Check free/busy status for the primary calendar (defaults to the
-        next 7 days)."""
-        time_min, time_max = self._default_window(time_min, time_max)
-        data = await self._gapi_post(
-            "https://www.googleapis.com/calendar/v3/freeBusy",
-            json_body={
-                "timeMin": time_min,
-                "timeMax": time_max,
-                "items": [{"id": "primary"}],
-            },
-        )
-        calendars = data.get("calendars", {})
-        primary = calendars.get("primary", {})
-        busy_slots = primary.get("busy", [])
-        return {
-            "time_min": time_min,
-            "time_max": time_max,
-            "busy_slots": busy_slots,
-            "is_free": len(busy_slots) == 0,
-        }
-
-    # -- execute dispatch ----------------------------------------------------
-
     async def _execute_action(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
-        method_name = self._ACTION_MAP.get(action)
-        if not method_name:
-            raise ConnectorError(f"Unknown Google Workspace action: {action}")
-        method = getattr(self, method_name)
-        result = await method(**params)
-        if isinstance(result, list):
-            return {"items": result, "count": len(result)}
-        return result
+        return await self._dispatch(action, params)
 
-    # -- Health check --------------------------------------------------------
+    # -- Health check ------------------------------------------------------------
 
-    # (scope prefix, probe URL) pairs, cheapest first. The connector is
-    # healthy when the stored token can reach *any* surface it was granted:
-    # probing Gmail alone failed every calendar-only connector — an
-    # incremental-auth grant the platform explicitly supports — and told the
-    # user their credentials were invalid when they were merely narrower
-    # than the probe.
-    _HEALTH_PROBES: tuple[tuple[str, str], ...] = (
+    # (scope prefix, probe URL, query), cheapest first. The connector is
+    # healthy when the token reaches any surface it was granted: probing
+    # Gmail alone failed every calendar-only (incrementally granted) row.
+    _HEALTH_PROBES: tuple[tuple[str, str, Optional[dict[str, Any]]], ...] = (
+        (f"{SCOPE_BASE}gmail", f"{GMAIL_API}/profile", None),
+        (f"{SCOPE_BASE}calendar", f"{CALENDAR_API}/users/me/calendarList", {"maxResults": 1}),
+        (f"{SCOPE_BASE}drive", f"{DRIVE_API}/about", {"fields": "user"}),
         (
-            "https://www.googleapis.com/auth/gmail",
-            "https://gmail.googleapis.com/gmail/v1/users/me/profile",
-        ),
-        (
-            "https://www.googleapis.com/auth/calendar",
-            "https://www.googleapis.com/calendar/v3/users/me/calendarList",
+            f"{SCOPE_BASE}contacts",
+            f"{PEOPLE_API}/people/me/connections",
+            {"personFields": "names", "pageSize": 1},
         ),
     )
 
-    def _ordered_health_probes(self) -> tuple[tuple[str, str], ...]:
-        """Probes to try, granted surfaces first.
-
-        ``_granted_scopes`` is only populated by the OAuth exchange; a
-        connector configured with a raw access token knows nothing about
-        its scopes, so every probe is tried in that case.
-        """
+    def _ordered_health_probes(self) -> tuple[tuple[str, str, Optional[dict[str, Any]]], ...]:
+        """Probes to try: the granted surfaces when the grant is known, else all."""
         if not self._granted_scopes:
             return self._HEALTH_PROBES
         granted = tuple(
@@ -520,19 +295,145 @@ class GoogleWorkspaceConnector(BaseConnector):
         )
         return granted or self._HEALTH_PROBES
 
+    def _probe_less_grant(self) -> bool:
+        """A known grant with no probe surface (only Docs or Sheets)."""
+        return bool(self._granted_scopes) and not any(
+            s.startswith(p[0]) for p in self._HEALTH_PROBES for s in self._granted_scopes
+        )
+
+    async def _probe(self) -> bool:
+        """True when a probe answers 200. A 403 (the token lacks that API's
+        scope) tries the next surface; any other failure raises.
+
+        A usage limit (``RateLimitExceededError``, including Google's
+        rate-limit 403s) also counts as healthy: Google meters an
+        authenticated caller, so the token was accepted, and "re-enter
+        your credentials" would be the wrong advice.
+        """
+        if self._probe_less_grant():
+            # Docs and Sheets have no id-free GET. Drive's /about answers
+            # 403 for a valid token without Drive scopes, and 401 for a bad
+            # one, so a 403 here still proves the token works.
+            try:
+                await self._request("GET", f"{DRIVE_API}/about", params={"fields": "user"})
+            except RateLimitExceededError:
+                pass
+            except AuthenticationError as exc:
+                if error_status(exc) != 403:
+                    raise
+            return True
+        for _, url, params in self._ordered_health_probes():
+            try:
+                await self._request("GET", url, params=params)
+                return True
+            except RateLimitExceededError:
+                return True
+            except AuthenticationError as exc:
+                if error_status(exc) != 403:
+                    raise
+        return False
+
     async def health_check(self) -> bool:
+        """One cheap authenticated GET (per granted surface until one answers).
+
+        A 401 with a refresh token and client id refreshes once and probes
+        again; the refreshed token is then persisted by the caller through
+        ``updated_credentials``.
+        """
         try:
-            client = self._get_client()
-            for _, url in self._ordered_health_probes():
-                resp = await client.get(url, headers=self._headers())
-                if resp.status_code == 200:
-                    return True
-                if resp.status_code != 403:
-                    # 403 is "this token lacks that API's scope" — the only
-                    # answer worth trying another surface for. A 401 means
-                    # the token itself is bad and every surface will refuse
-                    # it, and a 5xx is an outage, not a scope question.
-                    return False
+            return await self._probe()
+        except AuthenticationError as exc:
+            if error_status(exc) != 401 or not (self._can_refresh() and self._client_id):
+                return False
+        except ConnectorError:
             return False
-        except Exception:
+        try:
+            await self._refresh_access_token()
+            return await self._probe()
+        except ConnectorError:
             return False
+
+    async def revoke(self) -> bool:
+        """Revoke the grant at Google (the refresh token revokes all of it).
+
+        Google's revoke endpoint needs no client secret: a form POST of the
+        token, without our Authorization header. True on 200.
+        """
+        token = self._refresh_token or self._access_token
+        if not token:
+            return False
+        try:
+            await self._request("POST", REVOKE_URL, data={"token": token}, authorized=False)
+        except ConnectorError:
+            return False
+        return True
+
+
+DEFINITION = ConnectorDefinition(
+    key="google_workspace",
+    label="Google Workspace",
+    description=(
+        "Gmail, Google Calendar, Drive, Docs, Sheets and Contacts: read and send mail, "
+        "manage events, find and edit files, documents, spreadsheets and contacts."
+    ),
+    icon="mail",
+    auth=AuthSpec(
+        methods=("oauth", "token"),
+        fields=(
+            CredentialField(
+                "access_token",
+                "OAuth access token",
+                placeholder="ya29....",
+                hint="Token with the Google scopes you grant below.",
+            ),
+            CredentialField(
+                "refresh_token",
+                "Refresh token (strongly recommended)",
+                required=False,
+                placeholder="Without this, the connection stops working in about 1 hour",
+                hint=(
+                    "Google access tokens expire after about an hour. With a refresh "
+                    "token + client credentials, Crawler AI renews and saves tokens "
+                    "automatically; without them you must paste a fresh token every hour."
+                ),
+            ),
+            CredentialField(
+                "client_id",
+                "OAuth client ID (needed for auto-refresh)",
+                type="text",
+                required=False,
+                placeholder="Required for automatic renewal",
+            ),
+            CredentialField(
+                "client_secret",
+                "OAuth client secret (needed for auto-refresh)",
+                required=False,
+                placeholder="Required for automatic renewal",
+            ),
+        ),
+        oauth=OAUTH,
+        # The value the connector form has always stored for a pasted
+        # Google token.
+        token_auth_method="oauth2",
+        notes="OAuth access token with the Gmail/Calendar scopes you intend to grant.",
+    ),
+    network=NetworkSpec(
+        policy_key="google",
+        hosts={
+            # "/gmail/" on www and "/tokeninfo" stay because the narrower
+            # literal backstop in core/network_security.py lists them, and
+            # the registry policy must stay a superset of it.
+            "www.googleapis.com": ("/calendar/", "/gmail/", "/drive/v3/", "/upload/drive/v3/"),
+            "gmail.googleapis.com": ("/gmail/v1/",),
+            "docs.googleapis.com": ("/v1/documents",),
+            "sheets.googleapis.com": ("/v4/spreadsheets",),
+            "people.googleapis.com": ("/v1/people",),
+            "oauth2.googleapis.com": ("/token", "/tokeninfo", "/revoke"),
+            "accounts.google.com": ("/o/oauth2/",),
+        },
+        https_only=True,
+    ),
+    actions=ACTIONS,
+    connector_class=GoogleWorkspaceConnector,
+    docs_url="https://developers.google.com/identity/protocols/oauth2",
+)

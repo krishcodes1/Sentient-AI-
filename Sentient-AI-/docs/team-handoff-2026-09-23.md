@@ -37,10 +37,12 @@ cd Sentient-AI-/frontend && npx vitest run && npx tsc -b
 Read `backend/services/capabilities/README.md` — five steps, ~30 minutes for a simple tool family:
 
 1. Toolkit in `services/tools/<family>.py` (`execute(action, params) -> dict`, fail closed).
-2. `ToolSpec`s in `CONNECTOR_CATALOG`, policy rows in `permissions.py`, type in `BUILTIN_CONNECTOR_TYPES` + `_BUILTIN_STANCE`, entry in the executor's `_builtins` map.
+2. `ToolSpec`s in `CONNECTOR_CATALOG`, policy rows in `permissions.py`, type in `BUILTIN_CONNECTOR_TYPES` + `_BUILTIN_STANCE`, entry in the executor's `_builtins` map. Exception: a family the agent runtime answers itself (today `tools`, for `tools.find`) goes in `RUNTIME_BUILTIN_TYPES` instead of `_builtins` and has no toolkit.
 3. Copy `services/capabilities/_template.py` → `<key>.py`, add to `REGISTRY`.
 4. Tests for the toolkit and for your capability's `availability` / `probe`.
 5. `python3 -m pytest tests/test_capabilities_registry.py tests/test_capabilities_report.py tests/test_wiring.py tests/test_capability_gating.py -q` — it fails loudly if you misdeclare anything.
+
+A chat channel (Telegram, Slack DMs) is a capability with `tools=()`: its switch turns the channel on or off and its `availability()` reads a `ReportContext` fact (`telegram_configured`, `slack_configured`, the latter fed by `InstallationService.set_slack_status`). Both patterns are in the capabilities README ("Runtime built-ins", "Channels: capabilities with no tools"). A connector to an outside service (Google, GitHub, Slack workspace tools and so on) is not a capability: see `backend/services/connectors/README.md`.
 
 Rules that are enforced, not optional: consequential actions (send, create account, spend, delete, install, type into a form) are WRITE/DELETE/EXECUTE so the approval flow applies; never ask for a password in chat; secrets never reach logs, audit rows or error bodies.
 

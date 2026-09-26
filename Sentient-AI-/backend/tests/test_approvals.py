@@ -377,7 +377,45 @@ async def test_auto_approve_tier_executes_write_without_parking(session_factory)
     from tests.conftest import make_user
 
     user, _ = await make_user(session_factory)
+    event = {"summary": "Standup", "start": {"dateTime": "2026-10-01T09:00:00Z"}}
     runtime, executor, audit = _build_runtime(
+        session_factory,
+        [ToolCall(id="tc1", name="google_workspace.create_event",
+                  arguments={"event_data": event})],
+    )
+    tools = build_tools(
+        [ConnectorSpec("google_workspace", permission_tier="auto_approve")],
+        user_default_tier="auto_approve",
+    )
+
+    response = await runtime.chat(
+        messages=[{"role": "user", "content": "add standup to my calendar"}],
+        tools=tools,
+        user_id=str(user.id),
+    )
+
+    assert response.pending_approvals == []
+    assert executor.calls == [
+        {
+            "tool": "google_workspace.create_event",
+            "arguments": {"event_data": event},
+            "approved": True,
+        }
+    ]
+    assert any(e["event"] == "tool_executed" for e in audit.entries)
+
+
+@pytest.mark.asyncio
+async def test_auto_approve_tier_still_parks_always_confirm_send_email(session_factory):
+    """send_email is always_confirm: even with an auto_approve connector and
+    account default, the call is parked for approval and never executed on
+    standing consent."""
+    from services.agent.providers import ToolCall
+    from services.agent.tool_registry import ConnectorSpec, build_tools
+    from tests.conftest import make_user
+
+    user, _ = await make_user(session_factory)
+    runtime, executor, _ = _build_runtime(
         session_factory,
         [ToolCall(id="tc1", name="google_workspace.send_email",
                   arguments={"to": "x@y.com", "subject": "s", "body": "b"})],
@@ -393,15 +431,10 @@ async def test_auto_approve_tier_executes_write_without_parking(session_factory)
         user_id=str(user.id),
     )
 
-    assert response.pending_approvals == []
-    assert executor.calls == [
-        {
-            "tool": "google_workspace.send_email",
-            "arguments": {"to": "x@y.com", "subject": "s", "body": "b"},
-            "approved": True,
-        }
+    assert executor.calls == []
+    assert [pa.tool_name for pa in response.pending_approvals] == [
+        "google_workspace.send_email"
     ]
-    assert any(e["event"] == "tool_executed" for e in audit.entries)
 
 
 @pytest.mark.asyncio

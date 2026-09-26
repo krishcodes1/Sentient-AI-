@@ -75,6 +75,15 @@ FROM nginx:1.27-alpine AS prod
 COPY --from=build /app/dist /usr/share/nginx/html
 
 COPY <<'EOF' /etc/nginx/conf.d/default.conf
+# The default "main" format logs $request, which carries the query string.
+# On the OAuth callback that is the authorization code and state, so that
+# location logs the decoded path ($uri) only, and no Referer (the page the
+# provider redirected from can carry the state in its own URL).
+log_format oauth_callback '$remote_addr - $remote_user [$time_local] '
+                          '"$request_method $uri $server_protocol" '
+                          '$status $body_bytes_sent "$http_user_agent" '
+                          '"$http_x_forwarded_for"';
+
 server {
     listen 80;
     server_name _;
@@ -132,6 +141,25 @@ server {
         # turn must survive longer gaps than nginx's 60s default, and the
         # stream must not be buffered (the backend also sends
         # X-Accel-Buffering: no).
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+        proxy_buffering off;
+    }
+
+    # OAuth provider redirects land here with ?code=...&state=...: proxied
+    # exactly like /api/ (keep the two blocks in sync), but access-logged
+    # without the query string (log_format oauth_callback above). Error
+    # lines quote the full request line, so only crit ones are kept here;
+    # an upstream failure still shows as a 502 in the access log.
+    location /api/oauth/callback/ {
+        access_log /var/log/nginx/access.log oauth_callback;
+        error_log /var/log/nginx/error.log crit;
+        proxy_pass http://backend:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
         proxy_read_timeout 300s;
         proxy_send_timeout 300s;
         proxy_buffering off;

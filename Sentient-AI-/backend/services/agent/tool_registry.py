@@ -65,7 +65,7 @@ import hashlib
 import json
 import uuid as uuid_module
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Iterable, Literal, Mapping, Optional
 
 import structlog
@@ -116,187 +116,17 @@ _EMPTY_SCHEMA: dict[str, Any] = {"type": "object", "properties": {}, "required":
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class ToolSpec:
-    """Declarative description of one connector action.
+# ToolSpec and _schema live in services/connectors/definition.py so that
+# connector modules can declare their own catalogs without importing this
+# module; they are re-exported here under the same names.
+from services.connectors import registry as connector_registry  # noqa: E402
+from services.connectors.definition import ToolSpec, _schema  # noqa: E402
 
-    ``policy_key`` is the connector_type string the permission engine is
-    keyed by, which for Google differs per action (gmail vs
-    google_calendar). It defaults to the owning connector_type.
-
-    ``required_scope`` is the connector scope a user must have granted for
-    this action to be offered and executed. ``None`` means the action has
-    no scope gate beyond its permission tier.
-    """
-
-    action: str
-    description: str
-    category: ActionCategory
-    parameters: dict[str, Any] = field(default_factory=dict)
-    policy_key: Optional[str] = None
-    required_scope: Optional[str] = None
-
-
-def _schema(**props: dict[str, Any]) -> dict[str, Any]:
-    """Build a minimal JSON-schema object for tool parameters."""
-    required = [k for k, v in props.items() if v.get("required")]
-    return {
-        "type": "object",
-        "properties": {
-            k: {key: val for key, val in v.items() if key != "required"}
-            for k, v in props.items()
-        },
-        "required": required,
-    }
-
-
-# Keyed by ConnectorType enum value.
+# Keyed by connector type. The connector entries come from each connector
+# module's DEFINITION (services/connectors/registry.py); the built-in
+# families below are written here.
 CONNECTOR_CATALOG: dict[str, list[ToolSpec]] = {
-    "canvas": [
-        ToolSpec(
-            "get_courses",
-            "List the user's active Canvas courses.",
-            ActionCategory.READ,
-            required_scope="courses.read",
-        ),
-        ToolSpec(
-            "get_assignments",
-            "List assignments for a Canvas course.",
-            ActionCategory.READ,
-            _schema(course_id={"type": "string", "description": "Canvas course id", "required": True}),
-            required_scope="assignments.read",
-        ),
-        ToolSpec(
-            "get_grades",
-            "Get the user's grades for a Canvas course.",
-            ActionCategory.READ,
-            _schema(course_id={"type": "string", "description": "Canvas course id", "required": True}),
-            required_scope="grades.read",
-        ),
-        ToolSpec(
-            "get_calendar_events",
-            "List upcoming Canvas calendar events.",
-            ActionCategory.READ,
-            required_scope="calendar.read",
-        ),
-        ToolSpec(
-            "get_submissions",
-            "List submissions for a Canvas assignment.",
-            ActionCategory.READ,
-            _schema(
-                course_id={"type": "string", "required": True},
-                assignment_id={"type": "string", "required": True},
-            ),
-            required_scope="submissions.read",
-        ),
-        ToolSpec(
-            "submit_assignment",
-            "Submit work to a Canvas assignment.",
-            ActionCategory.WRITE,
-            _schema(
-                course_id={"type": "string", "required": True},
-                assignment_id={"type": "string", "required": True},
-                submission_data={"type": "object", "required": True},
-            ),
-            required_scope="submissions.write",
-        ),
-    ],
-    "google_workspace": [
-        ToolSpec(
-            "get_messages",
-            "List recent Gmail messages, optionally filtered by query.",
-            ActionCategory.READ,
-            _schema(query={"type": "string"}, max_results={"type": "integer"}),
-            policy_key="gmail",
-            required_scope="gmail.read",
-        ),
-        ToolSpec(
-            "get_message",
-            "Fetch a single Gmail message by id.",
-            ActionCategory.READ,
-            _schema(message_id={"type": "string", "required": True}),
-            policy_key="gmail",
-            required_scope="gmail.read",
-        ),
-        ToolSpec(
-            "search_emails",
-            "Search Gmail messages with a query string.",
-            ActionCategory.READ,
-            _schema(query={"type": "string", "required": True}),
-            policy_key="gmail",
-            required_scope="gmail.read",
-        ),
-        ToolSpec(
-            "send_email",
-            "Send an email via Gmail.",
-            ActionCategory.WRITE,
-            _schema(
-                to={"type": "string", "required": True},
-                subject={"type": "string", "required": True},
-                body={"type": "string", "required": True},
-            ),
-            policy_key="gmail",
-            required_scope="gmail.send",
-        ),
-        ToolSpec(
-            "get_events",
-            "List upcoming Google Calendar events.",
-            ActionCategory.READ,
-            _schema(time_min={"type": "string"}, time_max={"type": "string"}),
-            policy_key="google_calendar",
-            required_scope="calendar.read",
-        ),
-        ToolSpec(
-            "check_availability",
-            "Check Google Calendar availability for a time range.",
-            ActionCategory.READ,
-            _schema(time_min={"type": "string"}, time_max={"type": "string"}),
-            policy_key="google_calendar",
-            required_scope="calendar.read",
-        ),
-        ToolSpec(
-            "create_event",
-            "Create a Google Calendar event.",
-            ActionCategory.WRITE,
-            _schema(
-                event_data={
-                    "type": "object",
-                    "description": "Google Calendar event resource (summary, start, end, ...)",
-                    "required": True,
-                },
-            ),
-            policy_key="google_calendar",
-            required_scope="calendar.write",
-        ),
-    ],
-    "robinhood": [
-        ToolSpec(
-            "get_crypto_portfolio",
-            "View the Robinhood crypto portfolio (read-only).",
-            ActionCategory.READ,
-            required_scope="crypto.read",
-        ),
-        ToolSpec(
-            "get_crypto_prices",
-            "Get current prices for crypto symbols (read-only).",
-            ActionCategory.READ,
-            _schema(symbols={"type": "array", "items": {"type": "string"}, "required": True}),
-            required_scope="crypto.read",
-        ),
-        ToolSpec(
-            "get_crypto_holdings",
-            "View current crypto holdings (read-only).",
-            ActionCategory.READ,
-            required_scope="crypto.read",
-        ),
-        ToolSpec(
-            "execute_trade",
-            "Execute a crypto trade. Permanently blocked by platform policy.",
-            ActionCategory.FINANCIAL,
-            _schema(symbol={"type": "string", "required": True}, side={"type": "string", "required": True}),
-            required_scope="crypto.trade",
-        ),
-    ],
+    **connector_registry.catalog_entries(),
     # Built-in: no credentials, no connector row, no scopes to grant, so
     # every action here is deliberately scope-free. Read-only by
     # construction — the permission engine hard-blocks every other
@@ -603,6 +433,73 @@ _BUILTIN_STANCE: dict[str, str] = {
     # their approval card under every account default, like system does.
     "browser": "user_confirm",
 }
+
+# Built-in, answered by the agent runtime rather than the executor:
+# tools.find searches every tool this user can use in the current turn (the
+# offered array is capped, see context_manager.select_offered_tools) and
+# loads what it finds into the conversation's offered set. It needs the
+# turn's full tool list, which only the runtime holds, so the family has no
+# executor entry and the executor refuses it. READ only: every other
+# category is hard-blocked for the type. Always on (ALWAYS_ON_TOOLS in
+# services/capabilities), since it is how the model reaches the rest.
+# Declared as separate statements so the literals above stay untouched.
+from services.agent.permissions import register_default_policies  # noqa: E402
+
+RUNTIME_BUILTIN_TYPES: frozenset[str] = frozenset({"tools"})
+CONNECTOR_CATALOG["tools"] = [
+    ToolSpec(
+        "find",
+        "Find tools you were not offered among every tool the user can use, "
+        "connected services included. Returns up to 8 matching tool names "
+        "with their descriptions; the ones found are offered from your next "
+        "step on.",
+        ActionCategory.READ,
+        _schema(
+            query={
+                "type": "string",
+                "description": "A few words about the action, e.g. 'list open github issues'",
+                "required": True,
+            },
+            connector={
+                "type": "string",
+                "description": "Only this connector's tools, e.g. 'github' (optional)",
+            },
+        ),
+    ),
+]
+BUILTIN_CONNECTOR_TYPES = (*BUILTIN_CONNECTOR_TYPES, "tools")
+_BUILTIN_STANCE["tools"] = "auto_approve"
+register_default_policies(
+    {
+        ("tools", ActionCategory.READ): PermissionTier.AUTO_APPROVE,
+        ("tools", ActionCategory.WRITE): PermissionTier.HARD_BLOCKED,
+        ("tools", ActionCategory.DELETE): PermissionTier.HARD_BLOCKED,
+        ("tools", ActionCategory.EXECUTE): PermissionTier.HARD_BLOCKED,
+        ("tools", ActionCategory.FINANCIAL): PermissionTier.HARD_BLOCKED,
+    }
+)
+
+# Built-ins the prompt's playbooks rely on, offered ahead of the rest when
+# the tool array is over its cap (build_tools sets Tool.starter). Connector
+# starters come from their ToolSpec.starter instead. The browser, desktop
+# and installer tools are capability gated, so they take a slot only when
+# the owner switched them on; a connector with dozens of actions must not
+# push them out (the Browser and Computer playbooks apply only when
+# browser.read and desktop.act are offered).
+_BUILTIN_STARTER_TOOLS: frozenset[str] = frozenset(
+    {
+        "web.screenshot",
+        "reminders.create",
+        "reminders.list",
+        "reminders.cancel",
+        "system.capabilities",
+        "system.install_capability",
+        "browser.read",
+        "desktop.screenshot",
+        "desktop.observe",
+        "desktop.act",
+    }
+)
 
 
 def connector_scopes(connector_type: str) -> dict[str, list[str]]:
@@ -1092,6 +989,10 @@ def build_tools(
             )
             if runtime_decision == "blocked":
                 continue
+            if spec.always_confirm and runtime_decision == "approved":
+                # An always-confirm action gets an approval card under every
+                # tier, even where its policy row is AUTO_APPROVE (spec 4.4).
+                runtime_decision = "requires_approval"
             # auto_approve tier downgrades approval-gated tools to auto —
             # never financial/hard-blocked ones (those are filtered above,
             # but the guard is kept for defense in depth).
@@ -1100,6 +1001,7 @@ def build_tools(
                 and runtime_decision == "requires_approval"
                 and spec.category != ActionCategory.FINANCIAL
                 and not is_hard_blocked_action(spec.action)
+                and not spec.always_confirm
             ):
                 runtime_decision = "approved"
             cap = _capability_of(offer.connector_type, spec.action)
@@ -1117,6 +1019,8 @@ def build_tools(
                     parameters=spec.parameters or dict(_EMPTY_SCHEMA),
                     connector_type=offer.connector_type,
                     permission_tier="auto" if runtime_decision == "approved" else "approval",
+                    starter=spec.starter
+                    or f"{offer.connector_type}.{spec.action}" in _BUILTIN_STARTER_TOOLS,
                 )
             )
     return tools
@@ -1203,9 +1107,18 @@ class RuntimePermissionAdapter:
             scope=resolved.spec.category,
             user_tier=self._user_tier,
         )
+        runtime_decision = _runtime_decision(
+            decision.allowed, decision.requires_approval, decision.tier
+        )
+        reason = decision.reason
+        if resolved.spec.always_confirm and runtime_decision == "approved":
+            # Second always-confirm layer: whatever the policy row says, the
+            # call goes to the approval card. "blocked" stays blocked.
+            runtime_decision = "requires_approval"
+            reason = f"Action '{resolved.action}' always requires your approval."
         return (
-            _runtime_decision(decision.allowed, decision.requires_approval, decision.tier),
-            decision.reason,
+            runtime_decision,
+            reason,
             f"{resolved.policy_key}:{resolved.spec.category.value}",
         )
 
@@ -1569,6 +1482,18 @@ class ConnectorToolExecutor:
                 "error": refusal.reason,
             }
 
+        if resolved.connector_type in RUNTIME_BUILTIN_TYPES:
+            # tools.find needs the turn's full tool list, which only the
+            # agent runtime holds; it answers the call itself. Reaching here
+            # means a caller bypassed it, so refuse rather than guess.
+            return {
+                "ok": False,
+                "error": (
+                    f"{resolved.connector_type}.{resolved.action} is answered by "
+                    "the agent runtime during a chat turn, not by the tool executor."
+                ),
+            }
+
         builtin = self._builtins.get(resolved.connector_type)
         if builtin is not None:
             category = resolved.spec.category
@@ -1647,12 +1572,26 @@ class ConnectorToolExecutor:
                 ),
             }
 
+        if resolved.spec.always_confirm and not approved:
+            # Third always-confirm layer (spec 4.4). build_tools never
+            # offers these as auto, so approved=False here means no human
+            # said yes; refuse before any rate-limit slot or connector is
+            # spent, whatever the connector method itself would do.
+            return {
+                "ok": False,
+                "requires_approval": True,
+                "error": (
+                    f"Action requires user confirmation: "
+                    f"{resolved.connector_type}.{resolved.action} always needs "
+                    "your approval before it runs."
+                ),
+            }
+
         from services.connectors.base import (
             AuthenticationError,
             ConnectorError,
             HardBlockError,
             RateLimitExceededError,
-            UserConfirmationRequired,
         )
 
         limiter_error = self._acquire_rate_limit(
@@ -1661,95 +1600,219 @@ class ConnectorToolExecutor:
         if limiter_error:
             return {"ok": False, "error": limiter_error}
 
+        from services.connectors import oauth as oauth_broker
         from services.connectors.factory import create_connector
+
+        # A broker-made OAuth row whose access token is expiring is refreshed
+        # (and persisted) before the call, under the broker's per-row lock,
+        # so concurrent calls refresh once. Every other row passes through.
+        credentials: dict[str, Any] = config["credentials"]
+        try:
+            credentials = await oauth_broker.ensure_fresh_credentials(
+                self._session_factory,
+                config_id=config["id"],
+                connector_type=resolved.connector_type,
+                credentials=credentials,
+            )
+        except ConnectorError as exc:
+            # Fixed broker text ("<Label> needs to be reconnected ..." or a
+            # "try again shortly"), never a token or a provider body.
+            return {"ok": False, "error": str(exc)}
+        except Exception as exc:
+            logger.error(
+                "connector_token_refresh_unexpected_error",
+                connector=resolved.connector_type,
+                error_type=type(exc).__name__,
+            )
+            return {
+                "ok": False,
+                "error": "Could not refresh the connector sign-in. Try again shortly.",
+            }
 
         try:
             connector = create_connector(
                 resolved.connector_type,
-                config["credentials"],
+                credentials,
                 rate_limit=config["rate_limit_per_minute"],
             )
         except ConnectorError as exc:
             return {"ok": False, "error": str(exc)}
 
         try:
-            await connector.authenticate(config["credentials"])
             try:
-                response = await connector.execute(resolved.action, dict(arguments))
-            except UserConfirmationRequired as exc:
-                if not approved:
-                    return {
-                        "ok": False,
-                        "requires_approval": True,
-                        "error": f"Action requires user confirmation: {exc.details}",
-                    }
-                response = await connector.execute(
-                    resolved.action, {**arguments, "user_confirmed": True}
+                return await self._invoke_connector(
+                    connector, credentials, resolved, arguments, approved
                 )
-            return {
-                "ok": True,
-                "connector": resolved.connector_type,
-                "action": resolved.action,
-                "result": response.data,
-                "sanitized": response.sanitized,
-                "execution_time_ms": response.execution_time_ms,
-            }
+            except AuthenticationError as exc:
+                if not self._should_retry_auth(
+                    connector, resolved.connector_type, credentials, exc
+                ):
+                    raise
+            # The provider refused the token (a 401: it did not act), so one
+            # forced refresh and a single retry is safe even for a write.
+            logger.info(
+                "connector_auth_retry_after_refresh",
+                connector=resolved.connector_type,
+                action=resolved.action,
+            )
+            credentials = await oauth_broker.ensure_fresh_credentials(
+                self._session_factory,
+                config_id=config["id"],
+                connector_type=resolved.connector_type,
+                credentials=credentials,
+                force=True,
+            )
+            return await self._invoke_connector(
+                connector, credentials, resolved, arguments, approved
+            )
         except HardBlockError as exc:
             return {"ok": False, "error": str(exc)}
-        except (AuthenticationError, RateLimitExceededError) as exc:
+        except AuthenticationError as exc:
+            return {"ok": False, "error": self._auth_refusal(exc, resolved, credentials)}
+        except RateLimitExceededError as exc:
             return {"ok": False, "error": str(exc)}
         except ConnectorError as exc:
             return {"ok": False, "error": str(exc)}
         except Exception as exc:  # never leak a raw traceback into the chat
+            # Only the exception type: an unexpected error's text can carry
+            # a URL with a token in it, and this result reaches the model.
             logger.error(
                 "connector_dispatch_unexpected_error",
                 connector=resolved.connector_type,
                 action=resolved.action,
-                error=str(exc),
+                error_type=type(exc).__name__,
             )
-            return {"ok": False, "error": f"Connector failure: {exc}"}
+            return {
+                "ok": False,
+                "error": f"Connector failure ({type(exc).__name__}).",
+            }
         finally:
-            # Persist tokens the connector rotated during this call (e.g. a
-            # Google refresh) before the instance is thrown away — even when
-            # the API call itself failed, a newly minted token is valid and
-            # saves the next call a round trip (or a dead connector).
+            # Persist tokens a legacy connector rotated during this call (a
+            # Google or Canvas refresh of a pasted token) before the instance
+            # is thrown away, even when the API call itself failed: a newly
+            # minted token is valid and saves the next call a round trip (or
+            # a dead connector). Compared with the credentials this call
+            # actually used, so a broker refresh is never written twice.
             updater = getattr(connector, "updated_credentials", None)
             if callable(updater):
                 try:
-                    new_creds = updater(config["credentials"])
+                    new_creds = updater(credentials)
                     if new_creds:
                         await self._persist_credentials(config["id"], new_creds)
                 except Exception as exc:
                     logger.warning(
                         "credential_persist_failed",
                         connector=resolved.connector_type,
-                        error=str(exc),
+                        error_type=type(exc).__name__,
                     )
             await connector.close()
+
+    async def _invoke_connector(
+        self,
+        connector: Any,
+        credentials: dict[str, Any],
+        resolved: ResolvedTool,
+        arguments: Mapping[str, Any],
+        approved: bool,
+    ) -> dict[str, Any]:
+        """Authenticate *connector* and run the action once.
+
+        A connector-level confirmation request becomes the approval
+        refusal unless the call was *approved*, in which case the action
+        is re-run with ``user_confirmed``. Connector errors propagate.
+        """
+        from services.connectors.base import UserConfirmationRequired
+
+        await connector.authenticate(credentials)
+        try:
+            response = await connector.execute(resolved.action, dict(arguments))
+        except UserConfirmationRequired as exc:
+            if not approved:
+                return {
+                    "ok": False,
+                    "requires_approval": True,
+                    "error": f"Action requires user confirmation: {exc.details}",
+                }
+            response = await connector.execute(
+                resolved.action, {**arguments, "user_confirmed": True}
+            )
+        return {
+            "ok": True,
+            "connector": resolved.connector_type,
+            "action": resolved.action,
+            "result": response.data,
+            "sanitized": response.sanitized,
+            "execution_time_ms": response.execution_time_ms,
+        }
+
+    @staticmethod
+    def _should_retry_auth(
+        connector: Any,
+        connector_type: str,
+        credentials: Mapping[str, Any],
+        exc: Exception,
+    ) -> bool:
+        """True when a refused call deserves one forced broker refresh.
+
+        Only broker-made rows (``oauth_provider`` names this connector's
+        OAuth provider and a refresh token is stored) qualify. A 403 is a
+        missing scope, which a new access token cannot fix, and a
+        connector that already refreshed its own token during the call has
+        nothing a second refresh would change. The status comes from the
+        structured ``status_code`` that ``base.http_error_for`` sets. Only
+        when a connector re-raised a mapped error without copying that
+        attribute (Gmail's reply/forward scope hint keeps the
+        ``"HTTP 403 "`` prefix of the original message) is the prefix read
+        as a narrow fallback, so such a 403 is not retried either.
+        """
+        status = getattr(exc, "status_code", None)
+        if status is None and str(exc).startswith("HTTP 403 "):
+            status = 403
+        if status == 403:
+            return False
+        definition = connector_registry.get_definition(connector_type)
+        spec = definition.auth.oauth if definition is not None else None
+        if spec is None:
+            return False
+        if credentials.get("oauth_provider") != spec.provider or not credentials.get(
+            "refresh_token"
+        ):
+            return False
+        updater = getattr(connector, "updated_credentials", None)
+        try:
+            rotated = updater(dict(credentials)) if callable(updater) else None
+        except Exception:
+            return False
+        return not rotated
 
     async def _persist_credentials(
         self, config_id: uuid_module.UUID, credentials: dict[str, Any]
     ) -> None:
-        import json as json_module
+        """Encrypt and store *credentials* on connector row *config_id*.
 
-        from sqlalchemy import update
+        Delegates to the OAuth broker's writer so the executor, the
+        ``/test`` route and the broker persist tokens the same way.
+        """
+        from services.connectors import oauth as oauth_broker
 
-        from core.security import encrypt_credentials
-        from models.connector import ConnectorConfig
-
-        async with self._session_factory() as session:
-            await session.execute(
-                update(ConnectorConfig)
-                .where(ConnectorConfig.id == config_id)
-                .values(
-                    encrypted_credentials=encrypt_credentials(
-                        json_module.dumps(credentials)
-                    )
-                )
-            )
-            await session.commit()
+        if self._session_factory is None:
+            raise RuntimeError("no database session factory to persist credentials with")
+        await oauth_broker.persist_credentials(
+            self._session_factory, config_id, credentials
+        )
 
     # -- helpers ------------------------------------------------------------
+
+    @staticmethod
+    def _connector_type_value(value: Any) -> str:
+        """The plain string of a connector type.
+
+        ``connector_configs.connector_type`` was a ``ConnectorType`` enum
+        column and is becoming a plain string (migration
+        0011_connector_type_string); this reads either form, and a caller
+        passing the enum member, the same way.
+        """
+        return str(getattr(value, "value", value))
 
     async def _load_config(
         self, connector_type: str, user_id: str, slug: Optional[str] = None
@@ -1772,12 +1835,16 @@ class ConnectorToolExecutor:
         from sqlalchemy import select
 
         from core.security import decrypt_credentials
-        from models.connector import ConnectorConfig, ConnectorType
+        from models.connector import ConnectorConfig
         from models.user import User
 
+        type_key = self._connector_type_value(connector_type)
+        if not connector_registry.is_registered(type_key):
+            # Only registry connectors run through this path (MCP has its
+            # own dispatcher); anything else has no connector class.
+            return None
         try:
             user_uuid = uuid_module.UUID(user_id)
-            type_enum = ConnectorType(connector_type)
         except ValueError:
             return None
 
@@ -1786,7 +1853,7 @@ class ConnectorToolExecutor:
                 select(ConnectorConfig)
                 .where(
                     ConnectorConfig.user_id == user_uuid,
-                    ConnectorConfig.connector_type == type_enum,
+                    ConnectorConfig.connector_type == type_key,
                     ConnectorConfig.is_active.is_(True),
                 )
                 .order_by(ConnectorConfig.created_at.desc())
@@ -1798,7 +1865,7 @@ class ConnectorToolExecutor:
                 config = next(
                     (row for row in rows if connector_slug(str(row.id)) == slug), None
                 )
-            if config is None:
+            if config is None or self._connector_type_value(config.connector_type) != type_key:
                 return None
 
             # The tier must be re-checked at dispatch time (not only at
@@ -1841,6 +1908,29 @@ class ConnectorToolExecutor:
                 "rate_limit_per_minute": config.rate_limit_per_minute,
                 **tier_fields,
             }
+
+    @staticmethod
+    def _auth_refusal(
+        exc: Exception, resolved: ResolvedTool, credentials: Mapping[str, Any]
+    ) -> str:
+        """The tool error for a provider's auth refusal. A 403 (the token
+        lacks a permission) names the catalog scope the action needs, says
+        where to grant it and tells the model not to retry; anything else
+        keeps the connector's own safe message."""
+        message = str(exc)
+        scope = resolved.spec.required_scope
+        if getattr(exc, "status_code", None) != 403 or not scope:
+            return message
+        definition = connector_registry.get_definition(resolved.connector_type)
+        label = definition.label if definition is not None else resolved.connector_type
+        if credentials.get("oauth_provider"):
+            fix = f"use Grant more access on the {label} card in Connectors"
+        else:
+            fix = f"give the {label} token that permission (or replace it) in Connectors"
+        return (
+            f"{message} This action needs the '{scope}' permission: {fix}. "
+            "Do not retry this call until then."
+        )
 
     @staticmethod
     def _check_scope(resolved: ResolvedTool, granted_scopes: list[str]) -> Optional[str]:

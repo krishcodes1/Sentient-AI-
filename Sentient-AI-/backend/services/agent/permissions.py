@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
+from typing import Mapping, Optional
 
 
 class PermissionTier(str, Enum):
@@ -64,13 +64,13 @@ _DEFAULT_POLICIES: dict[tuple[str, ActionCategory], PermissionTier] = {
     # Gmail specifics — merged into google with action-level overrides below
     ("gmail", ActionCategory.READ): PermissionTier.AUTO_APPROVE,
     ("gmail", ActionCategory.WRITE): PermissionTier.USER_CONFIRM,  # gmail.send
-    ("gmail", ActionCategory.DELETE): PermissionTier.ADMIN_ONLY,
+    ("gmail", ActionCategory.DELETE): PermissionTier.USER_CONFIRM,  # every DELETE is always_confirm
     ("gmail", ActionCategory.EXECUTE): PermissionTier.USER_CONFIRM,
     ("gmail", ActionCategory.FINANCIAL): PermissionTier.HARD_BLOCKED,
     # Google Calendar
     ("google_calendar", ActionCategory.READ): PermissionTier.AUTO_APPROVE,
     ("google_calendar", ActionCategory.WRITE): PermissionTier.USER_CONFIRM,
-    ("google_calendar", ActionCategory.DELETE): PermissionTier.ADMIN_ONLY,
+    ("google_calendar", ActionCategory.DELETE): PermissionTier.USER_CONFIRM,  # every DELETE is always_confirm
     ("google_calendar", ActionCategory.EXECUTE): PermissionTier.USER_CONFIRM,
     ("google_calendar", ActionCategory.FINANCIAL): PermissionTier.HARD_BLOCKED,
     # Robinhood — everything requires confirmation, financials are hard blocked
@@ -155,7 +155,7 @@ _DEFAULT_POLICIES: dict[tuple[str, ActionCategory], PermissionTier] = {
     # GitHub
     ("github", ActionCategory.READ): PermissionTier.AUTO_APPROVE,
     ("github", ActionCategory.WRITE): PermissionTier.USER_CONFIRM,
-    ("github", ActionCategory.DELETE): PermissionTier.ADMIN_ONLY,
+    ("github", ActionCategory.DELETE): PermissionTier.USER_CONFIRM,  # every DELETE is always_confirm
     ("github", ActionCategory.EXECUTE): PermissionTier.USER_CONFIRM,
     ("github", ActionCategory.FINANCIAL): PermissionTier.HARD_BLOCKED,
 }
@@ -308,3 +308,23 @@ class PermissionEngine:
             requires_approval=False,
             reason=f"Action '{action}' on '{connector_type}' ({scope.value}) is unconditionally blocked.",
         )
+
+
+def register_default_policies(
+    rows: Mapping[tuple[str, ActionCategory], PermissionTier],
+) -> None:
+    """Add generated default rows for connector policy keys.
+
+    Called once by ``services.connectors.registry`` at import, with the
+    rows it derives from each connector's action categories. ``setdefault``
+    semantics: a row written by hand above always wins, so an existing
+    connector keeps its tuned tiers (Robinhood reads stay USER_CONFIRM).
+    A FINANCIAL row other than HARD_BLOCKED is refused outright; money
+    never moves through a connector, whatever a definition declares.
+    """
+    for (policy_key, category), tier in rows.items():
+        if category == ActionCategory.FINANCIAL and tier != PermissionTier.HARD_BLOCKED:
+            raise ValueError(
+                f"Refusing to register a {tier.value} FINANCIAL row for '{policy_key}'."
+            )
+        _DEFAULT_POLICIES.setdefault((policy_key.lower(), category), tier)

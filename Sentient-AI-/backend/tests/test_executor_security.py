@@ -304,6 +304,51 @@ async def test_executor_rate_limits_per_connector(session_factory, fake_factory)
     assert "rate limit" in second["error"].lower()
 
 
+_LEAKY_TOKEN = "ghp_" + "FAKEFAKEFAKEleakytokenFAKEFAKEFAKE00"  # split so secret scanners skip it
+
+
+class ExplodingConnector(FakeConnector):
+    """An action that fails with an unexpected error quoting a credential."""
+
+    async def _execute_action(self, action, params):
+        raise RuntimeError(
+            f"GET https://school.instructure.com/api?access_token={_LEAKY_TOKEN} failed"
+        )
+
+
+@pytest.mark.asyncio
+async def test_unexpected_action_error_text_never_reaches_result_or_logs(
+    session_factory, monkeypatch, caplog, capsys
+):
+    from structlog.testing import capture_logs
+
+    import services.connectors.factory as factory_module
+    from tests.conftest import make_user
+
+    def _exploding_create(connector_type, credentials, *, rate_limit=None, timeout_s=None):
+        connector = ExplodingConnector()
+        connector.set_network_policy(connector_type)
+        return connector
+
+    monkeypatch.setattr(factory_module, "create_connector", _exploding_create)
+    user, _ = await make_user(session_factory)
+    await _make_connector_row(session_factory, user.id, scopes=["courses.read"])
+
+    executor = ConnectorToolExecutor(session_factory=session_factory)
+    with capture_logs() as logs:
+        result = await executor.execute("canvas.get_courses", {}, str(user.id))
+
+    assert result == {"ok": False, "error": "Fake failed (RuntimeError)."}
+    assert _LEAKY_TOKEN not in json.dumps(result)
+    assert _LEAKY_TOKEN not in json.dumps(logs, default=str)
+    assert _LEAKY_TOKEN not in caplog.text
+    captured = capsys.readouterr()
+    assert _LEAKY_TOKEN not in captured.out and _LEAKY_TOKEN not in captured.err
+    # The failure is still logged, by type only.
+    (event,) = [entry for entry in logs if entry["event"] == "connector_execute_error"]
+    assert event["error_type"] == "RuntimeError" and "error" not in event
+
+
 @pytest.mark.asyncio
 async def test_executor_without_connector_row(session_factory, fake_factory):
     from tests.conftest import make_user

@@ -42,7 +42,8 @@ not installed, no OS permission — with the reason and first fix step;
      ```
 
    `test_every_builtin_type_has_a_stance_and_an_executor_entry` fails until
-   both the `_BUILTIN_STANCE` and the `_builtins` entries exist. In
+   both the `_BUILTIN_STANCE` and the `_builtins` entries exist (a runtime
+   built-in has no `_builtins` entry; see "Runtime built-ins" below). In
    `services/agent/permissions.py` add one policy row per `ActionCategory`
    (hard-block what you don't use).
 3. **Capability file.** Copy `_template.py` to `services/capabilities/<key>.py`,
@@ -55,7 +56,8 @@ not installed, no OS permission — with the reason and first fix step;
    or is not a built-in toolkit's, a tool is claimed twice, a built-in tool
    is unclaimed, `install` is not an `ALLOWLIST` key, the template's label or
    `when_denied` was left in, `when_denied` is empty, or a built-in family
-   is missing its `_BUILTIN_STANCE` or executor entry.
+   is missing its `_BUILTIN_STANCE` or executor entry (runtime built-ins
+   excepted).
 
 Nothing in the wizard, Settings, the gates or the prompt needs changing.
 
@@ -87,3 +89,33 @@ capability's `tools`.
   one in `probe()` (`ctx.executable`, already resolved past symlinks).
 - A broken check fails closed: an `availability()` or `probe()` that
   raises reports the capability as blocked, never as on.
+
+## Runtime built-ins
+
+A family whose calls need what only the agent runtime holds during a turn
+is a runtime built-in. Today that is `tools`: `tools.find` searches the
+turn's full tool list. It still gets its `CONNECTOR_CATALOG` entry, its
+place in `BUILTIN_CONNECTOR_TYPES` and `_BUILTIN_STANCE`, and its policy
+rows, but no toolkit and no `_builtins` entry. Instead, add its type to
+`RUNTIME_BUILTIN_TYPES` in `services/agent/tool_registry.py` and answer
+the call in `AgentRuntime` (`services/agent/runtime.py`, where
+`_find_tools` answers `tools.find`). The executor refuses a runtime
+built-in call that reaches it, and the checks in step 2 and step 5 leave
+these types out of the executor comparison. Prefer a toolkit: add a
+runtime built-in only when the call truly needs the turn's state.
+
+## Channels: capabilities with no tools
+
+A chat channel (`telegram`, `slack` for Slack DMs) is a capability with
+`tools=()`. Its switch turns the channel on or off for the whole install;
+it gates no tool. Its `availability()` reads a `ReportContext` fact
+(`telegram_configured`, `slack_configured`), added as described in "Adding
+an environment fact". When that fact is a running service's state rather
+than a stored setting, the service reports it through a callback:
+`main.wire_services` calls
+`InstallationService.set_slack_status(lambda: slack_manager.is_running)`,
+and the Slack manager calls `installation.invalidate` when it starts or
+stops, so the cached report follows. A channel capability never claims its
+connector's tools: the `slack.*` workspace tools stay governed by the Slack
+connector's own permissions, so the `slack` capability must not claim
+`slack.`.

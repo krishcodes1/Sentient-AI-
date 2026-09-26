@@ -5,6 +5,12 @@ blob.
 Why it exists: The connector routes, the tool registry's tier gating and the
 MCP loader all key off the same ``ConnectorType`` and ``PermissionTier``
 values, so they are defined once beside the row that carries them.
+
+``connector_type`` is a plain ``VARCHAR(64)`` (migration
+``0011_connector_type_string``) so a new connector needs no schema change; the
+API validates it against ``services.connectors.registry``. ``ConnectorType``
+stays for existing imports and comparisons (it is a ``str`` enum, so it
+compares equal to the stored string).
 """
 
 from __future__ import annotations
@@ -24,7 +30,7 @@ from sqlalchemy import (
     String,
     Uuid,
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
 from core.database import Base
 
@@ -35,6 +41,26 @@ class ConnectorType(str, enum.Enum):
     robinhood = "robinhood"
     mcp = "mcp"
     custom = "custom"
+
+
+# The only labels the pre-0011 ``connector_type`` Postgres ENUM held, in its
+# declaration order. The 0011 downgrade recreates exactly these.
+LEGACY_CONNECTOR_TYPES: tuple[str, ...] = tuple(t.value for t in ConnectorType)
+
+CONNECTOR_TYPE_MAX_LENGTH = 64
+
+
+def connector_type_key(value: str | ConnectorType) -> str:
+    """The plain string form of a connector type.
+
+    ``str(ConnectorType.canvas)`` is ``"ConnectorType.canvas"``, not
+    ``"canvas"``, so formatting an enum member where a key is expected would
+    silently produce a type that matches nothing. Every reader of a row's
+    type goes through this (or relies on the model normalising on write).
+    """
+    if isinstance(value, enum.Enum):
+        return str(value.value)
+    return str(value)
 
 
 class AuthMethod(str, enum.Enum):
@@ -64,8 +90,12 @@ class ConnectorConfig(Base):
         nullable=False,
         index=True,
     )
-    connector_type: Mapped[ConnectorType] = mapped_column(
-        Enum(ConnectorType, name="connector_type"),
+    # A registry key (``services.connectors.registry``) or ``mcp``/``custom``.
+    # Not an ENUM: adding a connector must not need a migration. Values are
+    # validated at the API boundary, and a row whose type is no longer
+    # registered is listed as unavailable rather than crashing a reader.
+    connector_type: Mapped[str] = mapped_column(
+        String(CONNECTOR_TYPE_MAX_LENGTH),
         nullable=False,
     )
     display_name: Mapped[str] = mapped_column(
@@ -116,6 +146,12 @@ class ConnectorConfig(Base):
     user: Mapped["User"] = relationship(  # noqa: F821
         back_populates="connectors",
     )
+
+    @validates("connector_type")
+    def _normalise_connector_type(self, _key: str, value: str | ConnectorType) -> str:
+        """Store the plain key even when a caller passes a ``ConnectorType``
+        member, so a freshly added row reads back exactly like a loaded one."""
+        return connector_type_key(value)
 
     def __repr__(self) -> str:
         return f"<ConnectorConfig {self.display_name} ({self.connector_type})>"

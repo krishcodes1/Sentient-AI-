@@ -17,6 +17,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
 from typing import Any, Callable
+from collections.abc import Awaitable, Coroutine
 
 import structlog
 import uvicorn
@@ -30,6 +31,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from core.config import settings
 from core.database import async_session, engine, get_db, init_db
+from core.http_pinning import warm_ssl_context
 from core.logging_config import configure_logging
 
 configure_logging()
@@ -45,8 +47,10 @@ from api.routes import (
     capabilities,
     connectors,
     memory,
+    oauth,
     reminders,
     setup,
+    slack,
     telegram,
     usage,
 )
@@ -58,9 +62,12 @@ from services.agent.tool_registry import (
     RuntimePermissionAdapter,
 )
 from services.audit import RuntimeAuditLogger
+from services.connectors.oauth import shutdown_background_tasks as stop_oauth_tasks
 from services.installation import InstallationService
 from services.mcp.integration import MCPConnectorLoader, MCPToolCatalog
 from services.notifications.reminders import ReminderService
+from services.notifications.slack import SlackChannel
+from services.notifications.slack_manager import SlackManager
 from services.notifications.telegram import NotifyingApprovalStore, TelegramService
 from services.notifications.telegram_manager import TelegramManager
 from services.tools.system import SystemToolkit
@@ -97,7 +104,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             raise
         logger.warning("app_starting_without_database")
 
+    # Load the CA bundle once, off the event loop, before any outbound call.
+    await warm_ssl_context()
     await wire_services(app)
+    await start_slack_channels(app)
     start_browser_reaper(app)
     reminder_service: ReminderService = app.state.reminders
     await reminder_service.start()
@@ -106,6 +116,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("shutting_down_crawler_ai")
     await reminder_service.stop()
     await app.state.telegram_manager.stop()
+    await app.state.slack_manager.stop()
     # Release every provider's HTTP client (cached, and retired but still
     # leased by a turn being torn down) before the loop goes away.
     runtime = getattr(app.state, "agent_runtime", None)
@@ -115,6 +126,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception as exc:  # shutdown must finish regardless
             logger.warning("agent_runtime_close_failed", error=str(exc))
     await close_browser_sessions(app)
+    # Device-flow pollers and revoke tasks use the engine; stop them first.
+    await stop_oauth_tasks()
     await engine.dispose()
 
 
@@ -184,11 +197,76 @@ async def close_browser_sessions(app: Any) -> None:
         logger.warning("browser_sessions_close_failed", error_type=type(exc).__name__)
 
 
+def _wire_slack(
+    app: FastAPI,
+    channel: SlackChannel,
+    session_factory: Callable[[], Any] = async_session,
+) -> None:
+    """Point a Slack DM channel at the agent pipelines, as _wire_telegram
+    does for the poller. The manager calls this for every channel it starts;
+    turns write into the user's "Slack" conversation."""
+    channel.decide = agent.build_decision_applier(app, session_factory)
+    channel.chat = agent.build_chat_applier(app, session_factory, channel="slack")
+
+
+def fan_out_notify(
+    channels: dict[str, Callable[[Any], Awaitable[Any]]],
+) -> Callable[[Any], Coroutine[Any, Any, None]]:
+    """One approval notifier over every chat channel. The channels run side
+    by side and each one's failure is logged and contained, so Telegram
+    being down never costs the Slack card and the reverse. The approval
+    itself never waits on this (NotifyingApprovalStore fires it as a task)."""
+
+    async def one(name: str, notify: Callable[[Any], Awaitable[Any]], action: Any) -> None:
+        try:
+            await notify(action)
+        except Exception as exc:
+            logger.warning("approval_notify_failed", channel=name, error_type=type(exc).__name__)
+
+    async def notify_all(action: Any) -> None:
+        await asyncio.gather(*(one(name, fn, action) for name, fn in channels.items()))
+
+    return notify_all
+
+
+def fan_out_send(
+    channels: dict[str, Callable[[str, str], Awaitable[Any]]],
+) -> Callable[[str, str], Coroutine[Any, Any, bool]]:
+    """One reminder sender over every chat channel: True when at least one
+    channel delivered (a channel that raises counts as not delivered)."""
+
+    async def one(name: str, send: Callable[[str, str], Awaitable[Any]], user_id: str, text: str) -> bool:
+        try:
+            return (await send(user_id, text)) is True
+        except Exception as exc:
+            logger.warning("reminder_send_failed", channel=name, error_type=type(exc).__name__)
+            return False
+
+    async def send_all(user_id: str, text: str) -> bool:
+        results = await asyncio.gather(
+            *(one(name, fn, user_id, text) for name, fn in channels.items())
+        )
+        return any(results)
+
+    return send_all
+
+
+async def start_slack_channels(app: Any) -> None:
+    """Start the Slack DM channels the database asks for (lifespan). A Slack
+    outage or a bad token never keeps the API down: channels retry on their
+    own, and a failure here is logged by type only."""
+    try:
+        await app.state.slack_manager.reconcile()
+    except Exception as exc:
+        logger.warning("slack_start_failed", error_type=type(exc).__name__)
+
+
 async def wire_services(
     app: FastAPI,
     session_factory: Callable[[], Any] = async_session,
     *,
     telegram_service_factory: Callable[..., TelegramService] = TelegramService,
+    slack_manager_factory: Callable[..., SlackManager] = SlackManager,
 ) -> None:
     """Build the owner-configurable services and hang them on app.state.
 
@@ -204,7 +282,8 @@ async def wire_services(
 
     Split out of the lifespan so tests can wire an app against their own
     database and a fake Telegram service. Does not start the reminder
-    sweeper (the lifespan does).
+    sweeper or the Slack DM channels (the lifespan does); a Slack
+    connector or capability change reconciles the Slack manager.
     """
     installation = InstallationService(session_factory)
     app.state.installation = installation
@@ -224,12 +303,26 @@ async def wire_services(
     )
     app.state.telegram_manager = telegram_manager
 
-    # Pending actions are pushed to each user's linked Telegram chat while
-    # a poller runs, and the Approve/Deny press flows through the same
-    # decision pipeline as the web UI.
+    async def _slack_enabled() -> bool:
+        return (await installation.capabilities()).get("slack", False) is True
+
+    slack_manager = slack_manager_factory(
+        session_factory,
+        on_start=lambda channel: _wire_slack(app, channel, session_factory),
+        enabled=_slack_enabled,
+        on_change=installation.invalidate,
+    )
+    app.state.slack_manager = slack_manager
+    installation.set_slack_status(lambda: slack_manager.is_running)
+
+    # Pending actions are pushed to each user's linked Telegram chat and
+    # Slack DM while those channels run, and an Approve/Deny press flows
+    # through the same decision pipeline as the web UI.
     approval_store = NotifyingApprovalStore(
         DbApprovalStore(session_factory=session_factory),
-        notify=telegram_manager.notify_pending,
+        notify=fan_out_notify(
+            {"telegram": telegram_manager.notify_pending, "slack": slack_manager.notify_pending}
+        ),
     )
 
     # One installer for the whole process: the agent's approved
@@ -309,6 +402,11 @@ async def wire_services(
                 runtime.invalidate_providers()
         if topic in ("telegram", "capabilities"):
             await _apply_telegram()
+        if topic == "capabilities":
+            # In the background, as the connector routes do: stopping a
+            # channel can wait on its running turn, and PUT
+            # /api/capabilities must never wait on that.
+            slack_manager.schedule_reconcile()
 
     installation.on_change(_on_change)
 
@@ -322,11 +420,13 @@ async def wire_services(
 
     # Reminders sweep regardless of whether a delivery channel runs — the
     # rows are still user-visible in the API; only the out-of-band push
-    # needs Telegram, and the manager's send_text reports False while none
-    # is running.
+    # needs Telegram or Slack, and each manager's send_text reports False
+    # while none of its channels runs.
     app.state.reminders = ReminderService(
         session_factory=session_factory,
-        send=telegram_manager.send_text,
+        send=fan_out_send(
+            {"telegram": telegram_manager.send_text, "slack": slack_manager.send_text}
+        ),
     )
 
 
@@ -375,6 +475,8 @@ app.add_middleware(
 app.include_router(auth.router, prefix="/api")
 app.include_router(agent.router, prefix="/api")
 app.include_router(connectors.router, prefix="/api")
+app.include_router(oauth.router, prefix="/api")
+app.include_router(slack.router, prefix="/api")
 app.include_router(audit.router, prefix="/api")
 app.include_router(memory.router, prefix="/api")
 app.include_router(reminders.router, prefix="/api")

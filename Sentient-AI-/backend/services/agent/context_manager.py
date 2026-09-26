@@ -8,7 +8,8 @@ this on every turn, and the agent route reuses its tool-result compression.
 Connects to: nothing external; pure functions over the message list and
 tool schemas.
 Used by: AgentRuntime on every turn (window, capped summary, tool
-selection, replay cache) and api/routes/agent.py (compress_tool_result).
+selection, the tools.find search and loaded list, replay cache) and
+api/routes/agent.py (compress_tool_result).
 
 Smart Context Manager for Crawler AI.
 
@@ -34,7 +35,9 @@ from __future__ import annotations
 
 import json
 import hashlib
+import re
 import time
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -310,21 +313,50 @@ def compress_tool_result(result: str, max_chars: int = 2000) -> str:
 # ---------------------------------------------------------------------------
 
 
+# The tool that searches every tool the user can use this turn (answered by
+# the runtime, see AgentRuntime._run_turn). Always offered: it is how the
+# model reaches a tool the bounded array left out.
+FIND_TOOL_NAME = "tools.find"
+
 # Built-in tools the assistant's everyday answers depend on (looking things
-# up, and today's date for anything time-relative). Offered whenever they
-# exist, however many connector tools compete for the bounded array.
-CORE_TOOL_NAMES = frozenset({"web.search", "web.fetch_page", "reminders.now"})
+# up, today's date for anything time-relative, and finding the rest).
+# Offered whenever they exist, however many connector tools compete for the
+# bounded array.
+CORE_TOOL_NAMES = frozenset(
+    {"web.search", "web.fetch_page", "reminders.now", FIND_TOOL_NAME}
+)
+
+# The core set in force. Extended through register_core_tools (the skills
+# feature adds skills.read), never shrunk, so a name that was core stays core.
+_core_tool_names: set[str] = set(CORE_TOOL_NAMES)
+
+# How many tools one request offers, and how many names a conversation keeps
+# loaded through tools.find (spec 4.5).
+MAX_OFFERED_TOOLS = 24
+MAX_LOADED_TOOLS = 24
+
+
+def register_core_tools(*names: str) -> None:
+    """Make *names* core: offered whenever they are in the turn's tool list."""
+    _core_tool_names.update(name for name in names if name)
+
+
+def core_tool_names() -> frozenset[str]:
+    """The core tool names in force (CORE_TOOL_NAMES plus registered ones)."""
+    return frozenset(_core_tool_names)
 
 
 def select_offered_tools(
     tools: list[dict[str, Any]],
     active_connectors: list[str],
-    max_tools: int = 15,
+    max_tools: int = MAX_OFFERED_TOOLS,
+    loaded: Sequence[str] = (),
+    core: Optional[Iterable[str]] = None,
 ) -> list[dict[str, Any]]:
     """Choose the bounded tool array to offer, deterministically.
 
     This used to re-score every tool against the latest user message, so
-    the same conversation offered a different set — in a different order —
+    the same conversation offered a different set, in a different order,
     on every turn. Two costs came out of that:
 
     - The tool array is part of the cached request prefix. Reordering it
@@ -334,39 +366,164 @@ def select_offered_tools(
       newest message happened not to mention it, which reads to the model
       as a capability that comes and goes.
 
-    Selection now depends only on the tool set and the user's active
-    connectors, both of which change when the user changes a connector and
-    not otherwise. That makes the array byte-identical turn to turn, and
-    makes which tools got dropped reproducible instead of a function of
-    phrasing.
+    Selection depends only on the tool set, the user's active connectors
+    and the conversation's ``loaded`` names (oldest first, as tools.find
+    stores them), none of which change unless the user changes a connector
+    or the model loads a tool. The array is therefore byte-identical turn
+    to turn until one of those happens.
 
-    Ordering within a tier is by name so that two calls with the same
-    inputs produce the same array regardless of how the tool list was
-    assembled.
+    When everything fits, the list is offered as built. Otherwise slots go,
+    in priority order, to: core tools (``core``, default
+    :func:`core_tool_names`); loaded tools, most recently loaded first;
+    starter tools (``starter`` true); then the rest. Starters and the rest
+    prefer the active connectors, then keep build order. A loaded name
+    missing from ``tools`` (connector removed, scope revoked) is skipped.
+    The chosen tools keep their build order in the result, so the output
+    depends only on the inputs, never on the priority walk.
     """
     if len(tools) <= max_tools:
         return tools
 
+    core_names = core_tool_names() if core is None else frozenset(core)
     active = {c.lower() for c in active_connectors}
+    index_of: dict[str, int] = {}
+    for position, tool in enumerate(tools):
+        index_of.setdefault(tool.get("name", ""), position)
 
-    def rank(tool: dict[str, Any]) -> tuple[int, str]:
-        # The core built-ins are never trimmed: the runtime lists built-in
-        # types among the "active" connectors, and alphabetically web.*
-        # sorts last, so one 16-tool connector used to push web.search off
-        # the array and the assistant silently lost the ability to look
-        # anything up. Then tools from a connector the user has actually
-        # enabled; everything else keeps a stable alphabetical order.
-        name = tool.get("name", "")
-        connector = (tool.get("connector_type") or "").lower()
-        if name in CORE_TOOL_NAMES:
-            tier = 0
-        elif connector in active:
-            tier = 1
-        else:
-            tier = 2
-        return (tier, name)
+    chosen: set[int] = set()
 
-    return sorted(tools, key=rank)[:max_tools]
+    def take(position: int) -> None:
+        if len(chosen) < max_tools:
+            chosen.add(position)
+
+    for position, tool in enumerate(tools):
+        if tool.get("name", "") in core_names:
+            take(position)
+    for name in reversed(list(loaded)):
+        position_or_none = index_of.get(name)
+        if position_or_none is not None:
+            take(position_or_none)
+
+    def preference(position: int) -> tuple[int, int]:
+        connector = (tools[position].get("connector_type") or "").lower()
+        return (0 if connector in active else 1, position)
+
+    starters = [p for p, tool in enumerate(tools) if tool.get("starter")]
+    rest = [p for p, tool in enumerate(tools) if not tool.get("starter")]
+    for position in sorted(starters, key=preference) + sorted(rest, key=preference):
+        if len(chosen) >= max_tools:
+            break
+        chosen.add(position)
+
+    return [tools[position] for position in sorted(chosen)]
+
+
+# ---------------------------------------------------------------------------
+# tools.find: search the turn's full tool list
+# ---------------------------------------------------------------------------
+
+# Most matches one tools.find call returns (and loads).
+MAX_FIND_RESULTS = 8
+# Longest query and connector argument read; the rest is ignored.
+_MAX_FIND_ARG_CHARS = 200
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+# Words that say nothing about which tool is wanted.
+_STOPWORDS = frozenset(
+    {"a", "an", "and", "the", "to", "of", "for", "in", "on", "my", "me", "or", "with", "from", "by", "at", "is", "it"}
+)
+# Weight of a query word found in the tool's name, and in its description.
+_NAME_HIT = 3
+_DESCRIPTION_HIT = 1
+# Shortest word matched by prefix ("email" finds "emails").
+_MIN_PREFIX = 4
+
+
+def _tokens(text: str) -> set[str]:
+    return {t for t in _TOKEN_RE.findall(text.lower()) if t not in _STOPWORDS}
+
+
+def _word_matches(word: str, vocabulary: set[str]) -> bool:
+    if word in vocabulary:
+        return True
+    if len(word) < _MIN_PREFIX:
+        return False
+    return any(
+        len(other) >= _MIN_PREFIX and (other.startswith(word) or word.startswith(other))
+        for other in vocabulary
+    )
+
+
+def _namespace(name: str) -> str:
+    return name.partition(".")[0].lower()
+
+
+def find_tools(
+    tools: Sequence[dict[str, Any]],
+    query: str,
+    connector: Optional[str] = None,
+    limit: int = MAX_FIND_RESULTS,
+) -> list[dict[str, Any]]:
+    """Rank *tools* (schema dicts) against *query*; at most *limit* matches.
+
+    Token matching over the name (weight 3) and description (weight 1),
+    ties broken by name, so the same inputs always give the same answer.
+    ``connector`` keeps only tools of that connector type (or of that exact
+    namespace, e.g. ``github__1a2b3c4d``). A query with no usable words
+    lists the connector's tools by name when a connector is given, and
+    finds nothing otherwise. tools.find itself is never returned.
+    """
+    wanted = (connector or "").strip().lower()[:_MAX_FIND_ARG_CHARS]
+    words = _tokens((query or "")[:_MAX_FIND_ARG_CHARS])
+    scored: list[tuple[int, str, dict[str, Any]]] = []
+    for tool in tools:
+        name = str(tool.get("name", ""))
+        if not name or name == FIND_TOOL_NAME:
+            continue
+        if wanted and wanted not in {
+            str(tool.get("connector_type") or "").lower(),
+            _namespace(name),
+        }:
+            continue
+        if not words:
+            if wanted:
+                scored.append((0, name, tool))
+            continue
+        name_words = _tokens(name.replace(".", " ").replace("_", " "))
+        description_words = _tokens(str(tool.get("description", "")))
+        score = sum(
+            _NAME_HIT * _word_matches(word, name_words)
+            + _DESCRIPTION_HIT * _word_matches(word, description_words)
+            for word in words
+        )
+        if score > 0:
+            scored.append((score, name, tool))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [tool for _score, _name, tool in scored[: max(0, limit)]]
+
+
+def merge_loaded(
+    loaded: Sequence[str],
+    found: Sequence[str],
+    available: Iterable[str],
+    cap: int = MAX_LOADED_TOOLS,
+) -> list[str]:
+    """The loaded list after a tools.find call found *found* (best first).
+
+    Oldest first. Names no longer in *available* are dropped (the list is
+    being rewritten anyway), a found name moves to the newest end (the best
+    match newest of all), duplicates collapse, and only the newest *cap*
+    names are kept.
+    """
+    usable = set(available)
+    fresh = [name for name in found if name in usable]
+    fresh_set = set(fresh)
+    kept = [
+        name
+        for name in dict.fromkeys(loaded)
+        if name in usable and name not in fresh_set
+    ]
+    merged = kept + list(reversed(list(dict.fromkeys(fresh))))
+    return merged[-cap:] if cap > 0 else []
 
 
 # ---------------------------------------------------------------------------
@@ -539,10 +696,12 @@ class ContextManager:
         conversation_id: str = "",
         active_connectors: list[str] | None = None,
         model: Optional[str] = None,
+        loaded: Sequence[str] = (),
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Prepare optimized messages and tools for an LLM request to
         ``model`` — the model the turn actually runs on, whose window the
-        budget is sized for (default: the constructor's).
+        budget is sized for (default: the constructor's). ``loaded`` is the
+        conversation's tools.find list (see select_offered_tools).
 
         Returns:
             Tuple of (optimized_messages, optimized_tools)
@@ -557,7 +716,9 @@ class ContextManager:
 
         # Step 3: Pick the tool array. Deliberately independent of the
         # messages above — see select_offered_tools.
-        optimized_tools = select_offered_tools(tools, active_connectors or [])
+        optimized_tools = select_offered_tools(
+            tools, active_connectors or [], loaded=loaded
+        )
 
         # Step 4: Check budget and trim if needed
         budget = self.get_budget(

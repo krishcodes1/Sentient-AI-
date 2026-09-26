@@ -18,6 +18,7 @@ restored afterwards so no other test sees the wiring.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 from types import SimpleNamespace
 from typing import Any
@@ -48,6 +49,7 @@ async def wired_app(session_factory, monkeypatch):
         yield app
     finally:
         await app.state.telegram_manager.stop()
+        await app.state.slack_manager.stop()
         app.state._state.clear()
         app.state._state.update(saved)
 
@@ -97,6 +99,102 @@ async def test_reminder_channel_reports_not_delivered_while_stopped(wired_app):
     # The sweeper is wired to the manager once; stopped, it reports "not
     # delivered" instead of raising.
     assert await state.reminders.send("u1", "hello") is False
+
+
+class RecordingSlackManager:
+    """Stands in for SlackManager: records what wire_services hands it."""
+
+    def __init__(self, session_factory, *, on_start=None, enabled=None, on_change=None):
+        self.on_start = on_start
+        self.enabled = enabled
+        self.on_change = on_change
+        self.reconciles = 0
+        self.scheduled = 0
+        self.is_running = False
+        self.notified: list[Any] = []
+        self.texts: list[tuple[str, str]] = []
+
+    async def reconcile(self):
+        self.reconciles += 1
+        return {"started": [], "restarted": [], "stopped": []}
+
+    def schedule_reconcile(self):
+        self.scheduled += 1
+        return None
+
+    async def stop(self):
+        pass
+
+    async def notify_pending(self, action):
+        self.notified.append(action)
+
+    async def send_text(self, user_id, text):
+        self.texts.append((user_id, text))
+        return True
+
+    def channel_running(self, connector_id):
+        return False
+
+    def channel_problem(self, connector_id):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_slack_manager_is_wired_next_to_telegram(session_factory, monkeypatch):
+    """The Slack manager gets the agent pipelines, the owner switch, the
+    capability report, the approval cards and the reminders, and a
+    capability change reconciles it. wire_services starts no channel."""
+    from main import app, wire_services
+
+    monkeypatch.setattr(settings, "TELEGRAM_BOT_TOKEN", "", raising=False)
+    saved = dict(app.state._state)
+    await wire_services(
+        app,
+        session_factory,
+        telegram_service_factory=FakeService,
+        slack_manager_factory=RecordingSlackManager,
+    )
+    try:
+        manager = app.state.slack_manager
+        installation = app.state.installation
+        assert isinstance(manager, RecordingSlackManager) and manager.reconciles == 0
+
+        channel = SimpleNamespace(chat=None, decide=None)
+        manager.on_start(channel)
+        assert callable(channel.chat) and callable(channel.decide)
+
+        by_key = {s.key: s for s in await installation.report()}
+        assert by_key["slack"].effective == "blocked"
+        manager.is_running = True
+        manager.on_change()
+        by_key = {s.key: s for s in await installation.report()}
+        assert by_key["slack"].effective == "on"
+
+        # Telegram runs nothing here, Slack delivers: the reminder counts.
+        assert await app.state.reminders.send("u1", "hello") is True
+        assert manager.texts == [("u1", "hello")]
+
+        # A new pending action reaches the Slack manager too.
+        user, _ = await make_user(session_factory, "wiring-slack@example.com")
+        store = app.state.agent_runtime._approvals
+        stored = await store.create(
+            user_id=str(user.id), tool_name="web.search", arguments={}, reason="test"
+        )
+        for _ in range(50):
+            if manager.notified:
+                break
+            await asyncio.sleep(0.01)
+        assert [a.action_id for a in manager.notified] == [stored.action_id]
+
+        assert await manager.enabled() is True
+        await installation.set_capabilities({"slack": False}, actor_id=user.id)
+        # Scheduled in the background: the owner's request never waits on it.
+        assert (manager.scheduled, manager.reconciles) == (1, 0)
+        assert await manager.enabled() is False
+    finally:
+        await app.state.telegram_manager.stop()
+        app.state._state.clear()
+        app.state._state.update(saved)
 
 
 class CountingFactory:
@@ -256,7 +354,12 @@ async def test_system_capabilities_reports_the_permission_switches(wired_app):
 
 
 def test_every_builtin_type_has_a_toolkit():
-    assert set(ConnectorToolExecutor()._builtins) == set(BUILTIN_CONNECTOR_TYPES)
+    # tools.find is answered by the runtime, so its family has no toolkit.
+    from services.agent.tool_registry import RUNTIME_BUILTIN_TYPES
+
+    assert set(ConnectorToolExecutor()._builtins) == (
+        set(BUILTIN_CONNECTOR_TYPES) - RUNTIME_BUILTIN_TYPES
+    )
 
 
 class RecordingReminders:

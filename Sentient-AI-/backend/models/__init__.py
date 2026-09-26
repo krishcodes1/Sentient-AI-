@@ -10,8 +10,10 @@ from models.connector import (
 from models.conversation import Conversation, Message, MessageRole
 from models.installation import INSTALLATION_ROW_ID, Installation
 from models.memory import Memory, MemoryCategory, MemorySource
+from models.oauth_state import OAuthFlowKind, OAuthFlowStatus, OAuthState
 from models.pending_action import PendingAction, PendingActionStatus
 from models.reminder import Reminder, ReminderSource, ReminderStatus
+from models.slack_link import SlackChannelLink
 from models.user import User
 
 __all__ = [
@@ -28,11 +30,15 @@ __all__ = [
     "MemorySource",
     "Message",
     "MessageRole",
+    "OAuthFlowKind",
+    "OAuthFlowStatus",
+    "OAuthState",
     "PendingAction",
     "PendingActionStatus",
     "PermissionTier",
     "Reminder",
     "ReminderSource",
     "ReminderStatus",
+    "SlackChannelLink",
     "User",
 ]

@@ -301,7 +301,7 @@ Tool names are `<key>.<action>`. The keys are `google_workspace`, `github`, `not
 
 ### 5.2 GitHub (`github.py`)
 
-**Auth:** the device flow with Crawler's OAuth App, or a pasted fine-grained personal access token. Scopes are `repo`, `workflow`, `read:org` and `notifications`, each mapped to catalog scopes.
+**Auth:** the device flow with Crawler's OAuth App, or a pasted fine-grained personal access token. Scopes are `repo`, `workflow`, `read:org` and `notifications`, each mapped to catalog scopes. Implementation decision: `workflow` is never requested (workflow files run with the repository's secrets), and `gist` is added for `gists.write`. With a device-flow token, `put_file` refuses paths under `.github/workflows/` before the approval card and says why; a fine-grained token with the Workflows permission can still change them.
 
 | Area | READ | WRITE | DELETE |
 |---|---|---|---|

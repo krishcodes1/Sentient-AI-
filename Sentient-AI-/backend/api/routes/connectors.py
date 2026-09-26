@@ -7,37 +7,86 @@ service and stored AES-encrypted, requested scopes checked against the
 first-party catalog, and MCP state forgotten on delete; owning those steps here
 keeps every connector mutation behind the same ownership check and the same 422
 rules.
+
+The connector type is a plain string validated against
+``services.connectors.registry`` (plus ``mcp``); ``GET /types`` serves the
+registry's catalog so the UI renders its cards from it. A stored row whose type
+is no longer registered is listed with ``available: false`` and never offered.
 """
 
 from __future__ import annotations
-from typing import Dict, List, Literal, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
 
 import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+import structlog
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from pydantic import BaseModel, Field, computed_field
+from sqlalchemy import delete as sa_delete
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api.routes.oauth import session_factory_dependency
 from core.database import get_db
-from core.security import encrypt_credentials
+from core.security import decrypt_credentials, encrypt_credentials
 from core.validation import SafeStr
 from models.audit import AuditLog, AuditStatus
 from models.connector import (
+    CONNECTOR_TYPE_MAX_LENGTH,
     AuthMethod,
     ConnectorConfig,
     ConnectorType,
     PermissionTier,
+    connector_type_key,
 )
+from models.slack_link import SlackChannelLink
 from models.user import User
 from services.agent.tool_registry import connector_scopes, default_read_scopes
+from services.audit import append_auth_event
 from services.auth import get_current_user
+from services.connectors import oauth as oauth_broker
+from services.connectors import registry as connector_registry
+from services.connectors.base import BaseConnector
 from services.connectors.factory import validate_credentials
 
+logger = structlog.get_logger(__name__)
+
 router = APIRouter(prefix="/connectors", tags=["connectors"])
+
+# Shape of a connector key. Checked before the registry lookup so a
+# rejected value is safe to echo back in the 422 detail.
+_CONNECTOR_TYPE_PATTERN = rf"^[a-z][a-z0-9_]{{0,{CONNECTOR_TYPE_MAX_LENGTH - 1}}}$"
+
+_UNAVAILABLE_DETAIL = (
+    "This connector type is no longer available on this server, so the "
+    "agent cannot use it. Delete it, or restore the version that provides it."
+)
+
+
+def connector_type_available(connector_type: str | ConnectorType) -> bool:
+    """True when rows of this type can be created, offered to the agent and
+    dispatched: a registered connector or an MCP server.
+
+    ``custom`` is not available (nothing can produce tools for it), and
+    neither is a stored type whose connector was removed from the registry.
+    """
+    key = connector_type_key(connector_type)
+    return key == ConnectorType.mcp.value or connector_registry.is_registered(key)
+
+
+def _is_unknown_type(connector_type: str | ConnectorType) -> bool:
+    """A stored type this server does not know at all (neither available
+    nor the legacy ``custom`` placeholder)."""
+    key = connector_type_key(connector_type)
+    return key != ConnectorType.custom.value and not connector_type_available(key)
+
+
+def _creatable_types() -> list[str]:
+    keys = {definition.key for definition in connector_registry.REGISTRY}
+    return sorted(keys | {ConnectorType.mcp.value})
 
 
 def _validate_scopes(connector_type: str, scopes: list[str]) -> None:
@@ -75,7 +124,14 @@ def _validate_scopes(connector_type: str, scopes: list[str]) -> None:
 
 
 class ConnectorCreateRequest(BaseModel):
-    connector_type: ConnectorType
+    # A registry key or "mcp"; the registry check happens in the route so
+    # the 422 can name the supported types.
+    connector_type: str = Field(
+        ...,
+        min_length=1,
+        max_length=CONNECTOR_TYPE_MAX_LENGTH,
+        pattern=_CONNECTOR_TYPE_PATTERN,
+    )
     display_name: SafeStr = Field(..., min_length=1, max_length=255)
     auth_method: AuthMethod
     credentials: dict
@@ -87,7 +143,7 @@ class ConnectorCreateRequest(BaseModel):
 class ConnectorResponse(BaseModel):
     id: uuid.UUID
     user_id: uuid.UUID
-    connector_type: ConnectorType
+    connector_type: str
     display_name: str
     is_active: bool
     auth_method: AuthMethod
@@ -96,8 +152,33 @@ class ConnectorResponse(BaseModel):
     rate_limit_per_minute: int
     created_at: datetime
     updated_at: datetime
+    # True when the provider refused this sign-in's refresh token, so the
+    # card shows "Needs reconnect". Set by ``_connector_response``.
+    needs_reconnect: bool = False
 
     model_config = {"from_attributes": True}
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def available(self) -> bool:
+        """False for a stored row whose type this server can no longer use
+        (its connector left the registry, or the legacy ``custom``). Such a
+        row is listed so the user can delete it, and is never offered."""
+        return connector_type_available(self.connector_type)
+
+
+def _connector_response(row: ConnectorConfig) -> ConnectorResponse:
+    """The API view of *row*. Only a signed-in (OAuth) row can carry the
+    broker's needs-reconnect flag, so only those are decrypted."""
+    response = ConnectorResponse.model_validate(row)
+    if row.auth_method == AuthMethod.oauth2:
+        try:
+            credentials = json.loads(decrypt_credentials(row.encrypted_credentials))
+        except Exception:  # noqa: BLE001 - an unreadable blob is not a reconnect hint
+            credentials = None
+        if isinstance(credentials, dict):
+            response.needs_reconnect = oauth_broker.needs_reconnect(credentials)
+    return response
 
 
 class ConnectorUpdateRequest(BaseModel):
@@ -137,6 +218,7 @@ async def _get_owned_connector(
 )
 async def create_connector(
     body: ConnectorCreateRequest,
+    request: Request,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> ConnectorConfig:
@@ -153,20 +235,26 @@ async def create_connector(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="custom connectors are not yet supported",
         )
+    if not connector_type_available(body.connector_type):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"Unknown connector type '{body.connector_type}'. "
+                f"Supported: {', '.join(_creatable_types())}."
+            ),
+        )
 
-    problems = validate_credentials(body.connector_type.value, body.credentials)
+    problems = validate_credentials(body.connector_type, body.credentials)
     if problems:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="; ".join(problems),
         )
 
-    _validate_scopes(body.connector_type.value, body.granted_scopes)
+    _validate_scopes(body.connector_type, body.granted_scopes)
 
     encrypted = encrypt_credentials(json.dumps(body.credentials))
-    granted_scopes = body.granted_scopes or default_read_scopes(
-        body.connector_type.value
-    )
+    granted_scopes = body.granted_scopes or default_read_scopes(body.connector_type)
 
     connector = ConnectorConfig(
         user_id=current_user.id,
@@ -181,6 +269,7 @@ async def create_connector(
     db.add(connector)
     await db.flush()
     await db.refresh(connector)
+    await _reconcile_slack_channels(request, db, connector.connector_type)
     return connector
 
 
@@ -188,12 +277,26 @@ async def create_connector(
 async def list_connectors(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> list[ConnectorConfig]:
+) -> list[ConnectorResponse]:
     """List the authenticated user's connectors."""
     result = await db.execute(
         select(ConnectorConfig).where(ConnectorConfig.user_id == current_user.id)
     )
-    return list(result.scalars().all())
+    return [_connector_response(row) for row in result.scalars().all()]
+
+
+@router.get("/types")
+async def list_connector_types(
+    current_user: User = Depends(get_current_user),
+) -> list[dict[str, Any]]:
+    """The connector catalog the UI renders its cards and forms from.
+
+    Served verbatim from ``services.connectors.registry`` so there is one
+    description of every connector. Declared before ``/{connector_id}`` so
+    "types" is never parsed as a connector id. Requires a signed-in user
+    like every other connector route, though it holds no per-user data.
+    """
+    return connector_registry.connector_types_payload()
 
 
 HealthStatus = Literal["healthy", "degraded", "unhealthy"]
@@ -221,8 +324,11 @@ class _Observations:
 class ConnectorHealthEntry(BaseModel):
     id: uuid.UUID
     name: str
-    type: ConnectorType
+    type: str
     status: HealthStatus
+    # False when the row's type is no longer usable here (see
+    # ConnectorResponse.available); such a row reads "unhealthy".
+    available: bool = True
     # Share of this connector's audited actions in the last 24h that the
     # platform carried out rather than refused. It is a measured ratio,
     # not an availability figure: with ``checks_24h == 0`` there is
@@ -277,7 +383,7 @@ async def get_connector_health(
     # ("canvas", "google_workspace", ...) rather than the display name, so
     # match on both.
     names = {c.display_name for c in connectors} | {
-        c.connector_type.value for c in connectors
+        connector_type_key(c.connector_type) for c in connectors
     }
     audit_result = await db.execute(
         select(AuditLog)
@@ -326,17 +432,22 @@ async def get_connector_health(
             # Audit rows record the connector segment of the tool name
             # (e.g. "canvas" from "canvas.submit_assignment"), so fall back
             # to the connector type when no row matches the display name.
+            type_key = connector_type_key(c.connector_type)
             last_seen = last_seen_by_name.get(
                 c.display_name
-            ) or last_seen_by_name.get(c.connector_type.value)
+            ) or last_seen_by_name.get(type_key)
             counts = observed_by_name.get(c.display_name) or observed_by_name.get(
-                c.connector_type.value
+                type_key
             ) or _Observations()
             failed_recently = counts.refused > 0
             observed_recently = counts.total > 0
 
-        if not c.is_active:
+        unknown_type = _is_unknown_type(c.connector_type)
+        if unknown_type:
             status_value: HealthStatus = "unhealthy"
+            detail = _UNAVAILABLE_DETAIL
+        elif not c.is_active:
+            status_value = "unhealthy"
             detail = "Disabled. Enable it to let the agent use it again."
         elif failed_recently:
             status_value = "degraded"
@@ -363,8 +474,9 @@ async def get_connector_health(
             ConnectorHealthEntry(
                 id=c.id,
                 name=c.display_name,
-                type=c.connector_type,
+                type=connector_type_key(c.connector_type),
                 status=status_value,
+                available=connector_type_available(c.connector_type),
                 uptime=counts.success_rate,
                 checks_24h=counts.total,
                 failures_24h=counts.refused,
@@ -387,25 +499,37 @@ async def get_connector(
     connector_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> ConnectorConfig:
+) -> ConnectorResponse:
     """Retrieve a single connector owned by the authenticated user."""
-    return await _get_owned_connector(connector_id, current_user, db)
+    return _connector_response(await _get_owned_connector(connector_id, current_user, db))
 
 
 @router.patch("/{connector_id}", response_model=ConnectorResponse)
 async def update_connector(
     connector_id: uuid.UUID,
     body: ConnectorUpdateRequest,
+    request: Request,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> ConnectorConfig:
+) -> ConnectorResponse:
     """Update connector configuration."""
     connector = await _get_owned_connector(connector_id, current_user, db)
 
     update_data = body.model_dump(exclude_unset=True)
+    type_key = connector_type_key(connector.connector_type)
+
+    if _is_unknown_type(type_key) and (
+        update_data.get("granted_scopes") is not None or "credentials" in update_data
+    ):
+        # With no catalog there is nothing to validate scopes or
+        # credentials against; renaming, disabling or deleting still work.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=_UNAVAILABLE_DETAIL,
+        )
 
     if update_data.get("granted_scopes") is not None:
-        _validate_scopes(connector.connector_type.value, update_data["granted_scopes"])
+        _validate_scopes(type_key, update_data["granted_scopes"])
 
     if "credentials" in update_data:
         credentials = update_data.pop("credentials") or {}
@@ -413,7 +537,7 @@ async def update_connector(
         # credential blob the connector can never use — and the failure
         # then surfaces at tool-call time, far from the change that caused
         # it.
-        problems = validate_credentials(connector.connector_type.value, credentials)
+        problems = validate_credentials(type_key, credentials)
         if problems:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -427,7 +551,28 @@ async def update_connector(
     await db.flush()
     await db.refresh(connector)
     _forget_mcp_state(connector)
-    return connector
+    await _reconcile_slack_channels(request, db, type_key)
+    return _connector_response(connector)
+
+
+async def _reconcile_slack_channels(
+    request: Request, db: AsyncSession, connector_type: str | ConnectorType
+) -> None:
+    """After a Slack connector is created, edited or deleted, have the Slack
+    manager (services/notifications/slack_manager.py) start, restart or stop
+    its DM channel. The change is committed first, since the manager reads
+    with its own session; the reconcile then runs in the background and a
+    failure to schedule it is logged, never turned into an error response."""
+    if connector_type_key(connector_type) != "slack":
+        return
+    manager = getattr(request.app.state, "slack_manager", None)
+    if manager is None:
+        return
+    await db.commit()
+    try:
+        manager.schedule_reconcile()
+    except Exception as exc:
+        logger.warning("slack_reconcile_schedule_failed", error_type=type(exc).__name__)
 
 
 def _forget_mcp_state(connector: ConnectorConfig) -> None:
@@ -446,16 +591,164 @@ def _forget_mcp_state(connector: ConnectorConfig) -> None:
     invalidate_mcp_connector(connector.id)
 
 
+def supports_revoke(connector_type: str | ConnectorType) -> bool:
+    """True when the connector's class declares ``SUPPORTS_REVOKE`` (its
+    ``revoke`` really calls the provider), so a revoke is worth scheduling;
+    its outcome is audited by the broker. MCP, retired types and classes
+    whose provider offers no revoke are skipped."""
+    definition = connector_registry.get_definition(connector_type_key(connector_type))
+    return definition is not None and definition.connector_class.SUPPORTS_REVOKE
+
+
+def _stored_credentials(encrypted: bytes) -> Optional[dict[str, Any]]:
+    """Decrypt and parse a credentials blob; None when it holds nothing."""
+    credentials = json.loads(decrypt_credentials(encrypted))
+    return credentials if isinstance(credentials, dict) and credentials else None
+
+
+def revocable_credentials(connector: ConnectorConfig) -> Optional[dict[str, Any]]:
+    """The decrypted credentials to revoke once *connector* is deleted.
+
+    None when its type cannot revoke or the stored blob is unreadable (a
+    rotated ENCRYPTION_KEY): the deletion then simply goes ahead. Read
+    before the delete, since the row is gone afterwards.
+    """
+    if not supports_revoke(connector.connector_type):
+        return None
+    try:
+        return _stored_credentials(connector.encrypted_credentials)
+    except Exception as exc:
+        logger.warning(
+            "connector_revoke_credentials_unreadable",
+            connector_id=str(connector.id),
+            error_type=type(exc).__name__,
+        )
+        return None
+
+
+# Stored credential keys whose value a provider revoke invalidates.
+_GRANT_TOKEN_KEYS = ("access_token", "refresh_token", "bot_token", "user_token")
+
+
+def grant_markers(credentials: dict[str, Any]) -> frozenset[tuple[str, str]]:
+    """What ties *credentials* to a provider grant another row may share.
+
+    Every stored token value (a Slack bot token is one per app and workspace,
+    so connectors sharing a Slack app hold the same one), plus the broker's
+    OAuth provider: every broker row signs in through this install's single
+    OAuth client, and Google revokes the whole grant of an account and
+    client, so two broker rows may share a grant through different tokens.
+    The Google account is not recorded, so such rows count as shared.
+    """
+    markers = {
+        ("token", value)
+        for key in _GRANT_TOKEN_KEYS
+        if isinstance(value := credentials.get(key), str) and value
+    }
+    provider = credentials.get("oauth_provider")
+    if isinstance(provider, str) and provider:
+        markers.add(("oauth_provider", provider))
+    return frozenset(markers)
+
+
+async def revoke_is_shared(
+    db: AsyncSession,
+    connector_type: str | ConnectorType,
+    credentials: dict[str, Any],
+    *,
+    exclude_ids: tuple[uuid.UUID, ...] = (),
+    exclude_user_id: Optional[uuid.UUID] = None,
+) -> bool:
+    """True when a remaining connector (of any user) of the same type uses
+    the grant *credentials* belong to, so revoking it would silently break
+    that connector. Rows in *exclude_ids*, or owned by *exclude_user_id*,
+    are the ones being deleted. Rows whose credentials cannot be read are
+    unusable anyway and do not count."""
+    markers = grant_markers(credentials)
+    if not markers:
+        return False
+    query = select(ConnectorConfig.encrypted_credentials).where(
+        ConnectorConfig.connector_type == connector_type_key(connector_type)
+    )
+    if exclude_ids:
+        query = query.where(ConnectorConfig.id.notin_(exclude_ids))
+    if exclude_user_id is not None:
+        query = query.where(ConnectorConfig.user_id != exclude_user_id)
+    for encrypted in (await db.execute(query)).scalars():
+        try:
+            other = _stored_credentials(encrypted)
+        except Exception:
+            continue
+        if other is not None and markers & grant_markers(other):
+            return True
+    return False
+
+
 @router.delete("/{connector_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_connector(
     connector_id: uuid.UUID,
+    request: Request,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    session_factory: Callable[[], AsyncSession] = Depends(session_factory_dependency),
 ) -> None:
-    """Delete a connector owned by the authenticated user."""
+    """Delete a connector owned by the authenticated user, then revoke its
+    grant at the provider (best effort) and audit the deletion.
+
+    The delete is committed BEFORE the revoke is scheduled: revoking first
+    and then failing the commit would leave a live row with dead
+    credentials. The revoke task audits its own outcome. A grant another
+    connector still uses is left alone (audited as ``skipped_shared``).
+    """
     connector = await _get_owned_connector(connector_id, current_user, db)
+    type_key = connector_type_key(connector.connector_type)
+    credentials = revocable_credentials(connector)
+    revoke = "not_supported"
+    if credentials is not None and await revoke_is_shared(
+        db, type_key, credentials, exclude_ids=(connector.id,)
+    ):
+        credentials, revoke = None, "skipped_shared"
+    if type_key == "slack":
+        # Its DM link holds a Slack user id: removed explicitly, since a
+        # SQLite database without foreign key enforcement would keep it.
+        await db.execute(
+            sa_delete(SlackChannelLink).where(SlackChannelLink.connector_id == connector.id)
+        )
     await db.delete(connector)
     _forget_mcp_state(connector)
+    await db.commit()
+    await _reconcile_slack_channels(request, db, type_key)
+
+    if credentials is not None:
+        task = oauth_broker.schedule_revoke(
+            type_key, credentials, user_id=current_user.id, session_factory=session_factory
+        )
+        revoke = "scheduled" if task is not None else "not_scheduled"
+
+    try:
+        await append_auth_event(
+            db,
+            user_id=current_user.id,
+            action="connector_deleted",
+            status=AuditStatus.approved,
+            endpoint="/api/connectors",
+            reason=f"revoke {revoke}",
+            details={
+                "connector_type": type_key,
+                "connector_id": str(connector_id),
+                "revoke": revoke,
+            },
+        )
+        await db.commit()
+    except Exception as exc:
+        # The connector is already gone; a failed audit write must not turn
+        # a completed deletion into an error response.
+        await db.rollback()
+        logger.error(
+            "connector_delete_audit_failed",
+            connector_id=str(connector_id),
+            error_type=type(exc).__name__,
+        )
 
 
 class ConnectorTestResult(BaseModel):
@@ -468,14 +761,19 @@ async def test_connector(
     connector_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    session_factory: Callable[[], AsyncSession] = Depends(session_factory_dependency),
 ) -> ConnectorTestResult:
     """Verify stored credentials against the live service.
 
     Decrypts the connector's credentials, authenticates, and runs the
     connector's health check — all under the deny-by-default network
     policy. Nothing is modified on the remote service.
+
+    A broker-made OAuth row whose access token is expiring is refreshed
+    first, and a token the connector rotated during the probe (a legacy
+    Google or Canvas refresh) is persisted afterwards. Each happens at
+    most once per test, so a failing health check never loops.
     """
-    from core.security import decrypt_credentials
     from services.connectors.base import AuthenticationError, ConnectorError
     from services.connectors.factory import create_connector
 
@@ -485,6 +783,8 @@ async def test_connector(
         return ConnectorTestResult(
             ok=False, detail="Custom connectors do not support automated tests yet."
         )
+    if not connector_type_available(row.connector_type):
+        return ConnectorTestResult(ok=False, detail=_UNAVAILABLE_DETAIL)
 
     # Decryption and parsing fail for different reasons and only one of
     # them is fixed by re-entering the credentials, so they must not share
@@ -547,9 +847,22 @@ async def test_connector(
         finally:
             await client.close()
 
+    type_key = connector_type_key(row.connector_type)
+    try:
+        credentials = await oauth_broker.ensure_fresh_credentials(
+            session_factory,
+            config_id=row.id,
+            connector_type=type_key,
+            credentials=credentials,
+        )
+    except AuthenticationError as exc:
+        return ConnectorTestResult(ok=False, detail=f"Authentication failed: {exc}")
+    except ConnectorError as exc:
+        return ConnectorTestResult(ok=False, detail=str(exc))
+
     try:
         connector = create_connector(
-            row.connector_type.value,
+            type_key,
             credentials,
             rate_limit=row.rate_limit_per_minute,
         )
@@ -577,6 +890,40 @@ async def test_connector(
     except ConnectorError as exc:
         return ConnectorTestResult(ok=False, detail=str(exc))
     except Exception as exc:
-        return ConnectorTestResult(ok=False, detail=f"Connection test failed: {exc}")
+        # Only the type: an unexpected error's text can carry a URL with a
+        # token in it.
+        logger.error(
+            "connector_test_unexpected_error",
+            connector_type=type_key,
+            error_type=type(exc).__name__,
+        )
+        return ConnectorTestResult(
+            ok=False, detail=f"Connection test failed ({type(exc).__name__})."
+        )
     finally:
+        await _persist_rotated_credentials(
+            connector, credentials, row.id, type_key, session_factory
+        )
         await connector.close()
+
+
+async def _persist_rotated_credentials(
+    connector: BaseConnector,
+    credentials: dict[str, Any],
+    config_id: uuid.UUID,
+    type_key: str,
+    session_factory: Callable[[], AsyncSession],
+) -> None:
+    """Store the tokens *connector* rotated during a test (a legacy Google
+    or Canvas refresh), compared with the credentials the test used. A
+    failure is logged, never raised: the test result stands either way."""
+    try:
+        rotated = connector.updated_credentials(credentials)
+        if rotated:
+            await oauth_broker.persist_credentials(session_factory, config_id, rotated)
+    except Exception as exc:
+        logger.warning(
+            "connector_test_persist_failed",
+            connector_type=type_key,
+            error_type=type(exc).__name__,
+        )

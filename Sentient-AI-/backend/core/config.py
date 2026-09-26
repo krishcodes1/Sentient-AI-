@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import ipaddress
 from typing import Optional
+from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -187,6 +188,51 @@ class Settings(BaseSettings):
     # each user's linked Telegram chat with Approve/Deny buttons and the
     # decision is taken from there. Empty = feature disabled.
     TELEGRAM_BOT_TOKEN: str = ""
+
+    # ── Connector sign-in (OAuth broker, optional) ────────────────────────
+    # The browser returns from a provider's consent page to
+    # <OAUTH_REDIRECT_BASE>/api/oauth/callback/<provider>; register exactly
+    # that URL with the provider. It must be an http(s) origin with no path
+    # (the frontend on port 3000 proxies /api/ to this backend).
+    OAUTH_REDIRECT_BASE: str = "http://127.0.0.1:3000"
+    # Client ids (and Google's Desktop-app secret, which Google treats as
+    # non-confidential) of the OAuth apps registered for this install.
+    # Empty = that provider's "Sign in" button is unavailable; pasting a
+    # token still works where the connector supports it.
+    GOOGLE_OAUTH_CLIENT_ID: str = ""
+    GOOGLE_OAUTH_CLIENT_SECRET: str = ""
+    MICROSOFT_OAUTH_CLIENT_ID: str = ""
+    GITHUB_OAUTH_CLIENT_ID: str = ""
+
+    @field_validator("OAUTH_REDIRECT_BASE")
+    @classmethod
+    def _redirect_base_is_an_origin(cls, v: str) -> str:
+        """Accept only ``http(s)://host[:port]`` (one trailing slash is
+        dropped). A path, query, fragment or user-info would make the
+        redirect URI the broker sends differ from the one registered with
+        the provider, or smuggle something into it."""
+        value = v.strip()
+        if value.endswith("/"):
+            value = value[:-1]
+        parsed = urlsplit(value)
+        bad_origin = ValueError(
+            "OAUTH_REDIRECT_BASE must be an http(s) origin such as "
+            "http://127.0.0.1:3000, with no path or query"
+        )
+        if (
+            parsed.scheme.lower() not in ("http", "https")
+            or not parsed.hostname
+            or parsed.path
+            or "?" in value
+            or "#" in value
+            or "@" in parsed.netloc
+        ):
+            raise bad_origin
+        try:
+            _ = parsed.port  # raises ValueError on a malformed port
+        except ValueError:
+            raise bad_origin from None
+        return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
 
     # ── Rate limiting ─────────────────────────────────────────────────────
     RATE_LIMIT_PER_MINUTE: int = 60
