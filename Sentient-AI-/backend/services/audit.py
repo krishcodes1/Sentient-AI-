@@ -410,6 +410,9 @@ _EVENT_STATUS: dict[str, AuditStatus] = {
     "tool_pending_approval": AuditStatus.pending,
     "tool_taint_escalated": AuditStatus.pending,
     "tool_blocked": AuditStatus.blocked,
+    # The model named a tool that does not exist: denied by default, so
+    # nothing ran, and it was told the right name (not a policy refusal).
+    "tool_unknown": AuditStatus.blocked,
     "tool_denied": AuditStatus.blocked,
     "tool_expired": AuditStatus.blocked,
     "input_blocked": AuditStatus.blocked,

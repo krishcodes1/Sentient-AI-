@@ -365,6 +365,51 @@ async def test_a_redirect_to_a_private_host_is_refused_with_the_blocked_host(kit
 
 
 @pytest.mark.asyncio
+async def test_open_follows_a_multi_hop_redirect_to_the_page_it_lands_on(kit, fakesite, monkeypatch):
+    from tests.fakesite.pages import REDIRECTS
+
+    monkeypatch.setitem(REDIRECTS, "/go/1", "/go/2")
+    monkeypatch.setitem(REDIRECTS, "/go/2", fakesite.url("/go/3"))
+    monkeypatch.setitem(REDIRECTS, "/go/3", "/grades")
+    result = await run(kit, "open", url=fakesite.url("/go/1"))
+    assert result["ok"] is True and result["url"] == fakesite.url("/grades")
+    assert result["http_status"] == 200 and "error_page" not in result
+    assert any("Grades for" in line for line in result["outline"])
+    assert [path for _m, path in fakesite.handled] == ["/go/1", "/go/2", "/go/3", "/grades"]
+
+
+@pytest.mark.asyncio
+async def test_a_later_hop_to_a_private_host_is_refused_as_plainly_as_the_first(kit, fakesite, monkeypatch):
+    """The first hop's goto succeeds (the guard hands a redirect back as a
+    page that moves on), so a hop stopped further down the chain must still
+    come back as a refusal naming the host, never as an empty error page."""
+    from tests.fakesite.pages import REDIRECTS
+
+    monkeypatch.setitem(REDIRECTS, "/go/1", "/go/2")
+    monkeypatch.setitem(REDIRECTS, "/go/2", "http://10.0.0.1/admin")
+    result = await run(kit, "open", url=fakesite.url("/go/1"))
+    assert result == {
+        "ok": False,
+        "error": "Refusing to open http://10.0.0.1/admin: 10.0.0.1 resolves to a private or local address (10.0.0.1)",
+    }
+    assert (await run(kit, "open", url=fakesite.url("/")))["ok"] is True  # the next open works
+
+
+@pytest.mark.asyncio
+async def test_open_says_plainly_when_the_address_is_not_a_page_of_the_site(kit, fakesite):
+    """A shop's 404 page has menus and reads like a page: the result and
+    the summary line that outlives its outline both carry the status."""
+    result = await run(kit, "open", url=fakesite.url("/shop/iphone-16-pro-max-grip-case-holo-white"))
+    assert result["ok"] is True and result["http_status"] == 404
+    assert result["error_page"].startswith("The site answered HTTP 404: there is no page at this address.")
+    assert result["summary"].endswith(" · HTTP 404")
+    _toolkit, sessions = kit
+    session = await sessions.get("u1", mode="account", task_id="t1")
+    assert session.task.summaries[-1] == result["summary"]
+    assert "error_page" not in await run(kit, "open", url=fakesite.url("/grades"))
+
+
+@pytest.mark.asyncio
 async def test_account_mode_strips_query_strings_from_urls(kit, fakesite):
     result = await run(kit, "open", url=fakesite.url("/grades?student=42#top"))
     assert result["ok"] is True

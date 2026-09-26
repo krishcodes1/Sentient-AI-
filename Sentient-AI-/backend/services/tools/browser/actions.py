@@ -108,6 +108,23 @@ _SUMMARY_LABEL_CHARS = 40
 _UNCOUNTED = frozenset({"note", "handoff"})
 # Why a read-tier click was left to browser.act by the purchase rules.
 _ORDER_REASON = "may place an order (a payment method, a total or a price is on the page)"
+# How long open follows zero-second refreshes (redirect hops) before it
+# describes the page as it is.
+REDIRECT_WAIT_MS = 10_000
+# True once the page is not one that moves on at once.
+_MOVING_ON_JS = r"""() => ![...document.querySelectorAll('meta[http-equiv="refresh" i]')]
+  .some(m => /^\s*0+(\.0*)?\s*([;,]|$)/.test(m.getAttribute('content') || ''))"""
+# The HTTP status of the page's current document, as the browser got it.
+_STATUS_JS = (
+    "() => { const n = performance.getEntriesByType('navigation')[0]; return n ? n.responseStatus || 0 : 0; }"
+)
+# What an open that landed on an error page adds to its result: a
+# missing page, or any other refusal or failure the site answered with.
+_NOT_FOUND_NOTE = (
+    "The site answered HTTP {status}: there is no page at this address. Do not try other "
+    "made-up addresses; open the site's home page and use its search or its links."
+)
+_ERROR_PAGE_NOTE = "The site answered HTTP {status}: the outline shows its error page, not the page asked for."
 # Why a read-tier click was left to browser.act otherwise: it is neither a
 # plain link nor a control outside a form on a page with nothing to pay.
 _ACT_REASON = "only browser.act, with the owner's approval, clicks that"
@@ -396,6 +413,7 @@ class BrowserReadToolkit:
         if reason is not None:
             return _error(f"Refusing to open that URL: {reason}")
         page = await session.page()
+        blocked_before = self._blocked_count(session)
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)
         except PlaywrightTimeoutError:
@@ -410,7 +428,51 @@ class BrowserReadToolkit:
                 return _error(f"Refusing to open {blocked}")
             _log_failure("browser_open_failed", exc)
             return _error("Could not open the page: the navigation failed.")
-        return await self._observe(session, "open", {"url": url})
+        # The guard hands each redirect back as a page that moves on at once
+        # (guard._client_redirect), so the goto ends on the first hop: wait
+        # for the page the chain lands on, and when the guard stopped a
+        # later hop, say so as it would have been said for the first.
+        await self._past_redirects(page)
+        stopped = self._blocked_reason(session, since=blocked_before)
+        if stopped is not None and page.url.startswith("chrome-error://"):
+            await self._guard.settle_blocked_navigation(page)
+            return _error(f"Refusing to open {stopped}")
+        result = await self._observe(session, "open", {"url": url})
+        status = await self._http_status(page) if result.get("ok") else None
+        if status is not None:
+            result["http_status"] = status
+        if status is not None and status >= 400:
+            # A shop's 404 page is a whole page with menus, and reads like
+            # one: say plainly that the address is not a page of the site,
+            # and keep it in the summary line that outlives the outline.
+            note = _NOT_FOUND_NOTE if status in (404, 410) else _ERROR_PAGE_NOTE
+            result["error_page"] = note.format(status=status)
+            result["summary"] = f"{result['summary']} · HTTP {status}"
+            if session.task.summaries:
+                session.task.summaries[-1] = result["summary"]
+        return result
+
+    @staticmethod
+    async def _past_redirects(page: Any) -> None:
+        """Wait (at most REDIRECT_WAIT_MS) while the page is one that moves
+        on at once (a zero-second refresh: the guard's redirect hops, and a
+        site's own); a page that keeps doing so is described as it is."""
+        try:
+            await page.wait_for_function(_MOVING_ON_JS, timeout=REDIRECT_WAIT_MS)
+        except Exception as exc:  # noqa: BLE001 - the page is described as it is
+            _log_failure("browser_redirect_wait_failed", exc)
+
+    @staticmethod
+    async def _http_status(page: Any) -> Optional[int]:
+        """The HTTP status of the document the page shows now (after the
+        redirects the guard turned into client hops), or None when the
+        page cannot say."""
+        try:
+            status = await _shared.frame_evaluate(page.main_frame, _STATUS_JS)
+        except Exception as exc:  # noqa: BLE001 - the page is described without it
+            _log_failure("browser_status_failed", exc)
+            return None
+        return status if isinstance(status, int) and status > 0 else None
 
     async def snapshot(
         self, session: BrowserSession, query: Optional[str] = None, full: bool = False

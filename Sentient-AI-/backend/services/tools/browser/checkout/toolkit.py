@@ -1008,8 +1008,8 @@ class BrowserCheckoutToolkit:
         left = 0
         for frame in page.frames:
             try:
-                left += int(await frame.evaluate(markers.CLEAR_CARD_FIELDS_JS) or 0)
-            except Exception as exc:  # noqa: BLE001 - a frame mid-navigation holds no form
+                left += int(await _shared.frame_evaluate(frame, markers.CLEAR_CARD_FIELDS_JS) or 0)
+            except Exception as exc:  # noqa: BLE001 - a frame mid-navigation or without a document holds no form
                 _log_failure("checkout_card_sweep_failed", exc, detail=False)
         if left:
             logger.warning("checkout_card_left_in_form", fields=left)

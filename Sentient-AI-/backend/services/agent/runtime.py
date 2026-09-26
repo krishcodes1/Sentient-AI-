@@ -376,6 +376,23 @@ tell the person what was bought and the amount, then offer a reminder
 confirmation page.
 </purchases>"""
 
+# Sent only when a browser tool is offered (``shopping`` in
+# _with_system_prompt), so a turn without the browser pays nothing for it.
+SHOPPING_SYSTEM_PROMPT = """\
+<shopping>
+To find or buy a product in the browser:
+- If the person pasted a link, open exactly that link. Otherwise never guess
+  a shop's addresses: web.search for the shop, product and variant, then open
+  the shop's own result; or open the shop's home page and use its search or
+  menus.
+- A 404 or "page not found" means the address was guessed wrong, not that the
+  product is gone: search instead of trying more addresses.
+- On the product page pick the variant (color, size, model) with browser.act,
+  add it to the cart, then go to the cart and on to checkout.
+- Pay only with browser.checkout, and only when it is offered; without it,
+  stop at checkout and tell the person the cart is ready.
+</shopping>"""
+
 # Receives the turn's progress events (tool_call, tool_result, blocked,
 # pending_approval) as they happen: the SSE stream and the Telegram
 # progress lines both listen through one of these.
@@ -480,6 +497,120 @@ DESKTOP_RESUME_CLOSING_LINE = (
     "not, call desktop.observe first (it needs no approval); ask for another "
     "desktop.act only for a step the outline shows is needed."
 )
+# Closes the last follow-up before a message's tool rounds run out: the
+# next model call offers no tools, so the reply says where the task stands
+# instead of breaking off. round_limit_note follows that reply.
+WRAP_UP_CLOSING_LINE = (
+    "This message has used all of its tool steps, so the next reply gets no tools; "
+    "do not ask for one. In plain words and two or three short sentences, tell the "
+    "person what you have done so far and what is left to do. A line inviting them "
+    'to send "continue" is added after your reply.'
+)
+# What the extra rounds of a browser or desktop turn may cost, priced on the
+# model that ran them: the browser task's spend cap
+# (services.tools.browser._shared.BROWSER_MAX_USD), which a desktop turn
+# has no toolkit of its own to enforce.
+TASK_MAX_USD = 0.25
+
+
+def round_limit_note(rounds: int) -> str:
+    """The plain line after the reply of a message that used all *rounds*
+    of its tool rounds."""
+    return f'I stopped after {rounds} steps for this message. Send "continue" and I\'ll pick up from here.'
+
+
+def is_task_tool(name: Any) -> bool:
+    """A tool whose use gives the message the larger round budget
+    (MAX_TASK_TOOL_ROUNDS): the browser's and the desktop's."""
+    return isinstance(name, str) and name.startswith(("browser.", "desktop."))
+
+
+# The policy the permission adapter files a name no catalog knows under
+# (tool_registry.RuntimePermissionAdapter). Such a call from the model is a
+# wrong name, not a refusal the owner needs to see: it never runs, and the
+# model is told the right tool instead (unknown_tool_reply).
+DEFAULT_DENY_POLICY = "default-deny"
+_SHOWN_TOOL_NAME_RE = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
+_OPEN_WORDS = ("open", "goto", "go", "navigate", "visit", "load", "browse", "url")
+# A verb the model reaches for, and the act action that does it.
+_BROWSER_ACT_VERBS = {
+    "click": "click", "tap": "click", "type": "fill", "fill": "fill", "input": "fill",
+    "enter": "fill", "select": "select", "choose": "select", "pick": "select",
+    "press": "press", "check": "check", "submit": "submit",
+}
+_DESKTOP_ACT_VERBS = {
+    "click": "click", "tap": "click", "type": "type", "fill": "type", "input": "type",
+    "press": "key", "key": "key", "keys": "key", "scroll": "scroll", "open": "open_app",
+    "launch": "open_app",
+}
+_READ_WORDS = ("read", "snapshot", "scroll", "find", "back", "text", "page", "wait", "tabs")
+_SEARCH_WORDS = ("search", "google", "lookup")
+_PAY_WORDS = ("checkout", "buy", "pay", "purchase")
+
+
+def _args_text(args: dict[str, str]) -> str:
+    return json.dumps(args, ensure_ascii=False)
+
+
+def _unknown_tool_hint(name: str, offered: set[str]) -> str:
+    """The offered tool that does what *name* sounds like, as one sentence
+    with its arguments; empty when nothing offered fits."""
+    lowered = name.lower()
+    words = set(re.split(r"[^a-z]+", lowered))
+
+    def first(table: Mapping[str, str] | tuple[str, ...]) -> Optional[str]:
+        return next((w for w in table if w in words), None)
+
+    if lowered.startswith(("desktop.", "computer.", "mac.", "app.")):
+        verb = first(_DESKTOP_ACT_VERBS)
+        if verb is not None and "desktop.act" in offered:
+            action = _DESKTOP_ACT_VERBS[verb]
+            extra = {"open_app": {"app": "…"}, "key": {"keys": "…"}, "scroll": {"direction": "down"}}
+            args = {"action": action, **extra.get(action, {"ref": "…"})}
+            return (
+                f"To {verb} in an app use desktop.act with {_args_text(args)}, "
+                "using a ref from the latest desktop.observe outline."
+            )
+        if "desktop.observe" in offered:
+            return 'To look at the apps on this computer use desktop.observe with {"action": "outline"}.'
+        return ""
+    if first(_PAY_WORDS) and "browser.checkout" in offered:
+        return 'To pay on the checkout page use browser.checkout with {"merchant": "…"}.'
+    if first(_SEARCH_WORDS) and "web.search" in offered:
+        return 'To search the web use web.search with {"query": "…"}.'
+    verb = first(_BROWSER_ACT_VERBS)
+    if verb is not None:
+        action = _BROWSER_ACT_VERBS[verb]
+        if "browser.act" in offered:
+            extra = {"fill": {"text": "…"}, "select": {"value": "…"}}
+            args = {"action": action, "ref": "…", **extra.get(action, {})}
+            if action == "press":
+                args = {"action": "press", "key": "Enter"}
+            return (
+                f"To {verb} on a page use browser.act with {_args_text(args)}, "
+                "using a ref from the latest browser.read outline."
+            )
+        if action == "click" and "browser.read" in offered:
+            return 'To follow a link or open a menu use browser.read with {"action": "click", "ref": "…"}.'
+    if first(_OPEN_WORDS):
+        if "browser.read" in offered:
+            return 'To open a page use browser.read with {"action": "open", "url": "…"}.'
+        if "web.fetch_page" in offered:
+            return 'To read a page use web.fetch_page with {"url": "…"}.'
+    if first(_READ_WORDS) and "browser.read" in offered:
+        return 'To read the open page use browser.read with {"action": "snapshot"}.'
+    return ""
+
+
+def unknown_tool_reply(name: Any, offered: list[str]) -> str:
+    """What the model is told when it calls a tool that does not exist
+    (``browser.open``): the right tool for the job, when one is offered,
+    and the names it may call, so it retries in the same turn."""
+    shown = name if isinstance(name, str) and _SHOWN_TOOL_NAME_RE.fullmatch(name) else ""
+    head = f"There is no tool named {shown}." if shown else "There is no tool by that name."
+    hint = _unknown_tool_hint(shown, set(offered)) if shown else ""
+    names = ", ".join(sorted(set(offered))) or "none"
+    return " ".join(part for part in (head, hint, f"The tools you can call are: {names}.") if part)
 
 
 def render_task_facts(*, notes: list[str], summaries: list[str]) -> str:
@@ -1230,6 +1361,9 @@ class AgentRuntime:
         self._retired: dict[int, LLMProvider] = {}
         # Upper bound on chained tool rounds within a single chat turn.
         self._max_tool_rounds: int = int(getattr(config, "MAX_TOOL_ROUNDS", 8) or 8)
+        # The bound once the turn has driven the browser or the desktop
+        # (is_task_tool), while its extra rounds cost under TASK_MAX_USD.
+        self._max_task_tool_rounds: int = int(getattr(config, "MAX_TASK_TOOL_ROUNDS", 30) or 30)
 
     # Cap on cached per-user provider instances (see _provider_cache).
     _PROVIDER_CACHE_MAX = 32
@@ -1461,6 +1595,7 @@ class AgentRuntime:
         permissions_text: Optional[str] = None,
         *,
         purchases: bool = False,
+        shopping: bool = False,
     ) -> list[dict[str, Any]]:
         """Ensure the security system prompt heads the message list.
 
@@ -1478,6 +1613,8 @@ class AgentRuntime:
         ``purchases`` (the checkout tool is offered this turn) adds the
         ``<purchases>`` block right after the policy, before the date: with
         buying off the system message is the pre-purchases one, unchanged.
+        ``shopping`` (a browser tool is offered) adds the ``<shopping>``
+        playbook after it, before the date, on the same terms.
         """
         # The model has no clock. Day granularity is enough for "next Friday"
         # and keeps the cached prompt prefix identical across a whole day;
@@ -1489,6 +1626,7 @@ class AgentRuntime:
         )
         tail = (
             (f"\n\n{PURCHASES_SYSTEM_PROMPT}" if purchases else "")
+            + (f"\n\n{SHOPPING_SYSTEM_PROMPT}" if shopping else "")
             + f"\n\n{today_line}"
             + (f"\n\n{permissions_text}" if permissions_text else "")
             + (f"\n\n{memory_block}" if memory_block else "")
@@ -1701,6 +1839,7 @@ class AgentRuntime:
         *,
         observation_slots: Optional[list[ObservationSlot]] = None,
         summaries: Optional[list[str]] = None,
+        closing: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         follow_up = list(messages)
         task_facts = self._task_facts_for(tool_results, summaries if summaries is not None else [])
@@ -1729,7 +1868,7 @@ class AgentRuntime:
                 }
         if llm_response.content.strip():
             follow_up.append({"role": "assistant", "content": llm_response.content})
-        wrapped = self._wrap_tool_results(tool_results, task_facts=task_facts)
+        wrapped = self._wrap_tool_results(tool_results, task_facts=task_facts, closing=closing)
         images = self._images_for_model(tool_results, provider)
         if images:
             follow_up.append(
@@ -2080,6 +2219,7 @@ class AgentRuntime:
                 memory_block,
                 permissions_text,
                 purchases=any(t.name == CHECKOUT_TOOL for t in tools or []),
+                shopping=any(is_browser_tool(t.name) for t in tools or []),
             )
             turn_provider, turn_model = await self._select_provider(llm_provider, llm_model)
             if usage_sink is not None:
@@ -2235,6 +2375,20 @@ class AgentRuntime:
         # summary so far.
         observation_slots: list[ObservationSlot] = []
         browser_summaries: list[str] = []
+        # The names the model was offered this turn: an unknown name is
+        # answered from these (unknown_tool_reply).
+        offered_names = [str(t.get("name", "")) for t in tool_schemas]
+        # Set once a browser or desktop call has run this turn: from then
+        # on the turn may take MAX_TASK_TOOL_ROUNDS rounds, while what it
+        # has cost so far (priced on the model that ran) is under
+        # TASK_MAX_USD. The browser toolkit's own caps still apply.
+        task_turn = False
+        turn_usd = 0.0
+
+        def round_budget() -> int:
+            if task_turn and turn_usd < TASK_MAX_USD:
+                return max(self._max_tool_rounds, self._max_task_tool_rounds)
+            return self._max_tool_rounds
 
         # Thinking off on browser rounds (spec §10), for providers that take
         # a budget; every other provider keeps its plain signature.
@@ -2274,7 +2428,7 @@ class AgentRuntime:
                 stopped = True
                 break
 
-            allow_tools = bool(tool_schemas) and rounds_used < self._max_tool_rounds
+            allow_tools = bool(tool_schemas) and rounds_used < round_budget()
             llm_response: LLMResponse = await provider.complete(
                 messages=messages,
                 tools=tool_schemas if allow_tools else None,
@@ -2283,6 +2437,9 @@ class AgentRuntime:
             for k, v in llm_response.usage.items():
                 total_usage[k] = total_usage.get(k, 0) + v
             served_model = llm_response.served_model or served_model
+            turn_usd += estimate_usd(
+                llm_response.usage or {}, turn_provider, turn_model, llm_response.served_model
+            )
             if usage_sink is not None:
                 usage_sink.served_model = served_model
 
@@ -2377,6 +2534,39 @@ class AgentRuntime:
                         user_id, tc.name, tc.arguments
                     )
                     policy = await self._permissions.get_policy_name(user_id, tc.name)
+                    if policy == DEFAULT_DENY_POLICY and tc.name not in offered_tools:
+                        # A name the model made up (browser.open): denied
+                        # like any unknown tool, so nothing runs, but it is
+                        # a wrong name rather than a refusal. The model is
+                        # told the right tool as this call's result and
+                        # retries in this turn; the owner sees no block.
+                        # Nothing ran, so the answer stands whether or not
+                        # the audit write succeeds.
+                        try:
+                            await self._audit.log(
+                                {
+                                    "event": "tool_unknown",
+                                    "user_id": user_id,
+                                    "tool": tc.name,
+                                    "arguments": tc.arguments,
+                                    "reason": reason,
+                                    "policy": policy,
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                }
+                            )
+                        except Exception as exc:
+                            logger.error("audit_write_failed_unknown_tool", error=str(exc))
+                        record = {
+                            "tool_call_id": tc.id,
+                            "name": tc.name,
+                            "result": {
+                                "ok": False,
+                                "error": unknown_tool_reply(tc.name, offered_names),
+                            },
+                        }
+                        round_results.append(record)
+                        tool_results.append(record)
+                        continue
                     blocked_actions.append(
                         BlockedAction(tool_name=tc.name, reason=reason, policy=policy)
                     )
@@ -2801,6 +2991,8 @@ class AgentRuntime:
                 except Exception as exc:  # noqa: BLE001 - accounting must never fail a turn
                     logger.warning("browser_spend_record_failed", error=str(exc)[:200])
 
+            task_turn = task_turn or any(is_task_tool(name) for name in ran_this_round)
+
             if skipped_calls or agent_cancel.is_cancelled(user_id):
                 # A stop skipped part of this round, or landed while its
                 # last call ran or its card was recorded. Either way the
@@ -2840,6 +3032,8 @@ class AgentRuntime:
 
             # Feed the results back and loop — the next call still offers
             # tools (until the round budget runs out) so calls can chain.
+            # When it will not, the results close by asking for a reply that
+            # says what was done and what is left.
             messages = self._follow_up_messages(
                 messages,
                 llm_response,
@@ -2847,14 +3041,15 @@ class AgentRuntime:
                 provider,
                 observation_slots=observation_slots,
                 summaries=browser_summaries,
+                closing=WRAP_UP_CLOSING_LINE if rounds_used >= round_budget() else None,
             )
 
         if hit_round_limit:
-            final_content = (final_content or "").rstrip() + (
-                f"\n\n[Stopped: reached the limit of {self._max_tool_rounds} "
-                "tool rounds for a single message. Send a follow-up message "
-                "to continue.]"
-            )
+            # The model's own account of where the task stands (asked for
+            # by WRAP_UP_CLOSING_LINE), then one plain line on how to go on.
+            note = round_limit_note(rounds_used)
+            final_content = (final_content or "").rstrip()
+            final_content = f"{final_content}\n\n{note}" if final_content else note
 
         # 4. Scan the FINAL model output — including the follow-up
         #    completion after tool execution, which is the path most

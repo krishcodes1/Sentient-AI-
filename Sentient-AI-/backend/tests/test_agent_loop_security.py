@@ -17,7 +17,7 @@ Covers the wiring fixes from the production audit:
   (including the follow-up completion after tool execution).
 - Guard failures are fail-safe (never crash chat).
 - The agent loop is multi-round: tool calls can chain, bounded at
-  ``_max_tool_rounds`` with a clear hard-stop message.
+  ``_max_tool_rounds`` with a plain line on how to continue.
 - ContextManager is live: sliding window + summarization, tool-result
   compression, dynamic tool selection, and the scoped semantic cache.
 - Per-user LLM provider resolution (Settings) with clear ProviderError
@@ -35,6 +35,7 @@ from services.agent.runtime import (
     AgentRuntime,
     RuntimePromptGuard,
     Tool,
+    round_limit_note,
 )
 from services.agent.tool_registry import (
     ConnectorSpec,
@@ -331,7 +332,8 @@ async def test_loop_hard_stops_at_round_limit_with_clear_message():
     assert len(executor.calls) == runtime._max_tool_rounds
     assert provider.calls[-1]["tools"] is None
     assert "ran out of tool budget" in response.content
-    assert f"limit of {runtime._max_tool_rounds} tool rounds" in response.content
+    assert response.content.endswith(round_limit_note(runtime._max_tool_rounds))
+    assert "[Stopped" not in response.content
 
 
 @pytest.mark.asyncio

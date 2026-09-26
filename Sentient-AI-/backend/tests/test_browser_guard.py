@@ -7,6 +7,7 @@ import asyncio
 import re
 import time
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 import pytest
 import pytest_asyncio
@@ -989,3 +990,117 @@ async def test_inside_a_window_only_the_approved_page_navigates_its_tab(no_syste
     route = FakeRoute(FakeResponse(200))
     await g._route(route, FakeRequest("https://shop.example/place-order", headers={}, page=alone), state)
     assert route.calls == [("abort", "blockedbyclient")] and state.blocked[-1]["reason"] == guard.OTHER_PAGE_NAVIGATION
+
+
+# -- every hop of a redirect chain is judged (the navigation path) --------------
+# A top-level GET is fetched by the guard and a 3xx comes back as a client
+# hop, never route.continue_()d: Playwright routes only a request's first
+# URL, so a hop the browser followed itself would go out unjudged.
+
+
+class _InternalHostGuard(Guard):
+    """The real guard, with a second local server standing in for a host on
+    the private network: its port is refused the way check_url refuses a
+    private address, and every URL checked is kept in order."""
+
+    def __init__(self, internal_port: int) -> None:
+        super().__init__(resolver=lambda host: ["127.0.0.1"])
+        self.internal_port = internal_port
+        self.checked: list[str] = []
+
+    def check_url(self, url: str):
+        self.checked.append(url)
+        if urlsplit(url).port == self.internal_port:
+            return "resolves to a private or local address (127.0.0.1, the stand-in internal host)"
+        return super().check_url(url)
+
+
+@pytest.fixture
+def internal_site():
+    from tests.fakesite import FakeSite
+
+    site = FakeSite().start()
+    try:
+        yield site
+    finally:
+        site.stop()
+
+
+def _chain_guard(internal_site) -> _InternalHostGuard:
+    return _InternalHostGuard(int(urlsplit(internal_site.base).port or 0))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hops", [1, 2, 4])
+async def test_a_redirect_chain_is_stopped_at_whichever_hop_turns_private(page, fakesite, internal_site, monkeypatch, hops):
+    """/chain/1 → … → /chain/<hops> → the internal host: every hop is
+    judged before the browser sends it, so the internal host never gets a
+    request, however deep in the chain it comes."""
+    from tests.fakesite.pages import REDIRECTS
+
+    for i in range(1, hops):
+        monkeypatch.setitem(REDIRECTS, f"/chain/{i}", f"/chain/{i + 1}")
+    monkeypatch.setitem(REDIRECTS, f"/chain/{hops}", internal_site.url("/admin"))
+    g = _chain_guard(internal_site)
+    await g.install_egress_guard(page.context, account_mode=True)
+    try:
+        await page.goto(fakesite.url("/chain/1"))
+    except Exception as exc:  # noqa: BLE001 - a one-hop chain fails the goto itself
+        assert BLOCKED_NAVIGATION_MARKER in str(exc)
+    deadline = time.monotonic() + 5
+    while not egress_state(page.context).blocked and time.monotonic() < deadline:
+        await asyncio.sleep(0.05)  # a later hop is a navigation of the page's own
+    await settle_blocked_navigation(page)
+    assert internal_site.handled == []
+    assert [path for _method, path in fakesite.handled] == [f"/chain/{i}" for i in range(1, hops + 1)]
+    # Each hop is judged as a redirect's target and again as a navigation.
+    assert list(dict.fromkeys(g.checked)) == [fakesite.url(f"/chain/{i}") for i in range(1, hops + 1)] + [
+        internal_site.url("/admin")
+    ]
+    assert egress_state(page.context).blocked == [
+        {
+            "url": internal_site.url("/admin"),
+            "reason": "resolves to a private or local address (127.0.0.1, the stand-in internal host)",
+            "via": fakesite.url(f"/chain/{hops}"),
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_multi_hop_public_redirect_chain_loads_with_every_hop_judged(page, fakesite, internal_site, monkeypatch):
+    from tests.fakesite.pages import REDIRECTS
+
+    monkeypatch.setitem(REDIRECTS, "/chain/1", "/chain/2")
+    monkeypatch.setitem(REDIRECTS, "/chain/2", fakesite.url("/chain/3"))  # absolute, as a CDN writes it
+    monkeypatch.setitem(REDIRECTS, "/chain/3", "/grades")
+    g = _chain_guard(internal_site)
+    await g.install_egress_guard(page.context, account_mode=True)
+    await page.goto(fakesite.url("/chain/1"))
+    await page.wait_for_url("**/grades")
+    assert "Grades" in await page.title()
+    hops = [fakesite.url(path) for path in ("/chain/1", "/chain/2", "/chain/3", "/grades")]
+    assert list(dict.fromkeys(g.checked)) == hops
+    assert [path for _method, path in fakesite.handled] == ["/chain/1", "/chain/2", "/chain/3", "/grades"]
+    assert egress_state(page.context).blocked == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "location",
+    [
+        "http://127.0.0.1:8080/admin",
+        "http://[::1]/",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://10.0.0.1/",
+        "http://0.0.0.0/",
+    ],
+)
+async def test_route_never_lets_a_hop_reach_a_loopback_private_or_link_local_address(no_system_dns, monkeypatch, location):
+    """Without the test toggle (production), a public page's redirect to
+    any local address is aborted before the browser sends it."""
+    monkeypatch.delenv("CRAWLER_ALLOW_LOOPBACK_FOR_TESTS", raising=False)
+    state, route = _state(), FakeRoute(FakeResponse(302, location))
+    await Guard(resolver=public_resolver)._route(route, FakeRequest("https://shop.example/go"), state)
+    assert route.calls == [("abort", "blockedbyclient")]
+    assert state.blocked[-1]["url"] == location and state.blocked[-1]["via"] == "https://shop.example/go"
+    assert "private or local" in state.blocked[-1]["reason"]

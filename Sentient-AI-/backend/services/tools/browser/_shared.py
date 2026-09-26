@@ -56,6 +56,9 @@ FULL_OUTLINE_CHARS = 24000
 NAVIGATION_TIMEOUT_MS = 20_000
 # A ref that no longer resolves must answer "stale" quickly, not hang.
 REF_TIMEOUT_MS = 3_000
+# How long a frame with no URL may take to answer before a picture treats
+# it as having no document (``frame_evaluate``).
+EMPTY_FRAME_TIMEOUT_S = 0.5
 JPEG_QUALITY = 70
 # Fields whose pixels never leave the machine, even in a screenshot the
 # person asked for: the checkout's classifier marks them (``mask_locators``)
@@ -178,6 +181,42 @@ def where(session: BrowserSession, page: Any) -> str:
     return snap.strip_url(page.url, session.mode == "account")
 
 
+async def frame_evaluate(frame: Any, script: str, *, quick: bool = False) -> Any:
+    """``frame.evaluate`` bounded by REF_TIMEOUT_MS. Playwright's has no
+    timeout, and a frame whose document never loaded (a lazy video embed
+    far below the fold: its URL stays "") never answers, so one such
+    frame would hold every picture, card and step of the page forever.
+    With *quick*, a frame with no URL gets EMPTY_FRAME_TIMEOUT_S: one
+    whose parent wrote into it shares the parent's thread and answers at
+    once, so waiting longer only delays a picture (never a judgement:
+    those keep the full bound). Raises ``asyncio.TimeoutError`` when the
+    frame does not answer."""
+    timeout = EMPTY_FRAME_TIMEOUT_S if quick and not frame.url else REF_TIMEOUT_MS / 1000
+    return await asyncio.wait_for(frame.evaluate(script), timeout)
+
+
+async def _mask_whole_frame(frame: Any) -> bool:
+    """Mark the ``<iframe>`` element of a frame that would not run the
+    classifier and has no document (URL ""), so the picture blacks out
+    its whole box, asked of its parent, which answers. Its own locator is
+    then left out: the screenshot would wait on that frame too."""
+    if frame.url:
+        return False
+    try:
+        element = await asyncio.wait_for(frame.frame_element(), REF_TIMEOUT_MS / 1000)
+        try:
+            await asyncio.wait_for(
+                element.evaluate("(el, name) => el.setAttribute(name, '')", markers.MASK_ATTRIBUTE),
+                REF_TIMEOUT_MS / 1000,
+            )
+        finally:
+            await element.dispose()
+    except Exception as exc:  # noqa: BLE001 - its own locator stays in the mask
+        logger.debug("browser_mask_frame_failed", error_type=type(exc).__name__)
+        return False
+    return True
+
+
 async def mask_locators(page: Any, refs: Sequence[str] = ()) -> list[Any]:
     """The locators a screenshot blacks out: every secret field in every
     frame, plus the fields at *refs* (a checkout's card fields) while
@@ -189,16 +228,26 @@ async def mask_locators(page: Any, refs: Sequence[str] = ()) -> list[Any]:
     cases. ``page.locator`` never looks inside an iframe, and an embedded
     IdP login or card form is exactly where a password or card number
     sits. A frame that will not run the script (mid-navigation, gone)
-    keeps the selector part; a ref that no longer resolves is left out,
-    because a ref into a frame that navigated away fails the whole
-    screenshot."""
-    locators: list[Any] = []
-    for frame in page.frames:
+    keeps the selector part, except one with no document at all, whose
+    whole box is blacked out instead (``_mask_whole_frame``); a ref that
+    no longer resolves is left out, because a ref into a frame that
+    navigated away fails the whole screenshot. Frames are asked at once,
+    each for at most REF_TIMEOUT_MS (``frame_evaluate``)."""
+
+    async def mark(frame: Any) -> Optional[Any]:
         try:
-            await frame.evaluate(markers.MARK_SECRET_FIELDS_JS)
+            await frame_evaluate(frame, markers.MARK_SECRET_FIELDS_JS, quick=True)
         except Exception as exc:  # noqa: BLE001 - the selector still masks by attribute
             logger.debug("browser_mask_mark_failed", error_type=type(exc).__name__)
-        locators.append(frame.locator(MASK_SELECTOR))
+            if await _mask_whole_frame(frame):
+                return None
+        return frame.locator(MASK_SELECTOR)
+
+    locators: list[Any] = [
+        locator
+        for locator in await asyncio.gather(*(mark(frame) for frame in page.frames))
+        if locator is not None
+    ]
     for ref in refs:
         if not ref:
             continue
@@ -338,14 +387,16 @@ async def page_facts(page: Any) -> list[Any]:
     """What every frame of the page shows (``markers.PAGE_FACTS_JS``): a
     total, a payment method on file, a price. A frame that cannot be asked
     answers None, which counts as all of them shown; a frame that went
-    away shows nothing. browser.act and browser.read's click join these
-    into what they judge (``markers.join_page``)."""
+    away shows nothing, and so does one that never answered because it has
+    no document (URL "": a frame whose parent wrote into it has one, and
+    answers). browser.act and browser.read's click join these into what
+    they judge (``markers.join_page``)."""
 
     async def ask(frame: Any) -> Any:
         try:
-            return await asyncio.wait_for(frame.evaluate(markers.PAGE_FACTS_JS), REF_TIMEOUT_MS / 1000)
+            return await frame_evaluate(frame, markers.PAGE_FACTS_JS)
         except Exception as exc:  # noqa: BLE001 - unknown facts fail closed
-            if frame.is_detached():
+            if frame.is_detached() or (isinstance(exc, asyncio.TimeoutError) and not frame.url):
                 return dict.fromkeys(markers.PAGE_FACT_KEYS, False)
             log_failure("browser_frame_facts_failed", exc)
             return None

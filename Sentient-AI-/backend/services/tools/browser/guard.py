@@ -55,6 +55,19 @@ XHR, a fetch, a beacon) is judged only by where it goes and outside a
 write window: a GET to anything but an order step, and a request to any
 other address, passes (a search box's suggestions, analytics), except
 while browser.read clicks.
+
+A top-level GET the guard admits is fetched here
+(``route.fetch(max_redirects=0)``, with the browser's own headers and
+cookies) and its answer handed to the browser, never passed on with
+``route.continue_()``: Playwright (1.63) calls a route for the first URL
+of a request only, so a redirect the browser followed itself would reach
+its next hop (a private address, an order step) unjudged, and the
+``request`` event that shows the hop fires once it is already sent. A
+3xx answer instead becomes a client-side hop (``_client_redirect``) that
+comes back through here and is judged like any navigation, however many
+hops the chain has. What the fetch cannot carry is Chrome's own TLS and
+HTTP/2 fingerprint; the browser-control spec (§9) says when that matters
+and what would carry it without losing a hop.
 """
 
 from __future__ import annotations
@@ -635,6 +648,15 @@ class Guard:
                 await self._bound_post(route, state, url)
                 return
             response = await route.fetch(max_redirects=0)
+            if response.status >= 400:
+                # A site's error page or bot wall, for the logs: the status
+                # and whether its CDN says it challenged the request.
+                logger.info(
+                    "browser_document_status",
+                    url=_without_query(url),
+                    status=response.status,
+                    challenged=bool(response.headers.get("cf-mitigated")),
+                )
             location = response.headers.get("location")
             if 300 <= response.status < 400 and location:
                 target = urljoin(url, location)

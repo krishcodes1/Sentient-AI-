@@ -181,6 +181,11 @@ class Settings(BaseSettings):
     # Tool-call rounds one message may chain (search → open pages → act).
     # Each round is another provider call, so this bounds cost and loops.
     MAX_TOOL_ROUNDS: int = 8
+    # The rounds a message gets once it drives the browser or the desktop
+    # (open, pick a variant, add to cart ... is one round each). Still
+    # bounded by the browser task's own caps (60 actions, $0.25 priced on
+    # the model that ran) and by the same spend for a desktop turn.
+    MAX_TASK_TOOL_ROUNDS: int = 30
 
     # ── Telegram approvals (optional) ─────────────────────────────────────
     # Bot token from @BotFather. When set, pending approvals are pushed to

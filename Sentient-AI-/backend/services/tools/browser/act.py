@@ -690,7 +690,7 @@ class BrowserActToolkit:
                     _shared.log_failure("browser_act_outline_failed", exc, ref=ref)
             if request.action == "press" and request.key == "Enter":
                 try:
-                    await page.main_frame.evaluate(_OUTLINE_FOCUS_JS)
+                    await _shared.frame_evaluate(page.main_frame, _OUTLINE_FOCUS_JS)
                 except Exception as exc:  # noqa: BLE001 - the picture without the box
                     _shared.log_failure("browser_act_outline_failed", exc, action="press")
             return await _shared.jpeg(page, None)
@@ -698,11 +698,13 @@ class BrowserActToolkit:
             _shared.log_failure("browser_act_picture_failed", exc)
             return None
         finally:
-            for frame in list(page.frames):
-                try:
-                    await frame.evaluate(_REMOVE_OUTLINE_JS)
-                except Exception:  # noqa: BLE001 - a frame that went away took its box along
-                    pass
+            # Bounded and at once (``_shared.frame_evaluate``): a frame that
+            # never answers (it has no document, so no box either) must not
+            # hold the card, nor a cancelled card build, forever.
+            await asyncio.gather(
+                *(_shared.frame_evaluate(frame, _REMOVE_OUTLINE_JS, quick=True) for frame in list(page.frames)),
+                return_exceptions=True,  # a frame that went away took its box along
+            )
 
     async def _money_facts(self, page: Any, request: _Request) -> Optional[dict[str, Any]]:
         """What the card's money warning is built from, or None when there

@@ -48,6 +48,11 @@ DEFAULT_VIEWPORT = (1280, 800)
 REDACTED = "[redacted]"
 FIND_MAX_BLOCKS = 20
 FACTS_TIMEOUT_S = 3.0
+# The longest a snapshot waits for the page's frames (``snapshot_raw``).
+SNAPSHOT_TIMEOUT_MS = 8_000
+_LOAD_LAZY_FRAMES_JS = (
+    "() => { for (const f of document.querySelectorAll('iframe[loading=lazy i]')) f.loading = 'eager'; }"
+)
 # A typed secret shorter than this would redact every occurrence of one
 # or two characters across the page; the toolkit only ever adds whole
 # passwords, whole OTP codes and whole card values.
@@ -744,8 +749,22 @@ async def page_facts(page: Any, raw: str) -> PageFacts:
 
 async def snapshot_raw(page: Any) -> str:
     """The one place the raw snapshot is taken; refs are valid until the
-    next snapshot of any kind (Playwright keeps only the last one)."""
-    return await page.locator("body").aria_snapshot(mode="ai", boxes=True)
+    next snapshot of any kind (Playwright keeps only the last one).
+
+    The snapshot waits for the document of every iframe it shows, and a
+    lazy one far below the fold (``loading="lazy"``, a video embed) has
+    none until it is scrolled to: Playwright's 30 s default then ran out
+    on every look at the page. While a frame has no document (URL "") the
+    page's lazy frames are told to load now, as scrolling to them would,
+    and the wait is bounded (SNAPSHOT_TIMEOUT_MS) either way: a frame
+    still without a document is left out of the outline."""
+    main = getattr(page, "main_frame", None)
+    if main is not None and any(frame is not main and not frame.url for frame in page.frames):
+        try:
+            await asyncio.wait_for(main.evaluate(_LOAD_LAZY_FRAMES_JS), FACTS_TIMEOUT_S)
+        except Exception as exc:  # noqa: BLE001 - the bounded snapshot still answers
+            logger.debug("browser_lazy_frames_failed", error=type(exc).__name__)
+    return await page.locator("body").aria_snapshot(mode="ai", boxes=True, timeout=SNAPSHOT_TIMEOUT_MS)
 
 
 async def outline(

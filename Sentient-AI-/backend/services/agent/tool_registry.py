@@ -65,12 +65,14 @@ not answer (``capability_gate_error``: refused, fail closed).
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import uuid as uuid_module
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Iterable, Literal, Mapping, Optional
+from urllib.parse import urlsplit
 
 import structlog
 
@@ -1416,6 +1418,31 @@ def _toolkit_rule(result: Mapping[str, Any]) -> str:
     return "invalid_arguments"
 
 
+# The longest one browser.read or browser.act step may take, page load,
+# outline and settling included. A site that never finishes answering (a
+# stalled connection, a bot wall that holds the request) must end the step
+# with a plain error, so the turn always replies. The toolkits lower their
+# guard windows in ``finally``, so a step cut off here leaves none open.
+BROWSER_STEP_TIMEOUT_S = 45.0
+
+
+def _step_timed_out(action: str, params: Mapping[str, Any]) -> dict[str, Any]:
+    """What a browser step cut off by BROWSER_STEP_TIMEOUT_S returns: the
+    site by name when the step opened one, and for an act, that it may
+    have happened (a click can land before the page stops answering)."""
+    host = ""
+    url = params.get("url")
+    if isinstance(url, str):
+        try:
+            host = (urlsplit(url.strip()).hostname or "").removeprefix("www.")
+        except ValueError:
+            host = ""
+    error = f"{host} took too long to load." if host else "The page took too long to respond."
+    if action == "act":
+        error += " The step may or may not have gone through: read the page before trying it again."
+    return {"ok": False, "timed_out": True, "error": error}
+
+
 def _not_wired(tool: str) -> dict[str, Any]:
     """The answer for a browser tool whose toolkit this process was never
     handed (main.py builds them; a bare executor has none): refused, and
@@ -1636,24 +1663,35 @@ class ConnectorToolExecutor:
         toolkit, act → the act toolkit's ``execute`` (with ``approved``: it
         runs only on the page its card was made from), checkout → the
         checkout toolkit's ``run`` (the arguments are the card's, ``_checkout``
-        included, which ties the purchase to the page the owner saw)."""
+        included, which ties the purchase to the page the owner saw).
+
+        A read or act step that runs past BROWSER_STEP_TIMEOUT_S is cut off
+        and answers a plain error (_step_timed_out). A checkout is not: it
+        may be mid-payment, and its own steps are bounded."""
+        step: Optional[Awaitable[dict[str, Any]]] = None
         if action == "read":
-            return await self._browser.execute(
+            step = self._browser.execute(
                 params.get("action", ""),
                 {k: v for k, v in params.items() if k != "action"},
                 user_id=user_id,
                 task_id=task_id,
             )
-        if action == "act":
+        elif action == "act":
             if self._act is None:
                 return _not_wired("browser.act")
-            return await self._act.execute(
+            step = self._act.execute(
                 params.get("action", ""),
                 {k: v for k, v in params.items() if k != "action"},
                 user_id=user_id,
                 task_id=task_id,
                 approved=approved,
             )
+        if step is not None:
+            try:
+                return await asyncio.wait_for(step, timeout=BROWSER_STEP_TIMEOUT_S)
+            except TimeoutError:
+                logger.warning("browser_step_timed_out", tool=f"browser.{action}")
+                return _step_timed_out(action, params)
         if action == "checkout":
             if self._checkout is None:
                 return _not_wired("browser.checkout")
