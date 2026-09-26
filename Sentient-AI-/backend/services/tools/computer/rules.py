@@ -57,6 +57,10 @@ _SECRET_APPS: dict[str, tuple[str, ...]] = {
     "Proton Pass": ("protonpass*",),
 }
 
+# Crawler's own app, the last entry of _BLOCKED_APPS: acting in it could
+# approve its own cards.
+CRAWLER_APP = "Crawler AI"
+
 _BLOCKED_APPS: dict[str, tuple[str, ...]] = {
     **_SECRET_APPS,
     # "systemsettings*" also covers Windows' SystemSettingsAdminFlows.exe;
@@ -117,7 +121,7 @@ _BLOCKED_APPS: dict[str, tuple[str, ...]] = {
         "consent",
         "credentialuibroker",
     ),
-    "Crawler AI": ("crawler*",),
+    CRAWLER_APP: ("crawler*",),
 }
 
 # Every blocked display name, for documentation and tests.

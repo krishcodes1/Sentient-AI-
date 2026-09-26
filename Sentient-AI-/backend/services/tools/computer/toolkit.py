@@ -27,7 +27,9 @@ instead of silently naming a different element.
 An approval card is tied to the screen it was made from: ``bind`` stores the
 app and the outline's id with the parked call (under ``CARD_KEY``), and an
 approved act runs only while that screen holds (rule ``screen_changed``) and
-only with that tie (rule ``unbound_approval``).
+only with that tie (rule ``unbound_approval``). When another app took the front
+while the card waited (the Approve tap itself, on this computer), the approved
+act brings its app forward before the live rules run (``_bring_forward``).
 """
 
 from __future__ import annotations
@@ -37,6 +39,7 @@ import dataclasses
 import re
 import secrets
 import threading
+import time
 import unicodedata
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Mapping, Optional
@@ -78,6 +81,13 @@ MAX_NODES = 3000
 MAX_LIST_ITEMS = 100
 MAX_COORD = 100_000
 MAX_WINDOW_INDEX = 50
+# How long an approved act waits for its app to come back to the front
+# (``ComputerToolkit._bring_forward``), how often it looks, and how many
+# times it asks: macOS can ignore a background process's first request (seen
+# on a real Mac, where the second one worked).
+BRING_FORWARD_WAIT_S = 1.0
+BRING_FORWARD_ATTEMPTS = 2
+_BRING_FORWARD_POLL_S = 0.05
 _CHECK_MAX_CHARS = 200_000
 _CHECK_MAX_LINES = 5000
 # Web content in a browser nests deeply; the payment scan must reach it.
@@ -760,6 +770,8 @@ class ComputerToolkit:
         self._preflight()
         if request.action not in _APP_ACTIONS:
             assert snapshot is not None  # _static_rules refuses input without one
+            if approved:
+                self._bring_forward(snapshot)
             self._live_rules(request, snapshot)
         # The last word before input is sent: the user may have hit Stop
         # while the screen was being checked.
@@ -824,6 +836,40 @@ class ComputerToolkit:
                     "blocked_key", f"{reason}, so Crawler never presses it. {_OWNER_STEP}"
                 )
         return dataclasses.replace(request, node=node)
+
+    def _bring_forward(self, snapshot: _Snapshot) -> None:
+        """Bring the app an approved act is for back to the front when another
+        app took it while the card waited: an Approve tap in Telegram, or in
+        Crawler's own window, on this computer puts that app in front, and the
+        act would be refused (``frontmost_changed``) only to be asked for again
+        behind a focus_window card whose tap takes the front once more. The
+        approval named this app, so bringing it forward is what the owner
+        asked for. Never away from a blocked app other than Crawler's own
+        (the login or lock window, an OS security prompt, a terminal, a
+        password manager: the owner may be typing a password there), and not
+        when the front app cannot be read. Sends no input: the live rules
+        that follow read the front app again and still refuse when it did not
+        come forward."""
+        front_app, _ = self._frontmost()
+        blocked = rules.blocked_app(front_app) if front_app else None
+        if (
+            not front_app
+            or rules.same_app(front_app, snapshot.app)
+            or (blocked is not None and blocked != rules.CRAWLER_APP)
+        ):
+            return
+        for _ in range(BRING_FORWARD_ATTEMPTS):
+            try:
+                self._backend.focus_window(snapshot.app, 0)
+            except Exception as exc:  # the front check below refuses the act
+                _log_failure("computer_bring_forward_failed", exc)
+                return
+            # Activation can land a moment after the call returns (macOS).
+            deadline = time.monotonic() + BRING_FORWARD_WAIT_S
+            while time.monotonic() < deadline:
+                if rules.same_app(self._frontmost()[0], snapshot.app):
+                    return
+                time.sleep(_BRING_FORWARD_POLL_S)
 
     def _live_rules(self, request: _Request, snapshot: _Snapshot) -> None:
         """Rules that need the screen as it is now. They read (frontmost app,
