@@ -68,6 +68,7 @@ import structlog
 from sqlalchemy import select, update
 
 from services.agent import cancel as agent_cancel
+from services.agent.app_approvals import REMEMBER_WEEK, Channel, weekly_app_for
 from services.notifications.progress import TurnProgress, takes_keyword, takes_on_event
 from services.tools.browser.checkout import NOTICE as PURCHASE_NOTICE
 
@@ -78,9 +79,15 @@ logger = structlog.get_logger(__name__)
 LINK_CODE_TTL_MINUTES = 10
 
 # callback_data prefixes (Telegram caps callback_data at 64 bytes; a uuid
-# is 36 chars, so prefix + uuid fits comfortably).
+# is 36 chars, so prefix + uuid fits comfortably). Every prefix is 4 chars.
 _CB_APPROVE = "apv:"
 _CB_DENY = "dny:"
+# "Allow <app> for 7 days": approve the card and allow its app for a week
+# for this chat (services.agent.app_approvals).
+_CB_APPROVE_WEEK = "apw:"
+# /apps: revoke one weekly app approval.
+_CB_REVOKE_APP = "rva:"
+_CB_PREFIX_LEN = 4
 
 # Decision callback signature: (user_id, action_id, approved) -> outcome
 # dict with at least {"status": "approved"|"denied"} or {"error": str}.
@@ -209,15 +216,47 @@ def _purchase_caption(card: dict[str, Any], expires_at: Any) -> str:
     return f"{caption}\n\nExpires in {_expires_in_text(expires_at)}."
 
 
-def _approval_keyboard(action_id: str) -> dict[str, Any]:
-    return {
-        "inline_keyboard": [
-            [
-                {"text": "✅ Approve", "callback_data": _CB_APPROVE + action_id},
-                {"text": "❌ Deny", "callback_data": _CB_DENY + action_id},
-            ]
+def _approval_keyboard(action_id: str, weekly_app: Optional[str] = None) -> dict[str, Any]:
+    """Approve and Deny, plus "Allow <app> for 7 days" on its own row when
+    the card may be allowed for a week (a desktop.act in an app on the
+    weekly list)."""
+    rows: list[list[dict[str, str]]] = [
+        [
+            {"text": "✅ Approve", "callback_data": _CB_APPROVE + action_id},
+            {"text": "❌ Deny", "callback_data": _CB_DENY + action_id},
         ]
-    }
+    ]
+    if weekly_app:
+        rows.append(
+            [
+                {
+                    "text": f"📅 Allow {weekly_app} for 7 days",
+                    "callback_data": _CB_APPROVE_WEEK + action_id,
+                }
+            ]
+        )
+    return {"inline_keyboard": rows}
+
+
+def _weekly_line(weekly_app: str) -> str:
+    """What a card that offers the week says about it."""
+    return (
+        f"Or allow {weekly_app} for 7 days: Crawler then acts in {weekly_app} "
+        "without a card for requests from this chat. /apps lists and revokes."
+    )
+
+
+def _day(when: Any) -> str:
+    """A date as the chat shows it ("Fri Oct 2"), in this computer's time
+    zone; the ISO text or datetime it was given when it cannot be read."""
+    try:
+        moment = when if isinstance(when, datetime) else datetime.fromisoformat(str(when))
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        local = moment.astimezone()
+    except (TypeError, ValueError):
+        return str(when)
+    return f"{local:%a} {local:%b} {local.day}"
 
 
 def _chunks(text: str, size: int = _MESSAGE_CHUNK) -> list[str]:
@@ -579,7 +618,10 @@ class TelegramService:
             chat_id = await self.linked_chat_id(action.user_id)
             if chat_id is None:
                 return
-            keyboard = _approval_keyboard(action.action_id)
+            # A desktop.act in an app on the weekly list also offers "Allow
+            # <app> for 7 days" (services.agent.app_approvals).
+            weekly_app = weekly_app_for(action.tool_name, action.arguments)
+            keyboard = _approval_keyboard(action.action_id, weekly_app)
             purchase = _purchase_card(action)
             if purchase is not None:
                 caption = _purchase_caption(purchase, action.expires_at)
@@ -614,6 +656,8 @@ class TelegramService:
             if args and args != "{}":
                 lines += ["", "Arguments:", args]
             lines += ["", f"Expires in {_expires_in_text(action.expires_at)}."]
+            if weekly_app:
+                lines += ["", _weekly_line(weekly_app)]
             text = "\n".join(lines)
             if action.tool_name == _ACT_TOOL:
                 # The act card's picture: the page with the target outlined,
@@ -777,6 +821,8 @@ class TelegramService:
             await self._handle_new(chat_id)
         elif command == "/usage":
             await self._handle_usage(chat_id, user_id)
+        elif command == "/apps":
+            await self._handle_apps(chat_id, user_id)
         elif command.startswith("/"):
             await self._handle_help(chat_id)
         else:
@@ -878,10 +924,118 @@ class TelegramService:
             "/stop \u2014 stop the request that is running now\n"
             "/new \u2014 start a fresh conversation\n"
             "/pending \u2014 re-send every action waiting for your decision\n"
+            "/apps \u2014 apps allowed for a week, with a button to revoke each\n"
             "/usage \u2014 tokens used today and over the last 30 days\n"
             "/help \u2014 this message"
         )
         await self._api("sendMessage", chat_id=chat_id, text=text)
+
+    async def _handle_apps(self, chat_id: int, user_id: str) -> None:
+        """List the apps Crawler may use without asking (weekly app
+        approvals), each with a Revoke button, whichever chat or browser
+        allowed them: the owner sees every one from here."""
+        from services.agent.app_approvals import DbAppApprovalStore
+
+        try:
+            approvals = await DbAppApprovalStore(self._session_factory).list_active(user_id)
+        except Exception as exc:
+            logger.warning("telegram_apps_lookup_failed", error=str(exc)[:200])
+            await self._api(
+                "sendMessage", chat_id=chat_id, text="Could not read the allowed apps right now."
+            )
+            return
+        if not approvals:
+            await self._api(
+                "sendMessage",
+                chat_id=chat_id,
+                text=(
+                    "No apps are allowed for a week. When Crawler asks to act in an app "
+                    "like Calendar, the card has an \u201cAllow for 7 days\u201d button."
+                ),
+            )
+            return
+        here = Channel.telegram(chat_id)
+        lines = ["Crawler acts in these apps without a card, until the date shown:", ""]
+        buttons: list[list[dict[str, str]]] = []
+        for approval in approvals:
+            if approval.holds_for(here):
+                where = "this chat"
+            elif approval.channel_kind == "web":
+                where = "the web app"
+            else:
+                where = "another Telegram chat"
+            lines.append(f"\u2022 {approval.app} \u2014 from {where}, until {_day(approval.expires_at)}")
+            buttons.append(
+                [{"text": f"Revoke {approval.app}", "callback_data": _CB_REVOKE_APP + approval.id}]
+            )
+        await self._api(
+            "sendMessage",
+            chat_id=chat_id,
+            text="\n".join(lines),
+            reply_markup={"inline_keyboard": buttons},
+        )
+
+    async def _handle_revoke_app(
+        self,
+        chat_id: int,
+        user_id: str,
+        approval_id: str,
+        answer: Callable[[str], Awaitable[None]],
+    ) -> None:
+        """A Revoke button from /apps: end that approval (the owner's own
+        only; the store scopes by user) and say so in the chat. Audited as
+        the web's revoke is."""
+        from services.agent.app_approvals import DbAppApprovalStore
+
+        try:
+            revoked = await DbAppApprovalStore(self._session_factory).revoke(
+                user_id=user_id, approval_id=approval_id
+            )
+        except Exception as exc:
+            logger.warning("telegram_app_revoke_failed", error=str(exc)[:200])
+            await answer("Could not revoke that right now.")
+            return
+        if revoked is None:
+            await answer("That approval has already ended.")
+            return
+        await answer(f"{revoked.app} revoked.")
+        await self._audit_app_revoke(user_id, revoked)
+        await self._api(
+            "sendMessage",
+            chat_id=chat_id,
+            text=(
+                f"{revoked.app} is no longer allowed. The next action in "
+                f"{revoked.app} will ask you first."
+            ),
+        )
+
+    async def _audit_app_revoke(self, user_id: str, revoked: Any) -> None:
+        """The ``app_approval_revoked`` row for a revoke from this chat.
+        Best effort: revoking only takes a permission away."""
+        from models.audit import AuditStatus
+        from services.audit import append_audit_log
+
+        try:
+            async with self._session_factory() as session:
+                await append_audit_log(
+                    session,
+                    user_id=user_id,
+                    connector_name="desktop",
+                    action="act",
+                    endpoint="telegram:/apps",
+                    scope_used="desktop",
+                    status=AuditStatus.approved,
+                    reasoning_chain={
+                        "event": "app_approval_revoked",
+                        "app": revoked.app,
+                        "channel": revoked.channel_kind,
+                        "app_approval_id": revoked.id,
+                        "revoked_from": "telegram",
+                    },
+                )
+                await session.commit()
+        except Exception as exc:
+            logger.error("telegram_app_revoke_audit_failed", error=str(exc)[:200])
 
     async def _handle_usage(self, chat_id: int, user_id: str) -> None:
         """Token totals for the linked account, from the same aggregation
@@ -947,6 +1101,9 @@ class TelegramService:
                     # Likewise one without stop_mark: it takes its mark on entry.
                     if takes_keyword(self.chat, "stop_mark"):
                         listen["stop_mark"] = stop_mark
+                    # This chat, for the apps allowed for a week from it.
+                    if takes_keyword(self.chat, "channel"):
+                        listen["channel"] = Channel.telegram(chat_id)
                     outcome = await self.chat(user_id, text, new_conversation=fresh, **listen)
                 except Exception as exc:
                     logger.error("telegram_chat_failed", chat_id=chat_id, error=str(exc))
@@ -1084,16 +1241,27 @@ class TelegramService:
                     "answerCallbackQuery", callback_query_id=callback_id, text=text
                 )
 
-        if not (data.startswith(_CB_APPROVE) or data.startswith(_CB_DENY)):
+        prefix, target = data[:_CB_PREFIX_LEN], data[_CB_PREFIX_LEN:]
+        if prefix not in (_CB_APPROVE, _CB_DENY, _CB_APPROVE_WEEK, _CB_REVOKE_APP):
             logger.warning("telegram_callback_unknown_prefix", data=data[:32])
             await answer("Unknown action.")
             return
-        approved = data.startswith(_CB_APPROVE)
-        action_id = data[len(_CB_APPROVE) :]
+        if prefix == _CB_REVOKE_APP:
+            user_id = await self._user_for_chat(chat_id)
+            if chat_id is None or user_id is None:
+                await answer("This chat is not linked to a Crawler AI account.")
+                return
+            await self._handle_revoke_app(chat_id, user_id, target, answer)
+            return
+        approved = prefix != _CB_DENY
+        # "Allow <app> for 7 days" approves the card and remembers the app.
+        remember = REMEMBER_WEEK if prefix == _CB_APPROVE_WEEK else None
+        action_id = target
         logger.info(
             "telegram_callback_received",
             chat_id=chat_id,
             approved=approved,
+            remember=remember,
             action_id=action_id,
         )
 
@@ -1120,7 +1288,9 @@ class TelegramService:
         # of racing it in the same conversation, and /stop can cancel it.
         self._track(
             chat_id,
-            self._run_decision(chat_id, user_id, action_id, approved, message, message_id),
+            self._run_decision(
+                chat_id, user_id, action_id, approved, message, message_id, remember
+            ),
             name=f"telegram-decision-{chat_id}",
         )
 
@@ -1132,11 +1302,12 @@ class TelegramService:
         approved: bool,
         message: dict[str, Any],
         message_id: Any,
+        remember: Optional[str] = None,
     ) -> None:
         lock = self._chat_locks.setdefault(chat_id, asyncio.Lock())
         async with lock:
             await self._apply_decision(
-                chat_id, user_id, action_id, approved, message, message_id
+                chat_id, user_id, action_id, approved, message, message_id, remember
             )
 
     async def _apply_decision(
@@ -1147,22 +1318,32 @@ class TelegramService:
         approved: bool,
         message: dict[str, Any],
         message_id: Any,
+        remember: Optional[str] = None,
     ) -> None:
         """Apply one Approve/Deny press, then freeze the card and send the
         resumed turn's reply. While an approval runs, the chat shows
         "typing…" and progress lines, as a message turn does. The press was
-        already answered, so a failure goes to the chat as a message."""
+        already answered, so a failure goes to the chat as a message.
+
+        The decision carries this chat (``channel``): the resumed turn's acts
+        in an app allowed for a week from here need no card, and with
+        ``remember="week"`` (the "Allow for 7 days" button) the card's app is
+        allowed from this chat."""
         assert self.decide is not None
         typing: Optional[asyncio.Task[None]] = None
         progress: Optional[TurnProgress] = None
         listen: dict[str, Any] = {}
+        if takes_keyword(self.decide, "channel"):
+            listen["channel"] = Channel.telegram(chat_id)
+        if remember and takes_keyword(self.decide, "remember"):
+            listen["remember"] = remember
         if approved:
             await self._api("sendChatAction", chat_id=chat_id, action="typing")
             typing = asyncio.create_task(self._keep_typing(chat_id))
             progress = self._turn_progress(chat_id)
             # A callback without on_event still decides; it gets no lines.
             if takes_on_event(self.decide):
-                listen = {"on_event": progress.on_event}
+                listen["on_event"] = progress.on_event
         try:
             outcome = await self.decide(user_id, action_id, approved, **listen)
         except Exception as exc:
@@ -1192,6 +1373,14 @@ class TelegramService:
             return
 
         verdict = "✅ Approved" if approved else "❌ Denied"
+        # "Allow for 7 days": the card says until when, and how to undo it.
+        weekly = outcome.get("weekly")
+        allowed = (
+            f" {weekly['app']} is allowed for 7 days, until "
+            f"{_day(weekly.get('expires_at'))}. /apps to revoke."
+            if isinstance(weekly, dict) and weekly.get("app")
+            else ""
+        )
         # Freeze the card: replace the buttons with the decision so it
         # can't be pressed twice from the chat history. A photo card (a
         # purchase) has a caption, not text, and is edited as one.
@@ -1201,7 +1390,7 @@ class TelegramService:
                 "editMessageCaption",
                 chat_id=chat_id,
                 message_id=message_id,
-                caption=f"{original}\n\n— {verdict} from this chat."[:1024],
+                caption=f"{original}\n\n— {verdict} from this chat.{allowed}"[:1024],
             )
         elif message_id is not None:
             original = message.get("text") or "Approval request"
@@ -1209,7 +1398,7 @@ class TelegramService:
                 "editMessageText",
                 chat_id=chat_id,
                 message_id=message_id,
-                text=f"{original}\n\n— {verdict} from this chat.",
+                text=f"{original}\n\n— {verdict} from this chat.{allowed}",
             )
         summary = outcome.get("summary")
         if summary:

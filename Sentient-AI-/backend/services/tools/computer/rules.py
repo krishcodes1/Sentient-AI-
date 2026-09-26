@@ -177,6 +177,56 @@ def crawler_window(title: str) -> bool:
     return bool(_CRAWLER_WINDOW.match(str(title or "")))
 
 
+# ── Apps the owner may allow for a week ────────────────────────────────────
+
+# A desktop.act card in one of these apps offers "Allow <app> for 7 days"
+# (services/agent/app_approvals.py; spec 2026-09-25-weekly-app-approvals):
+# everyday apps whose data stays on this computer and that have no store, so
+# an act nobody looked at can neither spend money nor send anything in the
+# owner's name. Browsers, mail and chat apps, file managers, stores (App
+# Store, and the media apps that sell), Shortcuts and anything that runs
+# other programs are never here, and every act in them keeps its own card.
+# Display name → the squashed whole names (``squash``) the app is reported
+# under: the bundle's file name on macOS, the executable's file description
+# or stem on Windows.
+_WEEKLY_APPS: dict[str, tuple[str, ...]] = {
+    "Calendar": ("calendar", "ical"),
+    "Reminders": ("reminders",),
+    "Notes": ("notes",),
+    "Contacts": ("contacts", "addressbook"),
+    "Stickies": ("stickies",),
+    "Sticky Notes": ("stickynotes", "microsoftstickynotes"),
+    "Microsoft To Do": ("microsofttodo", "todo"),
+    "Clock": ("clock", "alarmsclock", "windowsalarms"),
+    "Calculator": ("calculator", "calc", "calculatorapp", "windowscalculator"),
+    "Weather": ("weather", "msnweather", "microsoftweather"),
+    "Maps": ("maps", "windowsmaps"),
+    "Photos": ("photos", "microsoftphotos"),
+    "Preview": ("preview",),
+    "TextEdit": ("textedit",),
+    "Notepad": ("notepad", "windowsnotepad"),
+    "Paint": ("paint", "mspaint"),
+    "Freeform": ("freeform",),
+}
+
+# Every weekly-list display name, for documentation and tests.
+WEEKLY_APPS: tuple[str, ...] = tuple(_WEEKLY_APPS)
+
+
+def weekly_app(name: str) -> Optional[str]:
+    """The weekly-list app *name* is (its display name, e.g. "Calendar"), or
+    None. Only the whole name counts, squashed: never a prefix and never one
+    part of a dotted bundle id, so "Calendar Helper" and
+    "com.example.calendar" are not Calendar. A blocked app never is."""
+    key = squash(name)
+    if not key or blocked_app(name):
+        return None
+    for display, spellings in _WEEKLY_APPS.items():
+        if key in spellings:
+            return display
+    return None
+
+
 # ── Secure fields ──────────────────────────────────────────────────────────
 
 _FIELD_ROLE = re.compile(r"field|text area|text box|textbox|edit|combo box|spin", re.IGNORECASE)

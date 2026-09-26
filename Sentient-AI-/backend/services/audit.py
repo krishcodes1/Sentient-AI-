@@ -416,6 +416,10 @@ _EVENT_STATUS: dict[str, AuditStatus] = {
     "output_blocked": AuditStatus.blocked,
     # The user's stop ended a turn before it finished (policy user_stopped).
     "turn_stopped": AuditStatus.blocked,
+    # The owner allowed an app for a week from an approval card, or ended
+    # that approval (services.agent.app_approvals).
+    "app_approval_granted": AuditStatus.approved,
+    "app_approval_revoked": AuditStatus.approved,
 }
 
 
@@ -456,7 +460,20 @@ class RuntimeAuditLogger:
         reasoning: dict[str, Any] = {"event": event}
         # "rule" names the tool's own hard rule when a call was refused
         # before its approval card (policy computer_rule: blocked_app ...).
-        for key in ("reason", "policy", "rule", "action_id", "threat_level"):
+        # "approval" is "weekly" on an act a weekly app approval ran, with
+        # that approval's id, app, channel and expiry.
+        for key in (
+            "reason",
+            "policy",
+            "rule",
+            "action_id",
+            "threat_level",
+            "approval",
+            "app_approval_id",
+            "app",
+            "channel",
+            "expires_at",
+        ):
             if entry.get(key) is not None:
                 reasoning[key] = entry[key]
 
