@@ -412,9 +412,14 @@ class InstallationService:
         return Decimal(str(caps["per_purchase_cap_usd"])), Decimal(str(caps["per_day_cap_usd"]))
 
     async def context(self) -> ReportContext:
+        configured = bool(await self.telegram_token())
+        # The Telegram switch is a fact for the capabilities that deliver
+        # over Telegram (page_watch): with it off no message goes out.
+        switches = await self.capabilities()
         return registry.default_context(
-            telegram_configured=bool(await self.telegram_token()),
+            telegram_configured=configured,
             slack_configured=bool(self._slack_running()),
+            telegram_enabled=configured and switches.get("telegram") is True,
         )
 
     def _cached_view(self) -> Optional[_ReportView]:

@@ -61,6 +61,10 @@ class ReportContext:
     # For slack: at least one Slack DM channel (a Slack connector with an
     # app-level token) is running in this process.
     slack_configured: bool = False
+    # For page_watch, whose alerts only go out over Telegram: a bot token is
+    # configured and the owner's "telegram" switch is on, so a message can
+    # actually be sent. False when not gathered, which reads as no Telegram.
+    telegram_enabled: bool = False
 
 
 @dataclass(frozen=True)

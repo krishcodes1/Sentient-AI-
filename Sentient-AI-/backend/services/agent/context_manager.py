@@ -346,6 +346,30 @@ def core_tool_names() -> frozenset[str]:
     return frozenset(_core_tool_names)
 
 
+# The undo of something that keeps running: whenever a tool here is chosen,
+# the tools that list what it made and take it back are chosen with it (the
+# trim takes them together or, past the core and loaded tools, not at all).
+# A reminder fires and a page watch fetches its page (standing background
+# egress) long after the chat, and chat is the only place the owner can find
+# and stop one, so the trim must never leave the assistant able to start one
+# it cannot stop. Entries are "<connector type>.<action>"; a companion is
+# looked up in the create tool's own namespace.
+UNDO_COMPANIONS: dict[str, tuple[str, ...]] = {
+    "reminders.create": ("reminders.list", "reminders.cancel"),
+    "watch.create": ("watch.list", "watch.delete"),
+}
+
+
+def _companion_names(tool: dict[str, Any]) -> list[str]:
+    """The names *tool*'s ``UNDO_COMPANIONS`` have in its own namespace."""
+    namespace, _, action = tool.get("name", "").rpartition(".")
+    connector = (tool.get("connector_type") or namespace.partition("__")[0]).lower()
+    return [
+        f"{namespace}.{key.rpartition('.')[2]}"
+        for key in UNDO_COMPANIONS.get(f"{connector}.{action}", ())
+    ]
+
+
 def select_offered_tools(
     tools: list[dict[str, Any]],
     active_connectors: list[str],
@@ -378,8 +402,12 @@ def select_offered_tools(
     starter tools (``starter`` true); then the rest. Starters and the rest
     prefer the active connectors, then keep build order. A loaded name
     missing from ``tools`` (connector removed, scope revoked) is skipped.
-    The chosen tools keep their build order in the result, so the output
-    depends only on the inputs, never on the priority walk.
+    A tool with ``UNDO_COMPANIONS`` brings them along at its own priority
+    and is never chosen without them: a core or loaded tool's companions
+    take the free slots before it does, and a starter or one of the rest is
+    taken only when it fits together with them. The chosen tools keep their
+    build order in the result, so the output depends only on the inputs,
+    never on the priority walk.
     """
     if len(tools) <= max_tools:
         return tools
@@ -392,9 +420,19 @@ def select_offered_tools(
 
     chosen: set[int] = set()
 
+    def group(position: int) -> list[int]:
+        """*position* and its built undo companions, less those chosen."""
+        companions = (index_of.get(name) for name in _companion_names(tools[position]))
+        return [
+            p for p in dict.fromkeys([position, *companions]) if p is not None and p not in chosen
+        ]
+
     def take(position: int) -> None:
-        if len(chosen) < max_tools:
-            chosen.add(position)
+        # Companions first, so a last free slot never goes to a create
+        # tool whose undo is left out.
+        for member in reversed(group(position)):
+            if len(chosen) < max_tools:
+                chosen.add(member)
 
     for position, tool in enumerate(tools):
         if tool.get("name", "") in core_names:
@@ -413,7 +451,9 @@ def select_offered_tools(
     for position in sorted(starters, key=preference) + sorted(rest, key=preference):
         if len(chosen) >= max_tools:
             break
-        chosen.add(position)
+        members = group(position)
+        if len(chosen) + len(members) <= max_tools:
+            chosen.update(members)
 
     return [tools[position] for position in sorted(chosen)]
 

@@ -25,6 +25,7 @@ import structlog
 
 from services.agent.permissions import ActionCategory
 
+from . import canvas_grades
 from .base import (
     AuthenticationError,
     BaseConnector,
@@ -91,10 +92,74 @@ ACTIONS: tuple[ToolSpec, ...] = (
         starter=True,
     ),
     ToolSpec(
+        "get_upcoming",
+        "Everything due in the next N days across all active Canvas courses, "
+        "plus missing and late work, in one call (course, title, type, due_at "
+        "in UTC, points, submitted/missing/late, link). Prefer it to "
+        "get_assignments per course.",
+        ActionCategory.READ,
+        _schema(
+            days={
+                "type": "integer",
+                "description": "Days ahead to cover (default 7, at most 30)",
+            },
+        ),
+        required_scope="assignments.read",
+        starter=True,
+    ),
+    ToolSpec(
         "get_grades",
         "Get the user's grades for a Canvas course.",
         ActionCategory.READ,
         _schema(course_id={"type": "string", "description": "Numeric Canvas course id from canvas.get_courses (not the course code)", "required": True}),
+        required_scope="grades.read",
+    ),
+    # Grade math the model must never do itself: canvas_grades computes it
+    # from the assignment groups. READ only; what_if never reaches Canvas.
+    ToolSpec(
+        "grade_whatif",
+        "Work out a Canvas course grade exactly as Canvas does (group weights, "
+        "drop rules, excused work): the current grade, the grade with the "
+        "hypothetical scores in what_if, and the score needed on the ungraded "
+        "work to reach target_percent (spread evenly, or on target_assignment). "
+        "Use it for every grade calculation and quote its numbers as "
+        "estimates, with its assumptions; never compute grades yourself. For "
+        "a letter grade, use the user's cutoff or say which one you assumed "
+        "(e.g. B+ = 87%). Read-only: nothing is sent to Canvas.",
+        ActionCategory.READ,
+        _schema(
+            course_id={"type": "string", "description": "Numeric Canvas course id from canvas.get_courses (not the course code)", "required": True},
+            what_if={
+                "type": "array",
+                "description": "Hypothetical scores to try; each replaces or fills in one assignment's score",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "assignment": {
+                            "type": "string",
+                            "description": "Assignment id or name",
+                        },
+                        "score": {
+                            "type": "number",
+                            "description": "Points earned, e.g. 45 for 45/50",
+                        },
+                        "percent": {
+                            "type": "number",
+                            "description": "Instead of score: percent of the points, e.g. 90",
+                        },
+                    },
+                    "required": ["assignment"],
+                },
+            },
+            target_percent={
+                "type": "number",
+                "description": "Course grade to reach, in percent, e.g. 87",
+            },
+            target_assignment={
+                "type": "string",
+                "description": "With target_percent: the one assignment (id or name) to solve for; omit to spread it evenly over all ungraded work",
+            },
+        ),
         required_scope="grades.read",
     ),
     ToolSpec(
@@ -158,7 +223,9 @@ class CanvasConnector(BaseConnector):
         "get_courses": "get_courses",
         "get_assignments": "get_assignments",
         "get_grades": "get_grades",
+        "grade_whatif": "grade_whatif",
         "get_calendar_events": "get_calendar_events",
+        "get_upcoming": "get_upcoming",
         "get_submissions": "get_submissions",
         "submit_assignment": "submit_assignment",
     }
@@ -530,11 +597,77 @@ class CanvasConnector(BaseConnector):
             params={"user_id": "self", "type[]": "StudentEnrollment"},
         )
 
+    async def grade_whatif(
+        self,
+        course_id: int | str,
+        what_if: Any = None,
+        target_percent: Any = None,
+        target_assignment: Any = None,
+    ) -> dict[str, Any]:
+        """Current grade, what-if grade and the score needed for a target,
+        worked out by ``canvas_grades`` from the course's assignment groups.
+
+        Read-only: two GETs, and the hypothetical scores exist only as
+        arguments; nothing is written back to Canvas. Arguments are checked
+        before any request, and the answer is compact numbers rather than
+        the raw groups, which would not survive the result budget.
+        """
+        if isinstance(course_id, bool) or not str(course_id).strip():
+            raise ConnectorError("grade_whatif needs a course_id.")
+        try:
+            request = canvas_grades.parse_request(
+                what_if=what_if,
+                target_percent=target_percent,
+                target_assignment=target_assignment,
+            )
+        except canvas_grades.GradeInputError as exc:
+            raise ConnectorError(str(exc)) from exc
+        segment = path_segment(str(course_id).strip())
+        # apply_assignment_group_weights lives on the course, not the groups;
+        # total_scores adds Canvas's own current score to cross-check against.
+        course = await self._api_get(f"/courses/{segment}", params={"include[]": "total_scores"})
+        groups = await self._api_get(
+            f"/courses/{segment}/assignment_groups",
+            params={"include[]": ["assignments", "submission"], "per_page": 100},
+        )
+        try:
+            return canvas_grades.plan(groups, course, request)
+        except canvas_grades.GradeInputError as exc:
+            raise ConnectorError(str(exc)) from exc
+
     async def get_calendar_events(self) -> list[dict[str, Any]]:
         """Fetch upcoming calendar events."""
         return await self._api_get(
             "/calendar_events", params={"type": "event", "per_page": 50}
         )
+
+    async def get_upcoming(self, days: Any = None) -> dict[str, Any]:
+        """Everything due in the next *days* days across the user's active
+        courses, plus missing and late work, as compact rows.
+
+        Two account-wide reads replace a get_assignments call per course:
+        the planner (dated items with the user's submission state, read
+        from a short lookback so late work shows) and the missing
+        submissions list. Both follow pagination through ``_api_get`` and
+        take no model-supplied path segment; ``days`` only sets the window.
+        Shaping and the size caps live in ``canvas_upcoming``.
+        """
+        from . import canvas_upcoming as upcoming
+
+        window = upcoming.window_for(days)
+        planner = await self._api_get(
+            "/planner/items",
+            params={
+                "start_date": upcoming.iso(window.late_since),
+                "end_date": upcoming.iso(window.until),
+                "per_page": 100,
+            },
+        )
+        missing = await self._api_get(
+            "/users/self/missing_submissions",
+            params={"include[]": "course", "per_page": 100},
+        )
+        return upcoming.summarize(planner, missing, window=window, base_url=self._base_url)
 
     async def get_submissions(
         self, course_id: int | str, assignment_id: int | str

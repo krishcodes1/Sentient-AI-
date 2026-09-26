@@ -11,6 +11,7 @@ from models.conversation import Conversation, Message, MessageRole
 from models.installation import INSTALLATION_ROW_ID, Installation
 from models.memory import Memory, MemoryCategory, MemorySource
 from models.oauth_state import OAuthFlowKind, OAuthFlowStatus, OAuthState
+from models.page_watch import PageWatch, PageWatchStatus
 from models.pending_action import PendingAction, PendingActionStatus
 from models.reminder import Reminder, ReminderSource, ReminderStatus
 from models.slack_link import SlackChannelLink
@@ -34,6 +35,8 @@ __all__ = [
     "OAuthFlowKind",
     "OAuthFlowStatus",
     "OAuthState",
+    "PageWatch",
+    "PageWatchStatus",
     "PendingAction",
     "PendingActionStatus",
     "PermissionTier",

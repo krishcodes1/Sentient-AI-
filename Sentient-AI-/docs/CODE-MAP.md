@@ -55,7 +55,7 @@ the chat gets what ran and why it stopped, in plain words
 
 ## Entry points & wiring
 
-- `backend/main.py` — FastAPI app: lifespan, `wire_services` (builds installation, telegram manager, runtime, MCP catalog, reminders onto `app.state`), router mounting, global exception handlers.
+- `backend/main.py` — FastAPI app: lifespan, `wire_services` (builds installation, telegram manager, runtime, MCP catalog, reminders and page watches onto `app.state`), router mounting, global exception handlers.
 - `backend/core/config.py` — `Settings` (pydantic-settings): env vars, provider key fields, placeholder-secret rejection.
 - `backend/core/database.py` — async engine/session factory, Alembic-adoption logic for pre-Alembic databases, `backfill_user_llm_defaults`.
 - `backend/core/security.py` — password hashing, JWT issue/verify, AES-GCM credential encryption, audit HMAC hashing.
@@ -95,10 +95,12 @@ the chat gets what ran and why it stopped, in plain words
 ## Built-in tools (`backend/services/tools/`)
 
 - `desktop.py` — `desktop.screenshot` (mss capture, downscale, capability-gated).
-- `web.py` — `web.search`/`web.fetch_page`/`web.screenshot` (Playwright-backed).
+- `web.py` — `web.search`/`web.fetch_page`/`web.research`/`web.screenshot` (screenshot is Playwright-backed; research is one search plus a parallel read of the top sources).
 - `html_text.py` — readable-text extraction and search-result parsing helpers used by `web.py`.
 - `net.py` — egress guard (SSRF-checked HTTP client) shared by the web tools.
 - `reminders.py` — `reminders.now`/`create`/`list`/`cancel` (the model's clock + scheduling).
+- `memory.py` — `memory.remember`: saves one fact the user stated about themselves, only through its approval card (refuses secrets, duplicates, memory switched off or full).
+- `watch.py` — `watch.create`/`list`/`delete`: the owner's page watches (create and delete behind the approval card; the URL is checked against the network policy).
 - `system.py` — capability report tool + `system.install_capability` (fixed argv allowlist installer, e.g. hidden browser).
 - `browser/` — Crawler's own browser (one per user, `session.py`; egress guard `guard.py`; sign-in/2FA handoff `handoff.py`; ARIA outline `snapshot.py`). `actions.py` is `browser.read` (READ; its click, which has no card, only follows a plain link to no order path (an order history aside) or clicks a control outside any form on a page with no total, payment method on file or wallet, `markers.read_click_allowed`, and the guard never lets it, or a handoff the model asked for, open an order step or send anything to an order address; while it clicks, no page script sends anything but a GET), `act.py` is `browser.act` (WRITE, one card per call, tied to the page by `_page` (origin, address and outline, for every act, a key press included); `bind_async` puts a masked picture of the page with the target outlined in red on every card, kept in memory and served by `approval_image`, and a money warning from the page's facts; never into a password or card field, never on `http://`, never a click, submit or Enter that pays — the control that would send the form is judged (`markers.pays`): a purchase-worded button, a form holding a card, a POST to an order path, or a button on a page showing an order total next to a payment method on file is `use_checkout`), `checkout/` is `browser.checkout` (FINANCIAL, one card per purchase: `markers.py` is the one classifier of card fields, buttons that pay and pages where an order is placed, shared by the facts, the outline, the screenshot mask and `browser.act`; `facts.py` reads the origin, the on-screen total nearest the card form, items, card fields and the order button's target off the page, `merchant.py` refuses the wrong or a look-alike host, `amounts.py` parses money, `ledger.py` writes the `purchases` audit rows and sums the last 24 h over every submitted card (a decline excepted), `toolkit.py` runs precheck → begin (the card's facts and an in-memory screenshot) → run (decrypts the card at fill time only, submits, reads the confirmation)). `pagememory.py` is the page the last read observed, which act and checkout are checked against; `_shared.py` holds the helpers the three toolkits share (the outline, the masked screenshot, the handoff and its window: `hand_over` when a toolkit hands the page to the person, `take_back` on the agent's next action).
 - `computer/` — desktop.observe / desktop.act on this platform's backend (see `docs/superpowers/specs/2026-09-24-computer-control-design.md`).
@@ -125,7 +127,9 @@ the chat gets what ran and why it stopped, in plain words
 - `browser_control.py` — the `browser_control` capability (`browser.read`; `browser.act` and `browser.checkout` need it too, through `_REQUIRED_CAPABILITIES`).
 - `browser_act.py` — the `browser_act` capability ("Fill in forms and click on sites": off by default, high risk, claims `browser.act`, native Mac/Windows only, `requires=("browser_control",)` so the report shows it blocked while Control a browser is not on).
 - `reminders.py` — the `reminders` capability.
-- `web_browsing.py` — the `web_browsing` capability (`web.search`, `web.fetch_page`).
+- `save_memories.py` — the `save_memories` capability (`memory.remember`).
+- `page_watch.py` — the `page_watch` capability (`watch.*`; off by default, needs Telegram).
+- `web_browsing.py` — the `web_browsing` capability (`web.search`, `web.fetch_page`, `web.research`).
 
 ## Installation & settings
 
@@ -143,7 +147,7 @@ the chat gets what ran and why it stopped, in plain words
 - `shaping.py`: output helpers every connector uses (`clamp_limit`, `cap_text`, `collect_pages`, `pick`).
 - `factory.py`: builds a live connector from stored (encrypted) credentials, arms its network policy, validates credentials; public names kept for older callers.
 - `oauth.py` / `oauth_config.py`: the OAuth broker (PKCE browser sign-in, device code, refresh before expiry, revoke after delete) and the client id / redirect URI resolver (env settings only). HTTP surface: `backend/api/routes/oauth.py`; flow rows: `backend/models/oauth_state.py`.
-- Connectors: `canvas.py` (Canvas LMS), `google_workspace.py` + `google_api/` (Gmail, Calendar, Drive, Docs, Sheets, Contacts), `microsoft.py` + `microsoft_api/` (Outlook mail and calendar, OneDrive, To Do, contacts), `github.py` + `github_api/`, `notion.py` + `notion_api/`, `slack.py` + `slack_api/` + `slack_manifest.json`, `robinhood.py` (read-only crypto; trading hard-blocked). A `<key>_api/` package holds one mixin module per action area when the connector would be too large for one file.
+- Connectors: `canvas.py` (Canvas LMS; `canvas_upcoming.py` shapes the rows of `canvas.get_upcoming`, and `canvas_grades.py` is the grade math of `canvas.grade_whatif`, no I/O), `google_workspace.py` + `google_api/` (Gmail, Calendar, Drive, Docs, Sheets, Contacts), `microsoft.py` + `microsoft_api/` (Outlook mail and calendar, OneDrive, To Do, contacts), `github.py` + `github_api/`, `notion.py` + `notion_api/`, `slack.py` + `slack_api/` + `slack_manifest.json`, `robinhood.py` (read-only crypto; trading hard-blocked). A `<key>_api/` package holds one mixin module per action area when the connector would be too large for one file.
 - Slack DM channel (runs on each user's Slack connector tokens): `backend/services/notifications/slack.py` (Socket Mode channel), `slack_manager.py` (one channel per Slack app), `backend/api/routes/slack.py` (link code routes), `backend/models/slack_link.py`, `backend/services/capabilities/slack.py`.
 - `backend/models/connector.py`: `ConnectorConfig` (`connector_type` is a plain string validated against the registry), `ConnectorType`/`AuthMethod`/`PermissionTier` enums. Owner setup of the sign-in apps: `docs/connectors-setup.md`.
 
@@ -159,6 +163,7 @@ the chat gets what ran and why it stopped, in plain words
 - `telegram_manager.py` — starts/restarts/stops the poller at runtime as settings change; serializes concurrent apply calls.
 - `progress.py` — `TurnProgress`: turns a running turn's tool_call events into short fact-only lines ("Opening canvas.nyit.edu…") and paces them (2 s grace, one per 4 s, no repeats, 6 per turn, the reply at least 1 s after the last line).
 - `reminders.py` — `ReminderService`: delivers due reminders (Telegram when linked).
+- `page_watch.py` — `PageWatchService`: the page-watch sweeper (leased claims, guarded fetch, change alerts on Telegram, error backoff).
 
 ## Usage / pricing (`backend/services/usage/`)
 
@@ -174,7 +179,7 @@ the chat gets what ran and why it stopped, in plain words
 
 ## Models & migrations
 
-Models (`backend/models/`): `user.py` (User, telegram link fields), `conversation.py` (Conversation/Message/MessageRole), `audit.py` (AuditLog/AuditStatus, hash chain columns), `connector.py` (ConnectorConfig + enums), `installation.py` (single-row Installation), `memory.py` (Memory/MemoryCategory/MemorySource), `pending_action.py` (PendingAction — persisted approvals), `reminder.py` (Reminder/ReminderSource/ReminderStatus), `vault_item.py` (VaultItem — the owner's sealed card: kind, label, masked, AES-GCM blob; never plaintext).
+Models (`backend/models/`): `user.py` (User, telegram link fields), `conversation.py` (Conversation/Message/MessageRole), `audit.py` (AuditLog/AuditStatus, hash chain columns), `connector.py` (ConnectorConfig + enums), `installation.py` (single-row Installation), `memory.py` (Memory/MemoryCategory/MemorySource), `pending_action.py` (PendingAction — persisted approvals), `reminder.py` (Reminder/ReminderSource/ReminderStatus), `page_watch.py` (PageWatch/PageWatchStatus), `vault_item.py` (VaultItem — the owner's sealed card: kind, label, masked, AES-GCM blob; never plaintext).
 
 Migrations (`backend/alembic/versions/`), oldest first:
 - `0001_baseline_schema.py` — baseline schema (everything `create_all()` used to build); stamped, never run, on pre-Alembic DBs.
@@ -187,6 +192,7 @@ Migrations (`backend/alembic/versions/`), oldest first:
 - `0008_installation.py` — the one-row `installation` table (owner switches, provider, secrets).
 - `0009_user_llm_nullable.py` — makes a user's provider/model nullable ("follow the install default").
 - `0010_vault_items.py` — the `vault_items` table and `installation.capability_settings` (guarded like 0008/0009).
+- `0015_page_watches.py` — the `page_watches` table, after the connectors migrations 0011 to 0014 (first written as `0011_page_watches` revising 0009; its docstring says how to reset a database that ran that).
 
 `backend/alembic/env.py` — reads `DATABASE_URL` from `core.config.settings` (no second credential copy); `backend/alembic/README.md` explains the adoption logic for pre-Alembic deployments.
 

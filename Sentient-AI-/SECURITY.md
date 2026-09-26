@@ -151,8 +151,8 @@ is whoever deployed it. There is no UI to transfer or grant the role; see
 
 **Capability switches** (`services/capabilities/`) are a third, orthogonal
 control: coarse, owner-only toggles (Browse the web, Screenshots of
-websites, See my screen, Reminders, Install optional software, Telegram,
-Slack chat and approvals)
+websites, See my screen, Reminders, Save memories, Watch web pages for
+changes, Install optional software, Telegram, Slack chat and approvals)
 set in the setup wizard or Settings → Permissions, on top of the action
 tiers and scopes above.
 

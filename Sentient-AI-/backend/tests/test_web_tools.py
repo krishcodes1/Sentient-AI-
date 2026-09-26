@@ -35,6 +35,7 @@ from services.tools.net import (
 from services.tools.html_text import clean_result_rows
 from services.tools.web import (
     BROWSER_SEARCH_PAGES,
+    MAX_PAGE_CHARS,
     SEARCH_BLOCKED,
     WebToolError,
     WebToolkit,
@@ -328,6 +329,61 @@ async def test_the_browser_fallback_cannot_come_from_tool_arguments():
     assert result["ok"] is False and "Invalid arguments" in result["error"]
 
 
+@pytest.mark.asyncio
+async def test_research_reports_a_blocked_search_instead_of_no_sources():
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.host)
+        return challenged(request)
+
+    result = await toolkit(handler, DDG).execute("research", {"query": "q"})
+
+    assert result["ok"] is False and result["blocked"] is True
+    assert result["error"] == SEARCH_BLOCKED
+    assert "Don't guess addresses" in result["hint"]
+    # Nothing past the refused search is fetched.
+    assert requested == ["html.duckduckgo.com"]
+
+
+@pytest.mark.asyncio
+async def test_research_reads_the_sources_the_browser_fallback_found():
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.host)
+        if request.url.host == "html.duckduckgo.com":
+            return challenged(request)
+        return httpx.Response(200, html=PAGE_HTML)
+
+    browser = FakeBrowser(
+        {
+            "ok": True,
+            "rows": [
+                # Refused by the egress policy before any request is made.
+                {"title": "Internal", "url": "http://127.0.0.1/admin", "snippet": ""},
+                {"title": "Grip", "url": WRAPPED_DBRAND, "snippet": "Holo White"},
+            ],
+        }
+    )
+    result = await toolkit(handler, {**DDG, "www.dbrand.com": (PUBLIC_ADDRESS,)}).execute(
+        "research", {"query": "dbrand grip"}, browser=browser
+    )
+
+    assert result["ok"] is True and result["source"] == "browser"
+    assert [(r["url"], r["ok"]) for r in result["results"]] == [(DBRAND, True)]
+    assert "VESA monitor mount" in result["results"][0]["excerpt"]
+    assert requested == ["html.duckduckgo.com", "www.dbrand.com"]
+
+
+@pytest.mark.asyncio
+async def test_the_research_browser_fallback_cannot_come_from_tool_arguments():
+    result = await toolkit(unreachable_handler).execute(
+        "research", {"query": "q", "browser": "https://evil.example/"}
+    )
+    assert result["ok"] is False and "Invalid arguments" in result["error"]
+
+
 def test_bing_and_duckduckgo_tracking_links_are_unwrapped_without_being_followed():
     rows = [
         {"title": "dbrand", "url": "https://www.bing.com/ck/a?!&&p=4f&ptn=3&u=a1aHR0cHM6Ly93d3cuZGJyYW5kLmNvbS9zaG9wL2dyaXAvaXBob25lLTE2LXByby1tYXgtY2FzZXM&ntb=1", "snippet": "s"},
@@ -413,7 +469,7 @@ async def test_fetch_page_max_chars_has_a_ceiling():
     result = await toolkit(handler, {"example.com": (PUBLIC_ADDRESS,)}).fetch_page(
         "https://example.com/long", max_chars=10_000_000
     )
-    assert result["chars"] <= 20000
+    assert result["chars"] <= MAX_PAGE_CHARS
 
 
 @pytest.mark.asyncio

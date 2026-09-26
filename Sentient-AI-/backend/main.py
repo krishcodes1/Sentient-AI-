@@ -67,6 +67,7 @@ from services.audit import RuntimeAuditLogger
 from services.connectors.oauth import shutdown_background_tasks as stop_oauth_tasks
 from services.installation import InstallationService
 from services.mcp.integration import MCPConnectorLoader, MCPToolCatalog
+from services.notifications.page_watch import PageWatchService
 from services.notifications.reminders import ReminderService
 from services.notifications.slack import SlackChannel
 from services.notifications.slack_manager import SlackManager
@@ -119,10 +120,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     start_browser_reaper(app)
     reminder_service: ReminderService = app.state.reminders
     await reminder_service.start()
+    page_watch_service: PageWatchService = app.state.page_watches
+    await page_watch_service.start()
 
     yield
     logger.info("shutting_down_crawler_ai")
     await reminder_service.stop()
+    await page_watch_service.stop()
     await app.state.telegram_manager.stop()
     await app.state.slack_manager.stop()
     # Release every provider's HTTP client (cached, and retired but still
@@ -345,9 +349,9 @@ async def wire_services(
     proxies are no-ops while no poller runs.
 
     Split out of the lifespan so tests can wire an app against their own
-    database and a fake Telegram service. Does not start the reminder
-    sweeper or the Slack DM channels (the lifespan does); a Slack
-    connector or capability change reconciles the Slack manager.
+    database and a fake Telegram service. Does not start the reminder or
+    page-watch sweepers or the Slack DM channels (the lifespan does); a
+    Slack connector or capability change reconciles the Slack manager.
     """
     installation = InstallationService(session_factory)
     app.state.installation = installation
@@ -511,6 +515,20 @@ async def wire_services(
         send=fan_out_send(
             {"telegram": telegram_manager.send_text, "slack": slack_manager.send_text}
         ),
+    )
+
+    # Page watches fetch pages in the background, so the sweeper re-reads
+    # the owner's page_watch switch every sweep and checks nothing while it
+    # is off or blocked (no Telegram token, or Telegram switched off). Alerts
+    # go through the same manager as reminders; with no linked chat the
+    # change is still recorded for watch.list.
+    async def _page_watch_enabled() -> bool:
+        return "page_watch" in await installation.enabled_keys()
+
+    app.state.page_watches = PageWatchService(
+        session_factory=session_factory,
+        send=telegram_manager.send_text,
+        enabled=_page_watch_enabled,
     )
 
 

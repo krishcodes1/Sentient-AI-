@@ -156,6 +156,7 @@ class Recorder:
     ("data", "phrase"),
     [
         ({"name": "web.search"}, "Searching the web…"),
+        ({"name": "web.research"}, "Reading several sources…"),
         ({"name": "web.fetch_page", "host": "example.com"}, "Reading example.com…"),
         ({"name": "web.fetch_page"}, "Reading a web page…"),
         ({"name": "web.screenshot", "host": "example.com"}, "Taking a screenshot…"),
