@@ -837,8 +837,8 @@ async def test_stopping_the_bot_takes_no_new_message_while_a_started_call_ends(
     session_factory, fake_api, touched
 ):
     # Shutdown, or the owner turning Telegram off, while a started call
-    # runs: the poller stops first, so a message sent meanwhile starts no
-    # turn, and the call finishes and is recorded before stop() returns.
+    # runs: the poller stops first, so a message sent meanwhile is never
+    # fetched, and the call finishes and is recorded before stop() returns.
     from main import app
 
     user = await _link(session_factory, "tg-decision-shutdown@example.com", 8181)
@@ -850,18 +850,24 @@ async def test_stopping_the_bot_takes_no_new_message_while_a_started_call_ends(
         fake_api.get_updates = [_text_update(1, 8181, "remind me to call the dentist")]
         await service.start()
         assert await _wait_for(executor.started.is_set)
-        stopping = asyncio.create_task(service.stop())
-        # The poller is gone before the message arrives. Handed over any
-        # earlier, the poller (which wakes every 10 ms here, in step with
-        # _wait_for) could fetch it and be cancelled by stop() inside its
-        # account lookup; a query cancelled mid-flight invalidates the
-        # pooled connection, and this in-memory database goes with it.
-        assert await _wait_for(lambda: service._task is None)
-        fake_api.get_updates.append(_text_update(2, 8181, "what is on my calendar"))
+        meanwhile = _text_update(2, 8181, "what is on my calendar")
+
+        async def stop_as_a_message_arrives() -> None:
+            # Telegram has the message from the very step stop() begins
+            # in, so only a poller stop() left running could fetch it.
+            # Handed out any earlier, the poller could be inside its
+            # account lookup when stop() cancels it; a query cancelled
+            # mid-flight invalidates the pooled connection, and this
+            # in-memory database goes with it.
+            fake_api.get_updates.append(meanwhile)
+            await service.stop()
+
+        stopping = asyncio.create_task(stop_as_a_message_arrives())
         await asyncio.sleep(0.3)
         assert not stopping.done()  # waiting for the started call
         executor.release.set()
         await asyncio.wait_for(stopping, 5)
+        assert fake_api.get_updates == [meanwhile]  # never fetched
         assert [t for t in service._all_chat_tasks() if not t.done()] == []
         # Nor does a message handed to it once stopped start anything.
         await service._handle_message(telegram_dm(8181, "one more thing"))
@@ -896,7 +902,10 @@ async def test_stopping_the_bot_does_not_wait_forever_on_a_wedged_call(
             # earlier test used after configure_logging() keeps its old
             # processors and bypasses the capture; bind a fresh one inside it.
             monkeypatch.setattr(tg, "logger", structlog.get_logger(tg.__name__))
-            await asyncio.wait_for(service.stop(), 2.0)
+            # Seconds of slack over the 0.2 s it waits, for a loaded run,
+            # yet half the 10 s default: a stop() that ignored the patched
+            # _STOP_WAIT_S would still miss it.
+            await asyncio.wait_for(service.stop(), 5.0)
         assert not chat_task.done()
         executor.release.set()
         await service.wait_for_chats()
