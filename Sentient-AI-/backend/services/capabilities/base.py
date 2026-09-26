@@ -57,6 +57,10 @@ class ReportContext:
     # and the container marker. "" when not gathered; a rule that needs it
     # then derives it from ``platform`` and ``in_container``.
     host_platform: str = ""
+    # For page_watch, whose alerts only go out over Telegram: a bot token is
+    # configured and the owner's "telegram" switch is on, so a message can
+    # actually be sent. False when not gathered, which reads as no Telegram.
+    telegram_enabled: bool = False
 
 
 @dataclass(frozen=True)

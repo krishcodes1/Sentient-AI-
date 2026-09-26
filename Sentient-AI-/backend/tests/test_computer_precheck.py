@@ -1212,6 +1212,88 @@ async def test_an_unusable_precheck_answer_refuses_the_act(answer):
     assert executor.dispatched == []
 
 
+class _AnsweringLater(_Answering):
+    """The same, answering through an awaitable, as a check that must read
+    storage does (memory.remember: is memory on, is it full)."""
+
+    def __init__(self, answer: Any) -> None:
+        super().__init__(answer)
+        self.awaited = False
+
+    def precheck_approval(self, tool_name, arguments, user_id):
+        async def later():
+            self.awaited = True
+            if isinstance(self.answer, BaseException):
+                raise self.answer
+            return self.answer
+
+        return later()
+
+
+async def _scroll_turn(executor: ToolExecutor, audit: RecordingAudit):
+    runtime, store = _parking_runtime(executor, audit)
+    use_provider(
+        runtime,
+        Script(call("t1", ACT, action="scroll", direction="down"), LLMResponse(content="ok")),
+    )
+    response = await runtime.chat(
+        messages=[{"role": "user", "content": "scroll"}],
+        tools=[Tool(name=ACT, description="act", parameters={}, permission_tier="approval")],
+        user_id=U1,
+    )
+    return response, store
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "answer",
+    [
+        RuntimeError("database is locked at /Users/owner/secret"),
+        {"ok": False, "error": "no"},
+        "refused",
+    ],
+    ids=["raises", "a-result-dict", "a-string"],
+)
+async def test_an_awaited_precheck_that_raises_or_answers_unusably_refuses_the_act(answer):
+    """The awaitable is awaited inside the same fail-closed rule: no card
+    for a call whose check could not answer, and nothing dispatched."""
+    executor = _AnsweringLater(answer)
+    audit = RecordingAudit()
+    response, store = await _scroll_turn(executor, audit)
+
+    assert executor.awaited
+    assert response.pending_approvals == [] and await store.list_pending(U1) == []
+    assert response.blocked_actions == [
+        BlockedAction(tool_name=ACT, reason=PRECHECK_ERROR_REASON, policy=PRECHECK_ERROR_POLICY)
+    ]
+    assert executor.dispatched == []
+    assert "secret" not in str(audit.entries)
+
+
+@pytest.mark.asyncio
+async def test_an_awaited_precheck_answer_is_honoured():
+    """None parks the call for its card; a PrecheckRefusal refuses it with
+    that refusal's own policy."""
+    parked = _AnsweringLater(None)
+    response, store = await _scroll_turn(parked, RecordingAudit())
+    assert parked.awaited and [p.tool_name for p in response.pending_approvals] == [ACT]
+    assert len(await store.list_pending(U1)) == 1 and parked.dispatched == []
+
+    refusal = PrecheckRefusal(
+        reason="Memory is off.",
+        policy="memory_rule",
+        result={"ok": False, "refused": True, "error": "Memory is off."},
+        rule="memory_off",
+    )
+    refused = _AnsweringLater(refusal)
+    response, store = await _scroll_turn(refused, RecordingAudit())
+    assert response.pending_approvals == [] and await store.list_pending(U1) == []
+    assert response.blocked_actions == [
+        BlockedAction(tool_name=ACT, reason="Memory is off.", policy="memory_rule")
+    ]
+    assert refused.dispatched == []
+
+
 @pytest.mark.asyncio
 async def test_an_executor_refusal_is_filed_under_its_own_policy():
     # The hook is generic: whatever policy and rule the executor names are

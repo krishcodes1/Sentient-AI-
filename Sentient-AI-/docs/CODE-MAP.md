@@ -55,7 +55,7 @@ the chat gets what ran and why it stopped, in plain words
 
 ## Entry points & wiring
 
-- `backend/main.py` — FastAPI app: lifespan, `wire_services` (builds installation, telegram manager, runtime, MCP catalog, reminders onto `app.state`), router mounting, global exception handlers.
+- `backend/main.py` — FastAPI app: lifespan, `wire_services` (builds installation, telegram manager, runtime, MCP catalog, reminders and page watches onto `app.state`), router mounting, global exception handlers.
 - `backend/core/config.py` — `Settings` (pydantic-settings): env vars, provider key fields, placeholder-secret rejection.
 - `backend/core/database.py` — async engine/session factory, Alembic-adoption logic for pre-Alembic databases, `backfill_user_llm_defaults`.
 - `backend/core/security.py` — password hashing, JWT issue/verify, AES-GCM credential encryption, audit HMAC hashing.
@@ -94,10 +94,12 @@ the chat gets what ran and why it stopped, in plain words
 ## Built-in tools (`backend/services/tools/`)
 
 - `desktop.py` — `desktop.screenshot` (mss capture, downscale, capability-gated).
-- `web.py` — `web.search`/`web.fetch_page`/`web.screenshot` (Playwright-backed).
+- `web.py` — `web.search`/`web.fetch_page`/`web.research`/`web.screenshot` (screenshot is Playwright-backed; research is one search plus a parallel read of the top sources).
 - `html_text.py` — readable-text extraction and search-result parsing helpers used by `web.py`.
 - `net.py` — egress guard (SSRF-checked HTTP client) shared by the web tools.
 - `reminders.py` — `reminders.now`/`create`/`list`/`cancel` (the model's clock + scheduling).
+- `memory.py` — `memory.remember`: saves one fact the user stated about themselves, only through its approval card (refuses secrets, duplicates, memory switched off or full).
+- `watch.py` — `watch.create`/`list`/`delete`: the owner's page watches (create and delete behind the approval card; the URL is checked against the network policy).
 - `system.py` — capability report tool + `system.install_capability` (fixed argv allowlist installer, e.g. hidden browser).
 
 ## Capabilities (`backend/services/capabilities/`)
@@ -114,7 +116,9 @@ the chat gets what ran and why it stopped, in plain words
 - `telegram.py` — the Telegram capability (a channel, claims no tools).
 - `prompt.py` — `render_permissions_block`: turns statuses into the `<permissions>` system-prompt section.
 - `reminders.py` — the `reminders` capability.
-- `web_browsing.py` — the `web_browsing` capability (`web.search`, `web.fetch_page`).
+- `save_memories.py` — the `save_memories` capability (`memory.remember`).
+- `page_watch.py` — the `page_watch` capability (`watch.*`; off by default, needs Telegram).
+- `web_browsing.py` — the `web_browsing` capability (`web.search`, `web.fetch_page`, `web.research`).
 
 ## Installation & settings
 
@@ -125,7 +129,9 @@ the chat gets what ran and why it stopped, in plain words
 ## Connectors (`backend/services/connectors/`)
 
 - `base.py` — `BaseConnector` framework: rate limiting, error types (`AuthenticationError`, `HardBlockError`, `UserConfirmationRequired`), `path_segment` helper.
-- `canvas.py` — Canvas LMS connector (courses, assignments, grades).
+- `canvas.py` — Canvas LMS connector (courses, assignments, upcoming work, grades and grade what-ifs).
+- `canvas_upcoming.py` — pure row shaping for `canvas.get_upcoming` (planner items plus missing submissions, capped as the model sees them).
+- `canvas_grades.py` — Canvas's grade calculation for `canvas.grade_whatif` (weights, drop rules, what-if scores, score needed for a target); no I/O.
 - `google_workspace.py` — Gmail/Calendar connector.
 - `robinhood.py` — Robinhood Crypto connector (read-heavy; trading hard-blocked).
 - `factory.py` — builds a live connector instance from stored (encrypted) credentials; credential validation.
@@ -143,6 +149,7 @@ the chat gets what ran and why it stopped, in plain words
 - `telegram_manager.py` — starts/restarts/stops the poller at runtime as settings change; serializes concurrent apply calls.
 - `progress.py` — `TurnProgress`: turns a running turn's tool_call events into short fact-only lines ("Opening canvas.nyit.edu…") and paces them (2 s grace, one per 4 s, no repeats, 6 per turn, the reply at least 1 s after the last line).
 - `reminders.py` — `ReminderService`: delivers due reminders (Telegram when linked).
+- `page_watch.py` — `PageWatchService`: the page-watch sweeper (leased claims, guarded fetch, change alerts on Telegram, error backoff).
 
 ## Usage / pricing (`backend/services/usage/`)
 
@@ -158,7 +165,7 @@ the chat gets what ran and why it stopped, in plain words
 
 ## Models & migrations
 
-Models (`backend/models/`): `user.py` (User, telegram link fields), `conversation.py` (Conversation/Message/MessageRole), `audit.py` (AuditLog/AuditStatus, hash chain columns), `connector.py` (ConnectorConfig + enums), `installation.py` (single-row Installation), `memory.py` (Memory/MemoryCategory/MemorySource), `pending_action.py` (PendingAction — persisted approvals), `reminder.py` (Reminder/ReminderSource/ReminderStatus).
+Models (`backend/models/`): `user.py` (User, telegram link fields), `conversation.py` (Conversation/Message/MessageRole), `audit.py` (AuditLog/AuditStatus, hash chain columns), `connector.py` (ConnectorConfig + enums), `installation.py` (single-row Installation), `memory.py` (Memory/MemoryCategory/MemorySource), `pending_action.py` (PendingAction — persisted approvals), `reminder.py` (Reminder/ReminderSource/ReminderStatus), `page_watch.py` (PageWatch/PageWatchStatus).
 
 Migrations (`backend/alembic/versions/`), oldest first:
 - `0001_baseline_schema.py` — baseline schema (everything `create_all()` used to build); stamped, never run, on pre-Alembic DBs.
@@ -170,6 +177,7 @@ Migrations (`backend/alembic/versions/`), oldest first:
 - `0007_message_model.py` — records which provider/model produced each assistant message.
 - `0008_installation.py` — the one-row `installation` table (owner switches, provider, secrets).
 - `0009_user_llm_nullable.py` — makes a user's provider/model nullable ("follow the install default").
+- `0011_page_watches.py` — the `page_watches` table. It revises 0009 because 0010 is taken by the vault (`0010_vault_items` on feat/purchases), and keeps doing so: databases already ran it on top of 0009, so whichever merges second adds a merge revision (`0012_merge_0010_0011`, revising both) rather than re-parenting either. The connectors spec's planned `0010_connector_type_string` and Slack `0011` must be renumbered after these.
 
 `backend/alembic/env.py` — reads `DATABASE_URL` from `core.config.settings` (no second credential copy); `backend/alembic/README.md` explains the adoption logic for pre-Alembic deployments.
 

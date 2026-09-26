@@ -946,7 +946,7 @@ async def test_one_flagged_search_result_no_longer_wipes_the_others():
 
 
 def test_core_tools_survive_a_large_connector():
-    from services.agent.context_manager import select_offered_tools
+    from services.agent.context_manager import OFFERED_TOOL_CAP, select_offered_tools
 
     def tool(name, connector):
         return {"name": name, "connector_type": connector}
@@ -965,7 +965,8 @@ def test_core_tools_survive_a_large_connector():
     active = ["google_workspace", "web", "reminders"]
     offered = select_offered_tools(tools, active)
     names = {t["name"] for t in offered}
-    assert len(offered) == 15
+    assert len(tools) > OFFERED_TOOL_CAP  # precondition: this is a trim
+    assert len(offered) == OFFERED_TOOL_CAP
     assert {"web.search", "web.fetch_page", "reminders.now"} <= names
     # Stable across calls (the cached request prefix depends on it).
     assert offered == select_offered_tools(tools, active)

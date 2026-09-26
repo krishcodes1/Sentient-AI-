@@ -65,6 +65,7 @@ DEFAULT_PHRASE = "Working on it…"
 # None means say nothing: the call is instant or bookkeeping.
 _TOOL_PHRASES: dict[str, Optional[str]] = {
     "web.search": "Searching the web…",
+    "web.research": "Reading several sources…",
     "web.screenshot": "Taking a screenshot…",
     "browser.read/click": "Clicking on the page…",
     "browser.read/snapshot": "Reading the page…",
@@ -92,7 +93,9 @@ _TOOL_PHRASES: dict[str, Optional[str]] = {
     "desktop.act/focus_window": "Switching windows…",
     "canvas.get_courses": "Checking your Canvas courses…",
     "canvas.get_assignments": "Checking your Canvas assignments…",
+    "canvas.get_upcoming": "Checking what's due on Canvas…",
     "canvas.get_grades": "Checking your grades…",
+    "canvas.grade_whatif": "Working out your grade…",
     "canvas.get_calendar_events": "Checking your Canvas calendar…",
     "canvas.get_submissions": "Checking your Canvas submissions…",
     "canvas.submit_assignment": "Submitting to Canvas…",
@@ -108,6 +111,9 @@ _TOOL_PHRASES: dict[str, Optional[str]] = {
     "reminders.create": "Setting a reminder…",
     "reminders.list": "Checking your reminders…",
     "reminders.cancel": "Cancelling a reminder…",
+    "memory.remember": "Saving that to your memory…",
+    "watch.list": "Checking your page watches…",
+    "watch.delete": "Removing a page watch…",
     "system.capabilities": "Checking what this computer can do…",
     "system.install_capability": "Installing software…",
 }
@@ -117,6 +123,7 @@ _TOOL_PHRASES: dict[str, Optional[str]] = {
 _HOST_PHRASES: dict[str, tuple[str, str]] = {
     "web.fetch_page": ("Reading {host}…", "Reading a web page…"),
     "browser.read/open": ("Opening {host}…", "Opening a web page…"),
+    "watch.create": ("Setting up a watch on {host}…", "Setting up a page watch…"),
 }
 
 # A tool of a known family that has no entry above (a new action, an MCP
@@ -129,6 +136,7 @@ _FAMILY_PHRASES: dict[str, str] = {
     "google_workspace": "Checking your Google account…",
     "robinhood": "Checking your crypto portfolio…",
     "reminders": "Checking your reminders…",
+    "watch": "Checking your page watches…",
     "system": "Checking this computer's setup…",
     "mcp": "Using a connected app…",
 }

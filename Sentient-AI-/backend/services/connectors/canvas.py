@@ -22,6 +22,7 @@ from urllib.parse import urlencode
 import httpx
 import structlog
 
+from . import canvas_grades
 from .base import (
     AuthenticationError,
     BaseConnector,
@@ -56,7 +57,9 @@ class CanvasConnector(BaseConnector):
         "get_courses": "get_courses",
         "get_assignments": "get_assignments",
         "get_grades": "get_grades",
+        "grade_whatif": "grade_whatif",
         "get_calendar_events": "get_calendar_events",
+        "get_upcoming": "get_upcoming",
         "get_submissions": "get_submissions",
         "submit_assignment": "submit_assignment",
     }
@@ -316,11 +319,77 @@ class CanvasConnector(BaseConnector):
             params={"user_id": "self", "type[]": "StudentEnrollment"},
         )
 
+    async def grade_whatif(
+        self,
+        course_id: int | str,
+        what_if: Any = None,
+        target_percent: Any = None,
+        target_assignment: Any = None,
+    ) -> dict[str, Any]:
+        """Current grade, what-if grade and the score needed for a target,
+        worked out by ``canvas_grades`` from the course's assignment groups.
+
+        Read-only: two GETs, and the hypothetical scores exist only as
+        arguments; nothing is written back to Canvas. Arguments are checked
+        before any request, and the answer is compact numbers rather than
+        the raw groups, which would not survive the result budget.
+        """
+        if isinstance(course_id, bool) or not str(course_id).strip():
+            raise ConnectorError("grade_whatif needs a course_id.")
+        try:
+            request = canvas_grades.parse_request(
+                what_if=what_if,
+                target_percent=target_percent,
+                target_assignment=target_assignment,
+            )
+        except canvas_grades.GradeInputError as exc:
+            raise ConnectorError(str(exc)) from exc
+        segment = path_segment(str(course_id).strip())
+        # apply_assignment_group_weights lives on the course, not the groups;
+        # total_scores adds Canvas's own current score to cross-check against.
+        course = await self._api_get(f"/courses/{segment}", params={"include[]": "total_scores"})
+        groups = await self._api_get(
+            f"/courses/{segment}/assignment_groups",
+            params={"include[]": ["assignments", "submission"], "per_page": 100},
+        )
+        try:
+            return canvas_grades.plan(groups, course, request)
+        except canvas_grades.GradeInputError as exc:
+            raise ConnectorError(str(exc)) from exc
+
     async def get_calendar_events(self) -> list[dict[str, Any]]:
         """Fetch upcoming calendar events."""
         return await self._api_get(
             "/calendar_events", params={"type": "event", "per_page": 50}
         )
+
+    async def get_upcoming(self, days: Any = None) -> dict[str, Any]:
+        """Everything due in the next *days* days across the user's active
+        courses, plus missing and late work, as compact rows.
+
+        Two account-wide reads replace a get_assignments call per course:
+        the planner (dated items with the user's submission state, read
+        from a short lookback so late work shows) and the missing
+        submissions list. Both follow pagination through ``_api_get`` and
+        take no model-supplied path segment; ``days`` only sets the window.
+        Shaping and the size caps live in ``canvas_upcoming``.
+        """
+        from . import canvas_upcoming as upcoming
+
+        window = upcoming.window_for(days)
+        planner = await self._api_get(
+            "/planner/items",
+            params={
+                "start_date": upcoming.iso(window.late_since),
+                "end_date": upcoming.iso(window.until),
+                "per_page": 100,
+            },
+        )
+        missing = await self._api_get(
+            "/users/self/missing_submissions",
+            params={"include[]": "course", "per_page": 100},
+        )
+        return upcoming.summarize(planner, missing, window=window, base_url=self._base_url)
 
     async def get_submissions(
         self, course_id: int | str, assignment_id: int | str
