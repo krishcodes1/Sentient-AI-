@@ -1,9 +1,15 @@
-"""Windows: Edge or Chrome, %LOCALAPPDATA%, icacls, user32, netstat.
+"""Windows: Edge or Chrome, %LOCALAPPDATA%, icacls, user32, netstat, and
+DPAPI for the vault key (purchases spec §4).
 
 (Windows implementation of spec §11.1; mac.py is its twin.) Nothing here
 touches a Windows-only symbol at import time, so the module and its
-tests load on every OS; user32 is reached through a small shim
-(``User32``) that tests replace.
+tests load on every OS; user32 and crypt32 are reached through small
+shims (``User32``, ``Crypt32``) that tests replace.
+
+A secret is ``CryptProtectData`` ciphertext (user scope, no UI) in
+``<data_dir>/secrets/<name>.dpapi``: only the signed-in Windows account
+can unprotect it, on this machine, and the directory is ACL'd to that
+account like a browser profile as a second fence.
 """
 
 from __future__ import annotations
@@ -13,21 +19,27 @@ import ctypes
 import os
 import sys
 from pathlib import Path, PureWindowsPath
-from typing import Mapping, Optional, Protocol
+from typing import Any, Mapping, Optional, Protocol
 
 from services.platform.base import (
     APP_DIR_NAME,
     TIMEOUT_S,
+    VAULT_ID_FILE,
     PlatformName,
     Runner,
+    SecretStoreUnavailable,
     profile_path,
+    read_or_create_id,
     run_argv,
+    secret_name,
 )
 
 # Where Playwright's channel="chrome" looks, under each of these bases.
 # (os.environ upper-cases names on Windows, so "PROGRAMFILES(X86)" is right.)
 CHROME_EXE_PARTS = ("Google", "Chrome", "Application", "chrome.exe")
 _CHROME_BASES = ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA")
+SECRETS_DIR_NAME = "secrets"
+SECRET_SUFFIX = ".dpapi"
 
 
 class User32(Protocol):
@@ -108,6 +120,74 @@ class _CtypesUser32:
         self._u.FlashWindow(hwnd, True)
 
 
+class Crypt32(Protocol):
+    """The two DPAPI calls the secret store needs, so a fake stands in on
+    Mac/Linux and the real one is built only on Windows."""
+
+    def protect(self, data: bytes) -> bytes: ...
+
+    def unprotect(self, blob: bytes) -> bytes: ...
+
+
+class _CtypesCrypt32:
+    """Real crypt32.dll: CryptProtectData/CryptUnprotectData with
+    CRYPTPROTECT_UI_FORBIDDEN, user scope (no LOCAL_MACHINE flag), no
+    extra entropy. Constructed only when sys.platform is win32, which is
+    why the Windows-only ctypes names are looked up here, not at import.
+
+    Both calls take and return a DATA_BLOB; the output buffer is
+    LocalAlloc'd by the OS and freed here right after it is copied out."""
+
+    _UI_FORBIDDEN = 0x01
+
+    def __init__(self) -> None:
+        from ctypes import wintypes
+
+        class DataBlob(ctypes.Structure):
+            _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+        c = ctypes.WinDLL("crypt32", use_last_error=True)  # type: ignore[attr-defined]
+        k = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        blob_p = ctypes.POINTER(DataBlob)
+        # (pDataIn, szDataDescr, pOptionalEntropy, pvReserved, pPromptStruct,
+        # dwFlags, pDataOut); the description and prompt pointers stay NULL.
+        for fn in (c.CryptProtectData, c.CryptUnprotectData):
+            fn.argtypes = [
+                blob_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+                ctypes.c_void_p, wintypes.DWORD, blob_p,
+            ]
+            fn.restype = wintypes.BOOL
+        k.LocalFree.argtypes = [ctypes.c_void_p]
+        k.LocalFree.restype = ctypes.c_void_p
+        self._blob = DataBlob
+        self._crypt32 = c
+        self._kernel32 = k
+
+    def _call(self, fn: Any, data: bytes) -> bytes:
+        # The buffer outlives the call: DataBlob only points into it.
+        buffer = ctypes.create_string_buffer(data, len(data))
+        blob_in = self._blob(len(data), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_char)))
+        blob_out = self._blob()
+        ok = fn(ctypes.byref(blob_in), None, None, None, None, self._UI_FORBIDDEN,
+                ctypes.byref(blob_out))
+        if not ok:
+            # Windows-only in ctypes (and in typeshed), hence the getattr.
+            last_error = getattr(ctypes, "get_last_error", None)
+            raise SecretStoreUnavailable(
+                f"DPAPI refused (error {last_error() if last_error else 0})"
+            )
+        try:
+            return ctypes.string_at(blob_out.pbData, blob_out.cbData)
+        finally:
+            self._kernel32.LocalFree(blob_out.pbData)
+
+    def protect(self, data: bytes) -> bytes:
+        return self._call(self._crypt32.CryptProtectData, data)
+
+    def unprotect(self, blob: bytes) -> bytes:
+        return self._call(self._crypt32.CryptUnprotectData, blob)
+
+
 def parse_netstat(output: str, port: int) -> Optional[int]:
     """``netstat -ano -p tcp``: the PID of the first listening row whose
     local address ends in ``:<port>`` (IPv4 ``0.0.0.0:80`` or IPv6 ``[::]:80``)."""
@@ -144,10 +224,12 @@ class WindowsPlatform:
         runner: Runner = run_argv,
         env: Optional[Mapping[str, str]] = None,
         user32: Optional[User32] = None,
+        crypt32: Optional[Crypt32] = None,
     ) -> None:
         self._run = runner
         self._env: Mapping[str, str] = os.environ if env is None else env
         self._user32 = user32
+        self._crypt32 = crypt32
 
     def _system32(self, exe: str) -> str:
         # Absolute, like the Mac binaries: never whatever PATH finds first.
@@ -182,15 +264,20 @@ class WindowsPlatform:
         return Path(base) / APP_DIR_NAME
 
     def profile_dir(self, user_id: str) -> Path:
-        path = profile_path(self.data_dir(), user_id)
+        return self._private_dir(profile_path(self.data_dir(), user_id))
+
+    def _private_dir(self, path: Path) -> Path:
+        """Create *path* and restrict it to the signed-in account.
+
+        Drop inherited ACEs and grant only that account: the Windows
+        spelling of 0700 for a profile that holds live session cookies or
+        the directory that holds the vault key. The account name comes
+        from the environment, never from the model, and a failure is a
+        refusal (as a failed chmod is on Mac). `/reset` first drops any
+        explicit ACE an existing directory carries (`/grant:r` only
+        replaces the named account's own ACEs), the twin of chmod-ing a
+        loose Mac profile back to 0700."""
         path.mkdir(parents=True, exist_ok=True)
-        # Drop inherited ACEs and grant only the signed-in account: the
-        # Windows spelling of 0700 for a profile that holds live session
-        # cookies. The account name comes from the environment, never from
-        # the model, and a failure is a refusal (as a failed chmod is on Mac).
-        # `/reset` first drops any explicit ACE an existing directory carries
-        # (`/grant:r` only replaces the named account's own ACEs), the twin
-        # of chmod-ing a loose Mac profile back to 0700.
         account = self._account()
         icacls = self._system32("icacls.exe")
         steps = (
@@ -204,6 +291,44 @@ class WindowsPlatform:
                     f"icacls could not restrict {path} to {account}: {out.strip()[-200:]}"
                 )
         return path
+
+    # -- secrets (the vault key) --------------------------------------------
+
+    def vault_id(self) -> str:
+        return read_or_create_id(self.data_dir() / VAULT_ID_FILE)
+
+    def _secret_path(self, name: str) -> Path:
+        return self.data_dir() / SECRETS_DIR_NAME / f"{secret_name(name)}{SECRET_SUFFIX}"
+
+    def _dpapi(self) -> Crypt32:
+        shim = self._crypt32
+        if shim is None and sys.platform.startswith("win"):
+            shim = self._crypt32 = _CtypesCrypt32()
+        if shim is None:
+            raise SecretStoreUnavailable("DPAPI is only available on Windows")
+        return shim
+
+    def get_secret(self, name: str) -> Optional[bytes]:
+        try:
+            blob = self._secret_path(name).read_bytes()
+        except FileNotFoundError:
+            return None
+        # A file that exists but will not unprotect (another account, a
+        # reinstalled Windows) is unavailable, not absent: see base.py.
+        return self._dpapi().unprotect(blob)
+
+    def set_secret(self, name: str, value: bytes) -> None:
+        blob = self._dpapi().protect(value)
+        path = self._secret_path(name)
+        self._private_dir(path.parent)
+        # Write beside, then replace: a crash mid-write must not leave a
+        # truncated file that reads as "stored" next time.
+        staging = path.with_name(path.name + ".tmp")
+        staging.write_bytes(blob)
+        os.replace(staging, path)
+
+    def delete_secret(self, name: str) -> None:
+        self._secret_path(name).unlink(missing_ok=True)
 
     def bring_to_front(self, *, pid: Optional[int] = None, title: Optional[str] = None) -> bool:
         user32 = self._user32

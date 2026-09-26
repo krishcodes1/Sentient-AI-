@@ -1,7 +1,7 @@
 /**
- * Renders the capabilities list: one row per capability with a risk badge, an on/off switch, an
- * effective-status line and Grant access / Install actions, plus the panel shown when the list
- * fails to load.
+ * Renders the capabilities list: one row per capability with a risk badge, an on/off switch, a
+ * warning where one applies, an effective-status line and Grant access / Install actions, plus the
+ * panel shown when the list fails to load.
  *
  * Why it exists: Settings and the setup wizard's Permissions step show the same list, so the row
  * layout and the read-only-for-non-owners behaviour live in one component.
@@ -9,6 +9,7 @@
 
 import { useId } from "react";
 import { Download, Loader2, ShieldAlert } from "lucide-react";
+import CapabilitySettings from "@/components/CapabilitySettings";
 import type { CapabilityEffective, CapabilityStatus } from "@/types";
 
 const riskColors: Record<CapabilityStatus["risk"], { text: string; fill: string; border: string }> = {
@@ -42,6 +43,12 @@ function RiskBadge({ risk }: { risk: CapabilityStatus["risk"] }) {
   );
 }
 
+// What the owner should know before turning a switch on, shown under its
+// description: acting on sites goes step by step through approval cards.
+const capabilityWarnings: Record<string, string> = {
+  browser_act: "Crawler will ask before every click or keystroke, with a picture of the page.",
+};
+
 function effectiveColor(effective: CapabilityEffective): string {
   if (effective === "on") return "var(--accent-success)";
   if (effective === "blocked") return "var(--accent-danger)";
@@ -61,9 +68,18 @@ interface CapabilityRowProps {
   onToggle: (key: string, enabled: boolean) => void;
   onRequestAccess: (key: string) => void;
   onInstall: (key: string) => void;
+  onSettingsChange?: (key: string, patch: Record<string, number>) => void;
 }
 
-function CapabilityRow({ item, editable, busy, onToggle, onRequestAccess, onInstall }: CapabilityRowProps) {
+function CapabilityRow({
+  item,
+  editable,
+  busy,
+  onToggle,
+  onRequestAccess,
+  onInstall,
+  onSettingsChange,
+}: CapabilityRowProps) {
   const headingId = useId();
   const disabled = !editable || busy;
   return (
@@ -82,6 +98,11 @@ function CapabilityRow({ item, editable, busy, onToggle, onRequestAccess, onInst
           <p className="text-xs mt-1" style={{ color: "var(--text-secondary)" }}>
             {item.description}
           </p>
+          {capabilityWarnings[item.key] && (
+            <p className="text-xs mt-1 font-medium" style={{ color: "var(--accent-warning)" }}>
+              {capabilityWarnings[item.key]}
+            </p>
+          )}
           <p className="text-xs mt-1.5 font-medium" style={{ color: effectiveColor(item.effective) }}>
             {statusLine(item)}
           </p>
@@ -113,6 +134,18 @@ function CapabilityRow({ item, editable, busy, onToggle, onRequestAccess, onInst
           )}
         </button>
       </div>
+
+      {/* Only `purchases` has settings (its spending caps); the component
+          renders nothing for the other rows. Shown only where a save handler
+          exists: the setup wizard's step turns things on and off and leaves
+          the caps at their defaults. */}
+      {onSettingsChange && (
+        <CapabilitySettings
+          item={item}
+          editable={!disabled}
+          onChange={(patch) => onSettingsChange(item.key, patch)}
+        />
+      )}
 
       {(item.can_request_access || (item.install && !item.available)) && (
         <div className="flex items-center gap-3 mt-3 flex-wrap">
@@ -175,6 +208,9 @@ export interface CapabilityListProps {
   onInstall: (key: string) => void;
   /** Key of the capability currently mid-request, if any. Disables its switch and buttons. */
   busyKey?: string | null;
+  /** Saves one changed setting of a capability (the purchase caps). When
+   *  absent, no settings fields are rendered. */
+  onSettingsChange?: (key: string, patch: Record<string, number>) => void;
 }
 
 /**
@@ -196,6 +232,7 @@ export default function CapabilityList({
   onRequestAccess,
   onInstall,
   busyKey = null,
+  onSettingsChange,
 }: CapabilityListProps) {
   return (
     <div className="space-y-4">
@@ -213,6 +250,7 @@ export default function CapabilityList({
           onToggle={onToggle}
           onRequestAccess={onRequestAccess}
           onInstall={onInstall}
+          onSettingsChange={onSettingsChange}
         />
       ))}
     </div>

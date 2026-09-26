@@ -5,16 +5,27 @@ CRAWLER_PLATFORM picks the implementation whatever OS runs the suite."""
 
 from __future__ import annotations
 
+import base64
 import stat
 import subprocess
 import sys
+import uuid
 from pathlib import Path
+from typing import Optional
 
 import pytest
 
 from services import platform as platform_pkg
 from services.platform import OVERRIDE_ENV, current, detect_name
-from services.platform.base import make_private_dir, parse_lsof, profile_path, run_argv
+from services.platform.base import (
+    SecretStoreUnavailable,
+    make_private_dir,
+    parse_lsof,
+    profile_path,
+    read_or_create_id,
+    run_argv,
+    secret_name,
+)
 from services.platform.container import ContainerPlatform
 from services.platform.linux import LinuxPlatform
 from services.platform.mac import MacPlatform
@@ -25,15 +36,20 @@ POSIX_ONLY = pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX mo
 
 
 class Recorder:
-    """A Runner: records every argv and replays canned (code, output) pairs."""
+    """A Runner: records every argv (and what was fed to its stdin, one entry
+    per call, None when nothing was) and replays canned (code, output) pairs."""
 
     def __init__(self, *results: tuple[int, str]) -> None:
         self.calls: list[list[str]] = []
+        self.inputs: list[Optional[str]] = []
         self._results = list(results)
 
-    def __call__(self, argv: list[str], timeout_s: float) -> tuple[int, str]:
+    def __call__(
+        self, argv: list[str], timeout_s: float, stdin: Optional[str] = None
+    ) -> tuple[int, str]:
         assert 0 < timeout_s <= 10
         self.calls.append(list(argv))
+        self.inputs.append(stdin)
         return self._results.pop(0) if self._results else (0, "")
 
 
@@ -62,6 +78,16 @@ def test_run_argv_never_opens_a_console_window(monkeypatch):
     assert run_argv(["/bin/true"], 1.0) == (-1, "")
     assert seen["creationflags"] == getattr(subprocess, "CREATE_NO_WINDOW", 0)
     assert seen["stdin"] is subprocess.DEVNULL and "shell" not in seen
+
+
+def test_run_argv_feeds_stdin_only_when_given():
+    read_back = [sys.executable, "-c", "import sys; print(repr(sys.stdin.read()))"]
+    code, out = run_argv(read_back, 10.0, stdin="line one\nline two\n")
+    assert (code, out.strip()) == (0, repr("line one\nline two\n"))
+    # Without stdin the child reads an empty, closed stream (never the
+    # backend's own stdin).
+    code, out = run_argv(read_back, 10.0)
+    assert (code, out.strip()) == (0, repr(""))
 
 
 def test_run_argv_never_raises():
@@ -540,3 +566,343 @@ def test_host_os_maps_to_a_platform(monkeypatch, host, expected):
     monkeypatch.setattr(platform_pkg, "in_container", lambda: False)
     monkeypatch.setattr(sys, "platform", host)
     assert detect_name() == expected
+
+
+# -- secrets and vault_id (purchases spec §4) ------------------------------
+#
+# The vault key is the one thing the OS store holds. Mac goes through
+# `/usr/bin/security -i` with the command on stdin (argv and stdin recorded,
+# never run: the owner's Keychain is never touched), Windows through a
+# Crypt32 shim (a fake that reverses bytes), Linux and the container have
+# no store.
+
+VAULT_UUID = "0f8fad5b-d9cb-469f-a165-70867728950e"
+SERVICE = "Crawler AI vault"
+ACCOUNT = f"{VAULT_UUID}-vault-key"
+SECURITY_I = ["/usr/bin/security", "-i"]
+KEY_B64 = base64.b64encode(b"k" * 32).decode()
+
+
+def test_read_or_create_id_mints_a_uuid_once(tmp_path):
+    path = tmp_path / "data" / "vault-id"
+    first = read_or_create_id(path)
+    assert str(uuid.UUID(first)) == first
+    assert path.read_text().strip() == first
+    assert read_or_create_id(path) == first
+
+
+@POSIX_ONLY
+def test_read_or_create_id_file_is_0600(tmp_path):
+    path = tmp_path / "vault-id"
+    read_or_create_id(path)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_read_or_create_id_never_overwrites_a_corrupt_file(tmp_path):
+    # Replacing the id would change the Keychain account the key lives
+    # under and orphan it: refuse instead.
+    path = tmp_path / "vault-id"
+    path.write_text("not a uuid\n")
+    with pytest.raises(OSError, match="uuid"):
+        read_or_create_id(path)
+    assert path.read_text() == "not a uuid\n"
+
+
+@POSIX_ONLY
+def test_read_or_create_id_refuses_a_symlink(tmp_path):
+    target = tmp_path / "elsewhere"
+    target.write_text(VAULT_UUID)
+    link = tmp_path / "vault-id"
+    link.symlink_to(target)
+    with pytest.raises(OSError, match="symlink"):
+        read_or_create_id(link)
+
+
+@pytest.mark.parametrize("bad", ["", "../key", "a/b", "vault key", "x" * 65])
+def test_secret_name_refuses_anything_but_an_identifier(bad):
+    with pytest.raises(ValueError):
+        secret_name(bad)
+    assert secret_name("vault-key") == "vault-key"
+
+
+def test_mac_vault_id_lives_in_application_support(tmp_path):
+    plat, rec = mac(tmp_path)
+    vid = plat.vault_id()
+    assert (plat.data_dir() / "vault-id").read_text().strip() == vid
+    assert plat.vault_id() == vid and rec.calls == []
+
+
+def _mac_with_id(tmp_path, *results):
+    plat, rec = mac(tmp_path, *results)
+    plat.data_dir().mkdir(parents=True)
+    (plat.data_dir() / "vault-id").write_text(VAULT_UUID + "\n")
+    return plat, rec
+
+
+def test_mac_get_secret_reads_the_keychain_item_as_base64(tmp_path):
+    plat, rec = _mac_with_id(tmp_path, (0, KEY_B64 + "\n"))
+    assert plat.get_secret("vault-key") == b"k" * 32
+    assert rec.calls == [SECURITY_I]
+    assert rec.inputs == [f'"find-generic-password" "-s" "{SERVICE}" "-a" "{ACCOUNT}" "-w"\n']
+
+
+def test_mac_get_secret_is_none_only_when_the_item_is_not_found(tmp_path):
+    not_found = "security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain."
+    plat, _ = _mac_with_id(tmp_path, (44, not_found))
+    assert plat.get_secret("vault-key") is None
+    # A locked keychain, a denied prompt or a missing binary must not read
+    # as "no key yet": the caller would mint a new one over the old.
+    for code in (1, 36, 51, 128, -1):
+        plat, _ = _mac_with_id(tmp_path / f"c{code}", (code, "User interaction is not allowed."))
+        with pytest.raises(SecretStoreUnavailable, match="Keychain") as info:
+            plat.get_secret("vault-key")
+        # One plain sentence for the owner; the exit code is logged, not shown.
+        assert str(info.value) == "Crawler could not open this Mac's Keychain. Unlock the Mac and try again."
+
+
+def test_mac_get_secret_refuses_an_item_that_is_not_base64(tmp_path):
+    plat, _ = _mac_with_id(tmp_path, (0, "not base64!\n"))
+    with pytest.raises(SecretStoreUnavailable, match="format"):
+        plat.get_secret("vault-key")
+
+
+def test_mac_set_secret_adds_or_updates_the_item(tmp_path):
+    plat, rec = _mac_with_id(tmp_path, (0, ""))
+    plat.set_secret("vault-key", b"k" * 32)
+    assert rec.calls == [SECURITY_I]
+    assert rec.inputs == [
+        f'"add-generic-password" "-U" "-s" "{SERVICE}" "-a" "{ACCOUNT}" "-w" "{KEY_B64}"\n'
+    ]
+    denied = "security: SecKeychainItemCreateFromContent: User interaction is not allowed."
+    plat, _ = _mac_with_id(tmp_path / "fail", (1, denied))
+    with pytest.raises(SecretStoreUnavailable, match="Keychain"):
+        plat.set_secret("vault-key", b"k" * 32)
+
+
+def test_mac_vault_key_is_never_an_argument(tmp_path):
+    """The key travels on stdin only: an argument is readable in the
+    process table (`ps`, exec auditing) for as long as `security` runs."""
+    plat, rec = _mac_with_id(tmp_path, (0, ""), (0, KEY_B64 + "\n"))
+    key = b"k" * 32
+    plat.set_secret("vault-key", key)
+    plat.get_secret("vault-key")
+    for argv in rec.calls:
+        assert argv == SECURITY_I
+        assert KEY_B64 not in " ".join(argv) and key.hex() not in " ".join(argv)
+    # Every command ends in a newline: `security -i` runs nothing without one.
+    assert all(line is not None and line.endswith("\n") and line.count("\n") == 1 for line in rec.inputs)
+
+
+def test_mac_keychain_command_words_are_quoted_and_checked(tmp_path):
+    from services.platform.mac import _quoted
+
+    assert _quoted("Crawler AI vault") == '"Crawler AI vault"'
+    assert _quoted(KEY_B64) == f'"{KEY_B64}"'
+    for bad in ('a"b', "a\nb", "", "x\x00", "a'b"):
+        with pytest.raises(ValueError):
+            _quoted(bad)
+
+
+@POSIX_ONLY
+def test_mac_secrets_reach_a_real_security_binary_through_stdin(tmp_path, monkeypatch):
+    """The real run_argv against a stand-in `security` (a script in tmp, so
+    the owner's Keychain is never touched): it must be invoked as `-i`, get
+    the whole command on stdin, and its `-w` output must read back as the
+    key. This is the plumbing the recorded tests above take for granted."""
+    from services.platform import mac as mac_module
+
+    log = tmp_path / "commands.txt"
+    fake = tmp_path / "security"
+    fake.write_text(
+        "#!/bin/sh\n"
+        f"[ \"$1\" = -i ] || exit 99\n"
+        f"line=$(cat)\n"
+        f"printf '%s\\n' \"$line\" >> '{log}'\n"
+        f"case \"$line\" in\n"
+        f"  *find-generic-password*) printf '%s\\n' '{KEY_B64}' ;;\n"
+        f"  *add-generic-password*) : ;;\n"
+        f"  *) exit 2 ;;\n"
+        f"esac\n"
+    )
+    fake.chmod(0o700)
+    monkeypatch.setattr(mac_module, "_SECURITY", str(fake))
+    plat = MacPlatform(runner=run_argv, home=tmp_path, chrome_app=tmp_path / "none.app")
+    plat.data_dir().mkdir(parents=True)
+    (plat.data_dir() / "vault-id").write_text(VAULT_UUID + "\n")
+    plat.set_secret("vault-key", b"k" * 32)
+    assert plat.get_secret("vault-key") == b"k" * 32
+    lines = log.read_text().splitlines()
+    assert lines == [
+        f'"add-generic-password" "-U" "-s" "{SERVICE}" "-a" "{ACCOUNT}" "-w" "{KEY_B64}"',
+        f'"find-generic-password" "-s" "{SERVICE}" "-a" "{ACCOUNT}" "-w"',
+    ]
+
+
+def test_mac_delete_secret_tolerates_a_missing_item(tmp_path):
+    plat, rec = _mac_with_id(tmp_path, (0, ""), (44, "not found"), (1, "denied"))
+    plat.delete_secret("vault-key")
+    plat.delete_secret("vault-key")
+    assert rec.calls == [SECURITY_I, SECURITY_I]
+    assert rec.inputs[0] == f'"delete-generic-password" "-s" "{SERVICE}" "-a" "{ACCOUNT}"\n'
+    with pytest.raises(SecretStoreUnavailable, match="Keychain"):
+        plat.delete_secret("vault-key")
+
+
+def test_mac_secret_name_is_validated_before_any_argv(tmp_path):
+    plat, rec = _mac_with_id(tmp_path)
+    with pytest.raises(ValueError):
+        plat.get_secret("../../etc/passwd")
+    assert rec.calls == []
+
+
+class FakeCrypt32:
+    """DPAPI stand-in: protect = tagged, reversed bytes, so the file on
+    disk provably never holds the plaintext."""
+
+    def __init__(self) -> None:
+        self.protected = 0
+
+    def protect(self, data: bytes) -> bytes:
+        self.protected += 1
+        return b"DPAPI:" + bytes(reversed(data))
+
+    def unprotect(self, blob: bytes) -> bytes:
+        assert blob.startswith(b"DPAPI:")
+        return bytes(reversed(blob[6:]))
+
+
+def test_windows_vault_id_lives_in_localappdata(tmp_path):
+    plat, rec = windows(tmp_path)
+    vid = plat.vault_id()
+    assert (tmp_path / "Local" / "Crawler AI" / "vault-id").read_text().strip() == vid
+    assert plat.vault_id() == vid and rec.calls == []
+
+
+def test_windows_secret_is_dpapi_ciphertext_under_an_acl_restricted_dir(tmp_path):
+    shim = FakeCrypt32()
+    plat = WindowsPlatform(
+        runner=(rec := Recorder()),
+        env={"LOCALAPPDATA": str(tmp_path / "Local"), "SYSTEMROOT": r"C:\Windows", "USERNAME": "krish"},
+        crypt32=shim,
+    )
+    assert plat.get_secret("vault-key") is None  # nothing stored, no icacls
+    assert rec.calls == []
+
+    plat.set_secret("vault-key", b"k" * 32)
+    path = tmp_path / "Local" / "Crawler AI" / "secrets" / "vault-key.dpapi"
+    assert path.read_bytes() == b"DPAPI:" + bytes(reversed(b"k" * 32))
+    assert not path.with_name("vault-key.dpapi.tmp").exists()
+    secrets_dir = str(path.parent)
+    assert rec.calls == [
+        [r"C:\Windows\System32\icacls.exe", secrets_dir, "/reset"],
+        [r"C:\Windows\System32\icacls.exe", secrets_dir, "/inheritance:r", "/grant:r", "krish:(OI)(CI)F"],
+    ]
+    assert plat.get_secret("vault-key") == b"k" * 32
+
+    plat.set_secret("vault-key", b"j" * 32)  # replace in place
+    assert plat.get_secret("vault-key") == b"j" * 32 and shim.protected == 2
+
+    plat.delete_secret("vault-key")
+    assert not path.exists() and plat.get_secret("vault-key") is None
+    plat.delete_secret("vault-key")  # already gone: not an error
+
+
+def test_windows_set_secret_fails_closed_when_icacls_fails(tmp_path):
+    plat = WindowsPlatform(
+        runner=Recorder((5, "Access is denied.")),
+        env={"LOCALAPPDATA": str(tmp_path / "Local"), "SYSTEMROOT": r"C:\Windows", "USERNAME": "krish"},
+        crypt32=FakeCrypt32(),
+    )
+    with pytest.raises(OSError, match="icacls"):
+        plat.set_secret("vault-key", b"k" * 32)
+    assert not (tmp_path / "Local" / "Crawler AI" / "secrets" / "vault-key.dpapi").exists()
+
+
+def test_windows_secrets_are_unavailable_off_windows_without_a_shim(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(
+        "services.platform.windows._CtypesCrypt32",
+        lambda: pytest.fail("the real crypt32 must never be built off Windows"),
+    )
+    plat, _ = windows(tmp_path)
+    with pytest.raises(SecretStoreUnavailable, match="Windows"):
+        plat.set_secret("vault-key", b"k" * 32)
+    # A stored file with no way to unprotect it is unavailable, not absent.
+    path = tmp_path / "Local" / "Crawler AI" / "secrets" / "vault-key.dpapi"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"DPAPI:x")
+    with pytest.raises(SecretStoreUnavailable):
+        plat.get_secret("vault-key")
+
+
+def test_windows_builds_the_real_crypt32_lazily_on_windows(tmp_path, monkeypatch):
+    built: list[FakeCrypt32] = []
+
+    def factory() -> FakeCrypt32:
+        built.append(FakeCrypt32())
+        return built[-1]
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr("services.platform.windows._CtypesCrypt32", factory)
+    plat, _ = windows(tmp_path)
+    plat.set_secret("vault-key", b"k" * 32)
+    assert plat.get_secret("vault-key") == b"k" * 32
+    assert len(built) == 1
+
+
+def test_ctypes_crypt32_shim_wiring_against_a_fake_dll(monkeypatch):
+    # The real shim, minus the real DLL: proves the DATA_BLOB marshalling,
+    # the UI_FORBIDDEN flag, the copy-out and the LocalFree on any OS.
+    import ctypes
+
+    from services.platform.windows import _CtypesCrypt32
+
+    keep: list = []  # output buffers must outlive the call, as LocalAlloc's would
+
+    def transform(blob_in_ref, descr, entropy, reserved, prompt, flags, blob_out_ref):
+        assert flags == 0x01 and descr is None and entropy is None and prompt is None
+        blob_in = blob_in_ref._obj
+        data = ctypes.string_at(blob_in.pbData, blob_in.cbData)
+        out = bytes(reversed(data))
+        buffer = ctypes.create_string_buffer(out, len(out))
+        keep.append(buffer)
+        blob_out = blob_out_ref._obj
+        blob_out.cbData = len(out)
+        blob_out.pbData = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_char))
+        return 1
+
+    dll = type("FakeCrypt32Dll", (), {})()
+    dll.CryptProtectData = _FakeDllFn(transform)
+    dll.CryptUnprotectData = _FakeDllFn(transform)
+    dll.LocalFree = _FakeDllFn(lambda pointer: None)
+    monkeypatch.setattr(ctypes, "WinDLL", lambda name, use_last_error=False: dll, raising=False)
+
+    shim = _CtypesCrypt32()
+    assert shim.protect(b"abc") == b"cba"
+    assert shim.unprotect(b"cba") == b"abc"
+    assert len(dll.LocalFree.calls) == 2
+
+    dll.CryptUnprotectData = _FakeDllFn(lambda *args: 0)
+    with pytest.raises(SecretStoreUnavailable, match="DPAPI"):
+        shim.unprotect(b"cba")
+
+
+def test_linux_has_no_secret_store_but_a_vault_id(tmp_path):
+    plat = LinuxPlatform(runner=Recorder(), home=tmp_path, env={})
+    with pytest.raises(SecretStoreUnavailable):
+        plat.get_secret("vault-key")
+    with pytest.raises(SecretStoreUnavailable):
+        plat.set_secret("vault-key", b"k" * 32)
+    with pytest.raises(SecretStoreUnavailable):
+        plat.delete_secret("vault-key")
+    assert uuid.UUID(plat.vault_id())
+
+
+def test_container_has_neither_a_secret_store_nor_a_vault_id(tmp_path, monkeypatch):
+    monkeypatch.setattr("services.platform.container.tempfile.gettempdir", lambda: str(tmp_path))
+    plat = ContainerPlatform(runner=Recorder())
+    with pytest.raises(SecretStoreUnavailable):
+        plat.get_secret("vault-key")
+    with pytest.raises(SecretStoreUnavailable):
+        plat.vault_id()
+    assert not (tmp_path / "crawler-ai" / "vault-id").exists()

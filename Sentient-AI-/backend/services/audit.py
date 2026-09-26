@@ -112,9 +112,13 @@ def sanitize_request_data(data: Any) -> str:
 # password field is refused, but its row is still written) or a private
 # message, and this log is append-only: nothing written here can be taken
 # back. The approval store keeps the real text, since an approved call
-# needs it to run.
+# needs it to run. browser.act's fill text and fill_form fields are the
+# same kind of thing (a message, an address); browser.checkout's arguments
+# carry nothing sensitive (the card label on its card is masked, and the
+# card itself never leaves the vault).
 _LENGTH_ONLY_ARGUMENTS: dict[tuple[str, str], frozenset[str]] = {
     ("desktop", "act"): frozenset({"text"}),
+    ("browser", "act"): frozenset({"text", "fields"}),
 }
 
 

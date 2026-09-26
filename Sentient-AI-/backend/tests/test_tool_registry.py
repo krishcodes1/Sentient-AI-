@@ -525,7 +525,7 @@ def test_resolve_tool_does_not_mistake_an_underscore_type_for_a_slug():
 
 
 # ---------------------------------------------------------------------------
-# Built-in browser (phase 1: browser.read; act/login follow)
+# Built-in browser (browser.read, browser.act, browser.checkout; login follows)
 # ---------------------------------------------------------------------------
 
 
@@ -536,7 +536,37 @@ def test_browser_policy_reads_run_unattended_and_writes_need_confirmation():
     write = engine.check_permission("browser", "act", ActionCategory.WRITE)
     assert write.allowed is False and write.requires_approval is True
     assert write.tier == PermissionTier.USER_CONFIRM
-    for category in (ActionCategory.DELETE, ActionCategory.EXECUTE, ActionCategory.FINANCIAL):
+    for category in (ActionCategory.DELETE, ActionCategory.EXECUTE):
         decision = engine.check_permission("browser", "x", category)
         assert decision.tier == PermissionTier.HARD_BLOCKED, category
         assert decision.allowed is False and decision.requires_approval is False
+
+
+def test_browser_checkout_is_the_one_financial_action_that_asks_instead_of_blocking():
+    """Spec 2026-09-25 purchases §7: ("browser", FINANCIAL) is USER_CONFIRM,
+    every connector's FINANCIAL row stays HARD_BLOCKED, and the hard-block
+    list (buy, trade ...) is untouched."""
+    from services.agent.permissions import FINANCIAL_CONFIRM_KEYS, is_hard_blocked_action
+
+    assert FINANCIAL_CONFIRM_KEYS == frozenset({"browser"})
+    engine = PermissionEngine()
+    checkout = engine.check_permission("browser", "checkout", ActionCategory.FINANCIAL)
+    assert checkout.tier == PermissionTier.USER_CONFIRM
+    assert checkout.allowed is False and checkout.requires_approval is True
+    for key in ("robinhood", "gmail", "google_calendar", "canvas", "web", "desktop", "dropbox"):
+        decision = engine.check_permission(key, "checkout", ActionCategory.FINANCIAL)
+        assert decision.tier == PermissionTier.HARD_BLOCKED, key
+        assert decision.allowed is False and decision.requires_approval is False
+    # A hard-blocked action name stays blocked on the browser too.
+    assert is_hard_blocked_action("buy")
+    assert engine.check_permission("browser", "buy", ActionCategory.FINANCIAL).tier == (
+        PermissionTier.HARD_BLOCKED
+    )
+
+
+def test_a_financial_action_never_auto_approves_even_by_override():
+    engine = PermissionEngine(
+        policy_overrides={("browser", ActionCategory.FINANCIAL): PermissionTier.AUTO_APPROVE}
+    )
+    decision = engine.check_permission("browser", "checkout", ActionCategory.FINANCIAL)
+    assert decision.tier == PermissionTier.USER_CONFIRM and decision.requires_approval is True

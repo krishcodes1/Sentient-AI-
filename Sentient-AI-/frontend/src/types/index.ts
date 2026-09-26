@@ -231,6 +231,28 @@ export interface PendingApproval {
   // content (prompt-injection heuristics). The UI must surface it as a
   // warning the user cannot miss before they approve.
   risk_note?: string | null;
+  /** A browser.checkout card's screenshot of the page it was made from, as
+   *  a data URL. Held in the server's memory only, so it is absent after a
+   *  restart and never on any other tool's card. */
+  image?: string | null;
+}
+
+/**
+ * The `_checkout` block the backend stores with a browser.checkout approval:
+ * what its toolkit read from the page (never what the model said), plus the
+ * masked label of the stored card. It carries no card data and no image.
+ */
+export interface PurchaseCard {
+  checkout_id: string;
+  origin: string;
+  host: string;
+  /** Decimal string, e.g. "23.40". */
+  amount_usd: string;
+  currency: string;
+  items: string[];
+  /** e.g. "Visa ····4242". */
+  card_label: string;
+  notice: string;
 }
 
 export interface BlockedAction {
@@ -252,6 +274,11 @@ export interface ApprovalDecisionResponse {
   action_id: string;
   approved: boolean;
   result?: Record<string, unknown> | null;
+  /** The pictures the approved call itself took (a checkout's confirmation
+   *  page), for the live view only: the saved row keeps a placeholder. */
+  images?: TurnImage[];
+  /** The transcript row that records the decision, which `images` belong under. */
+  message_id?: string | null;
 }
 
 export interface ConnectorHealthEntry {
@@ -367,6 +394,35 @@ export interface CapabilityStatus {
   install_size_hint: string | null;
   when_denied: string;
   tools: string[];
+  /** Per-capability settings the owner can edit (the purchase caps for
+   *  `purchases`), defaults already merged in by the server. Optional so a
+   *  server predating them still type-checks. */
+  settings?: Record<string, unknown>;
+}
+
+// The card vault (GET /vault/items, PUT /vault/card, DELETE /vault/items/{id}).
+// This masked view is the only shape the server ever returns: no number, no
+// CVC, no ciphertext.
+/** GET /vault/items: the masked views plus whether a card can be stored on
+ *  this install at all (a container has no Keychain or DPAPI for the key)
+ *  and, when not, the reason to show instead of the form. */
+export interface VaultItems {
+  items: VaultItemView[];
+  available: boolean;
+  reason: string;
+}
+
+export interface VaultItemView {
+  id: string;
+  kind: "card" | "login";
+  label: string;
+  origins: string[];
+  /** e.g. "Visa ····4242" or "j***@school.edu". */
+  masked: string;
+  brand: string;
+  last4: string;
+  created_at: string;
+  last_used_at: string | null;
 }
 
 // First-run setup (GET /api/setup/status and the /api/setup/* writes).

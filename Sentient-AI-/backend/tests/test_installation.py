@@ -1019,6 +1019,11 @@ def test_migration_0008_upgrades_a_database_that_already_has_users(tmp_path, mon
         engine.dispose()
     assert emails == ["legacy@example.com"]
 
+    # The service maps every installation column at head (0010 added
+    # capability_settings); startup runs `upgrade head` before any service
+    # call, so the stamp below runs against head too.
+    command.upgrade(config, "head")
+
     monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", "env-key", raising=False)
 
     async def _stamp() -> tuple[bool, bool, bool, bool]:

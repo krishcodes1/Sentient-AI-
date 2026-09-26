@@ -35,6 +35,7 @@ import type {
   Connector,
   ConnectorHealthEntry,
   PendingApproval,
+  TurnImage,
   UsageSummary,
 } from "@/types";
 import {
@@ -46,12 +47,15 @@ import {
   getPendingApprovals,
   getUsageSummary,
 } from "@/services/api";
+import ApprovalPicture from "@/components/ApprovalPicture";
+import PurchaseApproval from "@/components/PurchaseApproval";
+import { screenshotAlt } from "@/components/toolScreenshots";
 import UsagePanel from "@/components/UsagePanel";
 import { formatCost, formatTokens } from "@/components/usageFormat";
 // Countdown logic lives beside Chat's ApprovalCard so both approval queues
 // expire in lockstep with the server-side TTL.
 import { formatCountdown, useCountdown } from "@/pages/approvalCountdown";
-import { shownArguments } from "@/pages/approvalArguments";
+import { ACT_PICTURE_ALT, PURCHASE_TOOL, isSentenceCard, shownArguments } from "@/pages/approvalArguments";
 import { useResolvedColors } from "@/hooks/useResolvedColors";
 
 const FEED_LIMIT = 6;
@@ -96,6 +100,9 @@ function ApprovalRow({
   // The server enforces the TTL, so a click after this point would 404 —
   // disable the buttons instead of letting the user walk into that.
   const expired = remaining !== null && remaining <= 0;
+  // A purchase is judged on what the page says, so its row shows the page's
+  // facts (PurchaseApproval) above the buttons and not the model's arguments.
+  const isPurchase = approval.tool_name === PURCHASE_TOOL;
 
   const decide = async (approved: boolean) => {
     setPending(true);
@@ -142,6 +149,10 @@ function ApprovalRow({
           </div>
         </div>
       )}
+      {isPurchase && <PurchaseApproval approval={approval} />}
+      {/* A browser.act step is approved on the page it will run on: the
+          picture taken when the card was made, its target outlined in red. */}
+      {isSentenceCard(approval) && <ApprovalPicture approval={approval} alt={ACT_PICTURE_ALT} className="mb-3" />}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
           <p className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
@@ -194,7 +205,9 @@ function ApprovalRow({
           </button>
         </div>
       </div>
-      {Object.keys(shownArguments(approval)).length > 0 && (
+      {/* A browser.act card is its sentence (the reason line above): its
+          arguments are refs and typed text, never shown as JSON. */}
+      {!isPurchase && !isSentenceCard(approval) && Object.keys(shownArguments(approval)).length > 0 && (
         <pre
           className="text-xs mt-2 p-2 rounded-[8px] overflow-x-auto"
           style={{
@@ -303,6 +316,9 @@ export default function Dashboard() {
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [health, setHealth] = useState<ConnectorHealthEntry[]>([]);
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
+  // The pictures the last approved action took (a checkout's confirmation
+  // page): they come once, with the decision, and are never saved.
+  const [decisionImages, setDecisionImages] = useState<TurnImage[]>([]);
   const [usage, setUsage] = useState<UsageSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -377,8 +393,9 @@ export default function Dashboard() {
   }, [load]);
 
   const handleApproval = async (actionId: string, approved: boolean) => {
-    await decideApproval(actionId, approved);
+    const decided = await decideApproval(actionId, approved);
     setApprovals((prev) => prev.filter((a) => a.action_id !== actionId));
+    setDecisionImages(decided.images ?? []);
     // Refresh stats and the feed so the decided action shows up immediately.
     void load(true);
   };
@@ -517,6 +534,28 @@ export default function Dashboard() {
                 onDecide={(approved) =>
                   handleApproval(approval.action_id, approved)
                 }
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* What the last approved action showed (a checkout's confirmation
+          page). Only a base64 raster data URL reaches an <img>: the server
+          checks each one before sending it. */}
+      {decisionImages.length > 0 && (
+        <div className="rounded-[14px] p-5" style={{ background: "var(--claw-surface)", border: "1px solid var(--claw-border)" }}>
+          <div className="eyebrow mb-2" style={{ color: "var(--accent-success)" }}>
+            After your approval
+          </div>
+          <div className="space-y-3">
+            {decisionImages.map((image) => (
+              <img
+                key={`${image.tool}-${image.index}`}
+                src={image.data_url}
+                alt={screenshotAlt(image)}
+                className="w-full max-h-96 object-contain rounded-[8px]"
+                style={{ background: "var(--bg-primary)", border: "1px solid var(--claw-border)" }}
               />
             ))}
           </div>

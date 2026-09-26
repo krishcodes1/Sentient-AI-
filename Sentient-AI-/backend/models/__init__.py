@@ -13,6 +13,7 @@ from models.memory import Memory, MemoryCategory, MemorySource
 from models.pending_action import PendingAction, PendingActionStatus
 from models.reminder import Reminder, ReminderSource, ReminderStatus
 from models.user import User
+from models.vault_item import VaultItem
 
 __all__ = [
     "INSTALLATION_ROW_ID",
@@ -35,4 +36,5 @@ __all__ = [
     "ReminderSource",
     "ReminderStatus",
     "User",
+    "VaultItem",
 ]

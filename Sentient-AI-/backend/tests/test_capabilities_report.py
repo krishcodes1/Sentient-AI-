@@ -554,7 +554,10 @@ def test_browser_control_declaration_is_off_high_risk_and_installable():
 
     cap = browser_control.CAPABILITY
     assert cap.key == "browser_control" and cap.label == "Control a browser"
-    assert cap.tools == ("browser.",)
+    # Exact names (spec 2026-09-25 purchases §7): browser.act belongs to
+    # "browser_act" and browser.checkout to "purchases", so no "browser."
+    # prefix here.
+    assert cap.tools == ("browser.read",)
     assert cap.default_enabled is False and cap.risk == "high"
     assert cap.install == "browser" and cap.probe is None
 

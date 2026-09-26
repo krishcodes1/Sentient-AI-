@@ -3,13 +3,15 @@ Pure cases run everywhere; the browser-backed ones use the fake site."""
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
 
-from services.tools.browser import guard
+from services.tools.browser import _shared, guard
 from services.tools.browser.guard import (
     BLOCKED_NAVIGATION_MARKER,
     Guard,
@@ -115,7 +117,7 @@ async def test_guard_aborts_a_read_tier_post_but_not_when_write_is_allowed(guard
     state = egress_state(page.context)
     assert state.blocked[-1]["reason"].startswith("non-GET top-level navigation")
     await page.goto(fakesite.url("/post"))
-    state.write_allowed = True
+    state.write_allowed, state.write_page = True, page
     await page.click("text=Sign up")
     await page.wait_for_load_state("domcontentloaded")
     assert "Thanks" in await page.content()
@@ -173,6 +175,50 @@ async def test_guard_leaves_fetch_and_subframes_alone(guarded, fakesite):
     assert await page.frame_locator("iframe").locator("button").count() == 1
     status = await page.evaluate("fetch('/grades').then(r => r.status)")
     assert status == 200 and egress_state(page.context).blocked == []
+
+
+async def _received(fakesite, message: str, *, timeout_s: float = 3.0) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if ("WS", message) in fakesite.handled:
+            return True
+        await asyncio.sleep(0.05)
+    return False
+
+
+@pytest.mark.asyncio
+async def test_a_websocket_sends_nothing_while_a_read_clicks_nor_on_an_order_address(guarded, fakesite):
+    """What a page sends on a WebSocket never reaches the route handler,
+    so the guard connects every socket itself (plain ws:// to the fake
+    site here; wss:// takes the same handler): a message passes to the
+    server, except while browser.read clicks, and never on a socket whose
+    address is an order address, even with a write window open for the
+    page (a socket's page cannot be told)."""
+    _g, page = guarded
+    state = egress_state(page.context)
+    await page.goto(fakesite.url("/"))
+    base = fakesite.base.replace("http://", "ws://")
+    opened = """url => new Promise((ok, fail) => { const s = new WebSocket(url);
+        s.onopen = () => ok(true); s.onerror = () => fail(new Error('no socket')); window.sockets.push(s); })"""
+    await page.evaluate("window.sockets = []")
+    await page.evaluate(opened, base + "/live")
+    await page.evaluate(opened, base + "/orders/ws")
+    send = "([i, m]) => window.sockets[i].send(m)"
+    await page.evaluate(send, [0, "hello"])
+    assert await _received(fakesite, "hello")
+    state.read_click = True
+    await page.evaluate(send, [0, "while-clicking"])
+    state.read_click = False
+    state.write_allowed, state.write_page = True, page
+    await page.evaluate(send, [1, "place the order"])
+    state.write_allowed, state.write_page = False, None
+    await page.evaluate(send, [0, "after"])
+    assert await _received(fakesite, "after")  # the same socket, in order: the one before it was dropped
+    await asyncio.sleep(0.3)
+    got = [h for h in fakesite.handled if h[0] == "WS"]
+    assert got == [("WS", "hello"), ("WS", "after")], got
+    assert [entry["reason"] for entry in state.blocked] == [guard.READ_CLICK_REQUEST, guard.READ_TIER_ORDER_REQUEST]
+    assert state.blocked[-1]["url"] == base + "/orders/ws"
 
 
 @pytest.mark.asyncio
@@ -340,15 +386,34 @@ def test_ip_literal_is_judged_as_itself_even_under_the_loopback_toggle(monkeypat
 # Windows unit job); these pin the same decisions with fakes everywhere.
 
 
+# The tab the fake requests come from, and the one every window of
+# ``_state()`` is opened for; and a tab no card showed.
+TAB = SimpleNamespace(name="the card's tab", url="https://shop.example/cart")
+OTHER_TAB = SimpleNamespace(name="another tab", url="https://deals.example/")
+# What a navigation the card's page started says of where it came from.
+FROM_TAB = {"referer": "https://shop.example/cart"}
+
+
 class FakeFrame:
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, page=TAB) -> None:
         self.parent_frame = parent
+        self.page = page
 
 
 class FakeRequest:
-    def __init__(self, url: str, *, method: str = "GET", navigation: bool = True, top: bool = True) -> None:
+    def __init__(
+        self,
+        url: str,
+        *,
+        method: str = "GET",
+        navigation: bool = True,
+        top: bool = True,
+        page=TAB,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self.url, self.method, self._navigation = url, method, navigation
-        self.frame = FakeFrame(None if top else FakeFrame())
+        self.frame = FakeFrame(None if top else FakeFrame(page=page), page=page)
+        self.headers = dict(FROM_TAB if headers is None else headers)
 
     def is_navigation_request(self) -> bool:
         return self._navigation
@@ -382,7 +447,7 @@ class FakeRoute:
 
 
 def _state(*, account_mode: bool = True) -> guard.EgressState:
-    return guard.EgressState(account_mode=account_mode)
+    return guard.EgressState(account_mode=account_mode, write_page=TAB, handoff_page=TAB)
 
 
 @pytest.mark.asyncio
@@ -455,3 +520,472 @@ async def test_public_mode_blocks_keep_the_full_url_but_logs_do_not(no_system_dn
     assert route.calls == [("abort", "blockedbyclient")]
     assert state.blocked[-1]["url"] == "http://intranet.example/a?q=SECRET3"
     assert logs and "SECRET3" not in repr(logs)
+
+
+@pytest.mark.asyncio
+async def test_a_bound_write_window_admits_one_post_to_its_origin_only(no_system_dns):
+    """The checkout binds the window to where the order form said it
+    posts: a POST there passes (fetched by the guard, the merchant's
+    answer passed on), a POST anywhere else, a PUT there and a
+    GET-with-the-card-in-the-URL are aborted and recorded."""
+    g = Guard(resolver=public_resolver)
+    state = _state()
+    state.write_allowed, state.write_origin = True, "https://shop.example"
+    answer = FakeResponse(200)
+    route = FakeRoute(answer)
+    await g._route(route, FakeRequest("https://shop.example/pay", method="POST"), state)
+    assert route.calls == [("fulfill", {"response": answer})] and state.blocked == []
+    for url, method in (
+        ("https://collector.example/steal", "POST"),
+        ("https://shop.example/pay", "PUT"),
+        ("http://shop.example/pay", "POST"),
+    ):
+        route = FakeRoute()
+        await g._route(route, FakeRequest(url, method=method), state)
+        assert route.calls == [("abort", "blockedbyclient")], (url, method)
+        assert state.blocked[-1]["url"] == url and "not by POST to https://shop.example" in state.blocked[-1]["reason"]
+    # An unbound window (browser.act's) is unchanged: any origin.
+    state.write_origin = None
+    route = FakeRoute()
+    await g._route(route, FakeRequest("https://collector.example/steal", method="POST"), state)
+    assert route.calls == [("continue", None)]
+
+
+@pytest.mark.asyncio
+async def test_a_bound_write_window_blocks_a_frames_post_to_another_origin(no_system_dns):
+    """An order form aimed at a hidden iframe and at another origin sends
+    the card as a frame's navigation: while the window is bound, that is
+    aborted; a frame's POST to the bound origin passes. With no window open
+    a frame's POST is a read-tier one and is aborted like a top page's;
+    the person's own, during a handoff, passes."""
+    g = Guard(resolver=public_resolver)
+    state = _state()
+    state.write_allowed, state.write_origin = True, "https://shop.example"
+    route = FakeRoute()
+    await g._route(route, FakeRequest("https://collector.example/steal", method="POST", top=False), state)
+    assert route.calls == [("abort", "blockedbyclient")]
+    assert state.blocked[-1]["url"] == "https://collector.example/steal"
+    assert "from a frame" in state.blocked[-1]["reason"] and "not by POST to https://shop.example" in state.blocked[-1]["reason"]
+    route = FakeRoute()
+    await g._route(route, FakeRequest("https://shop.example/pay", method="POST", top=False), state)
+    assert route.calls == [("continue", None)]
+    state.write_allowed, state.write_origin = False, None
+    route = FakeRoute()
+    await g._route(route, FakeRequest("https://collector.example/steal", method="POST", top=False), state)
+    assert route.calls == [("abort", "blockedbyclient")]
+    assert state.blocked[-1]["reason"] == guard.READ_TIER_FRAME_POST
+    state.human_driving = True
+    route = FakeRoute()
+    await g._route(route, FakeRequest("https://shop.example/otp", method="POST", top=False), state)
+    assert route.calls == [("continue", None)] and len(state.blocked) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_bound_post_is_fetched_and_its_answer_judged_before_the_browser_follows_it(no_system_dns):
+    """The order POST is fetched by the guard: a 307/308 to another
+    origin (the browser would send the card again) is aborted and
+    recorded with the order as ``via``; a 303 becomes the same client-side
+    GET hop every redirect gets; a plain answer is passed on as it is.
+    Without a bound window a POST is still forwarded untouched."""
+    g = Guard(resolver=public_resolver)
+    state = _state()
+    state.write_allowed, state.write_origin = True, "https://shop.example"
+    route = FakeRoute(FakeResponse(307, "https://collector.example/confirm"))
+    await g._route(route, FakeRequest("https://shop.example/pay", method="POST"), state)
+    assert route.calls == [("abort", "blockedbyclient")]
+    assert state.blocked[-1]["url"] == "https://collector.example/confirm"
+    assert state.blocked[-1]["via"] == "https://shop.example/pay"
+    assert "307" in state.blocked[-1]["reason"] and "not by POST to https://shop.example" in state.blocked[-1]["reason"]
+    # A 307 to a private address is refused by the address check first.
+    route = FakeRoute(FakeResponse(308, "https://shop.example/again"))
+    await Guard(resolver=private_resolver)._route(route, FakeRequest("https://shop.example/pay", method="POST"), state)
+    assert route.calls == [("abort", "blockedbyclient")] and "10.0.0.1" in state.blocked[-1]["reason"]
+    # A 303 lands on a GET the browser makes through the route again.
+    route = FakeRoute(FakeResponse(303, "/order-confirmed"))
+    await g._route(route, FakeRequest("https://shop.example/pay", method="POST"), state)
+    kind, kwargs = route.calls[-1]
+    assert kind == "fulfill" and isinstance(kwargs, dict) and kwargs["status"] == 200
+    assert "url=https://shop.example/order-confirmed" in kwargs["body"]
+    # A plain answer is the merchant's own.
+    answer = FakeResponse(200)
+    route = FakeRoute(answer)
+    await g._route(route, FakeRequest("https://shop.example/pay", method="POST"), state)
+    assert route.calls == [("fulfill", {"response": answer})]
+    assert len(state.blocked) == 2
+    # An act's window (unbound) forwards the POST as before.
+    state.write_origin = None
+    route = FakeRoute(FakeResponse(307, "https://collector.example/confirm"))
+    await g._route(route, FakeRequest("https://shop.example/pay", method="POST"), state)
+    assert route.calls == [("continue", None)]
+
+
+@pytest.mark.asyncio
+async def test_a_pending_handoff_does_not_widen_a_bound_write_window(no_system_dns):
+    """The person may be driving (a handoff left ``human_driving`` set)
+    while the checkout sends the order: the window is still bound to the
+    order form's origin, so a POST elsewhere is aborted; with no bound
+    window the person's own POST passes as before."""
+    g = Guard(resolver=public_resolver)
+    state = _state()
+    state.human_driving, state.write_allowed, state.write_origin = True, True, "https://shop.example"
+    route = FakeRoute()
+    await g._route(route, FakeRequest("https://collector.example/steal", method="POST"), state)
+    assert route.calls == [("abort", "blockedbyclient")]
+    assert "not by POST to https://shop.example" in state.blocked[-1]["reason"]
+    state.write_allowed, state.write_origin = False, None
+    route = FakeRoute()
+    await g._route(route, FakeRequest("https://canvas.school.edu/login", method="POST"), state)
+    assert route.calls == [("continue", None)]
+
+
+@pytest.mark.asyncio
+async def test_a_change_may_not_open_an_order_address_from_any_frame(no_system_dns):
+    """While browser.act runs an act not meant to send (a fill, a check, a
+    select, a plain link: ``changing``), no frame may open an order
+    address, by GET or through a redirect; the same addresses pass when
+    nothing is changing (an order history page is a read)."""
+    g = Guard(resolver=public_resolver)
+    state = _state()
+    state.changing = True
+    for request in (
+        FakeRequest("https://shop.example/place-order-now?token=abc"),
+        FakeRequest("https://shop.example/checkout/complete", top=False),
+    ):
+        route = FakeRoute()
+        await g._route(route, request, state)
+        assert route.calls == [("abort", "blockedbyclient")]
+        assert state.blocked[-1]["reason"] == guard.ORDER_ADDRESS
+    route = FakeRoute(FakeResponse(302, "/pay"))
+    await g._route(route, FakeRequest("https://shop.example/go"), state)
+    assert route.calls == [("abort", "blockedbyclient")]
+    assert state.blocked[-1] == {"url": "https://shop.example/pay", "reason": guard.ORDER_ADDRESS, "via": "https://shop.example/go"}
+    route = FakeRoute(FakeResponse(302, "/cart"))
+    await g._route(route, FakeRequest("https://shop.example/go"), state)
+    assert route.calls[-1][0] == "fulfill" and len(state.blocked) == 3
+    state.changing = False
+    route = FakeRoute(FakeResponse(200))
+    await g._route(route, FakeRequest("https://shop.example/orders/"), state)
+    assert route.calls[-1][0] == "fulfill" and len(state.blocked) == 3
+    assert guard.SENDING_REASONS == {
+        guard.READ_TIER_POST, guard.READ_TIER_FRAME_POST, guard.ORDER_ADDRESS, guard.ORDER_REQUEST
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_read_never_opens_an_order_step_by_any_route(no_system_dns):
+    """With no write window open (browser.read: open, a link's click,
+    back, a redirect) no frame opens an address whose opening may be the
+    order itself (/place-order-now?token=, /checkout/complete). An order
+    history (/orders) is still read; the checkout's window and its
+    handoff after the order (3-D Secure) open a step, and a handoff the
+    model asked for does not."""
+    g = Guard(resolver=public_resolver)
+    state = _state()
+    for request in (
+        FakeRequest("https://shop.example/place-order-now?token=abc"),
+        FakeRequest("https://shop.example/checkout/complete", top=False),
+    ):
+        route = FakeRoute(FakeResponse(200))
+        await g._route(route, request, state)
+        assert route.calls == [("abort", "blockedbyclient")], request.url
+        assert state.blocked[-1]["reason"] == guard.READ_TIER_ORDER_STEP
+    route = FakeRoute(FakeResponse(302, "/confirm-order?id=7"))
+    await g._route(route, FakeRequest("https://shop.example/go"), state)
+    assert route.calls == [("abort", "blockedbyclient")]
+    assert state.blocked[-1]["via"] == "https://shop.example/go"
+    assert state.blocked[-1]["reason"] == guard.READ_TIER_ORDER_STEP
+    assert guard.READ_TIER_ORDER_STEP not in guard.SENDING_REASONS
+    for url in ("https://shop.example/orders/8841", "https://shop.example/checkout/pay", "https://shop.example/pay"):
+        route = FakeRoute(FakeResponse(200))
+        await g._route(route, FakeRequest(url), state)
+        assert route.calls[-1][0] == "fulfill", url
+    blocked = len(state.blocked)
+    for window in ("write_allowed", "checkout_handoff"):
+        setattr(state, window, True)
+        route = FakeRoute(FakeResponse(200))
+        await g._route(route, FakeRequest("https://shop.example/checkout/complete"), state)
+        assert route.calls[-1][0] == "fulfill", window
+        setattr(state, window, False)
+    assert len(state.blocked) == blocked
+    state.human_driving = True
+    route = FakeRoute(FakeResponse(200))
+    await g._route(route, FakeRequest("https://shop.example/checkout/complete"), state)
+    assert route.calls == [("abort", "blockedbyclient")]
+    assert state.blocked[-1]["reason"] == guard.READ_TIER_ORDER_STEP
+
+
+@pytest.mark.asyncio
+async def test_a_page_request_to_an_order_address_is_stopped_outside_a_write_window(no_system_dns):
+    """A page's own request (fetch, XHR, beacon) is not a navigation. Sent
+    to an order address with no write window open (a read-tier click on a
+    script button, a page that orders on load) it is stopped; while
+    browser.act changes something (``changing``) too, and browser.act
+    reports it (``SENDING_REASONS``). A GET, a request anywhere else
+    (suggestions, analytics) and anything inside a write window or the
+    checkout's own handoff pass; a handoff the model asked for does not
+    open the order addresses."""
+    g = Guard(resolver=public_resolver)
+    state = _state()
+    route = FakeRoute()
+    await g._route(route, FakeRequest("https://shop.example/place-order", method="POST", navigation=False), state)
+    assert route.calls == [("abort", "blockedbyclient")]
+    assert state.blocked[-1]["reason"] == guard.READ_TIER_ORDER_STEP
+    for url in ("https://shop.example/api/orders", "https://shop.example/orders", "https://shop.example/pay?x=1",
+                "https://shop.example/buy/1", "https://shop.example/purchase"):
+        route = FakeRoute()
+        await g._route(route, FakeRequest(url, method="POST", navigation=False), state)
+        assert route.calls == [("abort", "blockedbyclient")], url
+        assert state.blocked[-1]["reason"] == guard.READ_TIER_ORDER_REQUEST
+    assert guard.READ_TIER_ORDER_REQUEST not in guard.SENDING_REASONS
+    for url, method in (
+        ("https://shop.example/orders", "GET"),
+        ("https://shop.example/pay", "OPTIONS"),
+        ("https://shop.example/api/suggest", "POST"),
+        ("https://www.google-analytics.com/g/collect", "POST"),
+    ):
+        route = FakeRoute()
+        await g._route(route, FakeRequest(url, method=method, navigation=False), state)
+        assert route.calls == [("continue", None)], (url, method)
+    state.changing = True
+    route = FakeRoute()
+    await g._route(route, FakeRequest("https://shop.example/api/orders", method="POST", navigation=False), state)
+    assert route.calls == [("abort", "blockedbyclient")]
+    assert state.blocked[-1]["reason"] == guard.ORDER_REQUEST and guard.ORDER_REQUEST in guard.SENDING_REASONS
+    route = FakeRoute()
+    await g._route(route, FakeRequest("https://shop.example/api/suggest", method="POST", navigation=False), state)
+    assert route.calls == [("continue", None)]
+    state.changing = False
+    blocked = len(state.blocked)
+    for window in ("write_allowed", "checkout_handoff"):
+        setattr(state, window, True)
+        route = FakeRoute()
+        await g._route(route, FakeRequest("https://shop.example/place-order", method="POST", navigation=False), state)
+        assert route.calls == [("continue", None)], window
+        setattr(state, window, False)
+    assert len(state.blocked) == blocked
+    state.human_driving = True
+    for url in ("https://shop.example/place-order", "https://shop.example/orders"):
+        route = FakeRoute()
+        await g._route(route, FakeRequest(url, method="POST", navigation=False), state)
+        assert route.calls == [("abort", "blockedbyclient")], url
+
+
+@pytest.mark.asyncio
+async def test_a_page_request_of_any_method_to_an_order_step_is_stopped_outside_a_write_window(no_system_dns):
+    """Opening an order step can be the order, whoever opens it: outside a
+    write window a page's image, GET fetch or preflight to one is stopped
+    like a navigation (while browser.act changes something, as the change
+    sending itself). An ordinary GET, and one to an order history, pass;
+    inside the window, or the checkout's handoff, the step is open."""
+    g = Guard(resolver=public_resolver)
+    state = _state()
+    for url, method in (
+        ("https://shop.example/place-order?sku=1", "GET"),
+        ("https://shop.example/checkout/complete", "GET"),
+        ("https://shop.example/confirm_order", "HEAD"),
+        ("https://shop.example/place-order", "OPTIONS"),
+    ):
+        route = FakeRoute()
+        await g._route(route, FakeRequest(url, method=method, navigation=False), state)
+        assert route.calls == [("abort", "blockedbyclient")], (url, method)
+        assert state.blocked[-1]["reason"] == guard.READ_TIER_ORDER_STEP
+    state.changing = True
+    route = FakeRoute()
+    await g._route(route, FakeRequest("https://shop.example/place-order", navigation=False), state)
+    assert route.calls == [("abort", "blockedbyclient")] and state.blocked[-1]["reason"] == guard.ORDER_REQUEST
+    state.changing = False
+    blocked = len(state.blocked)
+    for url in ("https://shop.example/img/logo.png", "https://shop.example/orders/8841", "https://shop.example/pay"):
+        route = FakeRoute()
+        await g._route(route, FakeRequest(url, navigation=False), state)
+        assert route.calls == [("continue", None)], url
+    for window in ("write_allowed", "checkout_handoff"):
+        setattr(state, window, True)
+        route = FakeRoute()
+        await g._route(route, FakeRequest("https://shop.example/place-order", navigation=False), state)
+        assert route.calls == [("continue", None)], window
+        setattr(state, window, False)
+    assert len(state.blocked) == blocked
+
+
+@pytest.mark.asyncio
+async def test_a_window_is_open_only_for_the_page_it_was_opened_for(no_system_dns):
+    """Approving a step on one tab opens nothing for another: a request
+    from another tab, and one whose frame (or page) cannot be told (a
+    service worker's, a popup's first navigation), is judged as if no
+    window were open, for the write window and the checkout's handoff
+    alike. The card's own tab, any frame of it, is inside."""
+
+    class NoFrame(FakeRequest):
+        """Playwright raises on ``request.frame`` here; so does this."""
+
+        def __init__(self, url: str, **kwargs) -> None:
+            super().__init__(url, **kwargs)
+            del self.frame
+
+    g = Guard(resolver=public_resolver)
+    state = _state()
+    for window in ("write_allowed", "checkout_handoff"):
+        setattr(state, window, True)
+        for request in (
+            FakeRequest("https://shop.example/place-order", method="POST", navigation=False, page=OTHER_TAB),
+            FakeRequest("https://shop.example/checkout/complete", page=OTHER_TAB),
+            FakeRequest("https://shop.example/place-order", method="POST", top=False, page=OTHER_TAB),
+            NoFrame("https://shop.example/place-order", method="POST", navigation=False),
+            NoFrame("https://shop.example/checkout/complete"),
+        ):
+            route = FakeRoute(FakeResponse(200))
+            await g._route(route, request, state)
+            assert route.calls == [("abort", "blockedbyclient")], (window, request.url)
+        for request in (
+            FakeRequest("https://shop.example/place-order", method="POST", navigation=False),
+            FakeRequest("https://shop.example/checkout/complete"),
+        ):
+            route = FakeRoute(FakeResponse(200))
+            await g._route(route, request, state)
+            assert route.calls[-1][0] in ("continue", "fulfill"), (window, request.url)
+        setattr(state, window, False)
+    state.write_allowed = True
+    route = FakeRoute()
+    await g._route(route, FakeRequest("https://shop.example/cart/add", method="POST", page=OTHER_TAB), state)
+    assert route.calls == [("abort", "blockedbyclient")] and state.blocked[-1]["reason"] == guard.READ_TIER_POST
+    state.write_page = None  # a window opened for no page is open for none
+    route = FakeRoute()
+    await g._route(route, FakeRequest("https://shop.example/cart/add", method="POST"), state)
+    assert route.calls == [("abort", "blockedbyclient")]
+
+
+@pytest.mark.asyncio
+async def test_while_a_read_clicks_no_page_script_sends_and_no_order_address_opens(no_system_dns):
+    """browser.read's click has no card: while it runs (``read_click``) a
+    page script's request is stopped unless it only asks (GET, HEAD,
+    OPTIONS), and no frame opens an order address other than an order
+    history, directly or through a redirect."""
+    g = Guard(resolver=public_resolver)
+    state = _state()
+    state.read_click = True
+    for url in ("https://shop.example/api/cart", "https://collector.example/beacon"):
+        route = FakeRoute()
+        await g._route(route, FakeRequest(url, method="POST", navigation=False), state)
+        assert route.calls == [("abort", "blockedbyclient")], url
+        assert state.blocked[-1]["reason"] == guard.READ_CLICK_REQUEST
+    route = FakeRoute()
+    await g._route(route, FakeRequest("https://shop.example/api/suggest", navigation=False), state)
+    assert route.calls == [("continue", None)]
+    # A page's GET to an order address other than an order history too.
+    route = FakeRoute()
+    await g._route(route, FakeRequest("https://shop.example/buy/1", navigation=False), state)
+    assert route.calls == [("abort", "blockedbyclient")] and state.blocked[-1]["reason"] == guard.READ_CLICK_ADDRESS
+    route = FakeRoute()
+    await g._route(route, FakeRequest("https://shop.example/orders/8841", navigation=False), state)
+    assert route.calls == [("continue", None)]
+    for url in ("https://shop.example/buy/1", "https://shop.example/orders/8841/reorder"):
+        route = FakeRoute(FakeResponse(200))
+        await g._route(route, FakeRequest(url), state)
+        assert route.calls == [("abort", "blockedbyclient")], url
+        assert state.blocked[-1]["reason"] == guard.READ_CLICK_ADDRESS
+    route = FakeRoute(FakeResponse(302, "/buy/1"))
+    await g._route(route, FakeRequest("https://shop.example/go"), state)
+    assert route.calls == [("abort", "blockedbyclient")] and state.blocked[-1]["via"] == "https://shop.example/go"
+    route = FakeRoute(FakeResponse(200))
+    await g._route(route, FakeRequest("https://shop.example/orders"), state)
+    assert route.calls[-1][0] == "fulfill"
+    assert {guard.READ_CLICK_REQUEST, guard.READ_CLICK_ADDRESS} <= guard.READ_CLICK_REASONS
+    state.read_click = False
+    route = FakeRoute(FakeResponse(200))
+    await g._route(route, FakeRequest("https://shop.example/buy/1"), state)
+    assert route.calls[-1][0] == "fulfill"  # a product's buy page is opened to be read
+
+
+@pytest.mark.asyncio
+async def test_the_persons_handoff_sends_nothing_to_an_order_address_unless_it_follows_the_checkout(no_system_dns):
+    """The model may ask for a handoff on any page: while the person holds
+    it their own sign-in passes, but no frame sends to an order address.
+    Only browser.checkout's handoff after the approved order (3-D Secure)
+    opens them, and the agent's next action shuts both (``take_back``)."""
+    g = Guard(resolver=public_resolver)
+    state = _state()
+    session = SimpleNamespace(context=object())
+
+    class Page:
+        async def wait_for_load_state(self, *_args, **_kwargs):
+            return None
+
+    async def page():
+        return Page()
+
+    session.page = page
+    fake = SimpleNamespace(egress_state=lambda _context: state)
+    _shared.hand_over(fake, session, TAB)
+    assert state.human_driving is True and state.checkout_handoff is False
+    route = FakeRoute()
+    await g._route(route, FakeRequest("https://shop.example/login", method="POST"), state)
+    assert route.calls == [("continue", None)]
+    for url in ("https://shop.example/orders", "https://shop.example/pay/confirm"):
+        route = FakeRoute()
+        await g._route(route, FakeRequest(url, method="POST"), state)
+        assert route.calls == [("abort", "blockedbyclient")], url
+        assert state.blocked[-1]["reason"] == guard.READ_TIER_ORDER_REQUEST
+    await _shared.take_back(fake, session)
+    _shared.hand_over(fake, session, TAB, checkout=True)
+    assert state.human_driving is True and state.checkout_handoff is True
+    route = FakeRoute()
+    await g._route(route, FakeRequest("https://shop.example/pay/confirm", method="POST"), state)
+    assert route.calls == [("continue", None)]
+    # The checkout's handoff is its page's: another tab still sends nothing there.
+    route = FakeRoute()
+    await g._route(route, FakeRequest("https://shop.example/pay/confirm", method="POST", page=OTHER_TAB), state)
+    assert route.calls == [("abort", "blockedbyclient")]
+    await _shared.take_back(fake, session)
+    assert state.human_driving is False and state.checkout_handoff is False and state.handoff_page is None
+
+
+# -- the tab's own navigation, inside a window ---------------------------------
+
+
+@pytest.mark.asyncio
+async def test_inside_a_window_only_the_approved_page_navigates_its_tab(no_system_dns):
+    """Another site's tab that holds the approved one (it opened the shop
+    with window.open) may point it anywhere: the navigation is the approved
+    tab's, but its Origin or Referer names the other site, so it is stopped
+    inside the window, an order step and a page of that site's own (which
+    would then open the step as the tab's own) alike. The approved page's
+    own passes, and so does one that names no origin while its tab is the
+    only one. Outside a window the rule does not apply."""
+    g = Guard(resolver=public_resolver)
+    state = _state()
+    for window in ("write_allowed", "checkout_handoff"):
+        setattr(state, window, True)
+        for method, headers in (
+            ("GET", {"referer": "https://deals.example/"}),
+            ("POST", {"origin": "https://deals.example", "referer": "https://deals.example/"}),
+            ("GET", {}),
+        ):
+            route = FakeRoute(FakeResponse(200))
+            await g._route(route, FakeRequest("https://shop.example/place-order?sku=9", method=method, headers=headers), state)
+            assert route.calls == [("abort", "blockedbyclient")], (window, headers)
+            assert state.blocked[-1]["reason"] == guard.OTHER_PAGE_NAVIGATION
+        for headers in (FROM_TAB, {"origin": "https://shop.example"}, {"origin": "null", "referer": "https://shop.example/c"}):
+            route = FakeRoute(FakeResponse(200))
+            await g._route(route, FakeRequest("https://shop.example/place-order?sku=1", headers=headers), state)
+            assert route.calls[-1][0] == "fulfill", (window, headers)
+        route = FakeRoute(FakeResponse(200))
+        await g._route(route, FakeRequest("https://deals.example/bounce", headers={"referer": "https://deals.example/"}), state)
+        assert route.calls == [("abort", "blockedbyclient")], window
+        route = FakeRoute(FakeResponse(200))
+        await g._route(route, FakeRequest("https://pay.example/start", headers=FROM_TAB), state)
+        assert route.calls[-1][0] == "fulfill", window  # the page's own, to another site
+        setattr(state, window, False)
+    route = FakeRoute(FakeResponse(200))
+    await g._route(route, FakeRequest("https://shop.example/cart", headers={"referer": "https://deals.example/"}), state)
+    assert route.calls[-1][0] == "fulfill"
+    alone = SimpleNamespace(url="https://shop.example/cart")
+    alone.context = SimpleNamespace(pages=[alone])
+    state.write_allowed, state.write_page = True, alone
+    route = FakeRoute(FakeResponse(200))
+    await g._route(route, FakeRequest("https://shop.example/place-order", headers={}, page=alone), state)
+    assert route.calls[-1][0] == "fulfill"
+    alone.context.pages.append(OTHER_TAB)
+    route = FakeRoute(FakeResponse(200))
+    await g._route(route, FakeRequest("https://shop.example/place-order", headers={}, page=alone), state)
+    assert route.calls == [("abort", "blockedbyclient")] and state.blocked[-1]["reason"] == guard.OTHER_PAGE_NAVIGATION

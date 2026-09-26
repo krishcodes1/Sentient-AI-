@@ -38,6 +38,8 @@ import type {
   SetupStatus,
   SetupProviders,
   ProviderChoice,
+  VaultItemView,
+  VaultItems,
 } from "@/types";
 
 const API_BASE = "/api";
@@ -742,6 +744,55 @@ export async function installCapability(
   key: string,
 ): Promise<{ ok: boolean; error?: string }> {
   return request(`/capabilities/${key}/install`, { method: "POST" });
+}
+
+/**
+ * Change one capability's settings (the purchase caps). Owner only; the
+ * server answers with the whole list, like PUT /capabilities, so the page
+ * can replace its state in one go.
+ */
+export async function updateCapabilitySettings(
+  key: string,
+  patch: Record<string, number>,
+): Promise<CapabilityStatus[]> {
+  const data = await request<{ capabilities: CapabilityStatus[] }>(
+    `/capabilities/${key}/settings`,
+    { method: "PUT", body: JSON.stringify({ settings: patch }) },
+  );
+  return data.capabilities;
+}
+
+// The card vault (owner only). The card goes to the server exactly once, in
+// saveVaultCard's body; every response is the masked VaultItemView.
+
+export interface VaultCardInput {
+  label?: string;
+  number: string;
+  exp_month: number;
+  exp_year: number;
+  cvc: string;
+  name: string;
+}
+
+export async function getVaultItems(): Promise<VaultItems> {
+  const data = await request<Partial<VaultItems>>("/vault/items");
+  // An older server answered with the items alone: read that as available.
+  return {
+    items: data.items ?? [],
+    available: data.available !== false,
+    reason: typeof data.reason === "string" ? data.reason : "",
+  };
+}
+
+export async function saveVaultCard(body: VaultCardInput): Promise<VaultItemView> {
+  return request<VaultItemView>("/vault/card", {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function deleteVaultItem(id: string): Promise<void> {
+  return request<void>(`/vault/items/${id}`, { method: "DELETE" });
 }
 
 /**

@@ -45,6 +45,10 @@ through the approval card, and the executor refuses it unapproved.
 ``desktop`` reads this computer's display and, with computer_control,
 operates its apps (desktop.act, which like the install always goes
 through the approval card); both capabilities are off by default.
+``browser`` drives Crawler's own browser: read with browser_control, act
+with browser_act as well, and checkout (the one financial action that is
+ever dispatched, ``FINANCIAL_BUILTINS``) with purchases as well; every act
+and checkout goes through the approval card.
 
 Every built-in tool belongs to a capability (``services/capabilities``)
 the owner can switch off, except the few in ``ALWAYS_ON_TOOLS``. That
@@ -79,10 +83,12 @@ from services.agent.permissions import (
     is_hard_blocked_action,
 )
 from services.agent.runtime import (
+    BROWSER_RULE_POLICY,
     CAPABILITY_BLOCKED_POLICY,
     CAPABILITY_GATE_ERROR_POLICY,
     CAPABILITY_GATE_ERROR_REASON,
     CAPABILITY_OFF_POLICY,
+    PURCHASE_RULE_POLICY,
     PrecheckRefusal,
     Tool,
 )
@@ -90,6 +96,10 @@ from services.capabilities.base import Capability, CapabilityStatus
 from services.platform import current as current_platform
 from services.tools.browser import guard as browser_guard
 from services.tools.browser import handoff as browser_handoff
+from services.tools.browser.act import ACT_ACTIONS as BROWSER_ACT_ACTIONS
+from services.tools.browser.act import MAX_FIELD_CHARS as BROWSER_MAX_FIELD_CHARS
+from services.tools.browser.act import MAX_FORM_FIELDS as BROWSER_MAX_FORM_FIELDS
+from services.tools.browser.act import PRESS_KEYS as BROWSER_PRESS_KEYS
 from services.tools.browser.actions import ACTIONS as BROWSER_ACTIONS
 from services.tools.browser.actions import BrowserReadToolkit
 from services.tools.browser.session import BrowserSessionManager
@@ -535,11 +545,16 @@ CONNECTOR_CATALOG: dict[str, list[ToolSpec]] = {
             ),
         ),
     ],
-    # Built-in, capability "browser_control" (off by default): the agent
-    # drives Crawler's own browser. One READ tool with one flat schema (the
+    # Built-in, three capabilities, all off by default: "browser_control"
+    # owns read (READ: the page as an outline with refs); "browser_act"
+    # owns act (WRITE: one typed, chosen or clicked step per call, each
+    # behind an approval card with a picture of the page); "purchases" owns
+    # checkout (FINANCIAL: pays with the card in the owner's vault after
+    # one approval card). act and checkout need browser_control on as well
+    # (_REQUIRED_CAPABILITIES). One flat schema per tool (the
     # ``action`` enum picks the toolkit action) keeps the offered list
-    # small and Gemini-friendly. browser.act (WRITE, phase 3) and
-    # browser.login (WRITE, phase 2) join this family later.
+    # small and Gemini-friendly. browser.login (WRITE, phase 2) joins the
+    # family later.
     "browser": [
         ToolSpec(
             "read",
@@ -576,7 +591,95 @@ CONNECTOR_CATALOG: dict[str, list[ToolSpec]] = {
                 reason={"type": "string", "description": "handoff: what the person should do and why"},
             ),
         ),
+        ToolSpec(
+            "act",
+            "Type, choose and click in Crawler's own browser, one action per "
+            "call; the person approves every call before it runs. Read the page "
+            "first (browser.read) and use refs from its latest outline: "
+            "fill(ref, text) types into a field; fill_form(fields) fills up to "
+            f"{BROWSER_MAX_FORM_FIELDS} fields at once; select(ref, value) picks an "
+            "option; check(ref) ticks a box; click(ref) presses a button or link, "
+            "including one that submits, sends or signs up; press(key) presses one "
+            "key; submit(ref) submits the form the ref is in. Refused on http:// "
+            "pages and into password, one-time-code and card fields (nothing "
+            "typed from chat goes into those; a sign-in is the person's: "
+            "browser.read handoff). The result says what was done and carries "
+            "the fresh outline.",
+            ActionCategory.WRITE,
+            _schema(
+                action={
+                    "type": "string",
+                    "enum": list(BROWSER_ACT_ACTIONS),
+                    "description": "Which action to take",
+                    "required": True,
+                },
+                ref={"type": "string", "description": "fill, select, check, click, submit: an element ref from the latest outline, e.g. e7"},
+                text={
+                    "type": "string",
+                    "description": f"fill: the text to type (at most {BROWSER_MAX_FIELD_CHARS} characters)",
+                },
+                fields={
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"ref": {"type": "string"}, "text": {"type": "string"}},
+                        "required": ["ref", "text"],
+                    },
+                    "description": f"fill_form: up to {BROWSER_MAX_FORM_FIELDS} fields, each a ref and the text to type there",
+                },
+                value={"type": "string", "description": "select: the option's value or visible label"},
+                key={
+                    "type": "string",
+                    "enum": list(BROWSER_PRESS_KEYS),
+                    "description": "press: the key to press",
+                },
+            ),
+        ),
+        ToolSpec(
+            "checkout",
+            "Pay for what is in the cart on the checkout page open in Crawler's "
+            "browser, with the card the owner stored (filled from the vault, never "
+            "typed); the person approves a card showing the site, the amount, the "
+            "items and a screenshot before anything is paid, so wait for that "
+            "decision. Bring the browser to the merchant's checkout page first "
+            "(browser.read; browser.act for delivery details). Refused unless the "
+            "page is HTTPS, the merchant is the one the person asked for, a USD "
+            "total is visible, and it is within the owner's spending caps. The "
+            "result says what was paid and shows the confirmation page.",
+            ActionCategory.FINANCIAL,
+            _schema(
+                merchant={
+                    "type": "string",
+                    "description": "The site the person asked to buy from, e.g. ticketmaster.com",
+                    "required": True,
+                },
+                amount={
+                    "type": "number",
+                    "description": "What you expect to pay, in USD (the total on the page is what counts)",
+                },
+                note={
+                    "type": "string",
+                    "description": "What is being bought, in a few words, for the approval card",
+                },
+            ),
+        ),
     ],
+}
+
+# The one financial action the executor dispatches: the built-in browser's
+# checkout, which the policy sends to the approval card
+# (permissions.FINANCIAL_CONFIRM_KEYS) and the "purchases" capability
+# gates. Every other FINANCIAL spec is refused at dispatch whatever the
+# policy says.
+FINANCIAL_BUILTINS: frozenset[tuple[str, str]] = frozenset({("browser", "checkout")})
+
+# Capabilities a built-in action needs on top of the one that claims it
+# (services/capabilities). browser.act is claimed by "browser_act" and
+# browser.checkout by "purchases"; both also need "browser_control": the
+# page is reached and read through the same browser session.
+_REQUIRED_CAPABILITIES: dict[tuple[str, str], tuple[str, ...]] = {
+    ("browser", "act"): ("browser_control",),
+    ("browser", "checkout"): ("browser_control", "purchases"),
 }
 
 # Types offered to every user with no connector row and no credentials.
@@ -785,6 +888,24 @@ def _capability_of(connector_type: str, action: str) -> Optional[Capability]:
     return capability_registry.capability_for_tool(f"{connector_type}.{action}")
 
 
+def _capabilities_of(connector_type: str, action: str) -> tuple[Capability, ...]:
+    """Every capability one built-in action needs on: the one that claims
+    it first (its refusal names the tool: "Buying things is off"), then
+    the ones ``_REQUIRED_CAPABILITIES`` lists. Each gate refuses on the
+    first of these that is not on. Empty for a tool nothing gates."""
+    from services import capabilities as capability_registry
+
+    caps: list[Capability] = []
+    claiming = _capability_of(connector_type, action)
+    if claiming is not None:
+        caps.append(claiming)
+    for key in _REQUIRED_CAPABILITIES.get((connector_type, action), ()):
+        cap = capability_registry.get(key)
+        if all(cap.key != c.key for c in caps):
+            caps.append(cap)
+    return tuple(caps)
+
+
 def capability_of_tool(tool_name: str) -> Optional[Capability]:
     """The capability gating *tool_name*: the name is resolved first and
     the capability looked up by its canonical ``type.action``. None for a
@@ -794,6 +915,16 @@ def capability_of_tool(tool_name: str) -> Optional[Capability]:
     if resolved is None:
         return None
     return _capability_of(resolved.connector_type, resolved.action)
+
+
+def capabilities_of_tool(tool_name: str) -> tuple[Capability, ...]:
+    """Every capability *tool_name* needs on (``_capabilities_of`` by the
+    canonical name): the claiming one and the required ones. Empty for a
+    name that does not resolve or a tool nothing gates."""
+    resolved = resolve_tool(tool_name)
+    if resolved is None:
+        return ()
+    return _capabilities_of(resolved.connector_type, resolved.action)
 
 
 # The owner's capability report indexed by key
@@ -1102,8 +1233,10 @@ def build_tools(
                 and not is_hard_blocked_action(spec.action)
             ):
                 runtime_decision = "approved"
-            cap = _capability_of(offer.connector_type, spec.action)
-            if cap is not None and cap.key not in enabled_capabilities:
+            if any(
+                cap.key not in enabled_capabilities
+                for cap in _capabilities_of(offer.connector_type, spec.action)
+            ):
                 continue
             tool_name = f"{offer.namespace}.{spec.action}"
             tools.append(
@@ -1192,8 +1325,7 @@ class RuntimePermissionAdapter:
         if resolved is None:
             # Default-deny unknown tools.
             return "blocked", f"Unknown tool '{tool_name}' is denied by default.", "default-deny"
-        cap = _capability_of(resolved.connector_type, resolved.action)
-        if cap is not None:
+        for cap in _capabilities_of(resolved.connector_type, resolved.action):
             refusal = await _gate_refusal(self._capability_gate, cap)
             if refusal is not None:
                 return "blocked", refusal.reason, refusal.policy
@@ -1245,7 +1377,22 @@ class RuntimePermissionAdapter:
 # A desktop.act refused by one of the computer toolkit's own hard rules
 # before its approval card (ConnectorToolExecutor.precheck_approval). The
 # toolkit's rule name (blocked_app, secure_field, cancelled ...) rides along.
+# browser.act and browser.checkout have their own (runtime.BROWSER_RULE_POLICY,
+# runtime.PURCHASE_RULE_POLICY).
 COMPUTER_RULE_POLICY = "computer_rule"
+
+# The reserved key a browser.checkout card carries its page facts under
+# (services.tools.browser.checkout.toolkit.CARD_KEY), set by the toolkit's
+# ``begin`` and never by the model: a call that brings its own is refused
+# before any card, like a desktop.act with its own ``_screen``.
+CHECKOUT_CARD_KEY = "_checkout"
+
+# Which (type, action) the executor's approval hooks dispatch to which
+# toolkit: the computer toolkit for desktop.act, the act toolkit for
+# browser.act, the checkout toolkit for browser.checkout.
+_DESKTOP_ACT = ("desktop", "act")
+_BROWSER_ACT = ("browser", "act")
+_BROWSER_CHECKOUT = ("browser", "checkout")
 
 
 def _without_confirmation(arguments: Mapping[str, Any]) -> dict[str, Any]:
@@ -1255,10 +1402,11 @@ def _without_confirmation(arguments: Mapping[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in arguments.items() if k != "user_confirmed"}
 
 
-def _desktop_rule(result: Mapping[str, Any]) -> str:
-    """The rule a desktop.act precheck refused under: the toolkit's own
-    (``blocked_app``, ``secure_field``, ``cancelled`` ...), else the kind of
-    error it found (a stale ref, no outline yet, bad arguments)."""
+def _toolkit_rule(result: Mapping[str, Any]) -> str:
+    """The rule a desktop.act or browser.act precheck refused under: the
+    toolkit's own (``blocked_app``, ``secure_field``, ``cancelled`` ...),
+    else the kind of error it found (a stale ref, no outline yet, bad
+    arguments)."""
     rule = result.get("rule")
     if isinstance(rule, str) and rule:
         return rule
@@ -1266,6 +1414,24 @@ def _desktop_rule(result: Mapping[str, Any]) -> str:
         if result.get(flag) is True:
             return flag
     return "invalid_arguments"
+
+
+def _not_wired(tool: str) -> dict[str, Any]:
+    """The answer for a browser tool whose toolkit this process was never
+    handed (main.py builds them; a bare executor has none): refused, and
+    said plainly, rather than a card for something that cannot run."""
+    return {
+        "ok": False,
+        "refused": True,
+        "rule": "unavailable",
+        "error": f"{tool} is not set up in this process.",
+    }
+
+
+def _tool_key(tool_name: str) -> Optional[tuple[str, str]]:
+    """``(type, action)`` of a resolvable tool name, else None."""
+    resolved = resolve_tool(tool_name)
+    return None if resolved is None else (resolved.connector_type, resolved.action)
 
 
 @dataclass(frozen=True)
@@ -1321,10 +1487,23 @@ class ConnectorToolExecutor:
     Before a call is parked for approval the runtime asks
     ``precheck_approval``: a ``desktop.act`` that the computer toolkit's
     own hard rules refuse (Terminal, a password field, a stale ref, after
-    Stop) gets no card at all and is filed under ``computer_rule``. The
-    card it does get stores ``approval_arguments``, which tie it to the
-    screen it was made from. The toolkit checks every rule again when an
-    approved act runs, and refuses one whose screen has changed since.
+    Stop) gets no card at all and is filed under ``computer_rule``; a
+    ``browser.act`` likewise under ``browser_rule`` (a password or card
+    field, an http:// page, a stale ref). The card it does get stores
+    ``approval_arguments``, which tie it to the screen (or page) it was
+    made from. The toolkit checks every rule again when an approved act
+    runs, and refuses one whose screen has changed since.
+
+    ``browser.checkout`` (FINANCIAL; the one financial action dispatched
+    at all, ``FINANCIAL_BUILTINS``) builds its card from the live page:
+    ``approval_arguments_async`` runs the checkout toolkit's ``begin``,
+    which reads the origin, the total, the items and the card fields, keeps
+    a screenshot in memory (``approval_image`` serves it to the card) and
+    answers a refusal instead of card arguments when a rule fails (not
+    HTTPS, the wrong merchant, over a cap): the runtime files that under
+    ``purchase_rule``, no card. Approved, the toolkit's ``run`` fills the
+    card from the vault and submits; the card number never passes through
+    here.
 
     Whatever comes back is data, never instruction: the runtime scans
     every tool result before it reaches the model, and fetched web pages
@@ -1345,6 +1524,8 @@ class ConnectorToolExecutor:
         browser_toolkit: Optional[BrowserReadToolkit] = None,
         capability_gate: Optional[CapabilityGate] = None,
         computer_toolkit: Optional[ComputerToolkit] = None,
+        act_toolkit: Optional[Any] = None,
+        checkout_toolkit: Optional[Any] = None,
     ) -> None:
         self._session_factory = session_factory
         web = web_toolkit or WebToolkit()
@@ -1366,7 +1547,19 @@ class ConnectorToolExecutor:
             guard=browser_guard,
             handoff=browser_handoff,
         )
-        read, write = ActionCategory.READ, ActionCategory.WRITE
+        self._browser = browser
+        # Never built here: both share the read toolkit's session manager
+        # and page memory, and the checkout toolkit needs the vault and the
+        # ledger, so main.py builds them (services.tools.browser.act,
+        # services.tools.browser.checkout.toolkit). Unwired, browser.act
+        # and browser.checkout are refused before any card (_not_wired).
+        self._act = act_toolkit
+        self._checkout = checkout_toolkit
+        read, write, financial = (
+            ActionCategory.READ,
+            ActionCategory.WRITE,
+            ActionCategory.FINANCIAL,
+        )
         # One entry per built-in family (see services/capabilities/README.md).
         # Only the reminder toolkit is handed the caller's identity: it is
         # the only one that stores anything per user.
@@ -1410,18 +1603,20 @@ class ConnectorToolExecutor:
                 confirm=frozenset({write}),
                 confirm_note="operates an app on this computer",
             ),
-            # browser.read's own ``action`` argument names the toolkit
-            # action; the tool-level action ("read") is the tier. The task
-            # id is the runtime's, never the model's.
+            # browser.read's and browser.act's own ``action`` argument names
+            # the toolkit action; the tool-level action (read / act /
+            # checkout) is the tier and picks the toolkit (_browser_call).
+            # act (WRITE) and checkout (FINANCIAL) run only re-dispatched
+            # with approved=True after the owner said yes to their card,
+            # and each toolkit then holds the call to the page that card
+            # was made from. The task id is the runtime's, never the
+            # model's.
             "browser": _Builtin(
                 "Browser",
-                lambda a, p, uid, ok, task: browser.execute(
-                    p.get("action", ""),
-                    {k: v for k, v in p.items() if k != "action"},
-                    user_id=uid,
-                    task_id=task,
-                ),
-                frozenset({read}),
+                self._browser_call,
+                frozenset({read, write, financial}),
+                confirm=frozenset({write, financial}),
+                confirm_note="acts in the browser or pays",
                 task_scoped=True,
             ),
         }
@@ -1434,6 +1629,39 @@ class ConnectorToolExecutor:
         self._limiters: dict[uuid_module.UUID, Any] = {}
         self._mcp_dispatcher: Optional[Any] = None
 
+    async def _browser_call(
+        self, action: str, params: dict[str, Any], user_id: str, approved: bool, task_id: str
+    ) -> dict[str, Any]:
+        """Dispatch one browser tool to its toolkit: read → the read
+        toolkit, act → the act toolkit's ``execute`` (with ``approved``: it
+        runs only on the page its card was made from), checkout → the
+        checkout toolkit's ``run`` (the arguments are the card's, ``_checkout``
+        included, which ties the purchase to the page the owner saw)."""
+        if action == "read":
+            return await self._browser.execute(
+                params.get("action", ""),
+                {k: v for k, v in params.items() if k != "action"},
+                user_id=user_id,
+                task_id=task_id,
+            )
+        if action == "act":
+            if self._act is None:
+                return _not_wired("browser.act")
+            return await self._act.execute(
+                params.get("action", ""),
+                {k: v for k, v in params.items() if k != "action"},
+                user_id=user_id,
+                task_id=task_id,
+                approved=approved,
+            )
+        if action == "checkout":
+            if self._checkout is None:
+                return _not_wired("browser.checkout")
+            return await self._checkout.run(
+                params, user_id=user_id, task_id=task_id, approved=approved
+            )
+        return {"ok": False, "error": f"Browser action '{action}' is not permitted."}
+
     def describe_approval(
         self, tool_name: str, arguments: Mapping[str, Any], user_id: str
     ) -> Optional[str]:
@@ -1441,32 +1669,126 @@ class ConnectorToolExecutor:
         state it from facts rather than the model's words; None otherwise
         (the runtime then uses its generic reason).
 
-        Only ``desktop.act`` has one: the computer toolkit names the real
-        element and app from the user's latest outline (``Click "Send" in
-        Mail``, ``Type 42 characters into "Subject" in Mail``), or, given the
-        card's arguments (``approval_arguments``), from the screen they are
-        tied to. It calls no backend, so building a card never touches the
-        screen.
+        ``desktop.act``: the computer toolkit names the real element and app
+        from the user's latest outline (``Click "Send" in Mail``, ``Type 42
+        characters into "Subject" in Mail``), or, given the card's arguments
+        (``approval_arguments``), from the screen they are tied to.
+        ``browser.act``: the act toolkit does the same from the latest page
+        (``Click "Continue to payment" on shop.example.com``).
+        ``browser.checkout``: the checkout toolkit reads the card's own facts
+        (``Pay $23.40 to shop.example.com (2 items) with Visa ····4242``).
+        None of them calls a backend, so building a card never touches the
+        screen or the page.
         """
-        resolved = resolve_tool(tool_name)
-        if resolved is None or (resolved.connector_type, resolved.action) != ("desktop", "act"):
-            return None
-        return self._computer.describe(_without_confirmation(arguments), user_id=user_id)
+        key = _tool_key(tool_name)
+        params = _without_confirmation(arguments)
+        if key == _DESKTOP_ACT:
+            return self._computer.describe(params, user_id=user_id)
+        if key == _BROWSER_ACT and self._act is not None:
+            return self._act.describe(params, user_id=user_id)
+        if key == _BROWSER_CHECKOUT and self._checkout is not None:
+            return self._checkout.describe(params, user_id=user_id)
+        return None
 
     def approval_arguments(
         self, tool_name: str, arguments: dict[str, Any], user_id: str
     ) -> dict[str, Any]:
         """The arguments an approval card stores for a call: *arguments*
-        unchanged, except for ``desktop.act``. Its card is tied to the screen
-        it was made from (the computer toolkit's ``bind``: that app and that
-        outline, under a key no action takes, set here and never by the
-        model). Once approved, the act runs only while that screen holds, and
-        an act with no such tie is refused. Calls no backend.
+        unchanged, except for ``desktop.act`` and ``browser.act``. Their
+        cards are tied to the screen or page they were made from (the
+        toolkit's ``bind``: that app and outline, or that origin and outline
+        digest, under a key no action takes, set here and never by the
+        model). Once approved, the act runs only while that screen holds,
+        and an act with no such tie is refused. Calls no backend.
+        ``browser.checkout``'s card needs the live page, so its bind is
+        ``approval_arguments_async``; here its arguments pass unchanged.
         """
-        resolved = resolve_tool(tool_name)
-        if resolved is None or (resolved.connector_type, resolved.action) != ("desktop", "act"):
-            return arguments
-        return self._computer.bind(arguments, user_id=user_id)
+        key = _tool_key(tool_name)
+        if key == _DESKTOP_ACT:
+            return self._computer.bind(arguments, user_id=user_id)
+        if key == _BROWSER_ACT and self._act is not None:
+            return self._act.bind(arguments, user_id=user_id)
+        return arguments
+
+    async def approval_arguments_async(
+        self, tool_name: str, arguments: dict[str, Any], user_id: str, *, task_id: Optional[str]
+    ) -> dict[str, Any]:
+        """``approval_arguments``, plus the binds that touch the browser.
+        A ``browser.act`` card shows the owner the page: the act toolkit's
+        ``bind_async`` takes a masked picture with the target outlined (kept
+        in memory; ``approval_image`` serves it) and reads the page's money
+        facts for the card's warning line; a card is made even when the
+        picture fails, and then says so. A ``browser.checkout`` card must
+        show live facts (the page's origin, total and items, and a
+        screenshot), so the checkout toolkit's ``precheck`` (the vault and a
+        stored card, without the browser) and ``begin`` (the page) run here.
+        Either may answer a refusal (``{"ok": False, "refused": True,
+        "rule": ..., "error": ...}``) instead of card arguments; the runtime
+        files it under ``purchase_rule`` and makes no card. Every other
+        tool's bind is the sync hook's."""
+        key = _tool_key(tool_name)
+        if key == _BROWSER_ACT and self._act is not None and hasattr(self._act, "bind_async"):
+            # The task id is the runtime's, as for checkout below.
+            return await self._act.bind_async(
+                _without_confirmation(arguments), user_id=user_id, task_id=task_id or user_id
+            )
+        if key != _BROWSER_CHECKOUT:
+            return self.approval_arguments(tool_name, arguments, user_id)
+        params = _without_confirmation(arguments)
+        if self._checkout is None:
+            return _not_wired("browser.checkout")
+        refusal = await self._checkout.precheck(params, user_id=user_id)
+        if refusal is not None:
+            return {**refusal, "ok": False, "refused": True}
+        # The task id is the runtime's; a caller that passes none gets the
+        # user-keyed task the dispatch would use (see execute).
+        return await self._checkout.begin(params, user_id=user_id, task_id=task_id or user_id)
+
+    def approval_image(
+        self, tool_name: str, arguments: Mapping[str, Any], user_id: str
+    ) -> Optional[str]:
+        """The picture a ``browser.checkout`` or ``browser.act`` card shows:
+        the masked screenshot the toolkit took when the card was made
+        (checkout's ``begin``, under ``_checkout.checkout_id``; act's
+        ``bind_async``, with the target outlined, under ``_page.picture``)
+        and keeps in memory, never stored with the card. None for any other
+        tool, and once the toolkit has dropped it (a restart, or the
+        approval's TTL)."""
+        key = _tool_key(tool_name)
+        if key == _BROWSER_ACT and self._act is not None and hasattr(self._act, "approval_image"):
+            return self._act.approval_image(_without_confirmation(arguments), user_id=user_id)
+        if key != _BROWSER_CHECKOUT or self._checkout is None:
+            return None
+        return self._checkout.approval_image(_without_confirmation(arguments), user_id=user_id)
+
+    def _checkout_precheck(
+        self, arguments: Mapping[str, Any], user_id: str
+    ) -> Optional[dict[str, Any]]:
+        """The part of a browser.checkout precheck that needs no await:
+        the toolkit must be wired, the user must not have pressed Stop, and
+        the call must not bring its own ``_checkout`` (the card's facts are
+        the toolkit's to add). The toolkit's own precheck (the vault, a
+        stored card) and its page checks run in ``approval_arguments_async``."""
+        if self._checkout is None:
+            return _not_wired("browser.checkout")
+        if agent_cancel.is_cancelled(user_id):
+            return {
+                "ok": False,
+                "refused": True,
+                "rule": "cancelled",
+                "error": "Stopped by the user before this purchase was checked.",
+            }
+        if CHECKOUT_CARD_KEY in arguments:
+            return {
+                "ok": False,
+                "refused": True,
+                "rule": "invalid_arguments",
+                "error": (
+                    "browser.checkout takes merchant, amount and note; the card's "
+                    "facts are read from the page by Crawler, never given."
+                ),
+            }
+        return None
 
     def precheck_approval(
         self, tool_name: str, arguments: Mapping[str, Any], user_id: str
@@ -1475,25 +1797,40 @@ class ConnectorToolExecutor:
         executor can tell without running it; None otherwise (the runtime
         then parks it for approval as usual).
 
-        Only ``desktop.act`` has one: the computer toolkit's checks that need
-        no backend (its arguments, the Stop flag, blocked apps and key
-        combos, typing into a known password field, a ref the latest outline
-        does not have). A refusal is filed under ``computer_rule`` with the
-        toolkit's rule name, and the model is shown the toolkit's own
-        result. Calls no backend; the same checks run again when an approved
-        act executes.
+        ``desktop.act``: the computer toolkit's checks that need no backend
+        (its arguments, the Stop flag, blocked apps and key combos, typing
+        into a known password field, a ref the latest outline does not
+        have), filed under ``computer_rule``. ``browser.act``: the act
+        toolkit's (a password or card field, an http:// page, a stale ref),
+        filed under ``browser_rule``. ``browser.checkout``: the checks that
+        need no await (``_checkout_precheck``), filed under
+        ``purchase_rule``; its page checks follow in the async bind. Each
+        carries the toolkit's rule name, and the model is shown the
+        toolkit's own result. Calls no backend; the same checks run again
+        when an approved call executes.
         """
-        resolved = resolve_tool(tool_name)
-        if resolved is None or (resolved.connector_type, resolved.action) != ("desktop", "act"):
+        key = _tool_key(tool_name)
+        params = _without_confirmation(arguments)
+        if key == _DESKTOP_ACT:
+            result = self._computer.precheck(params, user_id=user_id)
+            policy = COMPUTER_RULE_POLICY
+        elif key == _BROWSER_ACT:
+            result = _not_wired("browser.act") if self._act is None else self._act.precheck(
+                params, user_id=user_id
+            )
+            policy = BROWSER_RULE_POLICY
+        elif key == _BROWSER_CHECKOUT:
+            result = self._checkout_precheck(params, user_id)
+            policy = PURCHASE_RULE_POLICY
+        else:
             return None
-        result = self._computer.precheck(_without_confirmation(arguments), user_id=user_id)
         if result is None:
             return None
         return PrecheckRefusal(
-            reason=str(result.get("error") or "desktop.act was refused."),
-            policy=COMPUTER_RULE_POLICY,
-            result=result,
-            rule=_desktop_rule(result),
+            reason=str(result.get("error") or f"{tool_name} was refused."),
+            policy=policy,
+            result=dict(result),
+            rule=_toolkit_rule(result),
         )
 
     def _get_mcp_dispatcher(self):
@@ -1535,9 +1872,14 @@ class ConnectorToolExecutor:
         resolved = resolve_tool(tool_name)
         if resolved is None:
             return {"error": f"Unknown tool '{tool_name}'", "ok": False}
-        if resolved.spec.category == ActionCategory.FINANCIAL:
+        if (
+            resolved.spec.category == ActionCategory.FINANCIAL
+            and (resolved.connector_type, resolved.action) not in FINANCIAL_BUILTINS
+        ):
             # Belt-and-suspenders: never execute a financial action even if
-            # one somehow reaches the executor.
+            # one somehow reaches the executor. The one exception is the
+            # built-in checkout, approved per purchase by the owner and
+            # gated by two capabilities below.
             return {
                 "error": f"Action '{resolved.action}' is permanently blocked.",
                 "ok": False,
@@ -1547,9 +1889,10 @@ class ConnectorToolExecutor:
         # model. Strip any attempt to smuggle it through tool arguments.
         arguments = _without_confirmation(arguments)
 
-        cap = _capability_of(resolved.connector_type, resolved.action)
-        refusal = await _gate_refusal(self._capability_gate, cap) if cap is not None else None
-        if cap is not None and refusal is not None:
+        for cap in _capabilities_of(resolved.connector_type, resolved.action):
+            refusal = await _gate_refusal(self._capability_gate, cap)
+            if refusal is None:
+                continue
             # Second gate, independent of the offer: a tool whose capability
             # is off, blocked, or unreadable is refused even if the model
             # somehow names it. Looked up by the canonical name, so no

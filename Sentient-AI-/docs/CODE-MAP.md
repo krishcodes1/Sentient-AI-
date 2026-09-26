@@ -68,7 +68,7 @@ the chat gets what ran and why it stopped, in plain words
 ## API routes (`backend/api/routes/`)
 
 - `_deps.py` — shared deps: `installation_service(request)`, `require_admin`.
-- `agent.py` — conversations CRUD, send/stream message, approvals list/decide, `POST /agent/stop` (the web Stop button), and the chat/decision appliers the Telegram bot runs; the biggest route file (turn orchestration glue).
+- `agent.py` — conversations CRUD, send/stream message, approvals list/decide (`PendingApprovalOut.image` carries a purchase card's screenshot while the checkout is pending; `ApprovalDecisionResponse.images` + `message_id` carry the approved call's own pictures, a checkout's confirmation page, which `_apply_decision` also hands the Telegram applier ahead of the resumed turn's), `POST /agent/stop` (the web Stop button), and the chat/decision appliers the Telegram bot runs; the biggest route file (turn orchestration glue).
 - `auth.py` — register/login/refresh, profile & password change, account export/delete, settings.
 - `capabilities.py` — capability report + owner-only switch updates + install trigger.
 - `connectors.py` — connector CRUD, credential validation, health stats.
@@ -78,16 +78,17 @@ the chat gets what ran and why it stopped, in plain words
 - `telegram.py` — link-code generation/status/unlink for the approval channel.
 - `usage.py` — signed-in account's token/cost usage summary.
 - `audit.py` — read-only audit log list/stats/integrity-verify (no write endpoint by design).
+- `vault.py` — the owner's payment card (owner-only): `GET /vault/items` (masked views, plus `available` and the `reason` the Settings page shows instead of the form; a 200 always, and it never mints the key), `PUT /vault/card` (loopback peer only; 409 `vault_unavailable` in a container; 422 never echoes the input), `DELETE /vault/items/{id}`. No route returns a number or a blob.
 
 ## Agent runtime (`backend/services/agent/`)
 
-- `runtime.py` — `AgentRuntime`: provider leasing, system-prompt assembly, `chat`/`stream_chat`/`_run_turn`, approval resume, image handling; stop checks at step boundaries, the executor's pre-card checks (`precheck_approval`, `approval_arguments`), the latest-observation policy for browser and desktop outlines, desktop results audited as facts only, and the browser spend estimate priced per model.
+- `runtime.py` — `AgentRuntime`: provider leasing, system-prompt assembly, `chat`/`stream_chat`/`_run_turn`, approval resume, image handling; stop checks at step boundaries, the executor's pre-card checks (`precheck_approval`, `approval_arguments`, the async `approval_arguments_async` a `browser.checkout` card is built by, filed under `purchase_rule` when it refuses), a card's picture (`PendingApproval.image`, served through `approval_image` and never stored), the `<purchases>` prompt block sent only when `browser.checkout` is offered (`PURCHASES_SYSTEM_PROMPT`; `SECURITY_SYSTEM_PROMPT` is as before the feature), `_card_risk_note` (no taint heads-up on a checkout card whose merchant is the page's host; plain wording otherwise), `approved_call_message(image_delivered=…)` with `IMAGE_NOT_SHOWN` when no channel forwards a picture, the latest-observation policy for browser and desktop outlines, desktop results audited as facts only, and the browser spend estimate priced per model.
 - `cancel.py` — per-user stop requests (the web Stop button, Telegram `/stop`): each piece of work takes a mark when accepted and a stop ends work marked before it; the runtime and the computer toolkit check it.
 - `providers.py` — `LLMProvider` abstraction: `AnthropicProvider`, `OpenAICompatibleProvider` (OpenAI/Grok/DeepSeek/Groq/Ollama), tool-call/content normalization.
 - `prompt_guard.py` — multi-layer prompt-injection scanner: normalization (base64/hex/homoglyph/zero-width), pattern detection, threat levels.
 - `taint.py` — CaMeL-lite taint tracking: flags untrusted tool-result content flowing into later tool arguments, escalates auto-approved writes.
-- `permissions.py` — `PermissionEngine`: tiers, `ActionCategory`, hard-blocked actions, per-connector policy rows.
-- `tool_registry.py` — connector/tool catalog, capability gating, `ConnectorToolExecutor` (dispatch to built-in toolkits, connectors, MCP).
+- `permissions.py` — `PermissionEngine`: tiers, `ActionCategory`, hard-blocked actions, per-connector policy rows. `("browser", FINANCIAL)` is `USER_CONFIRM` (`FINANCIAL_CONFIRM_KEYS`); every connector's FINANCIAL row stays hard-blocked.
+- `tool_registry.py` — connector/tool catalog, capability gating (`_capabilities_of`: the claiming capability plus `_REQUIRED_CAPABILITIES`, so `browser.checkout` needs `purchases` and `browser_control`), `ConnectorToolExecutor` (dispatch to built-in toolkits, connectors, MCP; `FINANCIAL_BUILTINS` names the one financial action ever dispatched, `browser.checkout`; the approval hooks `describe_approval` / `precheck_approval` / `approval_arguments` / `approval_arguments_async` / `approval_image` route `desktop.act`, `browser.act` and `browser.checkout` to their toolkits).
 - `approvals.py` — `ApprovalStore` implementations (in-memory + DB-backed `PendingAction` rows), single-use/expiry semantics.
 - `context_manager.py` — token estimation, per-model context windows, message summarization/compression, offered-tool-set selection, turn-replay cache.
 
@@ -99,6 +100,13 @@ the chat gets what ran and why it stopped, in plain words
 - `net.py` — egress guard (SSRF-checked HTTP client) shared by the web tools.
 - `reminders.py` — `reminders.now`/`create`/`list`/`cancel` (the model's clock + scheduling).
 - `system.py` — capability report tool + `system.install_capability` (fixed argv allowlist installer, e.g. hidden browser).
+- `browser/` — Crawler's own browser (one per user, `session.py`; egress guard `guard.py`; sign-in/2FA handoff `handoff.py`; ARIA outline `snapshot.py`). `actions.py` is `browser.read` (READ; its click, which has no card, only follows a plain link to no order path (an order history aside) or clicks a control outside any form on a page with no total, payment method on file or wallet, `markers.read_click_allowed`, and the guard never lets it, or a handoff the model asked for, open an order step or send anything to an order address; while it clicks, no page script sends anything but a GET), `act.py` is `browser.act` (WRITE, one card per call, tied to the page by `_page` (origin, address and outline, for every act, a key press included); `bind_async` puts a masked picture of the page with the target outlined in red on every card, kept in memory and served by `approval_image`, and a money warning from the page's facts; never into a password or card field, never on `http://`, never a click, submit or Enter that pays — the control that would send the form is judged (`markers.pays`): a purchase-worded button, a form holding a card, a POST to an order path, or a button on a page showing an order total next to a payment method on file is `use_checkout`), `checkout/` is `browser.checkout` (FINANCIAL, one card per purchase: `markers.py` is the one classifier of card fields, buttons that pay and pages where an order is placed, shared by the facts, the outline, the screenshot mask and `browser.act`; `facts.py` reads the origin, the on-screen total nearest the card form, items, card fields and the order button's target off the page, `merchant.py` refuses the wrong or a look-alike host, `amounts.py` parses money, `ledger.py` writes the `purchases` audit rows and sums the last 24 h over every submitted card (a decline excepted), `toolkit.py` runs precheck → begin (the card's facts and an in-memory screenshot) → run (decrypts the card at fill time only, submits, reads the confirmation)). `pagememory.py` is the page the last read observed, which act and checkout are checked against; `_shared.py` holds the helpers the three toolkits share (the outline, the masked screenshot, the handoff and its window: `hand_over` when a toolkit hands the page to the person, `take_back` on the agent's next action).
+- `computer/` — desktop.observe / desktop.act on this platform's backend (see `docs/superpowers/specs/2026-09-24-computer-control-design.md`).
+
+## Vault and platform secrets
+
+- `backend/services/vault/` — the owner's card, "encrypted in its purse": `keys.py` (`PlatformKeyProvider` = one 32-byte key held only by the OS store, minted by the first `get` — the first card stored — while `check` only reads; `DevFileKeyProvider` for tests and a developer's Linux box, never picked on a Mac or PC; `DisabledKeyProvider` in a container; `select_key_provider`), `crypto.py` (AES-256-GCM `seal`/`open_`, Luhn, brand), `service.py` (`VaultService`: `put_card` validates before touching the key, one card per user, `open_card` only from the checkout toolkit, views are masked). No number, CVC or blob ever reaches a log line, an audit row, an API response or the model.
+- `backend/services/platform/` — the only OS branches: `mac.py` (Keychain via `/usr/bin/security -i` with the command, key included, on stdin so the key is never in argv; service "Crawler AI vault"), `windows.py` (DPAPI `CryptProtectData` through a `Crypt32` shim, ciphertext under `<data_dir>/secrets/`), `linux.py` / `container.py` (`SecretStoreUnavailable`); `base.py` adds `get_secret`/`set_secret`/`delete_secret`/`vault_id` to the `Platform` protocol.
 
 ## Capabilities (`backend/services/capabilities/`)
 
@@ -113,13 +121,16 @@ the chat gets what ran and why it stopped, in plain words
 - `site_screenshots.py` — the `web.screenshot` capability.
 - `telegram.py` — the Telegram capability (a channel, claims no tools).
 - `prompt.py` — `render_permissions_block`: turns statuses into the `<permissions>` system-prompt section.
+- `purchases.py` — the `purchases` capability ("Buy things for me": off by default, high risk, claims `browser.checkout`, native Mac/Windows only because it needs the card vault); `PURCHASE_SETTINGS_DEFAULTS` are the per-purchase ($25) and per-day ($50) caps the owner edits in Permissions.
+- `browser_control.py` — the `browser_control` capability (`browser.read`; `browser.act` and `browser.checkout` need it too, through `_REQUIRED_CAPABILITIES`).
+- `browser_act.py` — the `browser_act` capability ("Fill in forms and click on sites": off by default, high risk, claims `browser.act`, native Mac/Windows only, `requires=("browser_control",)` so the report shows it blocked while Control a browser is not on).
 - `reminders.py` — the `reminders` capability.
 - `web_browsing.py` — the `web_browsing` capability (`web.search`, `web.fetch_page`).
 
 ## Installation & settings
 
-- `backend/services/installation.py` — `InstallationService`: owner switches, provider/key resolution (`.env` > DB > default), Telegram token, registration lock, capability report assembly.
-- `backend/models/installation.py` — the single-row `Installation` table.
+- `backend/services/installation.py` — `InstallationService`: owner switches, provider/key resolution (`.env` > DB > default), Telegram token, registration lock, capability report assembly, and a capability's owner-editable numbers (`capability_settings` / `set_capability_settings`, audited as `capability_settings_updated`; `purchase_caps()` is what the checkout toolkit enforces).
+- `backend/models/installation.py` — the single-row `Installation` table (`capability_settings` JSON holds only what the owner changed, so a new default reaches every install).
 - `backend/api/routes/setup.py` / `capabilities.py` — the HTTP surface over the above (see routes section).
 
 ## Connectors (`backend/services/connectors/`)
@@ -158,7 +169,7 @@ the chat gets what ran and why it stopped, in plain words
 
 ## Models & migrations
 
-Models (`backend/models/`): `user.py` (User, telegram link fields), `conversation.py` (Conversation/Message/MessageRole), `audit.py` (AuditLog/AuditStatus, hash chain columns), `connector.py` (ConnectorConfig + enums), `installation.py` (single-row Installation), `memory.py` (Memory/MemoryCategory/MemorySource), `pending_action.py` (PendingAction — persisted approvals), `reminder.py` (Reminder/ReminderSource/ReminderStatus).
+Models (`backend/models/`): `user.py` (User, telegram link fields), `conversation.py` (Conversation/Message/MessageRole), `audit.py` (AuditLog/AuditStatus, hash chain columns), `connector.py` (ConnectorConfig + enums), `installation.py` (single-row Installation), `memory.py` (Memory/MemoryCategory/MemorySource), `pending_action.py` (PendingAction — persisted approvals), `reminder.py` (Reminder/ReminderSource/ReminderStatus), `vault_item.py` (VaultItem — the owner's sealed card: kind, label, masked, AES-GCM blob; never plaintext).
 
 Migrations (`backend/alembic/versions/`), oldest first:
 - `0001_baseline_schema.py` — baseline schema (everything `create_all()` used to build); stamped, never run, on pre-Alembic DBs.
@@ -170,6 +181,7 @@ Migrations (`backend/alembic/versions/`), oldest first:
 - `0007_message_model.py` — records which provider/model produced each assistant message.
 - `0008_installation.py` — the one-row `installation` table (owner switches, provider, secrets).
 - `0009_user_llm_nullable.py` — makes a user's provider/model nullable ("follow the install default").
+- `0010_vault_items.py` — the `vault_items` table and `installation.capability_settings` (guarded like 0008/0009).
 
 `backend/alembic/env.py` — reads `DATABASE_URL` from `core.config.settings` (no second credential copy); `backend/alembic/README.md` explains the adoption logic for pre-Alembic deployments.
 
@@ -177,6 +189,8 @@ Migrations (`backend/alembic/versions/`), oldest first:
 
 `conftest.py` sets dummy env vars, DB session fixtures, auth helpers. Themes:
 account export · admin role/tier · agent-loop security · vision/image turns · approval arg re-scanning · approval flow (DB+memory stores, concurrency) · auth-event audit trail · audit event→status mapping · HMAC audit hashing · audit service chaining · audit stats endpoint · auth hardening (XFF, lockout) · capabilities HTTP API · capabilities registry invariants · capability report logic · capability gating at both call sites · concurrency/failure modes · connector behavior (Canvas/Google/Robinhood) · connector route policy · context manager budgets/windows · conversation lifecycle routes · conversation search · desktop screenshot tool · executor security (credentials, scopes) · installation service · MCP integration · MCP client protocol · MCP DNS pinning (rebinding) · persistent memory CRUD · memory search · message usage/attachments · legacy-DB migration adoption · migration schema drift · network policy (SSRF per connector) · Ollama streaming errors · production-hardening config checks · prompt-guard false positives · prompt-guard normalization evasion · prompt-injection red-team suite · provider layer (Anthropic/OpenAI-compatible) · query-efficiency regressions · reminder tools · reminder CRUD/sweeper · resume-after-approval · route-level security · lazy provider resolution · security-middleware ordering · session refresh · Settings/account validation · setup wizard API · SSRF address policy · stream resilience/audit ordering · SSE streaming · built-in system tools (install allowlist) · taint tracking · Telegram approval channel · Telegram decisions answered at once and run off the poll loop (`test_telegram_decisions.py`) · Telegram progress lines (`test_telegram_progress.py`) · Telegram cost line, linked account only and `/stop` (`test_telegram_cost_safety.py`) · the turn resumed after an approved desktop action reaches the chat, or says why it could not (`test_telegram_desktop_resume.py`) · stop requests and the runtime's stop boundaries (`test_agent_cancel.py`, `test_runtime_stop.py`) · desktop acts refused before the card and cards tied to their screen (`test_computer_precheck.py`) · desktop latest-observation policy (`test_desktop_observation_policy.py`) · current provider model families (`test_provider_model_families.py`) · web chat screenshots shown live and never stored (`test_web_chat_images.py`) · Telegram manager lifecycle · tool registry/executor · token usage accounting · per-user LLM follows install default · audit-log verifier CLI · built-in web tools · app wiring (`test_wiring.py`).
+
+Purchases (2026-09-25): the vault (`test_vault_crypto.py`, `test_vault_keys.py`, `test_vault_service.py`, `test_vault_api.py`), the platform secret stores with a recorded `security` argv and a fake DPAPI shim (`test_platform.py`), `browser.act` and the page memory (`test_browser_act.py`), the act switch, the picture on every act card, its money warning and the read-tier click (`test_browser_act_card.py`), the risk note absent on a real-looking host (`test_purchase_card_text.py`), the decision path's confirmation pictures for the web and Telegram (`test_resume_after_approval.py`), the fake site's checkout pages and TLS harness (`test_fakesite_checkout.py`), the checkout parts (`test_checkout_amounts.py`, `test_checkout_merchant.py`, `test_checkout_facts.py`, `test_checkout_ledger.py`) and toolkit (`test_checkout_toolkit.py`), the capability and its caps (`test_purchases_capability.py`), the permission/registry/runtime/Telegram wiring on fakes (`test_purchases_wiring.py`, `test_telegram_purchase_card.py`), and the whole chain through the runtime on the real executor, toolkits, vault, ledger and audit log against the fake shop over TLS (`test_purchase_flow.py`: one card, Approve pays from the vault with the number reaching nothing the model sees, Deny fills nothing, cap / http / wrong or look-alike merchant / changed page / switch off refused). `tests/fixtures/purchase_notice.txt` is the notice the frontend copies.
 
 ## Frontend pages (`frontend/src/pages/`)
 
@@ -189,19 +203,23 @@ account export · admin role/tier · agent-loop security · vision/image turns �
 - `Setup.tsx` — first-run wizard: owner account → provider → Telegram → permissions → summary.
 - `AuditLogs.tsx` — audit log browser + integrity verification.
 - `approvalCountdown.ts` — shared TTL-countdown hook for approval cards (kept out of Chat's chunk so Dashboard doesn't pull in react-markdown).
-- `approvalArguments.ts` — `shownArguments`: the arguments an approval card displays, without the `_screen` key a `desktop.act` card stores (shared by Chat and Dashboard).
+- `approvalArguments.ts` — `shownArguments`: the arguments an approval card displays, without the reserved keys a `desktop.act` (`_screen`), `browser.act` (`_page`) or `browser.checkout` (`_checkout`) card stores; `isSentenceCard` (a `browser.act` card is its reason sentence alone, no JSON); `purchaseCard` reads a checkout card's facts and `approvalImage` accepts only a base64 image data URL (shared by Chat and Dashboard).
+- `purchaseNotice.ts` — `PURCHASE_NOTICE`, the frontend's copy of the backend's notice ("Crawler can make mistakes…"); a vitest holds it equal to `backend/tests/fixtures/purchase_notice.txt`.
 
 ## Frontend components (`frontend/src/components/`)
 
 - `Brand.tsx` — logo/wordmark variants.
-- `CapabilityList.tsx` — renders capability switches (on/blocked-with-fix/blocked-until-installed/off) for Setup and Settings.
+- `CapabilityList.tsx` — renders capability switches (on/blocked-with-fix/blocked-until-installed/off) for Setup and Settings; with an `onSettingsChange` handler (Settings only) it renders `CapabilitySettings` under a switch.
+- `CapabilitySettings.tsx` — the `purchases` row's "Per purchase (USD)" / "Per day (USD)" fields (`min=1 max=10000`, the server's bounds), saved on blur or Enter through `PUT /capabilities/purchases/settings`.
 - `ChatComposer.tsx` — message input: text, image attach/paste/drag.
 - `ConfirmDialog.tsx` — branded async `window.confirm()` replacement, focus-trapped.
 - `ErrorBoundary.tsx` — top-level React error boundary.
 - `FormFeedback.tsx` — `ErrorAlert`/`ResultLine` shared form feedback.
 - `MarkdownMessage.tsx` — exfiltration-safe markdown renderer for assistant output (untrusted content can't inject live links/images unchecked).
+- `PaymentCardSettings.tsx` — Settings ▸ "Payment card" (owner only): the masked stored card with Delete, or the `autoComplete="off"` entry form; posts once, clears the inputs, never renders a stored number; the reason a container gives (`GET /vault/items` `available: false`, or a 409 on save) replaces the form.
 - `ProviderErrorText.tsx` — turns an API "fix pointer" into a Settings/Setup link.
 - `ProviderForm.tsx` — shared provider-choice form (Setup wizard + Settings ▸ Server).
+- `PurchaseApproval.tsx` — the `browser.checkout` approval card (Chat's `ApprovalCard`, Dashboard's `ApprovalRow`): the screenshot, Pay / To / With facts, item lines, the model's note and the notice above Approve/Deny.
 - `ServerSettings.tsx` — owner-only Server section (provider, registration toggle).
 - `ThemeToggle.tsx` — light/system/dark switch.
 - `TokenUsage.tsx` — per-message token/cache caption.
@@ -231,6 +249,8 @@ account export · admin role/tier · agent-loop security · vision/image turns �
 
 Component tests mirror their component 1:1 (`CapabilityList`, `ChatComposer`, `ConfirmDialog`, `ErrorBoundary`, `MarkdownMessage`, `ProviderErrorText`, `TokenUsage`, `UsagePanel`, `Layout`), plus `toolScreenshots.test.ts`. Page tests: `Dashboard.test.tsx`, `Settings.test.tsx`, `Setup.test.tsx`, `Chat.stop.test.tsx` (the Stop button asks the server and keeps the stream), `Chat.screenshots.test.tsx` (a turn's screenshot shows as an image and survives an approval's refetch; a reloaded thread shows the note), `Login.test.tsx` ("Create one" or the closed-registration hint, and the 403 fallback), `approvalCountdown.test.ts`, `approvalArguments.test.ts`. Service tests: `api.test.ts` (general client), `api.approvals.test.ts`, `api.refresh.test.ts` (401→refresh flow), `api.setup.test.ts`, `api.stop.test.ts`. `theme.test.tsx` (theme persistence/sync), `App.test.tsx` (routing/setup redirect). `test/` holds shared fixtures, not tests: `setup.ts` (jsdom matchMedia polyfill), `http.ts` (fetch/location doubles), `capabilities.ts` and `usage.ts` (realistic fixture bodies).
 
+Purchases (2026-09-25): `CapabilitySettings.test.tsx`, `PaymentCardSettings.test.tsx` (never renders a number, posts once, clears the inputs, keeps the form on 422, shows the container's reason from the list or a 409, names a card once, deletes with confirm), `PurchaseApproval.test.tsx` (plus a Dashboard integration case: the purchase card with Approve/Deny and no JSON block), `Chat.approvalCards.test.tsx` and `Dashboard.actCard.test.tsx` (a `browser.act` card is one sentence; the confirmation picture after Approve), `purchaseNotice.test.ts` (equal to the backend fixture), and purchase cases in `CapabilityList.test.tsx`, `Settings.test.tsx` and `approvalArguments.test.ts`.
+
 ## Docker & CI
 
 - `docker/Dockerfile.backend` — multi-stage: `dev` (hot-reload uvicorn) / `prod` (non-root, healthcheck).
@@ -247,6 +267,7 @@ Component tests mirror their component 1:1 (`CapabilityList`, `ChatComposer`, `C
 - `docs/team-handoff-2026-09-23.md` — handoff notes for the capabilities/setup-wizard work that landed on `feat/full-platform-completion`.
 - `docs/superpowers/specs/2026-09-23-capabilities-and-setup-wizard-design.md` — design doc for that work.
 - `docs/superpowers/plans/2026-09-23-capabilities-and-setup-wizard.md` — implementation plan for that work.
-- `docs/testing/headless-mac-full-test.md` — the full live test on the headless test Mac (native install, wizard, Telegram, macOS grants, every agent flow); `docs/testing/computer-control-headless-mac.md` is the low-level computer-control smoke test.
+- `docs/superpowers/specs/2026-09-25-purchases-design.md` — design and the five implementation contracts for `purchases` (the vault, `browser.act`, `browser.checkout`, the wiring, the frontend).
+- `docs/testing/headless-mac-full-test.md` — the full live test on the headless test Mac (native install, wizard, Telegram, macOS grants, every agent flow, and section 5.2 for a purchase that stops at the approval card); `docs/testing/computer-control-headless-mac.md` is the low-level computer-control smoke test.
 - `backend/alembic/README.md` — migration workflow + pre-Alembic adoption.
 - `backend/services/capabilities/README.md` — how to add a capability (five steps, referenced above).

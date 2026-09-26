@@ -252,6 +252,10 @@ class PendingApproval:
     # Why this action deserves a careful look (e.g. its arguments were
     # derived from untrusted tool output). Rendered as a warning in the UI.
     risk_note: Optional[str] = None
+    # A picture of what the card is about (browser.checkout: the checkout
+    # page; browser.act: the page with the target outlined), as a data URL, read from the executor at render time
+    # (``ToolExecutor.approval_image``) and never stored with the card.
+    image: Optional[str] = None
 
 
 @dataclass()
@@ -329,6 +333,49 @@ class TurnUsage:
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
 
 
+# The tool whose presence in a request means "Buy things for me" is on for
+# this install (tool_registry offers it only with purchases and
+# browser_control both on), and the block the system prompt then gains.
+# Kept out of SECURITY_SYSTEM_PROMPT on purpose: an install with buying
+# off sends exactly the request it sent before the feature existed, byte
+# for byte, and the hard limit on purchases stands there unqualified.
+CHECKOUT_TOOL = "browser.checkout"
+# The reserved key a checkout card's page facts live under
+# (services.tools.browser.checkout.toolkit.CARD_KEY; tool_registry names
+# it too). The facts come from the toolkit's read of the page, never from
+# the model.
+CHECKOUT_CARD_KEY = "_checkout"
+
+
+def _merchant_is_host(merchant: str, host: str) -> bool:
+    """Whether the ``merchant`` the model named is the page's host the
+    toolkit read: the same host, or its registrable domain (``example.com``
+    for ``shop.example.com``), with a scheme, a path or a leading ``www.``
+    on either side ignored."""
+
+    def _plain(value: str) -> str:
+        value = value.strip().lower()
+        value = value.split("://", 1)[-1].split("/", 1)[0].split("@")[-1].split(":")[0]
+        return value[4:] if value.startswith("www.") else value
+
+    want, shown = _plain(merchant), _plain(host)
+    return bool(want) and (shown == want or shown.endswith("." + want))
+
+
+PURCHASES_SYSTEM_PROMPT = """\
+<purchases>
+"Buy things for me" is on, so browser.checkout is offered: the one sanctioned
+purchase path, and the only exception to the hard limit above. Money moves
+only when the person approves its card, which shows the site, the amount and
+the items read from the page; the card is filled from the owner's vault,
+never typed by you. Bring the browser to the merchant's checkout page first
+(browser.read, and browser.act for delivery details), then call
+browser.checkout with the site the person named. After a completed checkout,
+tell the person what was bought and the amount, then offer a reminder
+(reminders.create) for the event or delivery date if one is on the
+confirmation page.
+</purchases>"""
+
 # Receives the turn's progress events (tool_call, tool_result, blocked,
 # pending_approval) as they happen: the SSE stream and the Telegram
 # progress lines both listen through one of these.
@@ -341,19 +388,24 @@ EventSink = Callable[[dict[str, Any]], Awaitable[None]]
 # cannot interpret as text. Everything the model sees passes through here.
 _IMAGE_DATA_URL_PREFIX = "data:image/"
 _MODEL_VIEW_MAX_INLINE = 256
+# What stands in for an image in the model's view: the first when a chat
+# channel showed it to the person, the second when none did (a picture the
+# channel does not forward), so the model never claims a picture was seen.
+IMAGE_DELIVERED = "[image captured and delivered to the user separately]"
+IMAGE_NOT_SHOWN = "[image captured but not shown to the user]"
 
 
-def redact_binary_for_model(value: Any) -> Any:
+def redact_binary_for_model(value: Any, *, placeholder: str = IMAGE_DELIVERED) -> Any:
     if isinstance(value, dict):
-        return {k: redact_binary_for_model(v) for k, v in value.items()}
+        return {k: redact_binary_for_model(v, placeholder=placeholder) for k, v in value.items()}
     if isinstance(value, list):
-        return [redact_binary_for_model(v) for v in value]
+        return [redact_binary_for_model(v, placeholder=placeholder) for v in value]
     if (
         isinstance(value, str)
         and value.startswith(_IMAGE_DATA_URL_PREFIX)
         and len(value) > _MODEL_VIEW_MAX_INLINE
     ):
-        return "[image captured and delivered to the user separately]"
+        return placeholder
     return value
 
 
@@ -668,7 +720,7 @@ def estimate_usd(
     ) / 1_000_000
 
 
-def _stored_to_pending(action: StoredAction) -> PendingApproval:
+def _stored_to_pending(action: StoredAction, image: Optional[str] = None) -> PendingApproval:
     return PendingApproval(
         action_id=action.action_id,
         tool_name=action.tool_name,
@@ -678,6 +730,7 @@ def _stored_to_pending(action: StoredAction) -> PendingApproval:
         expires_at=action.expires_at,
         conversation_id=action.conversation_id,
         risk_note=action.risk_note,
+        image=image,
     )
 
 
@@ -707,6 +760,23 @@ PRECHECK_ERROR_REASON = (
     "Could not check this action before asking for approval; refusing it."
 )
 
+# A browser.act or browser.checkout refused by its toolkit's own rules
+# before (or instead of) its approval card: at the executor's precheck, or
+# by the checkout toolkit's ``begin`` (the async bind that reads the page:
+# not HTTPS, the wrong merchant, no total, over a cap). The toolkit's rule
+# name rides along (``PrecheckRefusal.rule``), as computer_rule's does.
+BROWSER_RULE_POLICY = "browser_rule"
+PURCHASE_RULE_POLICY = "purchase_rule"
+
+# The policy a refusal answered by the bind hook (``approval_arguments`` or
+# its async form returning ``{"refused": True, ...}``) is filed under, by
+# tool. Any other tool's bind refusal is a precheck error: nothing else is
+# expected to refuse there.
+_BIND_REFUSAL_POLICIES: dict[str, str] = {
+    "browser.act": BROWSER_RULE_POLICY,
+    "browser.checkout": PURCHASE_RULE_POLICY,
+}
+
 # The executor's refusal "state" -> the policy it is recorded under.
 _CAPABILITY_POLICY_BY_STATE = {
     "off": CAPABILITY_OFF_POLICY,
@@ -730,11 +800,12 @@ def _capability_refusal(tool_name: str, result: Any) -> Optional[tuple[str, str]
     key = result.get("capability")
     if not isinstance(key, str) or not key:
         return None
-    # Deferred: tool_registry imports this module.
-    from services.agent.tool_registry import capability_of_tool
+    # Deferred: tool_registry imports this module. Every capability the
+    # tool needs counts (browser.checkout: purchases and browser_control).
+    from services.agent.tool_registry import capabilities_of_tool
 
-    cap = capability_of_tool(tool_name)
-    if cap is None or cap.key != key:
+    cap = next((c for c in capabilities_of_tool(tool_name) if c.key == key), None)
+    if cap is None:
         return None
     state = result.get("state")
     policy = (
@@ -1072,6 +1143,26 @@ class ToolExecutor:
         was made from). Must not run the tool or touch anything."""
         return arguments
 
+    async def approval_arguments_async(
+        self, tool_name: str, arguments: dict[str, Any], user_id: str, *, task_id: str
+    ) -> dict[str, Any]:
+        """``approval_arguments`` for a card that must show live facts
+        (browser.checkout reads the page for the amount and the merchant,
+        and keeps its screenshot). The runtime awaits this when the
+        executor has it. A ``{"refused": True, "rule": ..., "error": ...}``
+        answer means the call gets no card: the runtime files it like a
+        precheck refusal and shows the model the answer as the result."""
+        return self.approval_arguments(tool_name, arguments, user_id)
+
+    def approval_image(
+        self, tool_name: str, arguments: Mapping[str, Any], user_id: str
+    ) -> Optional[str]:
+        """A picture for this call's card (browser.checkout: the checkout
+        page the card was made from; browser.act: the page with the target
+        outlined) as an image data URL, or None. Read at
+        render time so the picture is never stored with the card."""
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Runtime
@@ -1368,6 +1459,8 @@ class AgentRuntime:
         messages: list[dict[str, Any]],
         memory_block: Optional[str] = None,
         permissions_text: Optional[str] = None,
+        *,
+        purchases: bool = False,
     ) -> list[dict[str, Any]]:
         """Ensure the security system prompt heads the message list.
 
@@ -1381,6 +1474,10 @@ class AgentRuntime:
         so the model explains a switched-off ability instead of guessing.
         It goes before the memory block: it changes only when settings do,
         which keeps the cached prompt prefix stable across turns.
+
+        ``purchases`` (the checkout tool is offered this turn) adds the
+        ``<purchases>`` block right after the policy, before the date: with
+        buying off the system message is the pre-purchases one, unchanged.
         """
         # The model has no clock. Day granularity is enough for "next Friday"
         # and keeps the cached prompt prefix identical across a whole day;
@@ -1391,7 +1488,8 @@ class AgentRuntime:
             + (today.tzname() or "local") + ")</today>"
         )
         tail = (
-            f"\n\n{today_line}"
+            (f"\n\n{PURCHASES_SYSTEM_PROMPT}" if purchases else "")
+            + f"\n\n{today_line}"
             + (f"\n\n{permissions_text}" if permissions_text else "")
             + (f"\n\n{memory_block}" if memory_block else "")
         )
@@ -1548,7 +1646,9 @@ class AgentRuntime:
             + (closing or (BROWSER_CLOSING_LINE if task_facts else GENERIC_CLOSING_LINE))
         )
 
-    def approved_call_message(self, tool_name: str, result: Any) -> str:
+    def approved_call_message(
+        self, tool_name: str, result: Any, *, image_delivered: bool = True
+    ) -> str:
         """The user-role message the turn resumed after an approval starts
         from (api/routes/agent._resume_after_approval): the approved call's
         result in the same fenced envelope a tool round's results come back
@@ -1559,10 +1659,18 @@ class AgentRuntime:
         row: a history that ends on an assistant turn reads to a provider as
         a continuation of the model's own words (Gemini answers one with an
         empty completion), and it puts the result outside the envelope that
-        marks it as data."""
+        marks it as data.
+
+        ``image_delivered`` is whether the channel forwards the result's
+        picture (a checkout's confirmation page) to the person; when it
+        does not, the placeholder says so, and the model cannot tell them
+        to look at a picture they never got."""
         closing = DESKTOP_RESUME_CLOSING_LINE if tool_name == "desktop.act" else None
+        shown = redact_binary_for_model(
+            result, placeholder=IMAGE_DELIVERED if image_delivered else IMAGE_NOT_SHOWN
+        )
         wrapped = self._wrap_tool_results(
-            [{"tool_call_id": "approved", "name": tool_name, "result": result}],
+            [{"tool_call_id": "approved", "name": tool_name, "result": shown}],
             closing=closing,
         )
         return (
@@ -1678,7 +1786,7 @@ class AgentRuntime:
 
     # Longest executor-written card sentence kept (the toolkit's are far
     # shorter; this only bounds a misbehaving executor).
-    _APPROVAL_REASON_CHARS = 300
+    _APPROVAL_REASON_CHARS = 600
 
     def _approval_reason(
         self, tool_name: str, arguments: dict[str, Any], user_id: str
@@ -1703,25 +1811,108 @@ class AgentRuntime:
             return generic
         return sentence.strip()[: self._APPROVAL_REASON_CHARS]
 
-    def _approval_arguments(
-        self, tool_name: str, arguments: dict[str, Any], user_id: str
+    async def _approval_arguments(
+        self, tool_name: str, arguments: dict[str, Any], user_id: str, *, task_id: str
     ) -> dict[str, Any]:
         """The arguments an approval card stores: the executor's copy when it
-        ties the card to something (``ToolExecutor.approval_arguments``),
-        else the call's own. A hook that fails or answers nothing usable
-        stores the call's own; an executor that needs the tie then refuses
-        the approved call (fail closed), so this never blocks parking."""
+        ties the card to something (``ToolExecutor.approval_arguments``, or
+        its async form when the executor has one: a browser.checkout card
+        is built from the live page), else the call's own. A hook that
+        fails or answers nothing usable stores the call's own; an executor
+        that needs the tie then refuses the approved call (fail closed), so
+        this never blocks parking. A refusal answer (``{"refused": True}``)
+        is returned as is; ``_bind_refusal`` files it."""
+        bind_async = getattr(self._executor, "approval_arguments_async", None)
         bind = getattr(self._executor, "approval_arguments", None)
-        if not callable(bind):
-            return arguments
         try:
-            bound = bind(tool_name, arguments, user_id)
+            if callable(bind_async):
+                bound = await bind_async(tool_name, arguments, user_id, task_id=task_id)
+            elif callable(bind):
+                bound = bind(tool_name, arguments, user_id)
+            else:
+                return arguments
         except Exception as exc:
             logger.warning(
                 "approval_arguments_failed", tool=tool_name, error_type=type(exc).__name__
             )
             return arguments
         return bound if isinstance(bound, dict) else arguments
+
+    @staticmethod
+    def _card_risk_note(
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        card_arguments: Mapping[str, Any],
+        taint_reason: Optional[str],
+        taint: TaintTracker,
+    ) -> Optional[str]:
+        """The warning a card carries when its arguments came from untrusted
+        content, or None.
+
+        A browser.checkout card is the normal exception: the model read the
+        shop's page and then named that shop as ``merchant``, so the taint
+        tracker sees the host in an untrusted result. The checkout toolkit
+        has already checked that merchant against the page's own origin
+        (``_checkout.host``, read from the page, not from the model), and
+        the card is built from those facts, so when the two agree there is
+        nothing to warn about. A merchant that does not match the page, or
+        a note copied from the page, gets one plain sentence instead of the
+        security jargon other tools' cards carry."""
+        if not taint_reason:
+            return None
+        if tool_name == CHECKOUT_TOOL:
+            facts = card_arguments.get(CHECKOUT_CARD_KEY)
+            host = facts.get("host") if isinstance(facts, Mapping) else None
+            merchant = arguments.get("merchant")
+            if isinstance(host, str) and isinstance(merchant, str) and _merchant_is_host(merchant, host):
+                rest = {k: v for k, v in arguments.items() if k != "merchant"}
+                if taint.taint_reason(rest) is None:
+                    return None
+                return (
+                    "Part of this request came from a web page. Check the site and the "
+                    "amount on the card before approving."
+                )
+            return "The site name came from a web page; check it matches where you meant to buy."
+        return (
+            f"Heads up: this request was shaped by external content — {taint_reason}. "
+            "Check the recipient/target below before approving."
+        )
+
+    @staticmethod
+    def _bind_refusal(tool_name: str, bound: Mapping[str, Any]) -> Optional[PrecheckRefusal]:
+        """The refusal the bind hook answered instead of card arguments
+        (``{"refused": True, "rule": ..., "error": ...}``: the checkout
+        toolkit found the page not HTTPS, the wrong merchant, no total, an
+        amount over a cap), or None when *bound* is a card's arguments. Filed
+        like a precheck refusal: the tool's own policy, the rule, and the
+        answer as the model's result."""
+        if bound.get("refused") is not True:
+            return None
+        rule = bound.get("rule")
+        return PrecheckRefusal(
+            reason=str(bound.get("error") or f"{tool_name} was refused."),
+            policy=_BIND_REFUSAL_POLICIES.get(tool_name, PRECHECK_ERROR_POLICY),
+            result=dict(bound),
+            rule=rule if isinstance(rule, str) else "",
+        )
+
+    def _approval_image(
+        self, tool_name: str, arguments: Mapping[str, Any], user_id: str
+    ) -> Optional[str]:
+        """The picture a card shows (``ToolExecutor.approval_image``), when
+        the executor has one and it is an image data URL; None otherwise. A
+        hook that fails costs the card its picture, never the card."""
+        picture = getattr(self._executor, "approval_image", None)
+        if not callable(picture):
+            return None
+        try:
+            image = picture(tool_name, arguments, user_id)
+        except Exception as exc:
+            logger.warning("approval_image_failed", tool=tool_name, error_type=type(exc).__name__)
+            return None
+        if isinstance(image, str) and image.startswith(_IMAGE_DATA_URL_PREFIX):
+            return image
+        return None
 
     def _precheck_approval(
         self, tool_name: str, arguments: dict[str, Any], user_id: str
@@ -1884,7 +2075,12 @@ class AgentRuntime:
         # Everything below, the computer toolkit's own checks included,
         # answers "stopped?" for this turn's mark.
         with agent_cancel.watching(user_id, stop_mark):
-            messages = self._with_system_prompt(messages, memory_block, permissions_text)
+            messages = self._with_system_prompt(
+                messages,
+                memory_block,
+                permissions_text,
+                purchases=any(t.name == CHECKOUT_TOOL for t in tools or []),
+            )
             turn_provider, turn_model = await self._select_provider(llm_provider, llm_model)
             if usage_sink is not None:
                 usage_sink.provider, usage_sink.model = turn_provider, turn_model
@@ -2252,6 +2448,18 @@ class AgentRuntime:
                     # owner presses Stop); the same rules run again when an
                     # approved call executes.
                     precheck = self._precheck_approval(tc.name, tc.arguments, user_id)
+                    # The card stores what the executor ties it to (a
+                    # desktop.act: the screen it was made from; a
+                    # browser.checkout: the page's facts, read now), and
+                    # its sentence is read from that same copy. A bind
+                    # that refuses instead (the checkout page failed a
+                    # rule) is filed exactly as a precheck refusal is.
+                    card_arguments: dict[str, Any] = tc.arguments
+                    if precheck is None:
+                        card_arguments = await self._approval_arguments(
+                            tc.name, tc.arguments, user_id, task_id=task_id
+                        )
+                        precheck = self._bind_refusal(tc.name, card_arguments)
                     if precheck is not None and precheck.rule == _PRECHECK_STOPPED_RULE:
                         # The tool saw the user's stop before the check just
                         # above did: a stop, never a security block.
@@ -2305,13 +2513,9 @@ class AgentRuntime:
                         tool_results.append(record)
                         continue
 
-                    # The card stores what the executor ties it to (a
-                    # desktop.act: the screen it was made from), and its
-                    # sentence is read from that same copy. From storing it
-                    # to its audit row, nothing stops half-way: a stored
-                    # card can be approved, so it must not be left
-                    # unaudited by a chat's /stop (_RunsToEnd).
-                    card_arguments = self._approval_arguments(tc.name, tc.arguments, user_id)
+                    # From storing the card to its audit row, nothing stops
+                    # half-way: a stored card can be approved, so it must
+                    # not be left unaudited by a chat's /stop (_RunsToEnd).
                     section = _RunsToEnd()
                     # A failure after the cancel landed ends the turn as
                     # stopped, not as an error sent after the stop.
@@ -2326,11 +2530,8 @@ class AgentRuntime:
                                 ttl_minutes=self._approval_ttl_minutes,
                                 # Tell the human WHY this one deserves scrutiny when
                                 # its arguments came from untrusted content.
-                                risk_note=(
-                                    f"Heads up: this request was shaped by external content — {taint_reason}. "
-                                    "Check the recipient/target below before approving."
-                                    if taint_reason
-                                    else None
+                                risk_note=self._card_risk_note(
+                                    tc.name, tc.arguments, card_arguments, taint_reason, taint
                                 ),
                             )
                         )
@@ -2338,12 +2539,16 @@ class AgentRuntime:
                             section.finish()
                             skipped_calls = list(llm_response.tool_calls[index:])
                             break
-                        pending_approvals.append(_stored_to_pending(stored))
+                        pending = _stored_to_pending(
+                            stored,
+                            image=self._approval_image(stored.tool_name, stored.arguments, user_id),
+                        )
+                        pending_approvals.append(pending)
                         # Emit the SAME shape the REST contract uses
                         # (PendingApprovalOut), so a streamed approval card
-                        # renders complete — tool name, arguments, reason and
-                        # risk note — instead of the client having to refetch
-                        # to learn what it is being asked to approve.
+                        # renders complete — tool name, arguments, reason,
+                        # risk note and picture — instead of the client having
+                        # to refetch to learn what it is being asked to approve.
                         await section.run(
                             emit(
                                 {
@@ -2356,6 +2561,7 @@ class AgentRuntime:
                                         "expires_at": stored.expires_at,
                                         "conversation_id": stored.conversation_id,
                                         "risk_note": stored.risk_note,
+                                        "image": pending.image,
                                     },
                                 }
                             )
@@ -3023,6 +3229,7 @@ class AgentRuntime:
                         "expires_at": pa.expires_at,
                         "conversation_id": pa.conversation_id,
                         "risk_note": pa.risk_note,
+                        "image": pa.image,
                     }
                     for pa in response.pending_approvals
                 ],
@@ -3038,9 +3245,13 @@ class AgentRuntime:
     # ------------------------------------------------------------------
 
     async def list_pending_approvals(self, user_id: str) -> list[PendingApproval]:
-        """Return all live (unexpired, undecided) approvals for the user."""
+        """Return all live (unexpired, undecided) approvals for the user,
+        each with its picture when the executor still holds one."""
         stored = await self._approvals.list_pending(user_id)
-        return [_stored_to_pending(a) for a in stored]
+        return [
+            _stored_to_pending(a, image=self._approval_image(a.tool_name, a.arguments, user_id))
+            for a in stored
+        ]
 
     async def deny_action(self, action_id: str, user_id: str) -> dict[str, Any]:
         """Drop a pending action without executing it."""

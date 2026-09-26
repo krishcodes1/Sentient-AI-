@@ -870,3 +870,86 @@ async def test_permission_adapter_blocks_browser_read_until_the_owner_turns_it_o
         capability_gate=_gate("browser_control", playwright_installed=True, browser_channel="chrome")
     )
     assert await on.check("u1", "browser.read", {}) == "approved"
+
+
+# ── browser.act / browser.checkout (spec 2026-09-25 purchases) ───────────
+
+
+class RecordingCheckoutToolkit:
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    async def precheck(self, params, *, user_id):
+        return None
+
+    async def begin(self, params, *, user_id, task_id):
+        return {**params, "_checkout": {"checkout_id": "c1"}}
+
+    def describe(self, arguments, *, user_id):
+        return "Pay $1.00 to x.example (1 item) with Card ····0000"
+
+    def approval_image(self, arguments, *, user_id):
+        return None
+
+    async def run(self, arguments, *, user_id, task_id, approved):
+        self.calls.append((arguments, user_id, task_id, approved))
+        return {"ok": True}
+
+
+def _browser_gate(*keys):
+    return _gate(*keys, playwright_installed=True, browser_channel="chrome", host_platform="windows")
+
+
+def test_checkout_is_offered_only_when_both_capabilities_are_on():
+    assert "browser.checkout" not in names(build_tools([], enabled_capabilities=frozenset({"browser_control"})))
+    assert "browser.checkout" not in names(build_tools([], enabled_capabilities=frozenset({"purchases"})))
+    both = build_tools([], enabled_capabilities=frozenset({"browser_control", "purchases"}))
+    checkout = next(t for t in both if t.name == "browser.checkout")
+    assert checkout.permission_tier == "approval"
+    assert "browser.act" not in names(build_tools([], enabled_capabilities=frozenset({"browser_control"})))
+    assert "browser.act" in names(build_tools([], enabled_capabilities=frozenset({"browser_control", "browser_act"})))
+
+
+@pytest.mark.asyncio
+async def test_executor_refuses_checkout_when_either_capability_is_off():
+    kit = RecordingCheckoutToolkit()
+    purchases_off = ConnectorToolExecutor(
+        session_factory=None, capability_gate=_browser_gate("browser_control"), checkout_toolkit=kit
+    )
+    result = await purchases_off.execute("browser.checkout", {"merchant": "x.example"}, user_id="u1", approved=True)
+    assert result["ok"] is False and result["capability"] == "purchases" and result["state"] == "off"
+    assert result["error"] == capability_registry.get("purchases").when_denied
+    browser_off = ConnectorToolExecutor(
+        session_factory=None, capability_gate=_browser_gate("purchases"), checkout_toolkit=kit
+    )
+    result = await browser_off.execute("browser.checkout", {"merchant": "x.example"}, user_id="u1", approved=True)
+    assert result["ok"] is False and result["capability"] == "browser_control" and result["state"] == "off"
+    assert kit.calls == []
+
+
+@pytest.mark.asyncio
+async def test_executor_runs_an_approved_checkout_when_both_are_on():
+    kit = RecordingCheckoutToolkit()
+    ex = ConnectorToolExecutor(
+        session_factory=None,
+        capability_gate=_browser_gate("browser_control", "purchases"),
+        checkout_toolkit=kit,
+    )
+    unapproved = await ex.execute("browser.checkout", {"merchant": "x.example"}, user_id="u1", task_id="t9")
+    assert unapproved["ok"] is False and unapproved["requires_approval"] is True
+    result = await ex.execute("browser.checkout", {"merchant": "x.example"}, user_id="u1", approved=True, task_id="t9")
+    assert result == {"ok": True}
+    assert kit.calls == [({"merchant": "x.example"}, "u1", "t9", True)]
+
+
+@pytest.mark.asyncio
+async def test_permission_adapter_blocks_checkout_until_both_are_on():
+    off = RuntimePermissionAdapter(capability_gate=_browser_gate("browser_control"))
+    assert await off.check("u1", "browser.checkout", {}) == "blocked"
+    assert await off.get_policy_name("u1", "browser.checkout") == CAPABILITY_OFF_POLICY
+    on = RuntimePermissionAdapter(capability_gate=_browser_gate("browser_control", "purchases"))
+    assert await on.check("u1", "browser.checkout", {}) == "requires_approval"
+    # Buying on does not switch on acting: browser.act is its own switch.
+    assert await on.check("u1", "browser.act", {}) == "blocked"
+    acting = RuntimePermissionAdapter(capability_gate=_browser_gate("browser_control", "browser_act"))
+    assert await acting.check("u1", "browser.act", {}) == "requires_approval"

@@ -421,6 +421,11 @@ class PendingApprovalOut(BaseModel):
     # Warning surfaced on the approval card when the action's arguments were
     # shaped by untrusted external content.
     risk_note: Optional[str] = None
+    # The picture a browser.checkout or browser.act card shows (a masked
+    # screenshot of the page, an act's target outlined, as a data URL),
+    # served from the executor's memory while the card is pending and never
+    # stored; None for every other card.
+    image: Optional[str] = None
 
 
 class BlockedActionOut(BaseModel):
@@ -447,9 +452,17 @@ class ApprovalDecisionRequest(BaseModel):
 
 
 class ApprovalDecisionResponse(BaseModel):
+    """The decision's outcome. ``images`` are the pictures the approved
+    call itself took (a checkout's confirmation page), for the live web
+    view only, as a turn's ``images`` are; ``message_id`` is the transcript
+    row that records the decision, which they belong under (its saved
+    tool call keeps the placeholder, spec §9)."""
+
     action_id: str
     approved: bool
     result: Optional[Dict[str, Any]] = None
+    images: list[TurnImageOut] = []
+    message_id: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -965,6 +978,7 @@ async def send_message(
                 expires_at=pa.expires_at,
                 conversation_id=pa.conversation_id,
                 risk_note=pa.risk_note,
+                image=pa.image,
             )
             for pa in agent_response.pending_approvals
         ],
@@ -1285,6 +1299,7 @@ async def list_pending_approvals(
             expires_at=p.expires_at,
             conversation_id=p.conversation_id,
             risk_note=p.risk_note,
+            image=p.image,
         )
         for p in pending
     ]
@@ -1490,10 +1505,18 @@ async def _resume_after_approval(
             for r in rows
             if r.id != approved.row_id
         ]
+        # The model is told a picture reached the person only when the
+        # channel forwards one (_channel_image: the web chat and Telegram
+        # deliver the same set, from _apply_decision).
         history.append(
             {
                 "role": "user",
-                "content": runtime.approved_call_message(approved.tool_name, approved.result),
+                "content": runtime.approved_call_message(
+                    approved.tool_name,
+                    approved.result,
+                    image_delivered=_channel_image(approved.tool_name, approved.result)
+                    is not None,
+                ),
             }
         )
     else:
@@ -1661,6 +1684,17 @@ async def _apply_decision(
         if recorded is not None
         else None
     )
+    # The approved call's own pictures (a checkout's confirmation page, a
+    # 3-D Secure page it stopped at) go to the person first, whatever the
+    # resumed turn adds: the transcript row keeps only the placeholder, so
+    # this is the one time they can be delivered. The web gets them keyed
+    # to that row; a channel gets them as photos.
+    own_call = [{"name": str(result.get("tool", "")), "result": result.get("result")}]
+    own_photos = _channel_photos(own_call, _account_mode(own_call))
+    result["assistant_notes"] = {"images": own_photos}
+    if recorded is not None:
+        result["decision_images"] = _turn_images(own_call)
+        result["decision_message_id"] = str(recorded.id)
     try:
         resumed = await _resume_after_approval(
             mcp_catalog,
@@ -1692,7 +1726,7 @@ async def _apply_decision(
             result["assistant_notes"] = {
                 "pending_approvals": resumed.pending_approvals,
                 "blocked": resumed.blocked,
-                "images": resumed.images,
+                "images": (own_photos + resumed.images)[:MAX_CHANNEL_IMAGES],
             }
     except Exception as exc:
         logger.warning(
@@ -1701,7 +1735,7 @@ async def _apply_decision(
             error_type=type(exc).__name__,
             error=str(exc)[:200],
         )
-        result["assistant_notes"] = {"error": resume_failure_text(exc)}
+        result["assistant_notes"] = {"error": resume_failure_text(exc), "images": own_photos}
         # The calls the turn ran before failing (a desktop.observe) and the
         # tokens it billed close the turn in the transcript, as a message
         # turn's failure does (build_chat_applier); without the row they
@@ -1929,6 +1963,13 @@ def _channel_caption(name: str, result: dict[str, Any]) -> str:
     needs = result.get("needs_human")
     if isinstance(needs, dict) and needs.get("detail"):
         return str(needs["detail"])
+    if name == "browser.checkout":
+        # From the toolkit's facts: the host it paid on and the amount it
+        # read off the page, never the model's words.
+        merchant, amount = result.get("merchant"), result.get("amount")
+        if result.get("ok") is True and isinstance(merchant, str) and isinstance(amount, str):
+            return f"Order confirmation on {merchant}: ${amount}"
+        return "The page after the order was sent"
     return str(
         result.get("title")
         or result.get("final_url")
@@ -1981,6 +2022,12 @@ def _image_source(name: str, result: dict[str, Any]) -> Optional[str]:
             host = tool_call_facts({"url": where.get(key)}).get("host")
             if host:
                 return host
+    # A checkout names the host it paid on (read from the page), no URL.
+    merchant = result.get("merchant")
+    if name == "browser.checkout" and isinstance(merchant, str):
+        host = tool_call_facts({"url": f"https://{merchant}/"}).get("host")
+        if host:
+            return host
     app = result.get("app")
     if name.startswith("desktop.") and isinstance(app, str) and _IMAGE_APP_NAME.fullmatch(app):
         return app
@@ -2253,11 +2300,19 @@ async def decide_approval(
     result.pop("assistant_reply", None)
     result.pop("assistant_turn", None)
     result.pop("assistant_notes", None)
+    images = result.pop("decision_images", None) or []
+    message_id = result.pop("decision_message_id", None)
+    # The pictures travel once, checked, in ``images``; the result keeps
+    # the placeholder, as the transcript row and the model's view do.
+    if "result" in result:
+        result["result"] = redact_binary_for_model(result["result"])
 
     return ApprovalDecisionResponse(
         action_id=action_id,
         approved=body.approved,
         result=result,
+        images=[TurnImageOut(**image) for image in images],
+        message_id=message_id,
     )
 
 

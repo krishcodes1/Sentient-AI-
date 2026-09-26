@@ -5,9 +5,13 @@ that can afford to read everything. Ours cannot. The outline is what the
 model sees after *every* action, so each line costs tokens on each step,
 and each line is untrusted page content. This module makes the page
 small (wrappers, off-viewport nodes and redundant name-from-content text
-go), safe (password / one-time-code / cc-* values and anything the
+go), safe (password / one-time-code / card-field values and anything the
 toolkit typed are redacted; cross-origin frames become one line) and
 navigable (``[ref=eN]`` survives untouched so ``aria-ref=`` resolves).
+Which fields hold a card is decided by ``checkout.markers``, the one
+classifier the checkout, the screenshot mask and browser.act share; a
+typed secret made of digits (a card number, a CVC) is redacted in every
+grouping a page can print it (``redact``).
 
 What Playwright 1.63 gives us, verified against the bundled renderer:
 ``[ref=eN]`` (``fKeN`` inside frames -- and on the *main* frame after the
@@ -34,6 +38,8 @@ from urllib.parse import quote, quote_plus, urlsplit, urlunsplit
 
 import structlog
 
+from services.tools.browser.checkout import markers
+
 logger = structlog.get_logger(__name__)
 
 DEFAULT_LIMIT_CHARS = 8000
@@ -44,8 +50,14 @@ FIND_MAX_BLOCKS = 20
 FACTS_TIMEOUT_S = 3.0
 # A typed secret shorter than this would redact every occurrence of one
 # or two characters across the page; the toolkit only ever adds whole
-# passwords and whole OTP codes.
+# passwords, whole OTP codes and whole card values.
 _MIN_SECRET_CHARS = 3
+# A digit-only secret this long is a card number: it is redacted in every
+# grouping a page prints it ("4242 4242 4242 4242", "4242-4242-…"); a
+# shorter one (a CVC, an expiry as MMYY) only as a whole digit run, so
+# "987" inside an order id is not taken for the security code.
+_PAN_MIN_DIGITS = 12
+_DIGIT_GAP = r"[\s\-.\u00a0\u2007\u202f]*"
 # What JavaScript's encodeURIComponent / encodeURI leave unescaped beyond
 # ASCII letters, digits and ``-_.`` (which ``quote`` never escapes).
 _JS_URI_COMPONENT_SAFE = "!~*'()"
@@ -83,10 +95,8 @@ _WRAPPER_ROLES = frozenset({"generic", "none", "presentation"})
 _CONTEXT_ROLES = ("row", "listitem", "article")
 # Fallback when page facts are unavailable or a site labels a field
 # without the autocomplete attribute: the name alone is enough to redact.
-_SECRET_NAME_RE = re.compile(
-    r"(password|passcode|one[- ]time|verification code|security code|card number|cvv|cvc)",
-    re.IGNORECASE,
-)
+# The card-field half of the rule is the checkout's own (markers).
+_SECRET_NAME_RE = markers.SECRET_NAME_RE
 
 _LINE_RE = re.compile(r"^(?P<indent> *)- (?P<body>.*)$")
 _KEY_RE = re.compile(
@@ -107,14 +117,10 @@ _IFRAME_FACTS_JS = """el => {
   } catch (e) {}
   return { same, origin };
 }"""
-_FIELD_FACTS_JS = """el => {
-  const type = (el.type || '').toLowerCase();
-  const ac = (el.getAttribute('autocomplete') || '').toLowerCase();
-  if (type === 'password') return 'password';
-  if (ac === 'one-time-code') return 'one-time-code';
-  if (ac.startsWith('cc-')) return ac;
-  return null;
-}"""
+# What kind of secret a field holds, from its live attributes and labels:
+# password, one-time-code, or a cc-* token for a card field found by its
+# autocomplete token or by what the site calls it (markers.FIELD_KIND_JS).
+_FIELD_FACTS_JS = markers.FIELD_KIND_JS
 
 
 @dataclass(frozen=True)
@@ -136,6 +142,10 @@ class PageFacts:
     viewport: tuple[int, int] = DEFAULT_VIEWPORT
     external_frames: Optional[Mapping[str, str]] = None  # ref -> origin
     secret_fields: Optional[Mapping[str, str]] = None  # ref -> kind
+    # field ref -> the words on the default button of the field's form
+    # (what a submit through that field sends it with); the write tier's
+    # purchase rule reads it before any card is made.
+    form_buttons: Optional[Mapping[str, str]] = None
 
 
 UNKNOWN_FACTS = PageFacts()
@@ -272,16 +282,53 @@ def _is_sr_only(node: _Node) -> bool:
     return (w <= 1 and h <= 1) or w == 0 or h == 0 or x + w <= 0
 
 
-def _redaction_needles(secrets: Sequence[str]) -> list[str]:
-    """Every rendered form a secret can take in the YAML: as typed, JSON-
-    escaped inside a quoted name (``"`` and ``\\``), and percent-encoded
-    in a ``/url`` value. Longest first so a shorter secret never splits a
-    longer one's replacement."""
-    needles: set[str] = set()
+@dataclass(frozen=True)
+class Needles:
+    """Every form a secret can take in the YAML, ready to apply: literal
+    needles (as typed, JSON-escaped inside a quoted name, percent-encoded
+    in a ``/url`` value), longest first so a shorter secret never splits a
+    longer one's replacement, plus one pattern per digit-only secret
+    (``_digit_pattern``)."""
+
+    literals: tuple[str, ...]
+    patterns: tuple["re.Pattern[str]", ...]
+
+    def apply(self, value: str, replacement: str = REDACTED) -> str:
+        for needle in self.literals:
+            if needle in value:
+                value = value.replace(needle, replacement)
+        for pattern in self.patterns:
+            value = pattern.sub(replacement, value)
+        return value
+
+
+def _digit_pattern(secret: str) -> "re.Pattern[str]":
+    """A digit-only secret as a pattern: a card number matches with any
+    spaces, dashes or dots between its digits; anything shorter matches
+    as a whole digit run only. Neither matches inside a longer run of
+    digits, which would be a different number."""
+    if len(secret) >= _PAN_MIN_DIGITS:
+        body = _DIGIT_GAP.join(secret)
+    else:
+        body = re.escape(secret)
+    return re.compile(rf"(?<!\d){body}(?!\d)")
+
+
+def _redaction_needles(secrets: Sequence[str]) -> Needles:
+    literals: set[str] = set()
+    patterns: list["re.Pattern[str]"] = []
     for secret in secrets:
         if len(secret) < _MIN_SECRET_CHARS:
             continue
-        needles.update(
+        if secret.isdigit():
+            patterns.append(_digit_pattern(secret))
+            continue
+        # A card number a page shows grouped ("4242 4242 4242 4242" read
+        # off a secret field) is the same number in any other grouping.
+        digits = re.sub(r"[\s\-.]", "", secret)
+        if digits.isdigit() and len(digits) >= _PAN_MIN_DIGITS:
+            patterns.append(_digit_pattern(digits))
+        literals.update(
             (
                 secret,
                 json.dumps(secret, ensure_ascii=False)[1:-1],
@@ -292,16 +339,21 @@ def _redaction_needles(secrets: Sequence[str]) -> list[str]:
                 quote(secret, safe=_JS_URI_SAFE),  # encodeURI
             )
         )
-    return sorted(needles, key=len, reverse=True)
+    return Needles(tuple(sorted(literals, key=len, reverse=True)), tuple(patterns))
 
 
-def _redact_text(value: Optional[str], needles: Sequence[str]) -> Optional[str]:
+def redact(text: str, secrets: Sequence[str], replacement: str = REDACTED) -> str:
+    """*text* with every typed secret replaced, in every form the outline
+    redacts it in. The one function a toolkit uses on page text it returns
+    (a confirmation, a title, a label), so the outline and the rest of a
+    tool result hide the same things."""
+    return _redaction_needles(secrets).apply(text, replacement)
+
+
+def _redact_text(value: Optional[str], needles: Needles) -> Optional[str]:
     if value is None:
         return None
-    for needle in needles:
-        if needle in value:
-            value = value.replace(needle, REDACTED)
-    return value
+    return needles.apply(value)
 
 
 def _has_value(node: _Node) -> bool:
@@ -343,7 +395,7 @@ def _field_secrets(nodes: list[_Node], facts: PageFacts) -> list[str]:
     return values
 
 
-def _secret_needles(tree: list[_Node], secrets: Sequence[str], facts: PageFacts) -> list[str]:
+def _secret_needles(tree: list[_Node], secrets: Sequence[str], facts: PageFacts) -> Needles:
     return _redaction_needles([*secrets, *_field_secrets(tree, facts)])
 
 
@@ -379,7 +431,7 @@ def _prune(
     nodes: list[_Node],
     *,
     account_mode: bool,
-    needles: Sequence[str],
+    needles: Needles,
     facts: PageFacts,
 ) -> list[_Node]:
     """*needles* comes from ``_secret_needles``: typed secrets plus the

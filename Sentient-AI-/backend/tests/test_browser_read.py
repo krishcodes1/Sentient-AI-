@@ -400,7 +400,10 @@ async def test_read_tier_click_on_a_sign_up_button_is_refused(kit, fakesite):
     ref = ref_of(page, '- button "Sign up"')
     result = await run(kit, "click", ref=ref)
     assert result["ok"] is False
-    assert result["error"] == "This looks like a consequential action; use browser.act"
+    assert result["error"] == (
+        "Reading can't click that. Ask to fill in forms and click (needs 'Fill in forms and "
+        "click on sites' in Permissions)."
+    )
     assert result["consequential"]
     assert (await run(kit, "snapshot"))["url"].endswith("/post")  # nothing was submitted
 
@@ -782,6 +785,32 @@ async def test_find_and_text_redact_typed_secrets_everywhere(kit, fakesite):
     ):
         assert result["ok"] is True
         assert "s3cr3t-token" not in json.dumps(result)
+
+
+@pytest.mark.asyncio
+async def test_text_and_title_redact_a_typed_card_number_in_any_grouping(kit, fakesite):
+    """The checkout puts the card number on the redaction list as digits;
+    a page that echoes it grouped its own way (dots, spaces, dashes) must
+    show none of it through ``text``, the title in ``tabs`` or ``find``,
+    the way the outline hides it (snapshot.redact, not a plain replace)."""
+    _toolkit, sessions = kit
+    await run(kit, "open", url=fakesite.url("/"))
+    session = await sessions.get("u1", mode="account", task_id="t1")
+    session.typed_secrets.append("4242424242424242")
+    page = await session.page()
+    await page.set_content(
+        "<title>Receipt for card 4242.4242.4242.4242</title><main><p>Charged card "
+        "4242 4242 4242 4242 (also written 4242-4242-4242-4242); order 1987</p></main>"
+    )
+    for result in (
+        await run(kit, "text"),
+        await run(kit, "find", text="Charged"),
+        await run(kit, "tabs"),
+    ):
+        assert result["ok"] is True
+        shown = json.dumps(result)
+        assert "4242 4242" not in shown and "4242.4242" not in shown and "4242-4242" not in shown
+        assert "order 1987" in shown or "Receipt" in shown  # the rest of the page is intact
 
 
 @pytest.mark.asyncio

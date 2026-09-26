@@ -2,12 +2,59 @@
 
 Three gates: ``check_url`` on every model-supplied URL before a goto; a
 ``context.route`` handler that re-checks every top-level navigation the
-browser makes on its own (redirects, links) and aborts non-GET top-level
-navigations from read-tier actions (not the person's own, while a handoff
+browser makes on its own (redirects, links) and aborts non-GET navigations
+of any frame from read-tier actions (not the person's own, while a handoff
 is pending: ``EgressState.human_driving``); and ``consequential(page, ref)``, the
-live-page facts that decide whether a click is a read. Loopback is
+live-page facts that decide whether a click is a read. Outside a write
+window no frame may send a form: a field change whose page script submits
+the form (a radio that sends on change, a hidden frame's POST) is stopped
+here, and while a browser.act change runs (``EgressState.changing``) no
+frame may open an order address (``markers.ORDER_ACTION_RE``) either,
+directly or through a redirect. Outside a write window (browser.read,
+and the person's handoff too) no frame opens an order step's address
+(``markers.ORDER_STEP_RE``: a GET to /place-order can be the order), no
+frame sends anything to an order address, and no page script sends a
+request to one (POST /orders, /pay, /buy...): a script button whose
+``fetch()`` places the order, a page that orders on load or when
+scrolled to, and a page that sends its own order form while the person
+holds it are all stopped here whatever their words. Only an approved
+act or checkout (``write_allowed``) and the person's handoff right after
+an approved checkout (``checkout_handoff``: the bank's 3-D Secure page
+returns to the shop's payment address) lift that. While browser.read
+clicks (``EgressState.read_click``, the click and its settle time) no
+page script sends anything but a GET and no frame opens an order
+address other than an order history (``markers.READ_LINK_RE``):
+browser.read then answers ``markers.READ_CLICK_MESSAGE``. Loopback is
 allowed only under ``CRAWLER_ALLOW_LOOPBACK_FOR_TESTS=1`` (the fake
 site), read at call time, never in production paths.
+
+Every window is the page's it was opened for (``EgressState.write_page``,
+``EgressState.handoff_page``): a request from another tab, from a worker
+or from a frame whose page cannot be told is judged as outside it, so
+approving a step on one tab opens nothing for another. Inside a window
+the tab is navigated only by its own document (``_started_by``): another
+site's tab that holds it (it opened the shop, or the shop opened it) may
+point it anywhere, even at a page of its own that then opens an order
+step, and is stopped. Outside a write window no request of any method, a
+page's image, GET fetch or beacon included, goes to an order step's
+address, and while browser.read clicks none goes to an address
+``markers.READ_LINK_RE`` matches. The click's window stays open until
+the network is quiet (``wait_for_quiet``). A WebSocket is not a request
+the route sees: ``_socket`` drops what a page sends on one while
+browser.read clicks, and always on a page's socket whose address is an
+order address (a socket's page cannot be told, so it is never inside a
+write window). A socket a worker opens is not routed at all
+(``context.route_web_socket`` sees the page's only).
+
+A bound write window (``EgressState.write_origin``, the checkout's order
+POST) is judged on every frame, not only the top one: a POST from a
+frame to another origin is aborted, and the order POST itself is fetched
+here so the merchant's answer is checked before the browser acts on it
+(a 307/308 would re-send the card). What a page's own script sends (an
+XHR, a fetch, a beacon) is judged only by where it goes and outside a
+write window: a GET to anything but an order step, and a request to any
+other address, passes (a search box's suggestions, analytics), except
+while browser.read clicks.
 """
 
 from __future__ import annotations
@@ -18,6 +65,7 @@ import ipaddress
 import os
 import re
 import socket
+import time
 import weakref
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Optional
@@ -28,9 +76,10 @@ import structlog
 # The same blocked-range table check_ssrf applies, used on the one
 # resolution this module makes (see Guard.check_url).
 from core.network_security import _blocked_network_for
+from services.tools.browser.checkout.markers import ORDER_ACTION_RE, ORDER_STEP_RE, READ_LINK_RE
 
 if TYPE_CHECKING:
-    from playwright.async_api import BrowserContext, Page, Request, Route
+    from playwright.async_api import BrowserContext, Page, Request, Route, WebSocketRoute
 
 logger = structlog.get_logger(__name__)
 
@@ -47,7 +96,44 @@ _NAME_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _REF_PATTERN = re.compile(r"(?:f\d+)?e\d+")
+# Why a navigation that would have sent the page was stopped outside a
+# write window: browser.act reports these to the person as a change that
+# tried to send the page (``SENDING_REASONS``).
+READ_TIER_POST = "non-GET top-level navigation from a read-tier action"
+READ_TIER_FRAME_POST = "non-GET frame navigation from a read-tier action"
+ORDER_ADDRESS = "a change on the page tried to open an order address"
+ORDER_REQUEST = "a change on the page tried to send a request to an order address"
+SENDING_REASONS: frozenset[str] = frozenset(
+    {READ_TIER_POST, READ_TIER_FRAME_POST, ORDER_ADDRESS, ORDER_REQUEST}
+)
+# Why a navigation or a page's own request was stopped outside any write
+# window: an order step is placed by opening it, and only browser.act and
+# browser.checkout may do that.
+READ_TIER_ORDER_STEP = "an order step's address, outside an approved action"
+# Why a page's own request, or a form, to an order address was stopped
+# outside any write window (the person's handoff included).
+READ_TIER_ORDER_REQUEST = "a request to an order address, outside an approved action"
+# Why a navigation of the approved tab was stopped inside its window: the
+# window is the page's the card showed, and another page (a tab of another
+# site that holds this one) started it.
+OTHER_PAGE_NAVIGATION = "another page tried to navigate the approved tab"
+# Why something was stopped while browser.read clicked: a click with no
+# approval card sends nothing and opens no order address.
+READ_CLICK_REQUEST = "a read-tier click tried to send a request"
+READ_CLICK_ADDRESS = "a read-tier click tried to open an order address"
+READ_CLICK_REASONS: frozenset[str] = frozenset(
+    {READ_CLICK_REQUEST, READ_CLICK_ADDRESS, READ_TIER_POST, READ_TIER_FRAME_POST,
+     READ_TIER_ORDER_STEP, READ_TIER_ORDER_REQUEST}
+)
+# Methods that ask and never send: a page's own request by one of these is
+# never stopped (a CORS preflight precedes the request it asks about).
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _CONSEQUENTIAL_TIMEOUT_MS = 3000
+# How long browser.read's click window stays open after the click: until
+# no request has been in flight for READ_CLICK_QUIET_S, at most
+# READ_CLICK_CAP_S (a page that polls forever is not waited out).
+READ_CLICK_QUIET_S = 0.25
+READ_CLICK_CAP_S = 2.0
 
 
 class StaleRef(Exception):
@@ -104,19 +190,66 @@ def classify_target(facts: dict[str, Any]) -> Optional[str]:
 @dataclass
 class EgressState:
     """Per-context guard state. ``write_allowed`` is flipped by the write
-    tier around one approved action (phase 3). ``human_driving`` is set by
-    the toolkit while a handoff is pending: from the moment it hands the
-    page to the person (``needs_human``) until the agent's next action on
-    this context. While it is set the person's own submit (a sign-in form
-    in Crawler's window) passes the read-tier block; the address checks
-    still apply. It resets on the agent's next action and when the
-    context closes. ``blocked`` is the audit trail the toolkit and the
-    tests read."""
+    tier around one approved action (phase 3). ``write_origin`` narrows an
+    open window to one origin: the checkout sets it to where the order
+    form says it posts, so a card can only travel there, and only as a
+    POST (a GET would put it in a URL); it binds the window whoever holds
+    it, a pending handoff included. ``human_driving`` is set by a toolkit
+    while a handoff is pending: from the moment it hands the page to the
+    person (``needs_human``, from a read, an act or a checkout) until the
+    agent's next action on this context, whichever toolkit takes it. While
+    it is set the person's own submit (a sign-in form, a one-time code in
+    Crawler's window) passes the read-tier block; the address checks
+    still apply, and so do the order ones: the model can ask for a
+    handoff whenever it likes, and a page's own script may send its order
+    form while the person looks. ``checkout_handoff`` is set with it only
+    by browser.checkout, when a challenge follows the approved order (3-D
+    Secure): the order addresses are then open to the person as in a
+    write window. Both reset on the agent's next action and when the
+    context closes. ``changing`` is set by browser.act around an act that
+    is not meant to send anything (a fill, a check, a select, a key other
+    than Enter, a plain link): no frame may then open an order address,
+    even by GET or through a redirect, and no page script may send a
+    request to one. With neither window open, no frame opens an order
+    step's address or sends to an order address, and no page script sends
+    to one. ``read_click`` is set by browser.read around its click: no
+    page script sends anything but a GET, and no frame opens an order
+    address other than an order history. ``blocked`` is the audit trail
+    the toolkit and the tests read.
+
+    ``write_page`` is the page an open write window was opened for, and
+    ``handoff_page`` the page of the checkout's handoff: ``write_allowed``
+    and ``checkout_handoff`` hold only for a request whose frame belongs
+    to that page (another tab, a worker, a frame that cannot be told is
+    outside), and a navigation of that page only when its own document
+    started it (``_started_by``). ``write_origin``, ``changing`` and
+    ``read_click`` only ever narrow, so they hold for every page, and so
+    does ``human_driving``, which lifts no order block (the person's
+    sign-in may open a popup).
+    ``in_flight`` and ``last_request`` are what ``wait_for_quiet`` reads."""
 
     account_mode: bool
     write_allowed: bool = False
+    write_origin: Optional[str] = None
+    write_page: Any = None
     human_driving: bool = False
+    checkout_handoff: bool = False
+    handoff_page: Any = None
+    changing: bool = False
+    read_click: bool = False
     blocked: list[dict[str, str]] = field(default_factory=list)
+    in_flight: set[Any] = field(default_factory=set)
+    last_request: float = 0.0
+
+
+def _origin(url: str) -> str:
+    """``scheme://host[:port]`` of *url*, lower-cased, userinfo dropped:
+    what "the same site" means to a browser."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return ""
+    return f"{parts.scheme.lower()}://{parts.netloc.rpartition('@')[2].lower()}"
 
 
 _STATES: "weakref.WeakKeyDictionary[Any, EgressState]" = weakref.WeakKeyDictionary()
@@ -137,6 +270,36 @@ def _without_query(url: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 
 
+def _order_address(url: str) -> bool:
+    """Whether *url*'s path or query names an order step (/place-order,
+    /checkout/complete, ?next=/pay...)."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return True
+    return bool(ORDER_ACTION_RE.search(parts.path + ("?" + parts.query if parts.query else "")))
+
+
+def _read_link(url: str) -> bool:
+    """Whether *url* is an order address other than an order history
+    (``READ_LINK_RE``): what a read-tier click never opens."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return True
+    return bool(READ_LINK_RE.search(parts.path + ("?" + parts.query if parts.query else "")))
+
+
+def _order_step(url: str) -> bool:
+    """Whether *url*'s path or query names a step whose opening may place
+    an order (/place-order, /checkout/complete, ?next=/confirm-order)."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return True
+    return bool(ORDER_STEP_RE.search(parts.path + ("?" + parts.query if parts.query else "")))
+
+
 def _client_redirect(target: str) -> str:
     escaped = html.escape(target, quote=True)
     return (
@@ -150,6 +313,63 @@ def _is_top_level(request: "Request") -> bool:
         return request.frame.parent_frame is None
     except Exception:  # noqa: BLE001 - a popup's first navigation has no frame yet: guard it
         return True
+
+
+def _page_of(request: Any) -> Any:
+    """The page *request* was made for, or None when it cannot be told (a
+    service worker's request, a popup's first navigation, a gone frame):
+    a window is never open for None."""
+    try:
+        return request.frame.page
+    except Exception:  # noqa: BLE001 - no frame: outside every window
+        return None
+
+
+def _started_by(request: Any, page: Any) -> bool:
+    """Whether *page*'s own document started the navigation *request*: its
+    Origin (a POST's) or its Referer names the page's origin. A tab of
+    another site that holds this one (it opened the shop, or the shop
+    opened it) may point it at any address, and its navigation carries
+    that site's origin. One that names no origin at all (a page whose
+    referrer policy sends none) is taken as the page's own only while no
+    other tab is open to have started it."""
+    try:
+        headers = request.headers
+        origin = headers.get("origin") or ""
+        if origin in ("", "null"):
+            referer = headers.get("referer")
+            origin = _origin(referer) if referer else ""
+        if origin:
+            return bool(origin.lower() == _origin(page.url))
+        return len(page.context.pages) == 1
+    except Exception:  # noqa: BLE001 - what cannot be told was not the page's
+        return False
+
+
+async def wait_for_quiet(
+    state: Any, *, since: float, quiet_s: float = READ_CLICK_QUIET_S, cap_s: float = READ_CLICK_CAP_S
+) -> None:
+    """Return once no request of the context has been in flight for
+    *quiet_s* (counted from *since*, a ``time.monotonic()`` reading), or
+    *cap_s* after *since*: how long browser.read keeps its click window
+    open, so a request the click's script sends once an earlier one
+    answers is still judged inside it. A request of a closed page is not
+    waited for; a state without the counters (a test double) waits only
+    *quiet_s*."""
+    deadline = since + cap_s
+    while True:
+        now = time.monotonic()
+        if now >= deadline:
+            return
+        in_flight: set[Any] = getattr(state, "in_flight", set())
+        for request in list(in_flight):
+            page = _page_of(request)
+            if page is not None and page.is_closed():
+                in_flight.discard(request)
+        last = max(float(getattr(state, "last_request", 0.0) or 0.0), since)
+        if not in_flight and now - last >= quiet_s:
+            return
+        await asyncio.sleep(min(0.05, deadline - now))
 
 
 async def settle_blocked_navigation(page: "Page", *, timeout_ms: int = 1500) -> None:
@@ -260,37 +480,171 @@ class Guard:
 
         def closed(_context: "BrowserContext") -> None:
             state.human_driving = False  # a pending handoff ends with its window
+            state.checkout_handoff = False
+            state.handoff_page = None
+
+        def started(request: "Request") -> None:
+            state.in_flight.add(request)
+            state.last_request = time.monotonic()
+
+        def ended(request: "Request") -> None:
+            state.in_flight.discard(request)
+            state.last_request = time.monotonic()
+
+        def socket_opened(ws: "WebSocketRoute") -> None:
+            self._socket(ws, state)
 
         context.on("close", closed)
+        context.on("request", started)
+        context.on("requestfinished", ended)
+        context.on("requestfailed", ended)
         await context.route("**/*", handler)
+        await context.route_web_socket(lambda _url: True, socket_opened)
+
+    def _socket(self, ws: "WebSocketRoute", state: EgressState) -> None:
+        """A page's WebSocket, connected through to its server. What the
+        page sends on it is dropped while browser.read clicks, and always
+        when the socket's address is an order address: a socket's page
+        cannot be told, so no write window is ever open for it. What the
+        server sends passes untouched. A worker's socket never comes here
+        (see the module's notes)."""
+        server = ws.connect_to_server()
+        order = _order_address(ws.url)
+
+        def from_page(message: "str | bytes") -> None:
+            if state.read_click:
+                self._record(state, url=ws.url, reason=READ_CLICK_REQUEST)
+            elif order:
+                self._record(state, url=ws.url, reason=READ_TIER_ORDER_REQUEST)
+            else:
+                server.send(message)
+
+        ws.on_message(from_page)
 
     async def _route(self, route: "Route", request: "Request", state: EgressState) -> None:
         try:
-            if not request.is_navigation_request() or not _is_top_level(request):
+            url = request.url
+            # A window is open only for the page it was opened for: another
+            # tab, a worker, a frame whose page cannot be told is outside.
+            page = _page_of(request)
+            write_allowed = state.write_allowed and page is not None and page is state.write_page
+            # What only an approved act or checkout opens: an order step,
+            # and anything sent to an order address. The person's handoff
+            # does not (the model asks for one whenever it likes), except
+            # the one right after an approved checkout (3-D Secure).
+            orders_open = write_allowed or (
+                state.checkout_handoff and page is not None and page is state.handoff_page
+            )
+            if not request.is_navigation_request():
+                # A page's own request (fetch, XHR, beacon, an image): one
+                # that sends to an order address outside a write window is
+                # stopped, and so is anything but a GET while browser.read
+                # clicks; one of any method to an order step (a GET can be
+                # the order), or while browser.read clicks to an order
+                # address other than an order history, too.
+                reason: Optional[str] = None
+                if request.method not in _SAFE_METHODS and not write_allowed:
+                    if state.read_click:
+                        reason = READ_CLICK_REQUEST
+                    elif state.changing and _order_address(url):
+                        reason = ORDER_REQUEST
+                    elif not orders_open and _order_address(url):
+                        reason = READ_TIER_ORDER_STEP if _order_step(url) else READ_TIER_ORDER_REQUEST
+                if reason is None and not orders_open:
+                    if _order_step(url):
+                        reason = ORDER_REQUEST if state.changing else READ_TIER_ORDER_STEP
+                    elif state.read_click and _read_link(url):
+                        reason = READ_CLICK_ADDRESS
+                if reason is not None:
+                    await self._block(route, state, url=url, reason=reason)
+                    return
                 await route.continue_()
                 return
-            url = request.url
-            if request.method != "GET" and not (state.write_allowed or state.human_driving):
+            if orders_open and _is_top_level(request) and not _started_by(request, page):
+                # The window is the approved page's: a tab of another site
+                # that holds it (window.open) may not point it anywhere
+                # while the window is open, not even at a page of its own
+                # that would then open an order step as the tab's own.
+                await self._block(route, state, url=url, reason=OTHER_PAGE_NAVIGATION)
+                return
+            if state.changing and _order_address(url):
                 await self._block(
                     route, state, url=url,
-                    reason="non-GET top-level navigation from a read-tier action",
+                    reason=ORDER_ADDRESS,
                 )
                 return
+            if state.read_click and _read_link(url):
+                await self._block(route, state, url=url, reason=READ_CLICK_ADDRESS)
+                return
+            if not orders_open and _order_step(url):
+                await self._block(route, state, url=url, reason=READ_TIER_ORDER_STEP)
+                return
+            if request.method != "GET" and state.human_driving and not orders_open and _order_address(url):
+                # The person's own submit passes below, but not to an order
+                # address: a page may send its order form while they look.
+                await self._block(route, state, url=url, reason=READ_TIER_ORDER_REQUEST)
+                return
+            if not _is_top_level(request):
+                # A frame's own navigation is left alone, except that a
+                # bound write window admits no POST from a frame to any
+                # other origin (an order form aimed at a hidden iframe and
+                # at another site would carry the card there unseen), and
+                # no frame sends a form outside a write window, as no top
+                # page does.
+                if request.method != "GET" and state.write_origin is not None and _origin(url) != state.write_origin:
+                    await self._block(
+                        route, state, url=url,
+                        reason=f"the order form tried to send its data from a frame to "
+                        f"{_origin(url) or 'an unreadable address'} by {request.method}, "
+                        f"not by POST to {state.write_origin}",
+                    )
+                    return
+                if request.method != "GET" and not (write_allowed or state.human_driving):
+                    await self._block(
+                        route, state, url=url,
+                        reason=READ_TIER_FRAME_POST,
+                    )
+                    return
+                await route.continue_()
+                return
+            if request.method != "GET" and not (write_allowed or state.human_driving):
+                await self._block(
+                    route, state, url=url,
+                    reason=READ_TIER_POST,
+                )
+                return
+            if request.method != "GET" and state.write_origin is not None:
+                if request.method != "POST" or _origin(url) != state.write_origin:
+                    await self._block(
+                        route, state, url=url,
+                        reason=f"the order form tried to send its data to {_origin(url) or 'an unreadable address'} "
+                        f"by {request.method}, not by POST to {state.write_origin}",
+                    )
+                    return
             reason = await asyncio.to_thread(self.check_url, url)
             if reason is not None:
                 await self._block(route, state, url=url, reason=reason)
                 return
             if request.method != "GET":
-                # An approved write, or the person's own submit during a
-                # handoff. Forwarded as-is; its redirect lands on a GET the
-                # browser follows unseen (phase 3 tightens this).
-                await route.continue_()
+                if state.write_origin is None:
+                    # An approved act, or the person's own submit during a
+                    # handoff. Forwarded as-is; its redirect lands on a GET
+                    # the browser follows unseen.
+                    await route.continue_()
+                    return
+                await self._bound_post(route, state, url)
                 return
             response = await route.fetch(max_redirects=0)
             location = response.headers.get("location")
             if 300 <= response.status < 400 and location:
                 target = urljoin(url, location)
                 reason = await asyncio.to_thread(self.check_url, target)
+                if reason is None and state.changing and _order_address(target):
+                    reason = ORDER_ADDRESS
+                if reason is None and state.read_click and _read_link(target):
+                    reason = READ_CLICK_ADDRESS
+                if reason is None and not orders_open and _order_step(target):
+                    reason = READ_TIER_ORDER_STEP
                 if reason is not None:
                     await self._block(route, state, url=target, reason=reason, via=url)
                     return
@@ -312,9 +666,49 @@ class Guard:
             except Exception:  # noqa: BLE001 - already handled, or the page is gone
                 pass
 
+    async def _bound_post(self, route: "Route", state: EgressState, url: str) -> None:
+        """The checkout's order POST, to the bound origin. Fetched here so
+        the merchant's answer is judged before the browser acts on it: a
+        307 or 308 makes a browser send the same POST again, card
+        included, so one that points to another origin (or to a refused
+        address) is aborted; any other redirect becomes a client-side GET
+        hop, checked like every navigation; a plain answer is passed on as
+        it is, its cookies included."""
+        response = await route.fetch(max_redirects=0)
+        location = response.headers.get("location")
+        if not (300 <= response.status < 400 and location):
+            await route.fulfill(response=response)
+            return
+        target = urljoin(url, location)
+        reason = await asyncio.to_thread(self.check_url, target)
+        if reason is None and response.status in (307, 308) and _origin(target) != state.write_origin:
+            reason = (
+                f"the site's answer to the order pointed the same POST at "
+                f"{_origin(target) or 'an unreadable address'} (a {response.status} sends the card again), "
+                f"not by POST to {state.write_origin}"
+            )
+        if reason is not None:
+            await self._block(route, state, url=target, reason=reason, via=url)
+            return
+        if response.status in (307, 308):
+            await route.fulfill(response=response)  # the same origin: the browser re-sends the POST there
+            return
+        headers = {"set-cookie": response.headers["set-cookie"]} if "set-cookie" in response.headers else {}
+        await route.fulfill(
+            status=200,
+            content_type="text/html; charset=utf-8",
+            headers=headers,
+            body=_client_redirect(target),
+        )
+
     async def _block(
         self, route: "Route", state: EgressState, *, url: str, reason: str, via: Optional[str] = None
     ) -> None:
+        self._record(state, url=url, reason=reason, via=via)
+        await route.abort("blockedbyclient")
+
+    @staticmethod
+    def _record(state: EgressState, *, url: str, reason: str, via: Optional[str] = None) -> None:
         # The toolkit reports these entries to the model: in ACCOUNT mode
         # they follow the same query/fragment stripping as every URL there.
         def shown(value: str) -> str:
@@ -330,7 +724,6 @@ class Guard:
             reason=reason,
             via=_without_query(via) if via is not None else None,
         )
-        await route.abort("blockedbyclient")
 
     # -- consequential clicks --------------------------------------------------
 

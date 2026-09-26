@@ -508,6 +508,160 @@ enough), **f**. Note what each costs:
 `/usage` in Telegram and the Gateway page's usage panel show the day's
 totals per model.
 
+### 5.2 Purchases
+
+Buying is off until the owner turns it on, and every purchase stops at an
+approval card first. This check runs the whole chain up to that card and
+**denies it**, so no money moves; only the last step, which is optional,
+pays for real. The card stays "in its purse": the number is typed into
+Settings once, sealed under a key that lives only in this Mac's login
+keychain (`security find-generic-password -s "Crawler AI vault"` lists it
+once a card has been stored, and not before: opening Settings writes
+nothing to the keychain; Windows keeps the key under DPAPI in the user's
+account), and is decrypted only inside an approved checkout. The backend
+never puts the key on a command line: it runs `security -i` and writes
+the command to its stdin, so `ps` shows only `/usr/bin/security -i`.
+Nothing here works in the Docker variant: a container has no keychain,
+and the Payment card section says "The card vault is not available in
+this environment (container)." instead of showing the form.
+
+1. **Store a card** (web, signed in as the owner, on the Mac itself:
+   `http://localhost:3000`, not through a tunnel — the save route accepts
+   only a loopback peer). Settings > **Payment card**: number, MM/YY, CVC,
+   name on card, Save. Use a card you would accept a small charge on; to
+   see the card without any charge being possible, store the test number
+   `4242 4242 4242 4242` (any future expiry, any CVC): it passes the
+   vault's Luhn check, and a real merchant declines it. After Save the
+   section shows the line `Visa ····4242` once, with `not used yet` under
+   it and a Delete button, above the (now empty) form headed "Enter a
+   card below to replace it."; reload the page and confirm the number is
+   not shown anywhere. Audit: a `vault` `vault_card_stored` row whose
+   request data is `{kind, label, masked}` only (open the row: no number,
+   no CVC). Then, in Terminal: `security find-generic-password -s "Crawler
+   AI vault"` now lists one item (its `acct` is `<vault id>-vault-key`).
+2. **Turn the switches on.** Settings > Permissions: **Control a
+   browser**, then **Fill in forms and click on sites** (its row reads
+   "Crawler will ask before every click or keystroke, with a picture of
+   the page."; with Control a browser off it shows "Blocked — Needs
+   'Control a browser' on in Permissions."), then **Buy things for me**:
+   switch it on, and set the
+   two fields under it, **Per purchase (USD)** `10` and **Per day (USD)**
+   `20` (press Tab or Enter to save each; the row shows the saved values
+   after a reload). Typing `20000` in either field is refused on the page
+   with "Enter an amount between $1 and $10,000." and the stored value
+   comes back. Audit: `installation` `capabilities_updated`
+   (`{"changes": {"browser_act": true}}`, then `{"purchases": true}`) and `capability_settings_updated`
+   (`{"capability": "purchases", "changes": {...}}`). In tab 3, the §4.4
+   command prints the row `purchases on not_required` (the capability has
+   no macOS grant to probe, so its probe state is `not_required` and the
+   reason column is empty).
+3. **Run to the card, then deny it** (T and W, one at a time). Pick a real
+   shop with a guest checkout and an item under $10 (a $5 gift card on a
+   large retailer's site works), and send, for example:
+   `Buy a $5 e-gift card on <shop's host name> and pay with my stored card.`
+   Crawler opens the site in its own Chrome window, adds the item and
+   moves through the checkout with `browser.act` steps, **each waiting for
+   its own approval card**. Each card is a picture of the page with the
+   target outlined in red (password and card fields blacked out) and one
+   sentence — `Click "Add to cart" on <host>`, `Type 12 characters into
+   "Email" on <host>` — with no JSON and never the typed text; in Telegram
+   the same picture as a photo, the sentence as its caption, under "🔐
+   Approval required". On a page that shows a total or a saved card the
+   sentence adds "This page shows $… This step may place an order. Crawler
+   normally pays only through its checkout step."; if no picture could be
+   taken it says "No picture of the page could be taken." Approve those. When the page with the card fields and the total is on
+   screen it calls `browser.checkout`, and **one** purchase card appears:
+   on the web, a card with a screenshot of the checkout page (the card
+   fields blacked out), `Pay $5.00 to <host> (1 item) with Visa ····4242`,
+   the item line, and the notice "Crawler can make mistakes. Check the
+   amount and the site before you approve." above Approve and Deny — and
+   no red "Risk warning" box (the shop's name came from the page the
+   model read, which the toolkit checked against the page's own address,
+   so there is nothing to warn about); in Telegram, the same screenshot
+   as a photo with the caption `🛒 Purchase approval — <host> · $5.00 · 1
+   item · Visa ····4242 — Crawler can make mistakes. …` (when the shop's
+   rows could not be read as items the count is simply left out, never
+   "0 items") and the ✅ / ❌ buttons (`/pending` re-sends the photo).
+   Check that the amount on the card is what the page shows (the toolkit
+   reads it off the page; the model's own number is not used) and that
+   the host is the shop you named. Then **Deny**. Nothing is typed into
+   the card fields (look at the window), and the reply says the purchase
+   was not made. Audit: `purchases` rows `purchase_requested` (pending)
+   and, for the model's step, `browser.checkout` `tool_pending_approval`
+   then `tool_denied`; no `purchase_approved`, no `purchase_completed`.
+   Open the `purchase_requested` row: request data is `{merchant,
+   amount_usd, currency, items, task_id}`, no card data.
+4. **The refusals** (each refused before any card; the reply says why and
+   the audit shows a blocked `browser.checkout` row, policy
+   `purchase_rule`, with the rule name):
+   - Over the cap: repeat step 3 with an item over $10 → `over_cap`
+     ("This purchase is $14.99, over the per-purchase cap of $10.00. The
+     owner can change the cap in Permissions → Buy things for me.").
+   - The wrong site: on the checkout page, ask it to `check out on
+     amazon.com` when the page is another shop → `merchant_mismatch`
+     ("This page is on <host>, not amazon.com as asked …").
+   - Not secure: `Open http://neverssl.com and check out there for
+     example.com` → `insecure_page`.
+   - An order button through `browser.act`: on the checkout page, ask it
+     to `click Place order` → the act is refused before any card with
+     rule `use_checkout` (policy `browser_rule`) and the sentence
+     "Crawler only pays through its own checkout step, which needs 'Buy
+     things for me' on in Permissions.", so the reply says buying goes
+     through the purchase card (the same refusal with the switch off).
+   - Acting off: Fill in forms and click on sites **off**, then step 3 →
+     Crawler reads the shop but is not offered `browser.act`; a click on a
+     button in a form is refused with "Reading can't click that. Ask to
+     fill in forms and click (needs 'Fill in forms and click on sites' in
+     Permissions)." Turn it back on.
+   - Off: Settings > Permissions > Buy things for me **off**, then step 3
+     again → the model is not offered `browser.checkout` at all (it is
+     not in the tool list, and the `<permissions>` block tells it buying
+     is off), so the reply says buying is off and how to turn it on;
+     there is no `browser.checkout` audit row and no `purchases` row
+     (the page was never read for a purchase). Turn it back on.
+5. **A real purchase (optional, real money).** Only with a real card
+   stored and a shop you trust: step 3 again, check the amount and the
+   host on the card, and **Approve**. The card fields are filled from the
+   vault at that moment, the order is placed, and the confirmation page's
+   screenshot arrives in the chat: on the web under the "[Approved]
+   Executed 'browser.checkout'" row, in Telegram as a photo captioned
+   `Order confirmation on <host>: $5.00` sent before the reply. The reply
+   names what was bought and the amount and offers a reminder for the
+   event or delivery date. Audit: `purchase_approved` then
+   `purchase_completed` (approved, with the amount) and `browser.checkout`
+   `tool_approved_and_executed`. If the shop asks for a one-time code
+   after the order button, the turn ends with "I need you to take over in
+   the browser", the photo of that page arrives the same way, and a
+   `purchase_pending_human` row is written instead; finish the code in
+   Crawler's window yourself. The per-day figure counts that purchase
+   too: every submitted card counts, whether or not a confirmation was
+   read. Afterwards, the same `Approve` on a stale card is refused: send
+   step 3 once more, and while the card waits open another page in
+   Crawler's window (or ask it to `read the front page of the shop`),
+   then Approve → "The page changed since you approved this. Look again
+   and ask me to check out once more.", and nothing is paid
+   (`screen_changed` in the `tool_approved_and_executed` row's result).
+6. **What must never appear.** Grep the backend log in tab 1 and the
+   Audit logs page for the card number and the CVC: nowhere, not even in
+   a `browser.act` row (typed text is stored as its length only,
+   `<12 characters>`). The web chat's approval card and the Telegram
+   caption show only the masked label. If a checkout ever stops after
+   the fill (the shop's own validation, a decline), the card fields are
+   cleared before Crawler answers, so the next page read shows nothing
+   of the card. The same chain runs against a fake shop in the test
+   suite without a browser window:
+   `cd backend && .venv/bin/python -m pytest tests/test_purchase_flow.py tests/test_purchase_card_text.py -q`
+   (one card, Approve pays from the vault, Deny fills nothing, every
+   refusal above, and no risk warning on a real-looking host), so a
+   failure here on the live Mac is in the install or the shop, not the
+   flow.
+7. Delete the stored card afterwards (Settings > Payment card > Delete;
+   audit `vault_item_deleted`), and set the caps back or leave Buy things
+   for me off. `security find-generic-password -s "Crawler AI vault"`
+   still lists the key item: delete it with `security
+   delete-generic-password -s "Crawler AI vault"` if you want the
+   keychain as it was.
+
 ---
 
 ## 6. What to capture if something fails

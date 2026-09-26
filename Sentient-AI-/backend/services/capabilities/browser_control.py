@@ -1,5 +1,8 @@
-"""Control a browser: browser.read now; browser.login (phase 2) and
-browser.act (phase 3) join under the same "browser." family prefix.
+"""Control a browser: browser.read, named exactly rather than as the
+"browser." family, because the rest of the family belongs to other switches
+that need this one on as well: browser.act to "browser_act" ("Fill in forms
+and click on sites") and browser.checkout to "purchases". browser.login
+(phase 2) joins here when it lands.
 
 Off by default and high risk: it drives a real browser in a private
 Crawler profile that may hold the owner's logins. Available when the
@@ -29,9 +32,10 @@ CAPABILITY = Capability(
     label="Control a browser",
     description=(
         "Open websites in Crawler's own browser, read what is on the page and "
-        "move between pages, so tasks work on sites that have no API."
+        "follow links, so tasks work on sites that have no API. Typing into forms "
+        "and clicking buttons is a separate switch."
     ),
-    tools=("browser.",),
+    tools=("browser.read",),
     default_enabled=False,
     risk="high",
     when_denied="Browser control is turned off. The owner can turn it on in Settings → Permissions.",

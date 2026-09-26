@@ -76,6 +76,74 @@ capability's family prefix covers it: `reminders.now` is the model's clock
 and stays available with Reminders off. Never name one of these in a
 capability's `tools`.
 
+## A tool that needs two switches
+
+A tool is claimed by exactly one capability (`tools=`), and the registry
+test holds that. When it must also be off whenever another capability is
+off, list the other in `_REQUIRED_CAPABILITIES` in
+`services/agent/tool_registry.py`: `browser.act` is claimed by
+`browser_act` and `browser.checkout` by `purchases`, and both require
+`browser_control`, so `_capabilities_of` answers both and the offer, the
+permission adapter and the executor each refuse on the first that is not
+on (the claiming one first, so the plain `when_denied` of `purchases` is
+what the owner reads). `capabilities_of_tool` is the public form.
+
+## A capability that needs another on
+
+When a switch is useless without another one (acting on sites without
+opening them), give it `requires=("other_key",)`: the report then shows it
+`blocked`, with the plain reason "Needs 'Control a browser' on in
+Permissions." (or why the other one is blocked), while the other is not
+on, so the Permissions page, the `<permissions>` block and every gate say
+the same thing. `browser_act` requires `browser_control`. A new switch
+starts off on every existing install (a stored row without its key reads
+as its default), so turning a risky ability into its own switch never
+turns it on for anyone.
+
+## Settings a capability carries
+
+A capability with owner-editable numbers (the purchase caps) declares
+their defaults in its module (`purchases.PURCHASE_SETTINGS_DEFAULTS`) and
+registers them in `_SETTINGS_DEFAULTS` in `__init__.py`, keyed by the
+capability. The registry exposes `settings_defaults(key)`;
+`InstallationService.capability_settings(key)`
+merges the defaults with what the owner stored in
+`installation.capability_settings` (only the changed values are stored, so
+a new default reaches every install), `set_capability_settings` validates
+(known names, numbers above 0 and at most 10000, never a bool) and audits
+`capability_settings_updated`, and the report puts the merged values on
+`CapabilityStatus.settings` (read-only) for the Permissions page and the
+cards. `PUT /api/capabilities/{key}/settings` is the owner's route. The
+toolkit that enforces them reads them through a small protocol
+(`PurchaseSettings.purchase_caps()`), never the row.
+
+## A tool with an approval card of its own
+
+`desktop.act`, `browser.act` and `browser.checkout` are WRITE or FINANCIAL
+tools whose card must say what will really happen and be tied to what the
+owner saw. Every `browser.act` card shows the page: its async bind
+(`BrowserActToolkit.bind_async`) takes a masked screenshot with the target
+outlined in red, kept in memory for `approval_image`, and adds a money
+warning built from the page's facts; a failed capture still makes the
+card, which then says "No picture of the page could be taken." The executor's hooks route them to their toolkit:
+`precheck_approval` (a hard rule the toolkit refuses before any card, filed
+under `computer_rule` / `browser_rule` / `purchase_rule` with the rule
+name), `approval_arguments` (the bind: the screen or page the card was made
+from, under a reserved `_screen` / `_page` key the model may not supply),
+`approval_arguments_async` (the binds that may touch the browser:
+`browser.act` takes the card's picture; `browser.checkout` reads the page's
+facts now and answers a refusal dict instead of card arguments when a rule
+fails), `describe_approval` (the
+card's sentence from facts, never the model's words) and `approval_image`
+(a picture kept in memory by the toolkit, served to the card and never
+stored). An approved call runs only while that screen or page still holds.
+
+`FINANCIAL` stays hard-blocked for every connector; the executor dispatches
+a FINANCIAL action only when it is in `FINANCIAL_BUILTINS`
+(`browser.checkout`), and `("browser", FINANCIAL)` is the one policy row at
+`USER_CONFIRM` (`FINANCIAL_CONFIRM_KEYS`). Do not widen either without a
+spec.
+
 ## Rules
 
 - Consequential actions (send, create account, spend, delete, install,

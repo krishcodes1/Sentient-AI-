@@ -26,7 +26,8 @@ The two callables differ on purpose:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Literal, Optional
+from types import MappingProxyType
+from typing import Any, Callable, Literal, Mapping, Optional
 
 ProbeState = Literal["granted", "denied", "not_required", "unknown"]
 Effective = Literal["on", "off", "blocked"]
@@ -90,6 +91,10 @@ class Capability:
     probe: Optional[Callable[[ReportContext], ProbeResult]] = None
     request_access: Optional[Callable[[], None]] = None
     install: Optional[str] = None
+    # Capabilities that must be on for this one to work (browser_act needs
+    # browser_control). The report shows this one as blocked, with a plain
+    # reason, while any of them is not on.
+    requires: tuple[str, ...] = ()
 
     def claims(self, tool_name: str) -> bool:
         """True when this capability gates *tool_name*. A pattern ending in
@@ -126,6 +131,10 @@ class CapabilityStatus:
     # The download the Install button would start ("~150-300 MB download"),
     # from the ALLOWLIST entry behind ``install``; None when there is none.
     install_size_hint: Optional[str] = None
+    # The owner-editable settings this capability carries, defaults merged
+    # with what is stored (``purchases``: the spending caps). Empty for a
+    # capability that has none. Read-only: the report is shared.
+    settings: Mapping[str, Any] = MappingProxyType({})
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -148,4 +157,5 @@ class CapabilityStatus:
             "install_size_hint": self.install_size_hint,
             "when_denied": self.when_denied,
             "tools": list(self.tools),
+            "settings": dict(self.settings),
         }

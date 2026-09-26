@@ -69,6 +69,7 @@ from sqlalchemy import select, update
 
 from services.agent import cancel as agent_cancel
 from services.notifications.progress import TurnProgress, takes_keyword, takes_on_event
+from services.tools.browser.checkout import NOTICE as PURCHASE_NOTICE
 
 logger = structlog.get_logger(__name__)
 
@@ -132,18 +133,91 @@ def _short_json(data: dict[str, Any], limit: int = 700) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+# Tools whose card stores what it was made from under a reserved key
+# starting with "_", set by the runtime and never by the model (each
+# toolkit refuses a call that brings its own): desktop.act's screen
+# (``services.tools.computer.CARD_KEY``), browser.act's page (``_page``) and
+# browser.checkout's page facts (``_checkout``, which the purchase card
+# renders itself).
+_RESERVED_KEY_TOOLS = frozenset({"desktop.act", "browser.act", "browser.checkout"})
+
+# The reserved key a browser.checkout card carries its facts under
+# (services.tools.browser.checkout.toolkit.CARD_KEY).
+_CHECKOUT_KEY = "_checkout"
+# The tool whose card is the approval sentence alone (see notify_pending).
+_ACT_TOOL = "browser.act"
+
+
 def _card_arguments(tool_name: Any, arguments: Any) -> dict[str, Any]:
-    """A call's arguments as its approval card shows them. A desktop.act
-    card also stores the screen it was made from under a reserved key
-    starting with "_" (``services.tools.computer.CARD_KEY``), set by the
-    runtime and never by the model (the toolkit refuses any argument no
-    action takes), so those keys are left out. Every other tool's arguments
-    are shown whole: nothing the owner approves is hidden from the card."""
+    """A call's arguments as its approval card shows them. A desktop.act,
+    browser.act or browser.checkout card also stores the screen or page it
+    was made from under a reserved key starting with "_" (see
+    ``_RESERVED_KEY_TOOLS``), so those keys are left out. Every other
+    tool's arguments are shown whole: nothing the owner approves is hidden
+    from the card."""
     if not isinstance(arguments, dict):
         return {}
-    if tool_name != "desktop.act":
+    if tool_name not in _RESERVED_KEY_TOOLS:
         return arguments
     return {k: v for k, v in arguments.items() if not str(k).startswith("_")}
+
+
+def _purchase_card(action: Any) -> Optional[dict[str, Any]]:
+    """The ``_checkout`` facts a browser.checkout card carries (origin, host,
+    amount_usd, currency, items, card_label, notice), or None for any other
+    action or a checkout card without them."""
+    if getattr(action, "tool_name", None) != "browser.checkout":
+        return None
+    arguments = getattr(action, "arguments", None)
+    card = arguments.get(_CHECKOUT_KEY) if isinstance(arguments, dict) else None
+    return card if isinstance(card, dict) else None
+
+
+def _purchase_notice(card: dict[str, Any]) -> str:
+    """The "Crawler can make mistakes" line: the card's own copy (the
+    checkout toolkit puts NOTICE on every card), else the toolkit's."""
+    notice = card.get("notice")
+    if isinstance(notice, str) and notice.strip():
+        return notice.strip()
+    return PURCHASE_NOTICE
+
+
+def _purchase_caption(card: dict[str, Any], expires_at: Any) -> str:
+    """The purchase card's caption, on a photo or as the text card:
+    "🛒 Purchase approval — shop.example.com · $23.40 · 2 items ·
+    Visa ····4242 — Crawler can make mistakes. …", then the expiry. Every
+    part is read from the card's facts; the card number is never on it
+    (the label is masked by the vault). The item count is left out when
+    the toolkit found no item lines (many shops' rows are not li/tr), as
+    the web card and the approval sentence leave it out."""
+    host = str(card.get("host") or card.get("origin") or "the site")
+    amount = str(card.get("amount_usd") or "?")
+    currency = str(card.get("currency") or "USD")
+    money = f"${amount}" if currency == "USD" else f"{amount} {currency}"
+    items = card.get("items")
+    count = len(items) if isinstance(items, list) else 0
+    parts = [host, money]
+    if count > 0:
+        parts.append(f"{count} item{'' if count == 1 else 's'}")
+    label = card.get("card_label")
+    if isinstance(label, str) and label.strip():
+        parts.append(label.strip())
+    caption = "🛒 Purchase approval — " + " · ".join(parts)
+    notice = _purchase_notice(card)
+    if notice:
+        caption += f" — {notice}"
+    return f"{caption}\n\nExpires in {_expires_in_text(expires_at)}."
+
+
+def _approval_keyboard(action_id: str) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "✅ Approve", "callback_data": _CB_APPROVE + action_id},
+                {"text": "❌ Deny", "callback_data": _CB_DENY + action_id},
+            ]
+        ]
+    }
 
 
 def _chunks(text: str, size: int = _MESSAGE_CHUNK) -> list[str]:
@@ -236,11 +310,17 @@ class TelegramService:
         session_factory: Callable[[], Any],
         decide: Optional[DecideCallback] = None,
         chat: Optional[ChatCallback] = None,
+        approval_image: Optional[Callable[[Any], Optional[str]]] = None,
     ) -> None:
         self._token = token
         self._session_factory = session_factory
         self.decide: Optional[DecideCallback] = decide
         self.chat: Optional[ChatCallback] = chat
+        # (StoredAction) -> the picture its card shows, as an image data
+        # URL, or None: the executor's approval_image, wired by main.py.
+        # A purchase card goes out as a photo while the picture is there
+        # and as the text card with the same caption once it is gone.
+        self.approval_image: Optional[Callable[[Any], Optional[str]]] = approval_image
         # Chats that asked for /new; the next message starts a fresh
         # conversation instead of continuing the running one.
         self._fresh_chats: set[int] = set()
@@ -368,16 +448,27 @@ class TelegramService:
             )
             return None
 
-    async def _send_photo(self, chat_id: int, data_url: str, caption: str) -> bool:
-        """Upload an image (a screenshot the agent took) as a Telegram photo."""
+    async def _send_photo(
+        self,
+        chat_id: int,
+        data_url: str,
+        caption: str,
+        reply_markup: Optional[dict[str, Any]] = None,
+    ) -> bool:
+        """Upload an image (a screenshot the agent took) as a Telegram photo,
+        with an inline keyboard when the photo is an approval card."""
         try:
             header, _, payload = data_url.partition(",")
             media_type = header[len("data:") :].split(";", 1)[0] or "image/jpeg"
             raw = base64.b64decode(payload)
             ext = "png" if media_type.endswith("png") else "jpg"
+            fields: dict[str, str] = {"chat_id": str(chat_id), "caption": caption[:1024]}
+            if reply_markup is not None:
+                # Multipart carries the keyboard as its JSON text.
+                fields["reply_markup"] = json.dumps(reply_markup)
             resp = await self._client.post(
                 "/sendPhoto",
-                data={"chat_id": str(chat_id), "caption": caption[:1024]},
+                data=fields,
                 files={"photo": (f"screenshot.{ext}", raw, media_type)},
             )
             data = resp.json()
@@ -475,44 +566,82 @@ class TelegramService:
 
     async def notify_pending(self, action: Any) -> None:
         """Push an approval request to the owner's linked chat (no-op when
-        the user has no linked chat). ``action`` is a StoredAction."""
+        the user has no linked chat). ``action`` is a StoredAction.
+
+        A browser.checkout card is a photo of the checkout page with the
+        purchase caption (the site, the amount, the items, the card label
+        and the "Crawler can make mistakes" notice) and the same
+        Approve/Deny keyboard; a browser.act card is a photo of the page
+        with the target outlined, captioned with the act's sentence. When
+        the picture is gone (a restart) or the upload fails, the text card
+        carries the same caption."""
         try:
             chat_id = await self.linked_chat_id(action.user_id)
             if chat_id is None:
                 return
-            lines = [
-                "🔐 Approval required",
-                "",
-                f"Tool: {action.tool_name}",
-                f"Why: {action.reason}",
-            ]
+            keyboard = _approval_keyboard(action.action_id)
+            purchase = _purchase_card(action)
+            if purchase is not None:
+                caption = _purchase_caption(purchase, action.expires_at)
+                if getattr(action, "risk_note", None):
+                    caption = f"{caption}\n\n⚠️ {action.risk_note}"
+                image = self._approval_image_of(action)
+                if image is not None and await self._send_photo(
+                    chat_id, image, caption, reply_markup=keyboard
+                ):
+                    return
+                await self._api("sendMessage", chat_id=chat_id, text=caption, reply_markup=keyboard)
+                return
+            if action.tool_name == _ACT_TOOL:
+                # One plain sentence from the act toolkit's facts ('Click
+                # "Add to cart" on shop.example.com'): the arguments are
+                # refs and typed text, which a JSON dump would only obscure.
+                lines = ["🔐 Approval required", "", str(action.reason)]
+            else:
+                lines = [
+                    "🔐 Approval required",
+                    "",
+                    f"Tool: {action.tool_name}",
+                    f"Why: {action.reason}",
+                ]
             if getattr(action, "risk_note", None):
                 lines += ["", f"⚠️ {action.risk_note}"]
-            args = _short_json(_card_arguments(action.tool_name, action.arguments or {}))
+            args = (
+                ""
+                if action.tool_name == _ACT_TOOL
+                else _short_json(_card_arguments(action.tool_name, action.arguments or {}))
+            )
             if args and args != "{}":
                 lines += ["", "Arguments:", args]
             lines += ["", f"Expires in {_expires_in_text(action.expires_at)}."]
-            await self._api(
-                "sendMessage",
-                chat_id=chat_id,
-                text="\n".join(lines),
-                reply_markup={
-                    "inline_keyboard": [
-                        [
-                            {
-                                "text": "✅ Approve",
-                                "callback_data": _CB_APPROVE + action.action_id,
-                            },
-                            {
-                                "text": "❌ Deny",
-                                "callback_data": _CB_DENY + action.action_id,
-                            },
-                        ]
-                    ]
-                },
-            )
+            text = "\n".join(lines)
+            if action.tool_name == _ACT_TOOL:
+                # The act card's picture: the page with the target outlined,
+                # the sentence as its caption. Without one (it could not be
+                # taken, or a restart dropped it) the same text goes alone.
+                image = self._approval_image_of(action)
+                if image is not None and await self._send_photo(
+                    chat_id, image, text, reply_markup=keyboard
+                ):
+                    return
+            await self._api("sendMessage", chat_id=chat_id, text=text, reply_markup=keyboard)
         except Exception as exc:  # notification failure must never break flow
             logger.warning("telegram_notify_failed", error=str(exc))
+
+    def _approval_image_of(self, action: Any) -> Optional[str]:
+        """The card's picture from the wired callback, when it is an image
+        data URL; None otherwise, and when the callback fails (the card
+        then goes out as text: a missing picture never loses the card)."""
+        if self.approval_image is None:
+            return None
+        try:
+            image = self.approval_image(action)
+        except Exception as exc:
+            logger.warning("telegram_approval_image_failed", error_type=type(exc).__name__)
+            return None
+        if isinstance(image, str) and image.startswith("data:image/"):
+            return image
+        return None
 
     # ── inbound: poll loop ───────────────────────────────────────────────
 
@@ -1064,8 +1193,17 @@ class TelegramService:
 
         verdict = "✅ Approved" if approved else "❌ Denied"
         # Freeze the card: replace the buttons with the decision so it
-        # can't be pressed twice from the chat history.
-        if message_id is not None:
+        # can't be pressed twice from the chat history. A photo card (a
+        # purchase) has a caption, not text, and is edited as one.
+        if message_id is not None and message.get("photo"):
+            original = message.get("caption") or "Purchase approval"
+            await self._api(
+                "editMessageCaption",
+                chat_id=chat_id,
+                message_id=message_id,
+                caption=f"{original}\n\n— {verdict} from this chat."[:1024],
+            )
+        elif message_id is not None:
             original = message.get("text") or "Approval request"
             await self._api(
                 "editMessageText",

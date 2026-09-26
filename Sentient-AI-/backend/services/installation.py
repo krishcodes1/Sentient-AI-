@@ -43,12 +43,14 @@ cache TTL and never hear this process's change events.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import json
 import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal
 from types import MappingProxyType
 from typing import Any, Awaitable, Callable, Mapping, Optional
 
@@ -85,6 +87,27 @@ class RegistrationLocked(Exception):
     so the stored switch cannot be changed from the app."""
 
 
+# Bounds for a capability setting's value (the spending caps, in USD,
+# both inclusive): a cap under a dollar means nothing, and the ceiling
+# keeps a typo from turning "buy things for me" into an unbounded
+# allowance. The Permissions page puts the same bounds on its fields.
+SETTING_MIN = 1
+SETTING_MAX = 10000
+# The 422 the owner reads when a value is out of bounds: the Permissions
+# page shows it as it is, so it names no internal setting.
+SETTINGS_OUT_OF_BOUNDS = "Caps must be between $1 and $10,000."
+
+
+def _stored_settings(row: Installation) -> dict[str, dict[str, Any]]:
+    """The row's ``capability_settings`` ({capability: {name: value}},
+    migration 0010). Anything but a dict of dicts reads as nothing stored,
+    so every capability keeps its defaults."""
+    stored = row.capability_settings
+    if not isinstance(stored, dict):
+        return {}
+    return {str(k): dict(v) for k, v in stored.items() if isinstance(v, dict)}
+
+
 @dataclass(frozen=True)
 class _Snapshot:
     capabilities: dict[str, bool]
@@ -97,6 +120,8 @@ class _Snapshot:
     # A stored blob exists but does not decrypt with the current key.
     keys_unreadable: bool = False
     token_unreadable: bool = False
+    # Owner-set capability settings, by capability key (the purchases caps).
+    capability_settings: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -203,6 +228,7 @@ class InstallationService:
                 setup_completed_at=row.setup_completed_at,
                 keys_unreadable=keys_unreadable,
                 token_unreadable=token_unreadable,
+                capability_settings=_stored_settings(row),
             )
             await session.commit()
         return snap
@@ -302,6 +328,81 @@ class InstallationService:
         await self._changed("capabilities")
         return await self.report()
 
+    # ── capability settings ────────────────────────────────────────────
+    #
+    # The owner-editable numbers a capability carries (purchases: the
+    # spending caps). Defaults come from the registry; only what the owner
+    # changed is stored, so a new default reaches every install that never
+    # touched it.
+
+    @staticmethod
+    def _merged_settings(key: str, stored: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+        defaults = registry.settings_defaults(key)
+        if not defaults:
+            return {}
+        own = stored.get(key) or {}
+        return {**defaults, **{k: v for k, v in own.items() if k in defaults}}
+
+    async def capability_settings(self, key: str) -> dict[str, Any]:
+        """Capability *key*'s settings: its defaults merged with what the
+        owner stored. {} for a capability that has none; KeyError for an
+        unknown key."""
+        registry.get(key)
+        return self._merged_settings(key, (await self._load()).capability_settings)
+
+    async def set_capability_settings(
+        self, key: str, patch: Mapping[str, Any], *, actor_id: uuid.UUID
+    ) -> dict[str, Any]:
+        """Store the owner's values for capability *key*'s settings and
+        return the merged result. Only known settings, only whole numbers
+        of dollars from SETTING_MIN to SETTING_MAX (never a bool: True is 1
+        to Python, and "$1 cap" is not what a stray checkbox means; never
+        a fraction: a cap is a whole number of dollars). KeyError for an
+        unknown capability, ValueError for anything else, worded for the
+        owner (the Permissions page shows it as it is); audited as
+        capability_settings_updated with the values, which are not secret."""
+        registry.get(key)
+        defaults = registry.settings_defaults(key)
+        if not defaults:
+            raise ValueError(f"Capability '{key}' has no settings")
+        unknown = sorted(str(k) for k in patch if k not in defaults)
+        if unknown:
+            raise ValueError(f"Unknown settings for {key}: {', '.join(unknown)}")
+        bad = sorted(
+            str(k)
+            for k, v in patch.items()
+            if isinstance(v, bool)
+            or not isinstance(v, (int, float))
+            or v != v  # NaN
+            or not (SETTING_MIN <= v <= SETTING_MAX)
+            or v != int(v)  # a fraction of a dollar (in bounds, so int() is safe)
+        )
+        if bad:
+            raise ValueError(SETTINGS_OUT_OF_BOUNDS)
+        changes = {str(k): v for k, v in patch.items()}
+
+        def mutate(row: Installation) -> Mapping[str, Any]:
+            stored = _stored_settings(row)
+            stored[key] = {**stored.get(key, {}), **changes}
+            row.capability_settings = stored
+            return {"capability": key, "changes": changes}
+
+        await self._write(
+            mutate,
+            actor_id=actor_id,
+            action="capability_settings_updated",
+            endpoint=f"/api/capabilities/{key}/settings",
+        )
+        await self._changed("capabilities")
+        return await self.capability_settings(key)
+
+    async def purchase_caps(self) -> tuple[Decimal, Decimal]:
+        """(per purchase, per day) in USD, as the checkout toolkit enforces
+        them (``PurchaseSettings``). Through str(), so a value stored as a
+        float reads as itself and not as its binary expansion."""
+        caps = await self.capability_settings("purchases")
+        return Decimal(str(caps["per_purchase_cap_usd"])), Decimal(str(caps["per_day_cap_usd"]))
+
     async def context(self) -> ReportContext:
         return registry.default_context(telegram_configured=bool(await self.telegram_token()))
 
@@ -324,7 +425,16 @@ class InstallationService:
                 return view
             now = time.monotonic()
             gen = self._gen
-            statuses = tuple(registry.report(await self.capabilities(), await self.context()))
+            stored = (await self._load()).capability_settings
+            # A capability with settings reports them (defaults merged with
+            # the owner's values): what the Permissions page edits and the
+            # Telegram and web cards can quote.
+            statuses = tuple(
+                dataclasses.replace(s, settings=MappingProxyType(merged))
+                if (merged := self._merged_settings(s.key, stored))
+                else s
+                for s in registry.report(await self.capabilities(), await self.context())
+            )
             view = _ReportView(
                 statuses=statuses,
                 enabled=frozenset(s.key for s in statuses if s.effective == "on"),

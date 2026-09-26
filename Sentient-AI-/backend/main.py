@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
+from dataclasses import dataclass
 from typing import Any, Callable
 
 import structlog
@@ -49,6 +50,7 @@ from api.routes import (
     setup,
     telegram,
     usage,
+    vault,
 )
 from services.agent import cancel as agent_cancel
 from services.agent.approvals import DbApprovalStore
@@ -67,10 +69,16 @@ from services.tools.system import SystemToolkit
 from services.platform import current as current_platform
 from services.tools.browser import guard as browser_guard
 from services.tools.browser import handoff as browser_handoff
+from services.tools.browser.act import BrowserActToolkit
 from services.tools.browser.actions import BrowserReadToolkit
+from services.tools.browser.checkout.ledger import PurchaseLedger
+from services.tools.browser.checkout.toolkit import BrowserCheckoutToolkit
+from services.tools.browser.pagememory import PageMemory
 from services.tools.browser.session import BrowserSessionManager
 from services.tools.computer import ComputerToolkit
 from services.tools.computer import backend as computer_backend
+from services.vault.keys import select_key_provider
+from services.vault.service import VaultService
 
 logger = structlog.get_logger(__name__)
 
@@ -126,9 +134,65 @@ def _wire_telegram(
     """Point a poller at the agent pipelines. The manager calls this on
     every (re)start, so a bot token saved while the server runs gets the
     same approval and chat wiring as one present at boot. Both pipelines
-    open sessions from the factory wire_services was given."""
+    open sessions from the factory wire_services was given. The purchase
+    card's picture comes from the executor (the checkout toolkit keeps it
+    in memory), so the photo card works only in the process that made it."""
     service.decide = agent.build_decision_applier(app, session_factory)
     service.chat = agent.build_chat_applier(app, session_factory)
+    executor = getattr(app.state, "tool_executor", None)
+    if executor is not None:
+        service.approval_image = lambda action: executor.approval_image(
+            action.tool_name, action.arguments or {}, action.user_id
+        )
+
+
+@dataclass(frozen=True)
+class BrowserToolkits:
+    """The three browser toolkits one process runs, sharing a session
+    manager and a page memory: read (browser.read), act (browser.act) and
+    checkout (browser.checkout)."""
+
+    read: BrowserReadToolkit
+    act: BrowserActToolkit
+    checkout: BrowserCheckoutToolkit
+
+
+def build_browser_toolkits(
+    sessions: Any,
+    *,
+    session_factory: Callable[[], Any],
+    vault: VaultService,
+    settings_source: Any,
+    cancel_flag: Callable[[str], bool],
+) -> BrowserToolkits:
+    """Build the browser toolkits for this process. One PageMemory is shared
+    by all three (the read toolkit's _observe remembers every page), so an
+    act or a checkout is checked against the page the last read observed.
+    checkout pays with the card in *vault* under the caps *settings_source*
+    answers (purchases spec §6); in a container the vault is disabled and
+    the toolkit refuses before any card."""
+    memory = PageMemory()
+    read = BrowserReadToolkit(
+        sessions, guard=browser_guard, handoff=browser_handoff, page_memory=memory
+    )
+    act = BrowserActToolkit(
+        sessions,
+        guard=browser_guard,
+        handoff=browser_handoff,
+        memory=memory,
+        cancel_flag=cancel_flag,
+    )
+    checkout = BrowserCheckoutToolkit(
+        sessions,
+        guard=browser_guard,
+        handoff=browser_handoff,
+        memory=memory,
+        vault=vault,
+        ledger=PurchaseLedger(session_factory),
+        settings=settings_source,
+        cancel_flag=cancel_flag,
+    )
+    return BrowserToolkits(read=read, act=act, checkout=checkout)
 
 
 REAP_INTERVAL_S = 60.0
@@ -262,6 +326,11 @@ async def wire_services(
         headless=platform.name == "container", platform=platform
     )
     app.state.browser_sessions = browser_sessions
+    # vault: the owner's card, sealed under a key only the OS store holds
+    # (Keychain / DPAPI; disabled in a container). Nothing is read until
+    # the Settings page or an approved checkout asks.
+    vault = VaultService(session_factory, select_key_provider(platform))
+    app.state.vault = vault
     # desktop.observe / desktop.act run on this platform's backend (Mac or
     # Windows; an unavailable stand-in anywhere else, the container
     # included). Nothing is loaded or touched until the first call, and the
@@ -272,20 +341,35 @@ async def wire_services(
         computer_backend.select_backend(platform.name),
         cancel_flag=agent_cancel.is_cancelled,
     )
+    # browser.read, browser.act and browser.checkout share the one browser
+    # and one page memory. checkout pays with the card in the vault
+    # (app.state.vault), under the caps the owner set (installation
+    # .purchase_caps), and only after the owner approves its card; the
+    # purchases switch (off by default) gates every call.
+    browser_toolkits = build_browser_toolkits(
+        browser_sessions,
+        session_factory=session_factory,
+        vault=vault,
+        settings_source=installation,
+        cancel_flag=agent_cancel.is_cancelled,
+    )
+    tool_executor = ConnectorToolExecutor(
+        session_factory=session_factory,
+        capability_gate=installation.capability_statuses,
+        system_toolkit=system_toolkit,
+        browser_toolkit=browser_toolkits.read,
+        computer_toolkit=computer_toolkit,
+        act_toolkit=browser_toolkits.act,
+        checkout_toolkit=browser_toolkits.checkout,
+    )
+    # The Telegram poller reads a purchase card's picture through it.
+    app.state.tool_executor = tool_executor
     app.state.agent_runtime = AgentRuntime(
         config=settings,
         permission_engine=RuntimePermissionAdapter(
             capability_gate=installation.capability_statuses
         ),
-        tool_executor=ConnectorToolExecutor(
-            session_factory=session_factory,
-            capability_gate=installation.capability_statuses,
-            system_toolkit=system_toolkit,
-            browser_toolkit=BrowserReadToolkit(
-                browser_sessions, guard=browser_guard, handoff=browser_handoff
-            ),
-            computer_toolkit=computer_toolkit,
-        ),
+        tool_executor=tool_executor,
         audit_service=RuntimeAuditLogger(session_factory=session_factory),
         approval_store=approval_store,
         settings_source=installation,
@@ -382,6 +466,7 @@ app.include_router(telegram.router, prefix="/api")
 app.include_router(usage.router, prefix="/api")
 app.include_router(capabilities.router, prefix="/api")
 app.include_router(setup.router, prefix="/api")
+app.include_router(vault.router, prefix="/api")  # vault
 
 
 @app.get("/")

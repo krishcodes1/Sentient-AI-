@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import dataclasses
 import time
-from typing import Iterable, Mapping, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 import structlog
 
 from services.capabilities import (
+    browser_act,
     browser_control,
     computer_control,
     installs,
+    purchases,
     reminders,
     screen,
     site_screenshots,
@@ -36,8 +39,24 @@ REGISTRY: tuple[Capability, ...] = (
     installs.CAPABILITY,
     telegram.CAPABILITY,
     browser_control.CAPABILITY,
+    browser_act.CAPABILITY,
     computer_control.CAPABILITY,
+    purchases.CAPABILITY,
 )
+
+# Owner-editable settings a capability carries, by key, with their defaults
+# (``InstallationService.capability_settings`` merges the stored values over
+# them). A capability absent here has no settings: the Permissions page
+# shows only its switch, and the settings route refuses it.
+_SETTINGS_DEFAULTS: Mapping[str, Mapping[str, Any]] = {
+    purchases.CAPABILITY.key: purchases.PURCHASE_SETTINGS_DEFAULTS,
+}
+
+
+def settings_defaults(key: str) -> dict[str, Any]:
+    """The default settings of capability *key* ({} when it has none)."""
+    return dict(_SETTINGS_DEFAULTS.get(key, {}))
+
 
 # Tools no capability gates. Listed explicitly so that a new built-in tool
 # nobody claimed fails the registry test instead of being silently always-on.
@@ -223,20 +242,48 @@ def _enabled(cap: Capability, switches: Mapping[str, object]) -> bool:
     return cap.default_enabled if value is None else (value is True)
 
 
+def _required_reason(cap: Capability, statuses: Mapping[str, CapabilityStatus]) -> str:
+    """Why *cap* cannot work while a capability it ``requires`` is not on,
+    or "" when every one of them is on. A required key nobody registered
+    counts as not on (fail closed)."""
+    for key in cap.requires:
+        needed = statuses.get(key)
+        if needed is None:
+            return "It needs a permission this install does not have."
+        if needed.effective == "off":
+            return f"Needs '{needed.label}' on in Permissions."
+        if needed.effective == "blocked":
+            return f"Needs '{needed.label}', which is blocked here: {needed.reason}"
+    return ""
+
+
 def report(
     switches: Mapping[str, object], ctx: ReportContext, *, use_cache: bool = True
 ) -> list[CapabilityStatus]:
     """One status per registered capability, in registry order.
 
     Effective state: ``off`` when the owner switch is off; otherwise
-    ``blocked`` when the capability is unavailable here or its probe says
-    ``denied``; otherwise ``on`` (a probe answering ``unknown`` or
+    ``blocked`` when the capability is unavailable here, its probe says
+    ``denied``, or a capability it ``requires`` is not on (browser_act
+    without browser_control: "Needs 'Control a browser' on in
+    Permissions."); otherwise ``on`` (a probe answering ``unknown`` or
     ``not_required`` counts as on). An availability check or probe that
     raises reads as blocked. The probe runs only for a capability that is
     on and available, and its answer is cached for 10 s per context unless
     *use_cache* is False.
     """
-    return [_status(cap, _enabled(cap, switches), ctx, use_cache) for cap in REGISTRY]
+    statuses = [_status(cap, _enabled(cap, switches), ctx, use_cache) for cap in REGISTRY]
+    by_key = {s.key: s for s in statuses}
+    for index, cap in enumerate(REGISTRY):
+        status = statuses[index]
+        if not cap.requires or status.effective != "on":
+            continue
+        reason = _required_reason(cap, by_key)
+        if reason:
+            statuses[index] = by_key[cap.key] = dataclasses.replace(
+                status, effective="blocked", reason=reason
+            )
+    return statuses
 
 
 def enabled_keys(switches: Mapping[str, object], ctx: ReportContext) -> frozenset[str]:

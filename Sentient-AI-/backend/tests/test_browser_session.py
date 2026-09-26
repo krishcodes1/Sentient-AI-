@@ -287,3 +287,40 @@ async def test_close_stops_the_driver_even_when_the_context_will_not_close(tmp_p
     await mgr.get("u1", mode="account", task_id="t")
     await mgr.close("u1")
     assert driver.stopped is True and mgr.sessions == {}
+
+
+# -- HTTPS errors are never ignored in production (purchases spec §9) ------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("profile", [True, False])
+async def test_production_launcher_never_ignores_https_errors(fake_playwright, tmp_path, profile):
+    """The write tiers' https-only rule is worth nothing if the browser
+    accepts a forged certificate: only the test launcher may pass
+    ignore_https_errors, and it does so for the fake site's self-signed
+    certificate alone."""
+    from services.tools.browser.session import VIEWPORT, playwright_launcher
+
+    made = fake_playwright()
+    await playwright_launcher(
+        headless=True, channel=None, user_data_dir=str(tmp_path) if profile else None, viewport=dict(VIEWPORT)
+    )
+    assert made[0].calls  # the fake saw every launch call
+    for _name, kwargs in made[0].calls:
+        assert "ignore_https_errors" not in kwargs
+        assert "ignoreHTTPSErrors" not in kwargs
+
+
+@pytest.mark.asyncio
+async def test_test_launcher_ignores_https_errors_only_on_a_throwaway_headless_context(fake_playwright):
+    from services.tools.browser.session import VIEWPORT
+    from tests.conftest import CHROMIUM_TEST_ARGS, tls_launcher
+
+    made = fake_playwright()
+    context = await tls_launcher(headless=False, channel="chrome", user_data_dir="/tmp/profile", viewport=dict(VIEWPORT))
+    (launch, launch_kwargs), (new_context, kwargs) = made[0].calls
+    assert (launch, new_context) == ("launch", "new_context")
+    assert launch_kwargs == {"headless": True, "args": CHROMIUM_TEST_ARGS}  # never headed, never the real profile or channel
+    assert kwargs["ignore_https_errors"] is True
+    assert kwargs["service_workers"] == "block" and kwargs["accept_downloads"] is False and kwargs["permissions"] == []
+    assert context._crawler_playwright is made[0]

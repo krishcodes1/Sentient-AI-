@@ -2,10 +2,23 @@
 
 One toolkit per process, one browser session per user (session.py).
 Every action here is READ tier: it may navigate and look, never type or
-submit. ``click`` is the one grey area, so it asks the guard at execution
+submit. ``click`` is the one grey area, and it has no approval card, so
+nobody sees the page before it happens: it asks the guard at execution
 time whether the target is consequential (a submit control, a form with
-a password or payment field, a name like "sign up") and refuses with
-"use browser.act" when it is; the model never decides that.
+a password or payment field, a name like "sign up"), then judges the
+control the click lands on (``markers.read_click_allowed``): only a
+plain GET link that is not an order step, or a control outside any form
+with no purchase words on a page that shows no order total, payment
+method on file or wallet, is clicked. Everything else is refused with
+``markers.READ_CLICK_MESSAGE`` and left to browser.act, whose card shows
+the owner the page; the model never decides that. The egress guard, for
+its part, never lets a read open an order step's address or send a
+page's own request to an order address, and while the click and its
+settle time run (``EgressState.read_click``, until the network is quiet,
+at most 2 s) it lets no page script send anything but a GET, no request
+go to an order address other than an order history and no frame open
+one: a click that tries is answered with ``markers.READ_CLICK_MESSAGE``
+too.
 
 Every navigating or observing action returns the fresh page outline
 inline (spec §5): the runtime keeps only the newest one in context and
@@ -21,38 +34,48 @@ session's ``TaskState`` counts actions and holds notes; this toolkit
 enforces the action and spend caps and the loop detector (spec §10). The
 runtime adds each turn's estimated spend to ``TaskState.spend_usd`` and
 turns a ``cap`` result into a "Continue?" message.
+
+The observation, screenshot and handoff helpers live in ``_shared.py``
+(browser.act and browser.checkout end their actions the same way); this
+module keeps them under their old names. With a ``page_memory`` every
+observation is also recorded as the page the user's next write may be
+bound to.
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
-import hashlib
 import inspect
 import io
-import json
 import re
 import time
 from typing import Any, Awaitable, Callable, Optional, Protocol
 
 import structlog
 
+from services.tools.browser import _shared
 from services.tools.browser import snapshot as snap
-from services.tools.browser.guard import StaleRef
-from services.tools.browser.handoff import Challenge
+from services.tools.browser._shared import BROWSER_MAX_ACTIONS as BROWSER_MAX_ACTIONS
+from services.tools.browser._shared import BROWSER_MAX_USD as BROWSER_MAX_USD
+from services.tools.browser._shared import ELEMENT_NAME_JS as _CLICK_NAME_JS
+from services.tools.browser._shared import (
+    JPEG_QUALITY,
+    NAVIGATION_TIMEOUT_MS,
+    REF_TIMEOUT_MS,
+    HandoffDetector,
+    PlaywrightError,
+    PlaywrightTimeoutError,
+)
+from services.tools.browser._shared import call_key as _call_key
+from services.tools.browser._shared import error_result as _error
+from services.tools.browser._shared import log_failure as _log_failure
+from services.tools.browser._shared import stale_result as _stale
+from services.tools.browser._shared import valid_ref as _valid_ref
+from services.tools.browser.checkout import markers
+from services.tools.browser.guard import READ_CLICK_REASONS, StaleRef, wait_for_quiet
+from services.tools.browser.pagememory import PageMemory
 from services.tools.browser.session import BrowserSession, BrowserSessionManager, Mode
-
-try:
-    from playwright.async_api import Error as PlaywrightError
-    from playwright.async_api import TimeoutError as PlaywrightTimeoutError
-except ImportError:  # the capability reports the missing install; the module must import
-
-    class PlaywrightError(Exception):  # type: ignore[no-redef]
-        pass
-
-    class PlaywrightTimeoutError(PlaywrightError):  # type: ignore[no-redef]
-        pass
-
 
 logger = structlog.get_logger(__name__)
 
@@ -74,52 +97,20 @@ ACTIONS: tuple[str, ...] = (
 )
 SCROLL_DIRECTIONS: tuple[str, ...] = ("up", "down", "top", "bottom")
 
-BROWSER_MAX_ACTIONS = 60
-BROWSER_MAX_USD = 0.25
 LOOP_REPEATS = 3
 NOTES_CHAR_BUDGET = 2000
 TEXT_CHAR_LIMIT = 8000
-OUTLINE_CHARS = 8000
-FULL_OUTLINE_CHARS = 24000
 MAX_WAIT_MS = 10_000
-NAVIGATION_TIMEOUT_MS = 20_000
-# A ref that no longer resolves must answer "stale" quickly, not hang.
-REF_TIMEOUT_MS = 3_000
 MODEL_IMAGE_EDGE_PX = 768
-JPEG_QUALITY = 70
-# Fields whose pixels never leave the machine, even in a screenshot the
-# person asked for.
-MASK_SELECTOR = (
-    "input[type=password], input[autocomplete='one-time-code'], "
-    "input[autocomplete^='cc-'], input[name*='card' i]"
-)
-_LOG_DETAIL_CHARS = 200
-_REF_RE = re.compile(r"(f\d+)?e\d+")
-# A URL's query string and fragment inside exception text: Playwright
-# errors quote the URL they failed on, and on ACCOUNT-mode pages that part
-# carries session ids and OAuth codes (the guard's logs drop it too).
-_URL_TAIL_RE = re.compile(r"(\b[a-zA-Z][a-zA-Z0-9+.-]*://[^\s?#'\"<>]*)[?#][^\s'\"<>]*")
 _SCROLL_DELTA = {"up": -640, "down": 640, "top": -1_000_000, "bottom": 1_000_000}
-# The name a click summary shows ('click "Grades"'). A field is named by its
-# label, never by its value: el.value is an autofilled password, a card
-# number or whatever the owner typed, and the summary stays in the model's
-# context for the rest of the task. Only button-like inputs are named by
-# their value, which is their visible caption.
-_CLICK_NAME_JS = r"""
-el => {
-  const tag = el.tagName.toLowerCase();
-  const type = (el.getAttribute('type') || '').toLowerCase();
-  const field = ['input', 'textarea', 'select'].includes(tag) || el.isContentEditable;
-  const caption = tag === 'input' && ['button', 'submit', 'reset'].includes(type) ? el.value : '';
-  const label = el.labels && el.labels.length ? el.labels[0].innerText : '';
-  return [el.getAttribute('aria-label'), field ? label : el.innerText, caption,
-          el.getAttribute('title'), el.getAttribute('placeholder'), el.getAttribute('alt')]
-    .map(s => (s || '').replace(/\s+/g, ' ').trim()).find(s => s) || '';
-}
-"""
 _SUMMARY_LABEL_CHARS = 40
 # Bookkeeping actions that do not touch the page: not counted as actions.
 _UNCOUNTED = frozenset({"note", "handoff"})
+# Why a read-tier click was left to browser.act by the purchase rules.
+_ORDER_REASON = "may place an order (a payment method, a total or a price is on the page)"
+# Why a read-tier click was left to browser.act otherwise: it is neither a
+# plain link nor a control outside a form on a page with nothing to pay.
+_ACT_REASON = "only browser.act, with the owner's approval, clicks that"
 
 
 class Guard(Protocol):
@@ -135,40 +126,6 @@ class Guard(Protocol):
     async def consequential(self, page: Any, ref: str) -> Optional[str]: ...
     async def settle_blocked_navigation(self, page: Any, *, timeout_ms: int = 1500) -> None: ...
     def egress_state(self, context: Any) -> Any: ...
-
-
-class HandoffDetector(Protocol):
-    """What the toolkit needs from services/tools/browser/handoff.py."""
-
-    async def detect_challenge(self, page: Any) -> Optional[Challenge]: ...
-
-
-def _error(message: str, **extra: Any) -> dict[str, Any]:
-    return {"ok": False, "error": message, **extra}
-
-
-def _stale() -> dict[str, Any]:
-    return {"ok": False, "error": "stale ref: re-snapshot", "stale_ref": True}
-
-
-def _log_detail(exc: BaseException) -> str:
-    """The exception text a log line may keep: URLs lose their query
-    string and fragment before truncation, so a cut can never expose one."""
-    return _URL_TAIL_RE.sub(r"\1", str(exc))[:_LOG_DETAIL_CHARS]
-
-
-def _log_failure(event: str, exc: BaseException, **fields: Any) -> None:
-    logger.warning(event, error_type=type(exc).__name__, error=_log_detail(exc), **fields)
-
-
-def _valid_ref(ref: Any) -> bool:
-    return isinstance(ref, str) and _REF_RE.fullmatch(ref) is not None
-
-
-def _call_key(action: str, params: dict[str, Any]) -> str:
-    return hashlib.sha1(
-        json.dumps([action, params], sort_keys=True, default=str).encode("utf-8")
-    ).hexdigest()
 
 
 def mode_for(user_id: str) -> Mode:
@@ -187,11 +144,15 @@ class BrowserReadToolkit:
         guard: Guard,
         handoff: HandoffDetector,
         clock: Callable[[], float] = time.monotonic,
+        page_memory: Optional[PageMemory] = None,
     ) -> None:
         self._sessions = sessions
         self._guard = guard
         self._handoff = handoff
         self._clock = clock
+        # Shared with the write tiers: every observation here is the page
+        # their next approval card is bound to (spec §5).
+        self._memory = page_memory
         # task_id -> keys of the last LOOP_REPEATS calls, newest last.
         self._recent: dict[str, list[str]] = {}
         # user_id -> the context the egress guard is installed on. The
@@ -292,25 +253,7 @@ class BrowserReadToolkit:
 
     @staticmethod
     def _cap_refusal(task: Any) -> Optional[dict[str, Any]]:
-        if task.actions >= BROWSER_MAX_ACTIONS:
-            return {
-                "ok": False,
-                "cap": "actions",
-                "resume_hint": (
-                    f"This task has used {task.actions} browser actions (the cap is "
-                    f"{BROWSER_MAX_ACTIONS}). Ask the person whether to continue."
-                ),
-            }
-        if task.spend_usd >= BROWSER_MAX_USD:
-            return {
-                "ok": False,
-                "cap": "spend",
-                "resume_hint": (
-                    f"This task has spent about ${task.spend_usd:.2f} (the cap is "
-                    f"${BROWSER_MAX_USD:.2f}). Ask the person whether to continue."
-                ),
-            }
-        return None
+        return _shared.cap_refusal(task)
 
     async def _ensure_guard(self, session: BrowserSession) -> None:
         """Install the egress route guard on a context the first time this
@@ -335,35 +278,19 @@ class BrowserReadToolkit:
     ) -> dict[str, Any]:
         """The fresh page as the model sees it, or ``needs_human`` when the
         page is a challenge (checked first, so a CAPTCHA wall is never
-        described as if it were content)."""
-        page = await session.page()
-        challenge = await self._handoff.detect_challenge(page)
-        if challenge is not None:
-            return await self._needs_human(session, page, challenge.kind, challenge.detail)
-        account = session.mode == "account"
-        out = await snap.outline(
-            page,
+        described as if it were content). Remembered in the page memory
+        when this toolkit has one."""
+        return await _shared.observe(
+            session,
+            self._handoff,
+            action,
+            args,
             query=query,
             full=full,
-            account_mode=account,
-            secrets=session.typed_secrets,
-            limit_chars=FULL_OUTLINE_CHARS if full else OUTLINE_CHARS,
+            extra=extra,
+            memory=self._memory,
+            guard=self._guard,
         )
-        summary = snap.summarize(action, args, out, step=session.task.actions)
-        session.task.summaries.append(summary)
-        session.task.last_outline_chars = out.chars
-        return {
-            "ok": True,
-            "url": out.url,
-            "title": out.title,
-            "outline": list(out.lines),
-            "refs": out.refs,
-            "truncated": out.truncated,
-            "summary": summary,
-            "notes": list(session.task.notes),
-            "mode": session.mode,
-            **(extra or {}),
-        }
 
     @staticmethod
     def _record(session: BrowserSession, line: str) -> str:
@@ -375,7 +302,7 @@ class BrowserReadToolkit:
 
     @staticmethod
     def _where(session: BrowserSession, page: Any) -> str:
-        return snap.strip_url(page.url, session.mode == "account")
+        return _shared.where(session, page)
 
     async def _page_or_challenge(
         self, session: BrowserSession
@@ -390,74 +317,26 @@ class BrowserReadToolkit:
         self, session: BrowserSession, page: Any, kind: str, detail: str
     ) -> dict[str, Any]:
         """End the turn: the person clears the challenge (or does what the
-        model asked for) and resumes. The masked picture goes to them.
-        Until the agent's next action on this session the person is
+        model asked for) and resumes. The masked picture goes to them, and
+        until the agent's next action on this session the person is
         driving Crawler's window, so their own submit (the sign-in form)
-        must pass the guard's read-tier block: ``EgressState.human_driving``,
-        closed again by ``_take_back``.
-        (Phase 4 hook: ``platform.bring_to_front`` belongs here.)"""
-        state = self._guard.egress_state(session.context)
-        if state is not None:
-            state.human_driving = True
-        payload: dict[str, Any] = {
-            "kind": kind,
-            "detail": detail,
-            "url": self._where(session, page),
-        }
-        try:
-            image = await self._jpeg(page, None)
-        except PlaywrightError as exc:
-            _log_failure("browser_handoff_screenshot_failed", exc, kind=kind)
-            image = None
-        if image is not None:
-            payload["user_image"] = image
-        return {"ok": False, "needs_human": payload, "mode": session.mode}
+        passes the guard's read-tier block (``_shared.hand_over``, shut
+        again by ``_take_back``)."""
+        return await _shared.needs_human(session, page, kind, detail, guard=self._guard)
 
     async def _take_back(self, session: BrowserSession) -> None:
-        """The agent is acting again, so the person is no longer driving:
-        shut the handoff window before anything touches the page, then let
-        the navigation their last click started land, so the first read
-        after "done" sees the signed-in page and not the form."""
-        state = self._guard.egress_state(session.context)
-        if state is None or not state.human_driving:
-            return
-        state.human_driving = False
-        await self._settle(await session.page())
+        """The agent is acting again, so the person is no longer driving
+        (``_shared.take_back``: shut the window, let their last click land)."""
+        await _shared.take_back(self._guard, session)
 
     async def _jpeg(self, page: Any, ref: Optional[str]) -> str:
-        """Masked JPEG data URL of the page or of one element. Raises
-        PlaywrightTimeoutError for a ref that no longer resolves.
-
-        The mask covers every frame: ``page.locator`` never looks inside an
-        iframe, and an embedded IdP login or card form is exactly where a
-        password or card number sits."""
-        options: dict[str, Any] = {
-            "type": "jpeg",
-            "quality": JPEG_QUALITY,
-            "mask": [frame.locator(MASK_SELECTOR) for frame in page.frames],
-            "mask_color": "#000000",
-        }
-        if not ref:
-            raw = await page.screenshot(timeout=NAVIGATION_TIMEOUT_MS, **options)
-        else:
-            # Locator.screenshot (Playwright 1.63) does not pass its timeout
-            # to the element lookup, so a stale ref would wait the 30 s
-            # default. Resolve the element here, under REF_TIMEOUT_MS.
-            handle = await page.locator(f"aria-ref={ref}").element_handle(timeout=REF_TIMEOUT_MS)
-            try:
-                raw = await handle.screenshot(timeout=REF_TIMEOUT_MS, **options)
-            finally:
-                await handle.dispose()
-        return "data:image/jpeg;base64," + base64.b64encode(raw).decode("ascii")
+        """Masked JPEG data URL of the page or of one element (``_shared.jpeg``)."""
+        return await _shared.jpeg(page, ref)
 
     @staticmethod
     async def _settle(page: Any) -> None:
-        """Give a click that navigates a moment to land; one that does not
-        returns at once because the state is already reached."""
-        try:
-            await page.wait_for_load_state("domcontentloaded", timeout=5_000)
-        except PlaywrightError:
-            pass
+        """Give a click that navigates a moment to land (``_shared.settle``)."""
+        await _shared.settle(page)
 
     def _blocked_count(self, session: BrowserSession) -> int:
         state = self._guard.egress_state(session.context)
@@ -473,6 +352,17 @@ class BrowserReadToolkit:
         last = state.blocked[-1]
         return f"{last['url']}: {last['reason']}"
 
+    def _click_sent(self, session: BrowserSession, *, since: int) -> Optional[str]:
+        """Why the guard stopped a read-tier click sending something (a
+        page script's request, a form, an order address), or None."""
+        state = self._guard.egress_state(session.context)
+        if state is None:
+            return None
+        for entry in state.blocked[since:]:
+            if entry.get("reason") in READ_CLICK_REASONS:
+                return str(entry["reason"])
+        return None
+
     @staticmethod
     def _label(session: BrowserSession, value: str) -> str:
         """Model- or page-supplied text as it may appear in a summary: one
@@ -484,10 +374,12 @@ class BrowserReadToolkit:
 
     @staticmethod
     def _redact(session: BrowserSession, content: str) -> str:
-        for secret in session.typed_secrets:
-            if secret:
-                content = content.replace(secret, "•••")
-        return content
+        """Page text with every typed secret replaced the way the outline
+        does it (``snap.redact``): a card number in any grouping a page
+        prints it in, a short code as a whole digit run, and the escaped
+        and percent-encoded forms; a plain replace of the value as typed
+        would let "4242 4242 4242 4242" through."""
+        return snap.redact(content, session.typed_secrets, "•••")
 
     async def _title(self, session: BrowserSession, page: Any) -> str:
         """The page title, redacted like the outline's (it is page-controlled)."""
@@ -543,36 +435,69 @@ class BrowserReadToolkit:
             return refusal
         try:
             reason = await self._guard.consequential(page, ref)
+            if reason is None:
+                reason = await self._order_reason(page, ref)
         except (StaleRef, PlaywrightError) as exc:  # the ref could not be resolved at all
             _log_failure("browser_click_gate_failed", exc, ref=ref)
             return _stale()
         if reason is not None:
             self._record(session, f"click {ref} refused: {reason}")
-            return _error(
-                "This looks like a consequential action; use browser.act", consequential=reason
-            )
+            return _error(markers.READ_CLICK_MESSAGE, consequential=reason)
         locator = page.locator(f"aria-ref={ref}")
         blocked_before = self._blocked_count(session)
+        # A click with no card sends nothing: the guard stops any page
+        # script's request but a GET, and any order address, until the
+        # click has settled and the network is quiet (at most 2 s).
+        state = self._guard.egress_state(session.context)
+        if state is not None:
+            state.read_click = True
         try:
-            # The pre-click accessible name, so the summary reads
-            # 'click "Grades"' and not 'click e3' (contracts §3).
-            name = await locator.evaluate(_CLICK_NAME_JS, timeout=REF_TIMEOUT_MS)
-            await locator.click(timeout=REF_TIMEOUT_MS)
-        except PlaywrightTimeoutError:
-            return _stale()
-        except PlaywrightError as exc:
-            _log_failure("browser_click_failed", exc, ref=ref)
-            return _error(
-                "The click failed (the element may be covered or gone); re-snapshot and try again."
-            )
-        await self._guard.settle_blocked_navigation(page, timeout_ms=300)
+            try:
+                # The pre-click accessible name, so the summary reads
+                # 'click "Grades"' and not 'click e3' (contracts §3).
+                name = await locator.evaluate(_CLICK_NAME_JS, timeout=REF_TIMEOUT_MS)
+                await locator.click(timeout=REF_TIMEOUT_MS)
+            except PlaywrightTimeoutError:
+                return _stale()
+            except PlaywrightError as exc:
+                _log_failure("browser_click_failed", exc, ref=ref)
+                return _error(
+                    "The click failed (the element may be covered or gone); re-snapshot and try again."
+                )
+            clicked = time.monotonic()
+            await self._guard.settle_blocked_navigation(page, timeout_ms=300)
+            await self._settle(page)
+            await wait_for_quiet(state, since=clicked)
+        finally:
+            if state is not None:
+                state.read_click = False
+        sent = self._click_sent(session, since=blocked_before)
+        if sent is not None:
+            self._record(session, f"click {ref} refused: {sent}")
+            return _error(markers.READ_CLICK_MESSAGE, consequential=sent)
         blocked = self._blocked_reason(session, since=blocked_before)
         if blocked is not None and page.url.startswith("chrome-error://"):
             return _error(f"That click was refused by the network policy: {blocked}")
-        await self._settle(page)
         return await self._observe(
             session, "click", {"ref": ref, "name": self._label(session, str(name or ""))}
         )
+
+    @staticmethod
+    async def _order_reason(page: Any, ref: str) -> Optional[str]:
+        """The live page's answer for a click that has no approval card at
+        all: the control the click lands on, its words, its form, its link
+        and every frame's facts. A click the purchase rules flag
+        (``markers.read_click_pays``) may place an order; any other click
+        but a plain link or a control outside a form on a page with nothing
+        to pay (``markers.read_click_allowed``) is left to browser.act,
+        whose card shows the owner the page first."""
+        target = await page.locator(f"aria-ref={ref}").evaluate(
+            markers.PURCHASE_TARGET_JS, timeout=REF_TIMEOUT_MS
+        )
+        target = markers.join_page(target, await _shared.page_facts(page))
+        if markers.read_click_pays(target):
+            return _ORDER_REASON
+        return None if markers.read_click_allowed(target) else _ACT_REASON
 
     async def find(self, session: BrowserSession, text: str) -> dict[str, Any]:
         """Lines mentioning *text*, each with its row/listitem/article so the
