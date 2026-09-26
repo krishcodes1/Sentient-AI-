@@ -146,6 +146,32 @@ _DEFAULT_POLICIES: dict[tuple[str, ActionCategory], PermissionTier] = {
     ("browser", ActionCategory.DELETE): PermissionTier.HARD_BLOCKED,
     ("browser", ActionCategory.EXECUTE): PermissionTier.HARD_BLOCKED,
     ("browser", ActionCategory.FINANCIAL): PermissionTier.HARD_BLOCKED,
+    # Built-in memory — memory.remember adds one of the user's saved
+    # memories, which is replayed into every future system prompt as trusted
+    # context. A poisoned or mistaken memory steers every later turn, so the
+    # write goes through the approval card every time (the card shows the
+    # exact text), unlike a reminder. There is no read tool (memories are
+    # already in the prompt) and nothing edits, deletes, runs or pays: the
+    # owner manages memories on the Memory page, so every other category is
+    # blocked outright.
+    ("memory", ActionCategory.READ): PermissionTier.HARD_BLOCKED,
+    ("memory", ActionCategory.WRITE): PermissionTier.USER_CONFIRM,
+    ("memory", ActionCategory.DELETE): PermissionTier.HARD_BLOCKED,
+    ("memory", ActionCategory.EXECUTE): PermissionTier.HARD_BLOCKED,
+    ("memory", ActionCategory.FINANCIAL): PermissionTier.HARD_BLOCKED,
+    # Built-in page watch — a watch makes Crawler fetch a page on a schedule
+    # for as long as it exists, and tells the owner on Telegram when it
+    # changes. Listing watches is a read. Creating one is standing
+    # background egress to a URL, so it is a WRITE behind the approval card
+    # (never AUTO like reminders.create: an auto write would skip the taint
+    # gate, and a watch on a URL taken from fetched content must come back
+    # to a person). Deleting one removes the row: DELETE, also behind the
+    # card. Nothing here runs commands, and money never moves.
+    ("watch", ActionCategory.READ): PermissionTier.AUTO_APPROVE,
+    ("watch", ActionCategory.WRITE): PermissionTier.USER_CONFIRM,
+    ("watch", ActionCategory.DELETE): PermissionTier.USER_CONFIRM,
+    ("watch", ActionCategory.EXECUTE): PermissionTier.HARD_BLOCKED,
+    ("watch", ActionCategory.FINANCIAL): PermissionTier.HARD_BLOCKED,
     # Todoist
     ("todoist", ActionCategory.READ): PermissionTier.AUTO_APPROVE,
     ("todoist", ActionCategory.WRITE): PermissionTier.USER_CONFIRM,

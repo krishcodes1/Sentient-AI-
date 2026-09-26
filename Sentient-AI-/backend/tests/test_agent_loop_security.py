@@ -448,9 +448,12 @@ async def test_dynamic_tool_selection_caps_tool_count():
         user_id="u1",
     )
 
+    from services.agent.context_manager import OFFERED_TOOL_CAP
+
     sent_tools = provider.calls[0]["tools"]
     assert sent_tools is not None
-    assert len(sent_tools) <= 15
+    assert len(tools) > OFFERED_TOOL_CAP  # precondition: this is a trim
+    assert len(sent_tools) <= OFFERED_TOOL_CAP
 
 
 @pytest.mark.asyncio

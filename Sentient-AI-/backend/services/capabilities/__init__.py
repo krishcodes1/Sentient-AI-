@@ -11,7 +11,9 @@ from services.capabilities import (
     browser_control,
     computer_control,
     installs,
+    page_watch,
     reminders,
+    save_memories,
     screen,
     site_screenshots,
     telegram,
@@ -33,10 +35,12 @@ REGISTRY: tuple[Capability, ...] = (
     site_screenshots.CAPABILITY,
     screen.CAPABILITY,
     reminders.CAPABILITY,
+    save_memories.CAPABILITY,
     installs.CAPABILITY,
     telegram.CAPABILITY,
     browser_control.CAPABILITY,
     computer_control.CAPABILITY,
+    page_watch.CAPABILITY,
 )
 
 # Tools no capability gates. Listed explicitly so that a new built-in tool
@@ -91,9 +95,13 @@ def default_switches() -> dict[str, bool]:
     return {c.key: c.default_enabled for c in REGISTRY}
 
 
-def default_context(*, telegram_configured: bool = False) -> ReportContext:
+def default_context(
+    *, telegram_configured: bool = False, telegram_enabled: bool = False
+) -> ReportContext:
     """Gather the environment facts for one report. This is the only place
-    that touches the OS for availability; availability() reads the result."""
+    that touches the OS for availability; availability() reads the result.
+    *telegram_enabled* is the owner's Telegram switch; it counts only with a
+    token configured."""
     # Both deferred, like browser_installed: the registry stays importable
     # without the toolkit or the platform package.
     from services import platform as platform_layer
@@ -109,6 +117,7 @@ def default_context(*, telegram_configured: bool = False) -> ReportContext:
         playwright_installed=playwright_installed(),
         browser_channel=layer.browser_channel() or "",
         host_platform=layer.name,
+        telegram_enabled=telegram_configured and telegram_enabled,
     )
 
 

@@ -1,11 +1,12 @@
-"""Implements the web.* built-in tools: DuckDuckGo search, page fetch as text, and
-a Playwright screenshot.
+"""Implements the web.* built-in tools: DuckDuckGo search, page fetch as text,
+research (one search plus a parallel read of its top sources), and a
+Playwright screenshot.
 
 Why it exists: These are the only tools every user gets without credentials, so
 the tool registry dispatches web.* here, where every request goes through the
 egress guard and every returned field is capped.
 
-Built-in web tools: search, page fetch, screenshot.
+Built-in web tools: search, page fetch, research, screenshot.
 
 These are the only tools every user gets without configuring anything —
 they need no credentials, no OAuth and no connector row, because they
@@ -30,10 +31,13 @@ raising. To enable it:
 
     pip install playwright && python -m playwright install chromium
 
-All three actions are read-only. There is no form submission, no login
-and no purchase path in this module, and the permission engine blocks
-every non-read category for the ``web`` connector type as a second
-layer.
+``research`` adds no egress of its own: it runs ``search`` and then
+``fetch_page`` on each chosen result, so every page it reads passes the
+same guard, caps and text extraction as a single fetch.
+
+Every action is read-only. There is no form submission, no login and no
+purchase path in this module, and the permission engine blocks every
+non-read category for the ``web`` connector type as a second layer.
 """
 
 from __future__ import annotations
@@ -41,12 +45,19 @@ from __future__ import annotations
 import asyncio
 import base64
 import inspect
+import json
+import re
+from contextvars import ContextVar
 from typing import Any, Awaitable, Callable, Optional
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 import structlog
 
+# The characters the runtime writes out as visible \uXXXX escapes before it
+# shows a result to the model (runtime._wrap_tool_results); a stdlib-only
+# module, so importing it here pulls nothing else from the agent package.
+from services.agent.prompt_guard import _INVISIBLE_CHARS as _HIDDEN_CHARS
 from services.tools.html_text import extract_readable_text, parse_search_results
 from services.tools.net import (
     AddressResolver,
@@ -62,6 +73,13 @@ logger = structlog.get_logger(__name__)
 # that carries snippets.
 SEARCH_ENDPOINT = "https://html.duckduckgo.com/html/"
 
+# When DuckDuckGo suspects a bot it answers HTTP 202 with a "select the
+# ducks" challenge page instead of results. Parsed as a results page that is
+# an empty result set, which tells the model to rephrase a query that was
+# fine. These are the challenge page's own markers; they are checked only
+# when no results were parsed, so a normal page cannot trip them.
+_SEARCH_CHALLENGE_RE = re.compile(r'anomaly-modal|id="challenge-form"|/anomaly\.js', re.IGNORECASE)
+
 # Identify honestly. Wikimedia (and anyone else following the same robot
 # policy) answers a browser UA coming from a non-browser TLS stack with
 # 403, and serves this one; a spoofed Chrome string buys nothing that a
@@ -72,13 +90,54 @@ _MAX_RESULTS = 10
 _DEFAULT_RESULTS = 5
 _SNIPPET_CHARS = 200
 
-_DEFAULT_PAGE_CHARS = 4000
-_MAX_PAGE_CHARS = 20000
+DEFAULT_PAGE_CHARS = 4000
+# The most page text one fetch returns, counted as the model sees it (see
+# _clip_as_shown). It was 20000, but the runtime showed the model only a
+# 2000-char head and tail of any result, so a larger max_chars never showed
+# more. The runtime now keeps a fetch whole up to its web.fetch_page budget
+# (services/agent/runtime.py RESULT_CHAR_BUDGETS), sized from this number;
+# raising one means raising the other. 12000 is three times the default
+# and about 3400 tokens, so a round that reads three long pages stays near
+# 10k tokens.
+MAX_PAGE_CHARS = 12000
 # Read cap for the response body itself. Independent of the character
 # cap: a 50 MB page must not be buffered just to throw 99% of it away.
 _MAX_BODY_BYTES = 2 * 1024 * 1024
 
 _READABLE_CONTENT_TYPES = ("text/html", "application/xhtml", "text/plain", "text/")
+
+# web.research: one READ call that searches and reads the top results, so
+# a comparison costs one tool round instead of a search plus a fetch per
+# source. The caps bound the fan-out: at most 8 pages, 4 at a time, each
+# on its own clock. The excerpts also share one total, which keeps a full
+# result inside the runtime's budget for this tool (RESULT_CHAR_BUDGETS)
+# so the model never gets a source cut out of the middle of the payload.
+_RESEARCH_MAX_QUERY_CHARS = 300
+_RESEARCH_DEFAULT_SOURCES = 5
+_RESEARCH_MAX_SOURCES = 8
+_RESEARCH_DEFAULT_CHARS = 1200
+_RESEARCH_MIN_CHARS = 200
+_RESEARCH_MAX_CHARS = 3000
+_RESEARCH_TOTAL_CHARS = 10000
+_RESEARCH_CONCURRENCY = 4
+_RESEARCH_PAGE_TIMEOUT_S = 10.0
+_RESEARCH_TITLE_CHARS = 140
+_RESEARCH_URL_CHARS = 500
+# A link whose path names a document, archive or media file would only be
+# refused by fetch_page's content-type check, after taking a source slot
+# and a round trip, so research passes over it before the fan-out.
+_NON_TEXT_SUFFIXES = (
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".odt", ".epub",
+    ".zip", ".gz", ".tgz", ".tar", ".7z", ".rar", ".exe", ".msi", ".dmg", ".apk", ".iso",
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".ico", ".tif", ".tiff",
+    ".mp3", ".mp4", ".m4a", ".wav", ".ogg", ".avi", ".mov", ".mkv", ".webm",
+)  # fmt: skip
+
+# The executor's kill-switch check for the web call in progress, never a
+# model argument: execute() sets it around one call and research() asks
+# it before each page. A ContextVar because one toolkit serves every
+# user's turns at once.
+_stop_check: ContextVar[Optional[Callable[[], bool]]] = ContextVar("web_stop_check", default=None)
 
 _SCREENSHOT_WIDTH = 1024
 _SCREENSHOT_HEIGHT = 768
@@ -124,6 +183,36 @@ def _error(message: str, **extra: Any) -> dict[str, Any]:
     return {"ok": False, "error": message, **extra}
 
 
+def _shown_length(text: str) -> int:
+    """How many characters *text* takes in the JSON the runtime shows the
+    model: a line break or a quote is two, and an invisible character
+    (a soft hyphen, a zero-width joiner, a Unicode tag letter) is the six
+    or twelve of the escape the runtime writes it out as."""
+    shown = json.dumps(text, ensure_ascii=False)[1:-1]
+    return len(_HIDDEN_CHARS.sub(lambda m: json.dumps(m.group())[1:-1], shown))
+
+
+def _clip_as_shown(text: str, limit: int) -> str:
+    """The longest start of *text* whose shown length is at most *limit*.
+
+    Counting raw characters let a page of short lines (a table, a list)
+    come out a third longer than *limit* once escaped, overrun the
+    runtime's web.fetch_page budget and lose its middle there instead.
+    """
+    # Every character shows as at least one, so a text longer than the
+    # limit cannot fit, and the whole of a 2 MB page is never escaped.
+    if len(text) <= limit and _shown_length(text) <= limit:
+        return text
+    low, high = 0, min(len(text), limit)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if _shown_length(text[:middle]) <= limit:
+            low = middle
+        else:
+            high = middle - 1
+    return text[:low]
+
+
 class WebToolkit:
     """Executes the built-in ``web.*`` actions.
 
@@ -141,8 +230,10 @@ class WebToolkit:
         transport: Optional[httpx.AsyncBaseTransport] = None,
         capture: Optional[Callable[..., Any]] = None,
         playwright_loader: Optional[Callable[[], Any]] = None,
+        research_page_timeout_s: float = _RESEARCH_PAGE_TIMEOUT_S,
     ) -> None:
         self._timeout_s = timeout_s
+        self._research_page_timeout_s = research_page_timeout_s
         self._resolver = resolver
         self._transport = transport
         self._capture = capture
@@ -150,11 +241,22 @@ class WebToolkit:
 
     # -- Dispatch ------------------------------------------------------------
 
-    async def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
-        """Run one ``web.*`` action. Unknown actions fail closed."""
+    async def execute(
+        self,
+        action: str,
+        params: dict[str, Any],
+        *,
+        cancelled: Optional[Callable[[], bool]] = None,
+    ) -> dict[str, Any]:
+        """Run one ``web.*`` action. Unknown actions fail closed.
+
+        *cancelled* is the executor's check for the user's Stop on this
+        call; research asks it before each page it reads.
+        """
         handlers: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
             "search": self.search,
             "fetch_page": self.fetch_page,
+            "research": self.research,
             "screenshot": self.screenshot,
         }
         handler = handlers.get(action)
@@ -170,6 +272,7 @@ class WebToolkit:
         except TypeError as exc:
             return _error(f"Invalid arguments for web.{action}: {exc}")
 
+        token = _stop_check.set(cancelled)
         try:
             return await handler(**params)
         except EgressBlocked as exc:
@@ -178,6 +281,8 @@ class WebToolkit:
             return _error(str(exc))
         except httpx.HTTPError as exc:
             return _error(f"Request failed: {type(exc).__name__}")
+        finally:
+            _stop_check.reset(token)
 
     def _client(self) -> httpx.AsyncClient:
         return build_guarded_client(
@@ -216,6 +321,19 @@ class WebToolkit:
             )
 
         results = parse_search_results(response.text, limit, _SNIPPET_CHARS)
+        if not results and (
+            response.status_code == 202 or _SEARCH_CHALLENGE_RE.search(response.text)
+        ):
+            # Not an empty result set: the search engine refused to answer.
+            # Solving its challenge is not ours to do, so say what happened.
+            logger.warning("web_search_challenged", status_code=response.status_code)
+            return _error(
+                "The search engine (DuckDuckGo) answered with a human-verification "
+                "challenge instead of results, so web search is unavailable for now. "
+                "This usually clears on its own after a while. Tell the user; do "
+                "not retry or rephrase the search.",
+                search_blocked=True,
+            )
         if not results:
             # Distinguishable from a network failure on purpose: a zero
             # result set is a fact about the query, and the model should
@@ -223,17 +341,15 @@ class WebToolkit:
             return {"ok": True, "query": query, "results": [], "count": 0}
         return {"ok": True, "query": query, "results": results, "count": len(results)}
 
-    async def fetch_page(
-        self, url: str, max_chars: int = _DEFAULT_PAGE_CHARS
-    ) -> dict[str, Any]:
+    async def fetch_page(self, url: str, max_chars: int = DEFAULT_PAGE_CHARS) -> dict[str, Any]:
         """Fetch a public page and return its readable text."""
         if not url or not isinstance(url, str):
             return _error("A 'url' is required.")
 
         try:
-            limit = max(200, min(int(max_chars), _MAX_PAGE_CHARS))
+            limit = max(200, min(int(max_chars), MAX_PAGE_CHARS))
         except (TypeError, ValueError):
-            limit = _DEFAULT_PAGE_CHARS
+            limit = DEFAULT_PAGE_CHARS
 
         async with self._client() as client:
             async with client.stream("GET", url) as response:
@@ -262,9 +378,24 @@ class WebToolkit:
 
         body = b"".join(chunks).decode(encoding, errors="replace")
         title, text = extract_readable_text(body)
-        truncated = len(text) > limit
-        if truncated:
-            text = text[:limit].rstrip()
+        clipped = _clip_as_shown(text, limit)
+        truncated = len(clipped) < len(text)
+        text = clipped.rstrip() if truncated else text
+
+        # The note only promises what a retry can deliver: up to
+        # MAX_PAGE_CHARS the runtime shows the model everything returned
+        # here, and past it a larger max_chars returns the same text.
+        note: dict[str, str] = {}
+        if truncated and limit < MAX_PAGE_CHARS:
+            note["note"] = (
+                f"Truncated at max_chars={limit}. Request a larger max_chars "
+                f"(up to {MAX_PAGE_CHARS}) if the answer was cut off."
+            )
+        elif truncated:
+            note["note"] = (
+                f"Truncated at max_chars={limit}, the most web.fetch_page "
+                "returns; a larger max_chars will not show more of this page."
+            )
 
         return {
             "ok": True,
@@ -273,17 +404,151 @@ class WebToolkit:
             "text": text,
             "truncated": truncated,
             "chars": len(text),
-            **(
-                {
-                    "note": (
-                        f"Truncated to {limit} characters. Request a larger "
-                        "max_chars if the answer was cut off."
-                    )
-                }
-                if truncated
-                else {}
-            ),
+            **note,
         }
+
+    async def research(
+        self,
+        query: str,
+        max_sources: int = _RESEARCH_DEFAULT_SOURCES,
+        chars_per_source: int = _RESEARCH_DEFAULT_CHARS,
+    ) -> dict[str, Any]:
+        """Search, then read the top results in parallel as cited excerpts.
+
+        Never raises. A failed search is the call's error; a page that
+        fails (HTTP error, not text, a blocked redirect, too slow) is one
+        source with ``ok: False`` and an error while the rest still come
+        back. A result whose host the egress policy refuses is skipped
+        before any request and the next result takes its place.
+
+        ``results`` is a top-level list with one dict per source: the shape
+        the runtime's per-item scan (``_scan_and_redact_result``) redacts
+        one poisoned source in without dropping the others.
+        """
+        if not isinstance(query, str) or not query.strip():
+            return _error("A non-empty 'query' is required.")
+        query = query.strip()
+        if len(query) > _RESEARCH_MAX_QUERY_CHARS:
+            return _error(
+                f"The 'query' is limited to {_RESEARCH_MAX_QUERY_CHARS} characters; "
+                "shorten it to the key terms."
+            )
+        wanted = _bounded(max_sources, 1, _RESEARCH_MAX_SOURCES, _RESEARCH_DEFAULT_SOURCES)
+        chars = _bounded(
+            chars_per_source, _RESEARCH_MIN_CHARS, _RESEARCH_MAX_CHARS, _RESEARCH_DEFAULT_CHARS
+        )
+
+        try:
+            found = await self.search(query, max_results=_MAX_RESULTS)
+        except EgressBlocked as exc:
+            return _error(str(exc), blocked=True)
+        except httpx.HTTPError as exc:
+            return _error(f"Search failed: {type(exc).__name__}")
+        if not found.get("ok"):
+            return found
+
+        chosen = await self._admit(_research_candidates(found.get("results") or []), wanted)
+        if not chosen:
+            return {
+                "ok": True,
+                "query": query,
+                "results": [],
+                "note": (
+                    "The search found no readable sources for this query. "
+                    "Try different search terms."
+                ),
+            }
+
+        limit = min(chars, max(_RESEARCH_MIN_CHARS, _RESEARCH_TOTAL_CHARS // len(chosen)))
+        gate = asyncio.Semaphore(_RESEARCH_CONCURRENCY)
+        stop = _stop_check.get()
+        sources = await asyncio.gather(
+            *(self._read_source(row, limit, gate, stop) for row in chosen)
+        )
+        return {"ok": True, "query": query, "results": list(sources)}
+
+    async def _admit(self, rows: list[dict[str, Any]], wanted: int) -> list[dict[str, Any]]:
+        """The first *wanted* of *rows*, best first, whose host passes the
+        egress policy. Checked in rank order, a batch at a time, so a
+        refused result is replaced by the next one down.
+
+        This only picks what to read. The guarded client checks and pins
+        every hop again when the page is fetched, so a pass here grants
+        nothing on its own.
+        """
+        admitted: list[dict[str, Any]] = []
+        pending = list(rows)
+        while pending and len(admitted) < wanted:
+            need = wanted - len(admitted)
+            batch, pending = pending[:need], pending[need:]
+            verdicts = await asyncio.gather(*(self._admissible(row["url"]) for row in batch))
+            admitted.extend(row for row, ok in zip(batch, verdicts, strict=True) if ok)
+        return admitted
+
+    async def _admissible(self, url: str) -> bool:
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(self._resolver, url), self._research_page_timeout_s
+            )
+        except Exception:  # noqa: BLE001 - refused, unresolvable or slow: all a skip
+            return False
+        return True
+
+    async def _read_source(
+        self,
+        row: dict[str, Any],
+        limit: int,
+        gate: asyncio.Semaphore,
+        stop: Optional[Callable[[], bool]],
+    ) -> dict[str, Any]:
+        """Read one chosen result through fetch_page; never raises."""
+        url = row["url"]
+        source: dict[str, Any] = {
+            "title": str(row.get("title") or "")[:_RESEARCH_TITLE_CHARS],
+            "url": url[:_RESEARCH_URL_CHARS],
+            "host": _host_of(url),
+            "excerpt": "",
+            "ok": False,
+        }
+        async with gate:
+            if _stop_requested(stop):
+                source["error"] = "Stopped before this page was read."
+                return source
+            try:
+                page = await asyncio.wait_for(
+                    self.fetch_page(url, max_chars=limit), self._research_page_timeout_s
+                )
+            except asyncio.TimeoutError:
+                source["error"] = (
+                    f"The page did not load within {self._research_page_timeout_s:g} seconds."
+                )
+                return source
+            except EgressBlocked as exc:
+                source["error"] = str(exc)
+                return source
+            except httpx.HTTPError as exc:
+                source["error"] = f"Request failed: {type(exc).__name__}"
+                return source
+            except Exception as exc:  # noqa: BLE001 - one bad page is a result, not a failed call
+                logger.warning(
+                    "web_research_page_failed",
+                    host=source["host"],
+                    error_type=type(exc).__name__,
+                )
+                source["error"] = f"The page could not be read ({type(exc).__name__})."
+                return source
+
+        if not page.get("ok"):
+            source["error"] = str(page.get("error") or "The page could not be read.")
+            return source
+        final_url = str(page.get("url") or url)
+        source["url"] = final_url[:_RESEARCH_URL_CHARS]
+        source["host"] = _host_of(final_url)
+        source["excerpt"] = str(page.get("text") or "")
+        source["ok"] = True
+        if not source["title"]:
+            source["title"] = str(page.get("title") or "")[:_RESEARCH_TITLE_CHARS]
+        return source
 
     async def screenshot(
         self,
@@ -395,6 +660,58 @@ class WebToolkit:
             raise WebToolError(f"Screenshot failed: {type(exc).__name__}") from exc
 
         return image, final_url, width, height
+
+
+def _bounded(value: Any, low: int, high: int, default: int) -> int:
+    """*value* as an int clamped to [low, high]; *default* when it is not one."""
+    try:
+        return max(low, min(int(value), high))
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def _host_of(url: str) -> str:
+    try:
+        return (urlsplit(url).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return ""
+
+
+def _research_candidates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Search rows worth reading, best first: http(s) only, one per host
+    ("www." folded in, so a site is not read twice under two names), and
+    not a link to a document or media file."""
+    picked: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        url = row.get("url")
+        if not isinstance(url, str):
+            continue
+        try:
+            parts = urlsplit(url)
+        except ValueError:
+            continue
+        host = _host_of(url)
+        if parts.scheme not in ("http", "https") or not host:
+            continue
+        if parts.path.lower().endswith(_NON_TEXT_SUFFIXES):
+            continue
+        key = host[4:] if host.startswith("www.") else host
+        if key in seen:
+            continue
+        seen.add(key)
+        picked.append(row)
+    return picked
+
+
+def _stop_requested(stop: Optional[Callable[[], bool]]) -> bool:
+    if stop is None:
+        return False
+    try:
+        return bool(stop())
+    except Exception:  # noqa: BLE001 - no answer is not a "carry on"
+        logger.warning("web_research_stop_check_failed")
+        return True
 
 
 def _load_playwright() -> Any:

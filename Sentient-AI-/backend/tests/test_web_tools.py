@@ -31,7 +31,7 @@ from services.tools.net import (
     build_guarded_client,
     validated_addresses,
 )
-from services.tools.web import WebToolError, WebToolkit
+from services.tools.web import MAX_PAGE_CHARS, WebToolError, WebToolkit
 
 PUBLIC_ADDRESS = "93.184.216.34"
 
@@ -150,6 +150,66 @@ async def test_search_honours_max_results_and_its_ceiling():
     assert (await tools.search("q", max_results=500))["count"] == 2
 
 
+# The shape DuckDuckGo serves a suspected bot (trimmed from a live capture).
+CHALLENGE_HTML = """
+<html><body>
+<div class="anomaly-modal__mask"><div class="anomaly-modal__modal">
+  <p class="anomaly-modal__description">Unfortunately, bots use DuckDuckGo too.</p>
+  <form id="challenge-form" action="//duckduckgo.com/anomaly.js?sv=html" method="POST"></form>
+</div></div>
+</body></html>
+"""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [202, 200])
+async def test_a_search_challenge_is_an_error_not_an_empty_result(status):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, html=CHALLENGE_HTML)
+
+    result = await toolkit(handler, {"html.duckduckgo.com": (PUBLIC_ADDRESS,)}).search("q")
+
+    assert result["ok"] is False
+    assert result["search_blocked"] is True
+    assert "challenge" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_a_bare_202_with_no_results_is_treated_as_a_challenge():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(202, html="<html><body></body></html>")
+
+    result = await toolkit(handler, {"html.duckduckgo.com": (PUBLIC_ADDRESS,)}).search("q")
+    assert result["ok"] is False and result["search_blocked"] is True
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_empty_results_page_is_still_zero_results():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, html="<html><body><div class='no-results'>No results.</div></body></html>"
+        )
+
+    result = await toolkit(handler, {"html.duckduckgo.com": (PUBLIC_ADDRESS,)}).search("q")
+    assert result == {"ok": True, "query": "q", "results": [], "count": 0}
+
+
+@pytest.mark.asyncio
+async def test_research_reports_a_search_challenge_instead_of_no_sources():
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.host)
+        return httpx.Response(202, html=CHALLENGE_HTML)
+
+    result = await toolkit(handler, {"html.duckduckgo.com": (PUBLIC_ADDRESS,)}).research("q")
+
+    assert result["ok"] is False
+    assert result["search_blocked"] is True
+    # Nothing past the refused search is fetched.
+    assert requested == ["html.duckduckgo.com"]
+
+
 @pytest.mark.asyncio
 async def test_search_caps_snippet_length():
     long_snippet = "x" * 900
@@ -245,7 +305,7 @@ async def test_fetch_page_max_chars_has_a_ceiling():
     result = await toolkit(handler, {"example.com": (PUBLIC_ADDRESS,)}).fetch_page(
         "https://example.com/long", max_chars=10_000_000
     )
-    assert result["chars"] <= 20000
+    assert result["chars"] <= MAX_PAGE_CHARS
 
 
 @pytest.mark.asyncio

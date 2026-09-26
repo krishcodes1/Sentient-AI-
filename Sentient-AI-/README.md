@@ -390,10 +390,12 @@ them read-only.
 
 | Switch | Unlocks | Default |
 |--------|---------|---------|
-| **Browse the web** | Searching the public web and reading pages as text (`web.search`, `web.fetch_page`) | On |
+| **Browse the web** | Searching the public web and reading pages as text (`web.search`, `web.fetch_page`, and `web.research`, which reads several search results at once) | On |
 | **Screenshots of websites** | Opening a page in a hidden browser and capturing it as an image, for pages that don't read well as text — flights, products (`web.screenshot`). Needs the hidden browser installed (~150–300 MB); the wizard/Settings can install it for you. | On |
 | **See my screen** | Taking a picture of this computer's display when asked (`desktop.screenshot`). High risk, off by default, and audited on every capture. **Not available inside Docker** — the compose files set `CRAWLER_CONTAINER=1` so the capability reports "unavailable in this environment" instead of failing; it works when the backend runs directly on a Mac or Windows machine, and additionally needs the OS's screen-recording permission granted to the backend process. | Off |
 | **Reminders** | Setting, listing and cancelling reminders, delivered to you over Telegram when it's linked | On |
+| **Save memories (asks first)** | Proposing a fact you stated about yourself as a saved memory (`memory.remember`). Nothing is saved until you approve a card showing the exact text; saved memories are sent with every future conversation, and you can delete them on the Memory page. Passwords, keys and card numbers are refused. | On |
+| **Watch web pages for changes** | Checking pages you name on a schedule (no more often than every 30 minutes) and messaging you on Telegram when their text changes (`watch.create`, `watch.list`, `watch.delete`). Each new watch asks you first; the pages are fetched in the background with the same network protections as browsing. Needs a Telegram bot token and the Telegram switch on. | Off |
 | **Install optional software** | Installing optional components from a fixed list (e.g. the hidden browser above), asking you before every install | On |
 | **Telegram chat and approvals** | Chatting with Crawler from Telegram and approving pending actions from your phone. Needs a bot token configured (`.env` or the wizard's Telegram step). | On |
 

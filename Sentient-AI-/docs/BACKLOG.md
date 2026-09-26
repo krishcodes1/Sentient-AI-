@@ -44,16 +44,30 @@ Still open: a Telegram `/stop` writes no audit row of its own (the web stop's `s
 | ID | Item | Where | Done when | Size |
 |---|---|---|---|---|
 | C1 | **Google OAuth consent flow** — the redirect route is missing, so Google Workspace dies after ~1 h | `services/connectors/google_workspace.py`, new `api/routes/oauth.py`, Connectors UI | Gmail/Calendar stay connected for a week | M |
-| C2 | **Canvas assignments copilot** on the token connector: `canvas.get_assignments`, missing/late detection, due-this-week summary; prompt playbook | `services/connectors/canvas.py`, `tool_registry.py` catalog | "what's due this week" answers correctly against a real Canvas token | M |
+| C2 | **Shipped.** **Canvas assignments copilot** on the token connector: `canvas.get_upcoming` (due in the next N days plus missing/late work, every course in one call) and `canvas.grade_whatif`, with their prompt lines (see "C2 and C6 as shipped" below the table) | `services/connectors/canvas.py`, `canvas_upcoming.py`, `canvas_grades.py`, `tool_registry.py` catalog | done against a fake Canvas in tests. Still open: the "what's due this week" acceptance run against a real Canvas token | M |
 | C3 | **Microsoft 365 / Outlook** mail + calendar connector (Graph OAuth) for Windows-first users | new `services/connectors/microsoft.py` | read mail and events; send needs approval | M |
 | C4 | **MCP stdio transport** (+ localhost exception for user-registered servers) so any MCP server can be plugged in | `services/mcp/client.py`, `core/network_security.py` | Playwright MCP runs as a subprocess and its tools are offered, approval-gated | M |
 | C5 | **SKILL.md loader**: name+description injected, body on demand, scripts only via approval, no marketplace auto-install | new `services/skills/` | a local skill folder changes agent behaviour | M |
-| C6 | Search fallback (Brave/Tavily/SearXNG) + detect DuckDuckGo's anti-bot page (returns 0 results silently today) | `services/tools/web.py` | test with a captured anti-bot page | S |
+| C6 | Search fallback (Brave/Tavily/SearXNG) + detect DuckDuckGo's anti-bot page. **Detection shipped** (see below); the fallback is still open | `services/tools/web.py` | test with a captured anti-bot page (detection: `tests/test_web_tools.py`) | S |
+
+**C2 and C6 as shipped (2026-09-25).**
+
+- `canvas.get_upcoming` (scope `assignments.read`): everything due in the next N days (default 7, at most 30) across every active course, plus missing and late work, in one call; rows are shaped in `canvas_upcoming.py`. The prompt routes "what is due, missing or late" to it only when it is offered; without a Canvas connector the browser playbook's route (the planner, `find('Missing')`) applies.
+- `canvas.grade_whatif` (scope `grades.read`, READ, nothing is sent to Canvas): Canvas's own grade math in `canvas_grades.py` (group weights, drop rules, excused work), what-if scores and the score needed for a target. The prompt forbids the model's own grade arithmetic while the tool is offered.
+- C6, detection half: when DuckDuckGo answers with HTTP 202 or its challenge page and no results, `web.search` returns an error with `search_blocked: true` instead of 0 results, and `web.research` reports the same instead of "no sources". The error tells the model "do not retry or rephrase"; when the fallback lands, change that text, and `web.research` inherits the fallback through `web.search`.
+
+**Also shipped 2026-09-25 (no backlog item).**
+
+- `web.research` (capability `web_browsing`, READ, runs unattended): one search, then a parallel read of the top sources (5 by default, at most 8), cited by URL.
+- `web.fetch_page` returns at most 12000 characters of page text, and its result budget (`RESULT_CHAR_BUDGETS`, 16000 with the URL, title and keys) lets a full fetch reach the model whole instead of a 2000-character head and tail.
+- `memory.remember` (capability `save_memories`, on by default): saves one fact the user stated about themselves, always through the approval card showing the exact text; refuses secrets (`services/tools/memory.py:looks_like_secret`), duplicates, and memory that is switched off or full.
+- Page watch: `watch.create`/`list`/`delete` (capability `page_watch`, off by default, available only while Telegram can deliver the alerts). Create and delete go through the approval card; the sweeper (`services/notifications/page_watch.py`, wired in `main.py` next to `ReminderService`) checks each page on its interval with leased claims, a guarded fetch and error backoff, and messages the owner on Telegram when the text changes. Migration `0011_page_watches` (it keeps revising 0009; see its docstring for the merge with `0010_vault_items`).
+- The offered-tool array holds 20 tools (was 15), shared round-robin across families; a family's order comes from `TOOL_PRIORITY`, and the undo tools of an offered reminder or page-watch create, then every granted connector write, take the slots of later picks (a write only a tool that repeats an offered one), so with every switch on some writes still stay out (`context_manager.select_offered_tools`; `tests/test_offered_tools.py` pins what the largest configurations drop). The connectors spec §4.5 (`tools.find`, `loaded_tools`, `ToolSpec.starter`) is expected to replace the hand tables.
 
 ## Track D — Scheduling and automations
 | ID | Item | Where | Done when | Size |
 |---|---|---|---|---|
-| D1 | **Recurring reminders** (croniter/APScheduler); `agent_turn` payload runs a task on schedule with its own budget (off by default) | `models/reminder.py`, `services/notifications/reminders.py`, `services/tools/reminders.py` | "every weekday at 8am summarise Canvas" runs | M |
+| D1 | **Recurring reminders** (croniter/APScheduler); `agent_turn` payload runs a task on schedule with its own budget (off by default). Page watch already is a narrow, model-free scheduled job: build on its sweeper's design (leased claims, backoff, the capability switch re-read every sweep) rather than add a second scheduler | `models/reminder.py`, `services/notifications/reminders.py`, `services/tools/reminders.py`, `services/notifications/page_watch.py` | "every weekday at 8am summarise Canvas" runs | M |
 | D2 | **Reminders / automations page** in the web UI (API exists, no frontend) | `frontend/src/pages/Reminders.tsx`, Sidebar | list, create, cancel | S |
 | D3 | Inbound webhook with a bearer token; payload treated as untrusted | `api/routes/webhooks.py` | a webhook can start a turn, audited | S |
 
@@ -70,11 +84,11 @@ Still open: a Telegram `/stop` writes no audit row of its own (the web stop's `s
 | ID | Item | Where | Done when | Size |
 |---|---|---|---|---|
 | F1 | **Panic action**: revoke connector tokens, pause all tools, stop the poller; Telegram `/panic` and a Settings button | `api/routes/`, `telegram.py` | one tap stops everything, audited | S |
-| F2 | **Taint check on every `web.*` call** (URL host/path/query and the search query), allowing values from the user's own message | `runtime.py` taint gate | regression test with the flight URL | M |
+| F2 | **Taint check on every `web.*` call** (URL host/path/query and the search query, including `web.research`'s query, which is sent to DuckDuckGo unattended and whose results pick up to 8 pages it then reads), allowing values from the user's own message | `runtime.py` taint gate | regression test with the flight URL | M |
 | F3 | **Approval cards never truncate** recipients/URLs/paths; show a hash of the exact arguments | `telegram.py` card builder | test | S |
 | F4 | Irreversible-action policy: delete, new recipient, shell side effects never auto-approved | `services/agent/permissions.py` | tests per rule | S |
 | F5 | Host header allowlist + Origin check on SSE and state-changing requests | `api/middleware/security.py` | tests | S |
-| F6 | **Shared secret detector** (NemoClaw regex set + entropy) on memory writes, audit sanitiser, outbound Telegram text, write-tool args; fails closed | `services/security/secrets.py` (new) | a pasted key never lands in memory or Telegram | M |
+| F6 | **Shared secret detector** (NemoClaw regex set + entropy) on memory writes, audit sanitiser, outbound Telegram text, write-tool args; fails closed. `memory.remember` already refuses secrets with its own `services/tools/memory.py:looks_like_secret` (audit's patterns plus `_SECRET_RE`); move both into the shared module, together with the token formats the connectors spec (§4.3, Redaction) adds to `audit.py`, so each format lands once | `services/security/secrets.py` (new) | a pasted key never lands in memory or Telegram | M |
 | F7 | Refuse an Ollama endpoint that listens on a non-loopback address | `core/config.py` startup check | test | S |
 | F8 | JWT out of localStorage into an HttpOnly SameSite=Strict cookie | `api/routes/auth.py`, `api.ts` | login/refresh/logout still work | M |
 

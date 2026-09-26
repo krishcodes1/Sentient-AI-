@@ -219,6 +219,10 @@ class NetworkPolicy:
 # a self-hosted instance is never reachable at paths the hosted one is
 # not.
 _CANVAS_PATHS = ["/api/v1/", "/login/oauth2/token"]
+# The two reads behind canvas.get_upcoming. "/api/v1/" admits them already;
+# they are named so they stay admitted if that prefix is ever narrowed to
+# the endpoints the connector uses.
+_CANVAS_PATHS += ["/api/v1/planner/items", "/api/v1/users/self/missing_submissions"]
 
 # Default network policies per connector (deny-by-default)
 DEFAULT_POLICIES: dict[str, NetworkPolicy] = {

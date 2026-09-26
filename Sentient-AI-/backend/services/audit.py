@@ -27,7 +27,8 @@ Four layers live here:
 
 - ``sanitize_request_data`` / ``_sanitize``: strip credentials and other
   sensitive values before anything is persisted; ``redact_tool_arguments``
-  keeps only the length of what some tools take (the text desktop.act types).
+  keeps only the length of what some tools take (the text desktop.act types,
+  the text memory.remember saves).
 - ``build_hash_payload`` + ``append_audit_log``: the canonical hash
   payload (shared with ``api/routes/audit.py`` verification and
   ``scripts/verify_audit_log.py``) and the chained insert.
@@ -79,6 +80,14 @@ _SENSITIVE_VALUE_PATTERNS = re.compile(
 )
 
 
+def contains_sensitive_value(text: str) -> bool:
+    """True when *text* holds a value ``_sanitize`` would redact: a JWT, an
+    API or access key, or a card-length number. For a writer that must
+    refuse such a value outright rather than store it redacted (the agent's
+    memory.remember: a memory is sent with every future prompt)."""
+    return bool(_SENSITIVE_VALUE_PATTERNS.search(text))
+
+
 def _sanitize(data: Any) -> Any:
     """Recursively strip sensitive values from data before storage."""
     if isinstance(data, dict):
@@ -112,9 +121,12 @@ def sanitize_request_data(data: Any) -> str:
 # password field is refused, but its row is still written) or a private
 # message, and this log is append-only: nothing written here can be taken
 # back. The approval store keeps the real text, since an approved call
-# needs it to run.
+# needs it to run. A memory the agent saves is personal text the owner can
+# later delete from the Memory page; a copy here could never be deleted, so
+# its row keeps the length and category only (the memory row has the text).
 _LENGTH_ONLY_ARGUMENTS: dict[tuple[str, str], frozenset[str]] = {
     ("desktop", "act"): frozenset({"text"}),
+    ("memory", "remember"): frozenset({"content"}),
 }
 
 

@@ -303,7 +303,14 @@ class InstallationService:
         return await self.report()
 
     async def context(self) -> ReportContext:
-        return registry.default_context(telegram_configured=bool(await self.telegram_token()))
+        configured = bool(await self.telegram_token())
+        # The Telegram switch is a fact for the capabilities that deliver
+        # over Telegram (page_watch): with it off no message goes out.
+        switches = await self.capabilities()
+        return registry.default_context(
+            telegram_configured=configured,
+            telegram_enabled=configured and switches.get("telegram") is True,
+        )
 
     def _cached_view(self) -> Optional[_ReportView]:
         cached = self._report_view

@@ -742,7 +742,11 @@ async def test_a_ten_round_desktop_task_sends_one_outline_per_request(monkeypatc
     assert min(before_growth) > 6000
     assert max(after_growth) < 1500
     assert after[-1] < before[-1] / 3
-    assert sum(after) < sum(before) / 2.5
+    # Totals over what the rounds add on top of the first request: that one
+    # (system prompt, user message) is sent unchanged in every request of
+    # both runs and is not what the policy shrinks, so a longer prompt must
+    # not move this ratio.
+    assert sum(a - after[0] for a in after) < sum(b - before[0] for b in before) / 3
 
 
 # ── under the real permission policy ─────────────────────────────────────────

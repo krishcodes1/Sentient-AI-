@@ -26,9 +26,12 @@ from services.agent.prompt_guard import PromptGuard, ThreatLevel
 _GUARD = PromptGuard()
 
 # Cap how much memory text reaches the prompt so a large memory set cannot
-# crowd out the conversation or the policy.
-_MAX_MEMORIES_IN_PROMPT = 40
-_MAX_MEMORY_CHARS = 500
+# crowd out the conversation or the policy. Public because the agent's
+# memory.remember holds to the same two limits: it refuses a memory past the
+# number the prompt shows (an older one would silently drop out of it), and
+# its tool schema states the same length cap the Memory API enforces.
+MAX_MEMORIES_IN_PROMPT = 40
+MAX_MEMORY_CHARS = 500
 
 # Cap the free-text search term. A substring search compiles to a
 # leading-wildcard LIKE, which no index can serve — every row is compared
@@ -57,10 +60,8 @@ def screen_memory_content(content: str) -> str:
     text = (content or "").strip()
     if not text:
         raise MemoryRejected("Memory content cannot be empty.")
-    if len(text) > _MAX_MEMORY_CHARS:
-        raise MemoryRejected(
-            f"Memory is too long ({len(text)} chars; max {_MAX_MEMORY_CHARS})."
-        )
+    if len(text) > MAX_MEMORY_CHARS:
+        raise MemoryRejected(f"Memory is too long ({len(text)} chars; max {MAX_MEMORY_CHARS}).")
     result = _GUARD.scan(text)
     if not result.is_safe:
         patterns = ", ".join(
@@ -105,7 +106,7 @@ def render_memory_block(memories: Iterable[Memory]) -> str | None:
     subordinate to the security rules, so a fact can inform answers but
     never re-authorize a blocked action.
     """
-    items = list(memories)[:_MAX_MEMORIES_IN_PROMPT]
+    items = list(memories)[:MAX_MEMORIES_IN_PROMPT]
     if not items:
         return None
     lines = []
@@ -131,6 +132,8 @@ def render_memory_block(memories: Iterable[Memory]) -> str | None:
 
 __all__ = [
     "LIKE_ESCAPE_CHAR",
+    "MAX_MEMORIES_IN_PROMPT",
+    "MAX_MEMORY_CHARS",
     "MAX_SEARCH_CHARS",
     "MemoryRejected",
     "build_search_pattern",
