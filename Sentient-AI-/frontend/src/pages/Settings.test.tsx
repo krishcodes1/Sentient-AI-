@@ -42,6 +42,9 @@ vi.mock("@/services/api", () => {
     updateCapabilitySettings: vi.fn(),
     updateProfile: vi.fn(),
     updateSettings: vi.fn(),
+    // Permissions ▸ Apps allowed for a week: none unless a test says so.
+    listAppApprovals: vi.fn(async () => []),
+    revokeAppApproval: vi.fn(),
     // Owner-only Payment card section: an install with a vault and no card.
     getVaultItems: vi.fn(async () => ({ items: [], available: true, reason: "" })),
     saveVaultCard: vi.fn(),
@@ -82,6 +85,7 @@ import {
   getSetupStatus,
   getTelegramStatus,
   getVaultItems,
+  listAppApprovals,
   logout,
   removeTelegramToken,
   saveProvider,
@@ -596,5 +600,33 @@ describe("Settings purchase caps", () => {
 
     await waitFor(() => expect(screen.getByLabelText("Name")).toHaveValue("Me"));
     expect(screen.getByLabelText("Per purchase (USD)")).toBeDisabled();
+  });
+});
+
+describe("Settings apps allowed for a week", () => {
+  afterEach(() => {
+    vi.mocked(getMe).mockReset();
+  });
+
+  it("lists them inside Permissions, with Revoke, for an account that is not the owner too", async () => {
+    vi.mocked(getMe).mockResolvedValue(user({ is_admin: false }));
+    vi.mocked(listAppApprovals).mockResolvedValue([
+      {
+        id: "w1",
+        app: "Calendar",
+        channel: "web",
+        this_device: true,
+        granted_at: "2026-09-25T15:14:00Z",
+        expires_at: "2026-10-02T15:14:00Z",
+        last_used_at: null,
+      },
+    ]);
+    render(<Settings />);
+
+    const region = await screen.findByRole("region", { name: "Apps allowed for a week" });
+    expect(await within(region).findByText("Calendar")).toBeInTheDocument();
+    expect(within(region).getByRole("button", { name: "Revoke Calendar (this browser)" })).toBeEnabled();
+    const permissions = screen.getByRole("heading", { name: "Permissions" }).closest("section");
+    expect(permissions).toContainElement(region);
   });
 });

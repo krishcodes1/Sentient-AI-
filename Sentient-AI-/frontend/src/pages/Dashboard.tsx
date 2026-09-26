@@ -49,6 +49,11 @@ import {
 } from "@/services/api";
 import ApprovalPicture from "@/components/ApprovalPicture";
 import PurchaseApproval from "@/components/PurchaseApproval";
+import WeeklyAppButton, {
+  WeeklyAllowedNote,
+  type ApprovalDecision,
+  type WeeklyGrant,
+} from "@/components/WeeklyAppButton";
 import { screenshotAlt } from "@/components/toolScreenshots";
 import UsagePanel from "@/components/UsagePanel";
 import { formatCost, formatTokens } from "@/components/usageFormat";
@@ -92,7 +97,7 @@ function ApprovalRow({
   onDecide,
 }: {
   approval: PendingApproval;
-  onDecide: (approved: boolean) => Promise<void>;
+  onDecide: (...decision: ApprovalDecision) => Promise<void>;
 }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -104,11 +109,11 @@ function ApprovalRow({
   // facts (PurchaseApproval) above the buttons and not the model's arguments.
   const isPurchase = approval.tool_name === PURCHASE_TOOL;
 
-  const decide = async (approved: boolean) => {
+  const decide = async (...decision: ApprovalDecision) => {
     setPending(true);
     setError(null);
     try {
-      await onDecide(approved);
+      await onDecide(...decision);
     } catch (err) {
       setError((err as Error).message);
       setPending(false);
@@ -219,6 +224,11 @@ function ApprovalRow({
           {JSON.stringify(shownArguments(approval), null, 2)}
         </pre>
       )}
+      <WeeklyAppButton
+        approval={approval}
+        disabled={pending || expired}
+        onAllow={() => void decide(true, "week")}
+      />
       {error && (
         <p role="alert" className="text-xs mt-2" style={{ color: "var(--accent-danger)" }}>
           {error}
@@ -319,6 +329,8 @@ export default function Dashboard() {
   // The pictures the last approved action took (a checkout's confirmation
   // page): they come once, with the decision, and are never saved.
   const [decisionImages, setDecisionImages] = useState<TurnImage[]>([]);
+  // The app the last decision allowed for a week (its weekly button).
+  const [weeklyAllowed, setWeeklyAllowed] = useState<WeeklyGrant | null>(null);
   const [usage, setUsage] = useState<UsageSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -392,10 +404,11 @@ export default function Dashboard() {
     return () => clearInterval(interval);
   }, [load]);
 
-  const handleApproval = async (actionId: string, approved: boolean) => {
-    const decided = await decideApproval(actionId, approved);
+  const handleApproval = async (actionId: string, ...decision: ApprovalDecision) => {
+    const decided = await decideApproval(actionId, ...decision);
     setApprovals((prev) => prev.filter((a) => a.action_id !== actionId));
     setDecisionImages(decided.images ?? []);
+    setWeeklyAllowed(decided.weekly ?? null);
     // Refresh stats and the feed so the decided action shows up immediately.
     void load(true);
   };
@@ -531,14 +544,16 @@ export default function Dashboard() {
               <ApprovalRow
                 key={approval.action_id}
                 approval={approval}
-                onDecide={(approved) =>
-                  handleApproval(approval.action_id, approved)
+                onDecide={(...decision) =>
+                  handleApproval(approval.action_id, ...decision)
                 }
               />
             ))}
           </div>
         </div>
       )}
+
+      {weeklyAllowed && <WeeklyAllowedNote weekly={weeklyAllowed} />}
 
       {/* What the last approved action showed (a checkout's confirmation
           page). Only a base64 raster data URL reaches an <img>: the server

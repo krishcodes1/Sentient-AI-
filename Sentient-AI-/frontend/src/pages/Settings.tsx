@@ -19,6 +19,7 @@ import {
   Send,
 } from "lucide-react";
 import ConfirmDialog from "@/components/ConfirmDialog";
+import AppApprovals from "@/components/AppApprovals";
 import CapabilityList, { CapabilityListError } from "@/components/CapabilityList";
 import PaymentCardSettings from "@/components/PaymentCardSettings";
 import ServerSettings from "@/components/ServerSettings";
@@ -775,6 +776,8 @@ export default function Settings() {
             onSettingsChange={(key, patch) => void handleCapabilitySettingsChange(key, patch)}
           />
         )}
+        {/* Each account lists and revokes its own weekly approvals: not gated on is_admin. */}
+        <AppApprovals />
       </section>
 
       {/* Payment card (owner only): the card "Buy things for me" pays with.
