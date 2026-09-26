@@ -1,5 +1,6 @@
 """Parses fetched HTML into readable page text and DuckDuckGo result pages into
-result lists, using only the stdlib html.parser.
+result lists, using only the stdlib html.parser, and cleans the result rows a
+browser read off a results page (web.search's fallback).
 
 Why it exists: The web toolkit needs both readers to run on hostile markup
 without adding a scraping dependency to the agent's process, and malformed
@@ -19,10 +20,11 @@ containers must degrade to fewer results, never to an exception.
 
 from __future__ import annotations
 
+import base64
 import re
 from html.parser import HTMLParser
-from typing import Any, Optional
-from urllib.parse import parse_qs, urlparse
+from typing import Any, Iterable, Optional
+from urllib.parse import ParseResult, parse_qs, urlparse
 
 # Content inside these never reads as page text: it is code, chrome, or
 # controls. Dropping it is most of what makes a fetched page cheap
@@ -204,21 +206,51 @@ class _SearchResultParser(HTMLParser):
             self._buffer.append(data)
 
 
-def _is_search_engine_host(hostname: Optional[str]) -> bool:
+def _on_domain(hostname: Optional[str], domain: str) -> bool:
     host = (hostname or "").lower()
-    return host == "duckduckgo.com" or host.endswith(".duckduckgo.com")
+    return host == domain or host.endswith("." + domain)
+
+
+def _is_tracking_link(parsed: ParseResult) -> bool:
+    """A link that points at the search engine instead of a result: every
+    DuckDuckGo address (its ``/l/`` wrapper and its ``y.js`` ads) and
+    Bing's click-tracking paths. A result that is a page of bing.com
+    itself stays a result."""
+    if _on_domain(parsed.hostname, "duckduckgo.com"):
+        return True
+    return _on_domain(parsed.hostname, "bing.com") and parsed.path.startswith(("/ck/", "/aclk"))
+
+
+def _tracking_target(parsed: ParseResult) -> Optional[str]:
+    """The destination a tracking link carries in its query, or None.
+
+    DuckDuckGo: ``uddg=<percent-encoded target>``. Bing (``/ck/a``):
+    ``u=a1<base64url target>``. Read out of the address, never fetched."""
+    params = parse_qs(parsed.query)
+    target = params.get("uddg")
+    if target and target[0]:
+        return target[0]
+    encoded = (params.get("u") or [""])[0]
+    if not encoded.startswith("a1"):
+        return None
+    encoded = encoded[2:]
+    try:
+        return base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode("utf-8")
+    except ValueError:  # not base64, or not UTF-8 once decoded
+        return None
 
 
 def _unwrap_redirect(href: str) -> Optional[str]:
-    """Resolve a DuckDuckGo click-tracking link to its destination.
+    """Resolve a search engine's click-tracking link to its destination.
 
-    Results are wrapped as ``//duckduckgo.com/l/?uddg=<encoded target>``.
+    DuckDuckGo wraps results as ``//duckduckgo.com/l/?uddg=<encoded
+    target>`` and Bing as ``bing.com/ck/a?...&u=a1<base64 target>``.
     Sponsored rows are wrapped twice — the target is itself a
     ``duckduckgo.com/y.js`` ad-click URL carrying the real advertiser
     behind more tracking — so unwrapping loops, and anything still
     pointing at the search engine after that is dropped. That is what
     keeps ads out of the results the model reads, and it also drops
-    javascript: hrefs and relative links.
+    javascript: hrefs and relative links. Nothing here follows a link.
     """
     if not href:
         return None
@@ -227,19 +259,39 @@ def _unwrap_redirect(href: str) -> Optional[str]:
 
     parsed = urlparse(href)
     for _ in range(3):
-        if not _is_search_engine_host(parsed.hostname):
+        if not _is_tracking_link(parsed):
             break
-        target = parse_qs(parsed.query).get("uddg")
-        if not target or not target[0]:
+        target = _tracking_target(parsed)
+        if not target:
             return None
-        href = target[0]
+        href = target
         parsed = urlparse(href)
 
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         return None
-    if _is_search_engine_host(parsed.hostname):
+    if _is_tracking_link(parsed):
         return None
     return href
+
+
+def _bounded(rows: Iterable[dict[str, str]], limit: int, snippet_chars: int) -> list[dict[str, Any]]:
+    """At most *limit* rows, one per URL, each field cut to size."""
+    results: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for result in rows:
+        if result["url"] in seen:
+            continue
+        seen.add(result["url"])
+        results.append(
+            {
+                "title": result["title"][:140],
+                "url": result["url"][:500],
+                "snippet": result["snippet"][:snippet_chars],
+            }
+        )
+        if len(results) >= limit:
+            break
+    return results
 
 
 def parse_search_results(html: str, limit: int, snippet_chars: int) -> list[dict[str, Any]]:
@@ -255,20 +307,23 @@ def parse_search_results(html: str, limit: int, snippet_chars: int) -> list[dict
         parser.close()
     except Exception:  # noqa: BLE001 - hostile markup, never fatal
         pass
+    return _bounded(parser.results, limit, snippet_chars)
 
-    results: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for result in parser.results:
-        if result["url"] in seen:
+
+def clean_result_rows(rows: Any, limit: int, snippet_chars: int) -> list[dict[str, Any]]:
+    """Rows a browser read off a results page, in ``parse_search_results``'
+    shape: tracking links unwrapped to their destination, ads and anything
+    else still on the search engine dropped, one row per URL, capped.
+
+    The rows come from a page script, so they are hostile too: anything
+    that is not a dict with a title and a usable URL is skipped."""
+    cleaned: list[dict[str, str]] = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
             continue
-        seen.add(result["url"])
-        results.append(
-            {
-                "title": result["title"][:140],
-                "url": result["url"][:500],
-                "snippet": result["snippet"][:snippet_chars],
-            }
-        )
-        if len(results) >= limit:
-            break
-    return results
+        title = " ".join(str(row.get("title") or "").split())
+        url = _unwrap_redirect(str(row.get("url") or ""))
+        if url and title:
+            snippet = " ".join(str(row.get("snippet") or "").split())
+            cleaned.append({"title": title, "url": url, "snippet": snippet})
+    return _bounded(cleaned, limit, snippet_chars)

@@ -270,6 +270,37 @@ connectedCallback() { const r = this.attachShadow({mode: 'open'}); r.innerHTML =
 <h1>Thank you</h1><p>Order number 8841</p><p>A receipt is on its way.</p>""")),
     "/pay-declined": (200, "text/html", _page("Card declined", """
 <h1>Card declined</h1><p>The card was declined. Check the number and try again.</p>""")),
+    # web.search's browser fallback (test_web_search_fallback): results
+    # pages in the markup DuckDuckGo's JavaScript page and Bing render,
+    # every result behind the engine's click-tracking link, one advert
+    # each; and DuckDuckGo's bot check as a browser sees it. The tracking
+    # links point at the real engines and must never be followed.
+    "/search-results/duckduckgo": (200, "text/html", _page("dbrand grip at DuckDuckGo", """
+<ol class="react-results--main">
+<li data-layout="ad"><article data-testid="ad"><h2><a data-testid="result-title-a"
+ href="https://duckduckgo.com/y.js?ad_domain=cases.example&amp;ad_provider=bingv7aa">Cheap cases, sponsored</a></h2></article></li>
+<li data-layout="organic"><article data-testid="result"><h2><a data-testid="result-title-a"
+ href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.dbrand.com%2Fshop%2Fgrip%2Fiphone-16-pro-max-cases&amp;rut=abc">
+ <span>Grip Case - iPhone 16 Pro Max</span></a></h2>
+<div data-result="snippet"><span>The case that fits like a glove. Holo White and more.</span></div></article></li>
+<li data-layout="organic"><article data-testid="result"><h2><a data-testid="result-title-a"
+ href="https://www.reddit.com/r/dbrand/">r/dbrand</a></h2>
+<div data-result="snippet">Grip owners compare colours.</div></article></li>
+</ol>""")),
+    "/search-results/bing": (200, "text/html", _page("dbrand grip - Search", """
+<ol id="b_results">
+<li class="b_ad"><h2><a href="https://www.bing.com/aclk?ld=e8abc&amp;u=aHR0cHM6Ly9jYXNlcy5leGFtcGxl">Cheap cases, sponsored</a></h2></li>
+<li class="b_algo"><h2><a href="https://www.bing.com/ck/a?!&amp;&amp;p=4f1e&amp;ptn=3&amp;u=a1aHR0cHM6Ly93d3cuZGJyYW5kLmNvbS9zaG9wL2dyaXAvaXBob25lLTE2LXByby1tYXgtY2FzZXM&amp;ntb=1">Grip Case - iPhone 16 Pro Max | dbrand</a></h2>
+<div class="b_caption"><p class="b_lineclamp2">Holo White, Black Dot and more. Free shipping.</p></div></li>
+<li class="b_algo"><h2><a href="https://www.bing.com/ck/a?!&amp;&amp;p=77aa&amp;ptn=3&amp;u=a1aHR0cHM6Ly93d3cucmVkZGl0LmNvbS9yL2RicmFuZC9jb21tZW50cy9hYmMvZ3JpcF9ob2xvX3doaXRlLw&amp;ntb=1">Grip in Holo White : r/dbrand</a></h2>
+<div class="b_caption"><p>Photos of the new colour.</p></div></li>
+<li class="b_algo"><h2><a href="https://www.bing.com/ck/a?!&amp;&amp;p=0000&amp;u=a1bm90LWJhc2U2NCE">Broken tracking link</a></h2></li>
+</ol>""")),
+    "/search-results/challenge": (200, "text/html", _page("DuckDuckGo", """
+<div class="anomaly-modal__modal"><div class="anomaly-modal__title">Unfortunately, bots use DuckDuckGo too.</div>
+<p>Please complete the following challenge to confirm this search was made by a human.</p>
+<form id="challenge-form" method="post" action="/post"><p>Select all squares containing a duck:</p>
+<label><input type="checkbox" name="image-check_1"> 1</label></form></div>""")),
 }
 
 REDIRECTS: dict[str, str] = {

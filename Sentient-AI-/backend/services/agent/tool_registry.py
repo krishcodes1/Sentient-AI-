@@ -115,7 +115,7 @@ from services.tools.desktop import DesktopToolkit
 from services.tools.reminders import ReminderToolkit
 from services.tools.system import ALLOWLIST as SYSTEM_CAPABILITIES
 from services.tools.system import SystemToolkit
-from services.tools.web import WebToolkit
+from services.tools.web import BrowserPage, WebToolkit
 
 logger = structlog.get_logger(__name__)
 
@@ -1555,7 +1555,7 @@ class ConnectorToolExecutor:
         checkout_toolkit: Optional[Any] = None,
     ) -> None:
         self._session_factory = session_factory
-        web = web_toolkit or WebToolkit()
+        self._web = web_toolkit or WebToolkit()
         reminders = reminder_toolkit or ReminderToolkit(session_factory)
         system = system_toolkit or SystemToolkit()
         desktop = desktop_toolkit or DesktopToolkit()
@@ -1591,10 +1591,13 @@ class ConnectorToolExecutor:
         # Only the reminder toolkit is handed the caller's identity: it is
         # the only one that stores anything per user.
         self._builtins: dict[str, _Builtin] = {
+            # Task-scoped for web.search's browser fallback (_web_call),
+            # which counts against the same task's browser caps.
             "web": _Builtin(
                 "Web",
-                lambda a, p, uid, ok: web.execute(a, p),
+                self._web_call,
                 frozenset({read}),
+                task_scoped=True,
             ),
             "reminders": _Builtin(
                 "Reminder",
@@ -1655,6 +1658,37 @@ class ConnectorToolExecutor:
         # calls (connector instances are per-call) within this process.
         self._limiters: dict[uuid_module.UUID, Any] = {}
         self._mcp_dispatcher: Optional[Any] = None
+
+    async def _web_call(
+        self, action: str, params: dict[str, Any], user_id: str, approved: bool, task_id: str
+    ) -> dict[str, Any]:
+        """Dispatch one web tool to the web toolkit; web.search is also
+        handed its browser fallback (``_results_page``)."""
+        if action != "search":
+            return await self._web.execute(action, params)
+        return await self._web.execute(
+            action, params, browser=self._results_page(user_id, task_id)
+        )
+
+    def _results_page(self, user_id: str, task_id: str) -> BrowserPage:
+        """web.search's fallback for a challenged search: one results page
+        loaded in Crawler's own browser (the read toolkit's session for
+        this user's task, read tier, behind the egress guard), and only
+        while "Control a browser" is on. The switch is read when the
+        fallback is needed, so a search the endpoint answers never reads
+        the report; off, blocked or unreadable, the answer is
+        ``unavailable`` and nothing is launched."""
+        from services import capabilities as capability_registry
+
+        async def load(url: str, script: str, ready: str) -> dict[str, Any]:
+            cap = capability_registry.get("browser_control")
+            if await _gate_refusal(self._capability_gate, cap) is not None:
+                return {"ok": False, "unavailable": True, "error": cap.when_denied}
+            return await self._browser.read_results(
+                url, script=script, ready=ready, user_id=user_id, task_id=task_id
+            )
+
+        return load
 
     async def _browser_call(
         self, action: str, params: dict[str, Any], user_id: str, approved: bool, task_id: str

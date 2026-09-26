@@ -40,6 +40,12 @@ The observation, screenshot and handoff helpers live in ``_shared.py``
 module keeps them under their old names. With a ``page_memory`` every
 observation is also recorded as the page the user's next write may be
 bound to.
+
+``read_results`` is not a browser.read action: it is web.search's
+fallback when the search endpoint asks for a bot check (the executor
+offers it only while "Control a browser" is on). It loads one results
+page in a tab of its own, under the same guard and caps, and returns the
+rows a script reads off it.
 """
 
 from __future__ import annotations
@@ -111,6 +117,8 @@ _ORDER_REASON = "may place an order (a payment method, a total or a price is on 
 # How long open follows zero-second refreshes (redirect hops) before it
 # describes the page as it is.
 REDIRECT_WAIT_MS = 10_000
+# How long read_results waits for a results page to show its rows.
+RESULTS_READY_MS = 8_000
 # True once the page is not one that moves on at once.
 _MOVING_ON_JS = r"""() => ![...document.querySelectorAll('meta[http-equiv="refresh" i]')]
   .some(m => /^\s*0+(\.0*)?\s*([;,]|$)/.test(m.getAttribute('content') || ''))"""
@@ -473,6 +481,57 @@ class BrowserReadToolkit:
             _log_failure("browser_status_failed", exc)
             return None
         return status if isinstance(status, int) and status > 0 else None
+
+    async def read_results(
+        self, url: str, *, script: str, ready: str, user_id: str, task_id: str
+    ) -> dict[str, Any]:
+        """Load *url* in a tab of its own and return what *script* reads off
+        it: web.search's fallback when the search endpoint asks for a bot
+        check (services.tools.web), never a model action. Read tier and one
+        page load: the URL is checked and the egress guard installed as for
+        open, nothing is clicked or typed, the agent's own tab and outline
+        stay as they were, and the tab is closed again. Waits at most
+        RESULTS_READY_MS for *ready* (a selector the rows match) and counts
+        as one action of the task, so the task's caps apply."""
+        try:
+            session = await self._sessions.get(user_id, mode=mode_for(user_id), task_id=task_id)
+        except Exception as exc:  # launch errors quote paths; keep them in the log
+            _log_failure("browser_session_failed", exc, action="results")
+            return _error("Could not start the browser.")
+        async with session.lock:
+            cap = self._cap_refusal(session.task)
+            if cap is not None:
+                return cap
+            try:
+                await self._ensure_guard(session)
+            except Exception as exc:  # fail closed: never load a page on an unguarded context
+                _log_failure("browser_guard_failed", exc, action="results")
+                return _error("The browser's network guard could not be set up, so nothing was opened.")
+            reason = await asyncio.to_thread(self._guard.check_url, url)
+            if reason is not None:
+                return _error(f"Refusing to open that URL: {reason}")
+            session.task.actions += 1
+            await self._take_back(session)
+            page = await session.context.new_page()
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)
+                await self._past_redirects(page)
+                try:
+                    await page.wait_for_selector(ready, timeout=RESULTS_READY_MS)
+                except PlaywrightTimeoutError:
+                    pass  # read what is there: a page without rows is an answer too
+                read = await _shared.frame_evaluate(page.main_frame, script)
+            except Exception as exc:  # noqa: BLE001 - a page that will not load is a result
+                _log_failure("browser_results_failed", exc)
+                return _error("The results page could not be read.")
+            finally:
+                try:
+                    await page.close()
+                except Exception as exc:  # noqa: BLE001 - logged, never raised into the caller
+                    _log_failure("browser_results_close_failed", exc)
+        if not isinstance(read, dict):
+            return _error("The results page could not be read.")
+        return {**read, "ok": True}
 
     async def snapshot(
         self, session: BrowserSession, query: Optional[str] = None, full: bool = False
