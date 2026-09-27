@@ -1518,3 +1518,87 @@ async def test_toolkit_observes_and_acts_through_the_mac_backend(desk):
     done = await kit.execute("act", {"action": "click", "ref": ref('"Bold"')}, user_id="u1")
     assert done["ok"] is True, done
     assert desk.ax.performed == [("bold", "AXPress")]
+
+
+# --- Window context: one app's windows, dialogs labelled ----------------------------
+
+
+def test_list_windows_for_one_app(desk):
+    assert desk.backend.list_windows("TextEdit") == [
+        WindowInfo(app="TextEdit", title="Untitled.txt", index=0),
+        WindowInfo(app="TextEdit", title="Notes.txt", index=1),
+    ]
+    assert desk.backend.list_windows("No Such App") == []
+
+
+@pytest.mark.parametrize("subrole", ["AXDialog", "AXSystemDialog"])
+def test_a_dialog_window_is_outlined_as_a_dialog(desk, subrole):
+    desk.el.window.attrs["AXSubrole"] = subrole
+    roots = desk.backend.outline(None, 100)
+    assert roots[0].role == "dialog" and roots[0].name == "Untitled.txt"
+    # The toolkit still checks click points against it.
+    assert roots[0].bounds == (100, 50, 800, 600)
+
+
+# --- The menu bar ---------------------------------------------------------------------
+
+
+def _with_menu_bar(desk, *, open_file: bool):
+    new = El("AXMenuItem", "new", Title="New", actions=("AXPress",))
+    separator = El("AXMenuItem", "separator", Title="")
+    open_item = El("AXMenuItem", "open", Title="Open…", Enabled=False, actions=("AXPress",))
+    file_menu = El("AXMenu", "file-menu", children=(new, separator, open_item))
+    apple = El(
+        "AXMenuBarItem",
+        "apple",
+        Title="Apple",
+        actions=("AXPress",),
+        Selected=False,
+        children=(
+            El("AXMenu", "apple-menu", children=(El("AXMenuItem", "restart", Title="Restart…"),)),
+        ),
+    )
+    app_menu = El(
+        "AXMenuBarItem", "app-menu", Title="TextEdit", actions=("AXPress",), Selected=False
+    )
+    file_item = El(
+        "AXMenuBarItem",
+        "file",
+        Title="File",
+        actions=("AXPress",),
+        Selected=open_file,
+        children=(file_menu,),
+        pos=(120, 0),
+        size=(40, 24),
+    )
+    bar = El("AXMenuBar", "bar", children=(apple, app_menu, file_item))
+    desk.el.textedit_ax.attrs["AXMenuBar"] = bar
+    return SimpleNamespace(apple=apple, file=file_item, new=new, open_item=open_item)
+
+
+def test_menu_bar_lists_the_menus_without_the_apple_menu(desk):
+    _with_menu_bar(desk, open_file=False)
+    nodes = desk.backend.menu_bar("TextEdit")
+    assert [(n.role, n.name) for n in nodes] == [
+        ("menu bar item", "TextEdit"),
+        ("menu bar item", "File"),
+    ]
+    assert all(not n.children for n in nodes)
+    assert "Restart…" not in [c.name for n in nodes for c in n.children]
+
+
+def test_an_open_menu_lists_its_items_without_separators(desk):
+    menu = _with_menu_bar(desk, open_file=True)
+    nodes = desk.backend.menu_bar(None)  # TextEdit is in front
+    file_node = nodes[1]
+    assert [(c.role, c.name, c.enabled) for c in file_node.children] == [
+        ("menu item", "New", True),
+        ("menu item", "Open…", False),
+    ]
+    assert file_node.children[0].handle is menu.new
+    assert file_node.bounds == (120, 0, 40, 24)
+
+
+def test_menu_bar_is_empty_without_one(desk):
+    assert desk.backend.menu_bar("TextEdit") == []
+    assert desk.backend.menu_bar("No Such App") == []

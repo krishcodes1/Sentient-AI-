@@ -169,7 +169,18 @@ class ComputerBackend(Protocol):
 
     def list_apps(self) -> list[AppInfo]: ...
 
-    def list_windows(self) -> list[WindowInfo]: ...
+    def list_windows(self, app: Optional[str] = None) -> list[WindowInfo]:
+        """Every app's windows, front to back per app, or only *app*'s
+        when it is named (none when it is not running)."""
+        ...
+
+    def menu_bar(self, app: Optional[str]) -> list[Node]:
+        """*app*'s menus (the frontmost app's when None) as outline nodes,
+        where the platform keeps them outside the window: macOS's menu bar,
+        one "menu bar item" node per menu (never the Apple menu) with the
+        open menu's items as its children. [] where menus are part of the
+        window already (Windows) or there are none."""
+        ...
 
     def frontmost(self) -> tuple[str, str]:
         """(app name, front window title); ("", "") when nothing is in front."""
@@ -219,6 +230,7 @@ class UnavailableBackend:
     request_permission = _refuse
     list_apps = _refuse
     list_windows = _refuse
+    menu_bar = _refuse
     frontmost = _refuse
     focused = _refuse
     outline = _refuse

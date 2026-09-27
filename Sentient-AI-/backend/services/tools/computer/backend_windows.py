@@ -481,6 +481,11 @@ _VALUE_TYPES = frozenset({_CT_EDIT, _CT_COMBOBOX, _CT_DOCUMENT, _CT_SPINNER, _CT
 _INVOKE_TYPES = frozenset({_CT_BUTTON, _CT_MENU_ITEM, _CT_HYPERLINK, _CT_SPLIT_BUTTON})
 _PATTERN_FALLBACK_IDS = {"InvokePattern": 10000, "ValuePattern": 10002}
 
+# The window class of a standard Win32 dialog box (message boxes, Save and
+# Open dialogs, most "Are you sure?" prompts); outlined with the role below.
+_DIALOG_CLASS = "#32770"
+_DIALOG_ROLE = "dialog"
+
 # Top-level windows that belong to the shell, not to an app.
 _SHELL_CLASSES = frozenset(
     {
@@ -1301,15 +1306,23 @@ class WindowsBackend:
                 for (name, pid), is_active in active.items()
             ]
 
-    def list_windows(self) -> list[WindowInfo]:
+    def list_windows(self, app: str | None = None) -> list[WindowInfo]:
+        query = _check_app_query(app) if app is not None else None
         with self._session() as uia:
             counts: dict[str, int] = {}
             windows: list[WindowInfo] = []
             for ctl, ident in self._app_windows(uia):
+                if query is not None and not _matches(query, ident):
+                    continue
                 index = counts.get(ident.name.casefold(), 0)
                 counts[ident.name.casefold()] = index + 1
                 windows.append(WindowInfo(app=ident.name, title=_clean(ctl.Name), index=index))
         return windows
+
+    def menu_bar(self, app: str | None) -> list[Node]:
+        """Nothing extra: a Windows app's menu bar is part of its window's
+        own tree, so every outline already has it."""
+        return []
 
     def frontmost(self) -> tuple[str, str]:
         with self._session() as uia:
@@ -1370,7 +1383,13 @@ class WindowsBackend:
                     secure = _is_secure(ctl)
                     draft = _Draft(
                         {
-                            "role": _node_role(control_type, ctl, secure),
+                            # A standard dialog box is labelled one, so the
+                            # toolkit lists it first and says to answer it.
+                            "role": (
+                                _DIALOG_ROLE
+                                if not path and _class_name(ctl) == _DIALOG_CLASS
+                                else _node_role(control_type, ctl, secure)
+                            ),
                             "name": name,
                             "value": (
                                 None if secure else _read_value(ctl, control_type, value_pattern)

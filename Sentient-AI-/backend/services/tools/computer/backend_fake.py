@@ -15,6 +15,7 @@ import itertools
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Iterator, Optional
 
+from services.tools.computer import rules
 from services.tools.computer.backend import (
     AppInfo,
     AppNotFoundError,
@@ -83,6 +84,9 @@ class FakeBackend:
         # Called after each recorded event, to change the desktop the way
         # the real app would (e.g. a click that opens another app).
         self.on_event: Optional[Callable[["FakeBackend", tuple[Any, ...]], None]] = None
+        # App name → its menu bar nodes (menu_bar), as macOS keeps them
+        # outside the window.
+        self.menus: dict[str, list[Node]] = {}
 
     # ── helpers ──────────────────────────────────────────────────────────
 
@@ -111,6 +115,10 @@ class FakeBackend:
                 for node in self._walk(window.nodes):
                     if node.handle == handle:
                         return node
+        for nodes in self.menus.values():
+            for node in self._walk(nodes):
+                if node.handle == handle:
+                    return node
         return None
 
     def _live(self, node: Node, budget: list[int]) -> Optional[Node]:
@@ -153,12 +161,13 @@ class FakeBackend:
             for app in self.apps.values()
         ]
 
-    def list_windows(self) -> list[WindowInfo]:
+    def list_windows(self, app: Optional[str] = None) -> list[WindowInfo]:
         self._read("list_windows")
         return [
-            WindowInfo(app.name, window.title, index)
-            for app in self.apps.values()
-            for index, window in enumerate(app.windows)
+            WindowInfo(info.name, window.title, index)
+            for info in self.apps.values()
+            if app is None or rules.same_app(info.name, app)
+            for index, window in enumerate(info.windows)
         ]
 
     def frontmost(self) -> tuple[str, str]:
@@ -195,6 +204,14 @@ class FakeBackend:
         )
         live = self._live(root, [max_nodes])
         return [live] if live is not None else []
+
+    def menu_bar(self, app: Optional[str]) -> list[Node]:
+        self._read("menu_bar")
+        name = app if app is not None else self.front
+        for key, nodes in self.menus.items():
+            if name is not None and rules.same_app(key, name):
+                return list(nodes)
+        return []
 
     def click(self, target: ClickTarget, *, double: bool = False) -> None:
         if isinstance(target, Node):

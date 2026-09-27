@@ -91,8 +91,11 @@ class GuardedBackend:
     def list_apps(self) -> list[Any]:
         return self._inner.list_apps()
 
-    def list_windows(self) -> list[Any]:
-        return self._inner.list_windows()
+    def list_windows(self, app: Optional[str] = None) -> list[Any]:
+        return self._inner.list_windows(app)
+
+    def menu_bar(self, app: Optional[str]) -> list[Any]:
+        return self._inner.menu_bar(app)
 
     def frontmost(self) -> tuple[str, str]:
         return self._inner.frontmost()

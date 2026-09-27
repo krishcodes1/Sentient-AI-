@@ -88,6 +88,27 @@ MAX_WINDOW_INDEX = 50
 BRING_FORWARD_WAIT_S = 1.0
 BRING_FORWARD_ATTEMPTS = 2
 _BRING_FORWARD_POLL_S = 0.05
+# After an act, its fresh outline is read once the app has settled
+# (``ComputerToolkit._settle``): the front window is read every
+# SETTLE_POLL_S until two reads in a row match, for at most SETTLE_MAX_S or
+# SETTLE_MAX_READS reads. After open_app or focus_window it first waits for
+# that app to be in front with a window (up to OPEN_SETTLE_MAX_S) and never
+# settles sooner than SETTLE_MIN_AFTER_OPEN_S: an app's first sheet
+# ("What's New") often slides in a moment after its window.
+SETTLE_POLL_S = 0.2
+SETTLE_MAX_S = 1.5
+SETTLE_MAX_READS = 6
+OPEN_SETTLE_MAX_S = 3.0
+SETTLE_MIN_AFTER_OPEN_S = 0.8
+# Nodes a settle read compares (role, name, hidden), from the top.
+_SETTLE_PRINT_NODES = 400
+# The pause between reads; tests swap it out.
+_pause: Callable[[float], None] = time.sleep
+# What sits over a window and asks to be dealt with first; listed at the top
+# of the outline with a note (``_modal_first``).
+MODAL_ROLES = frozenset({"sheet", "dialog", "alert", "popover"})
+# Most of an app's other windows an outline lists.
+MAX_WINDOWS_LISTED = 8
 _CHECK_MAX_CHARS = 200_000
 _CHECK_MAX_LINES = 5000
 # Web content in a browser nests deeply; the payment scan must reach it.
@@ -369,6 +390,43 @@ def _find_handle(nodes: Iterable[Node], handle: Any) -> Optional[Node]:
             pass
         stack.extend(node.children or ())
     return None
+
+
+def _role_of(node: Node) -> str:
+    return clean_text(node.role, 30).lower()
+
+
+def _modal_first(nodes: list[Node]) -> tuple[list[Node], Optional[Node]]:
+    """*nodes* with any sheet, dialog, alert, popover or inner window that
+    sits in the window moved to the front of the window's children (so the
+    size cap never cuts it off and the model reads it first), and the first
+    such node; the window itself when it is a dialog. Nothing moves when
+    there is none."""
+    if not nodes:
+        return nodes, None
+    window = nodes[0]
+    if _role_of(window) in MODAL_ROLES:
+        return nodes, window
+    children = tuple(window.children or ())
+    first = [c for c in children if _role_of(c) in MODAL_ROLES or _role_of(c) == "window"]
+    if not first:
+        return nodes, None
+    chosen = {id(c) for c in first}
+    rest = [c for c in children if id(c) not in chosen]
+    return [dataclasses.replace(window, children=(*first, *rest)), *nodes[1:]], first[0]
+
+
+def _fingerprint(nodes: Iterable[Node]) -> tuple[tuple[str, str, bool], ...]:
+    """What a settle read compares: each node's role, name and hidden flag,
+    depth first, from the top (values are left out: a caret or a counter is
+    not the window changing)."""
+    out: list[tuple[str, str, bool]] = []
+    stack = list(reversed(list(nodes)))
+    while stack and len(out) < _SETTLE_PRINT_NODES:
+        node = stack.pop()
+        out.append((str(node.role), str(node.name), bool(node.hidden)))
+        stack.extend(reversed(tuple(node.children or ())))
+    return tuple(out)
 
 
 def _bound_screen(card: Any) -> Optional[tuple[str, str]]:
@@ -659,7 +717,7 @@ class ComputerToolkit:
         return result
 
     def _windows(self, app: Optional[str]) -> dict[str, Any]:
-        windows = list(self._backend.list_windows())
+        windows = list(self._backend.list_windows(app))
         if app is not None:
             windows = [w for w in windows if rules.same_app(w.app, app)]
         front_app, title = self._frontmost()
@@ -693,21 +751,39 @@ class ComputerToolkit:
         # A password manager's window title can name the item on show.
         return "" if rules.secret_app(app) else clean_text(title, 120)
 
-    def _outline(self, user_id: str, *, app: Optional[str], max_chars: int) -> dict[str, Any]:
+    def _outline(
+        self,
+        user_id: str,
+        *,
+        app: Optional[str],
+        max_chars: int,
+        read: Optional[tuple[str, str, list[Node]]] = None,
+    ) -> dict[str, Any]:
         """Outline *app* (the frontmost app when None) and make its refs the
         user's current ones. The old refs are dropped first, so a failure
-        here leaves the user with none rather than stale ones."""
+        here leaves the user with none rather than stale ones. *read* is a
+        read of the front window made a moment ago (``_settle``), used
+        instead of reading it again.
+
+        A sheet, dialog or popover in the window is listed first, and named
+        in ``modal`` with a ``note``; when the app has other windows they are
+        listed in ``windows`` (title and index, for focus_window)."""
         state = self._state(user_id)
         with self._state_lock:
             state.snapshot = None
             ref_start = state.next_ref
-        front_app, front_title = self._frontmost()
-        if app is None:
-            target = front_app
-        elif rules.same_app(app, front_app):
+        if read is not None and app is None:
+            front_app, front_title, nodes = read
             target = front_app
         else:
-            target = self._running_app(app)
+            front_app, front_title = self._frontmost()
+            if app is None:
+                target = front_app
+            elif rules.same_app(app, front_app):
+                target = front_app
+            else:
+                target = self._running_app(app)
+            nodes = []
         if not target:
             raise _Failed("Could not tell which app is in front; name one with app.")
         secret = rules.secret_app(target) or (rules.secret_app(app) if app else None)
@@ -716,12 +792,19 @@ class ComputerToolkit:
                 "secret_app",
                 f"{secret} holds passwords, so Crawler does not read its windows. {_OWNER_STEP}",
             )
-        nodes = self._read_tree(target)
-        out = build_outline(nodes, max_chars=max_chars, ref_start=ref_start)
+        if read is None or app is not None:
+            nodes = self._read_tree(target)
+        nodes, modal = _modal_first(nodes)
         if rules.same_app(target, front_app):
             title = front_title
         else:
-            title = nodes[0].name if nodes and nodes[0].role == "window" else ""
+            title = nodes[0].name if nodes and _role_of(nodes[0]) in ("window", "dialog") else ""
+        # The app's menus where the platform keeps them outside the window
+        # (macOS): after the window, or first while one of them is open.
+        menus = self._menus(target)
+        open_menu = next((m for m in menus if m.children), None)
+        nodes = [*menus, *nodes] if open_menu is not None else [*nodes, *menus]
+        out = build_outline(nodes, max_chars=max_chars, ref_start=ref_start)
         with self._state_lock:
             state.next_ref = out.next_ref
             state.snapshot = _Snapshot(
@@ -730,7 +813,7 @@ class ComputerToolkit:
                 refs=dict(out.refs),
                 outline=secrets.token_hex(6),
             )
-        return {
+        result: dict[str, Any] = {
             "ok": True,
             "frontmost_app": _label(front_app),
             "app": _label(target),
@@ -740,6 +823,64 @@ class ComputerToolkit:
             "truncated": out.truncated,
             "secure_fields_redacted": out.secure_fields_redacted,
         }
+        notes: list[str] = []
+        if open_menu is not None:
+            notes.append(
+                f'The "{_label(open_menu.name)}" menu is open and listed first: choose one of '
+                "its items, or press escape to close it."
+            )
+        if modal is not None:
+            kind = _role_of(modal)
+            named = _label(modal.name)
+            result["modal"] = f'{kind} "{named}"' if named else kind
+            if modal is nodes[0]:
+                notes.append(
+                    f"This window is a {kind}: answer it first; the window behind it "
+                    "cannot be used until it closes."
+                )
+            else:
+                notes.append(
+                    f"A {kind} is open over this window and is listed first: deal with "
+                    "it before the rest of the window."
+                )
+        windows = self._app_windows(target)
+        if windows:
+            result["windows"] = windows
+            notes.append(
+                f"{_label(target)} has {len(windows)} windows (see windows); this outline "
+                "is of the focused one. focus_window(app, index) switches to another."
+            )
+        if notes:
+            result["note"] = " ".join(notes)
+        return result
+
+    def _menus(self, app: str) -> list[Node]:
+        """*app*'s menu bar nodes from the backend (``menu_bar``: macOS keeps
+        menus outside the window); [] when the backend has none to add, or
+        they cannot be read (the outline goes on without them)."""
+        reader = getattr(self._backend, "menu_bar", None)
+        if reader is None:
+            return []
+        try:
+            return list(reader(app) or [])
+        except Exception as exc:
+            _log_failure("computer_menu_bar_failed", exc)
+            return []
+
+    def _app_windows(self, app: str) -> list[dict[str, Any]]:
+        """*app*'s windows (title, and index for focus_window) when it has
+        more than one; [] otherwise, and when they cannot be read."""
+        try:
+            windows = [w for w in self._backend.list_windows(app) if rules.same_app(w.app, app)]
+        except Exception as exc:
+            _log_failure("computer_app_windows_failed", exc)
+            return []
+        if len(windows) < 2:
+            return []
+        return [
+            {"title": self._title(w.app, w.title), "index": int(w.index)}
+            for w in windows[:MAX_WINDOWS_LISTED]
+        ]
 
     def _attach_image(self, result: dict[str, Any]) -> None:
         if self._image_source is None:
@@ -777,8 +918,44 @@ class ComputerToolkit:
         # while the screen was being checked.
         self._check_cancel(user_id)
         self._perform(request, user_id)
+        settled = self._settle(request)
         did = _facts(request, snapshot.app if snapshot else None, with_role=True)
-        return {"ok": True, "did": did, "then": self._then(user_id)}
+        return {"ok": True, "did": did, "then": self._then(user_id, settled)}
+
+    def _settle(self, request: _Request) -> Optional[tuple[str, str, list[Node]]]:
+        """Wait, reading only, for the app to finish what the act started,
+        so the fresh outline shows a sheet or dialog it opened: the front
+        window is read until two reads in a row match (bounded by
+        SETTLE_MAX_S and SETTLE_MAX_READS). After open_app or focus_window,
+        that app must also be in front with a window, and no sooner than
+        SETTLE_MIN_AFTER_OPEN_S. Returns the last read, (app, title, nodes),
+        for the fresh outline; None when there is none to reuse (a password
+        manager is in front, whose windows are never read, or the front app
+        could not be read). Never raises: the act has happened."""
+        opening = request.action in _APP_ACTIONS
+        start = time.monotonic()
+        deadline = start + (OPEN_SETTLE_MAX_S if opening else SETTLE_MAX_S)
+        earliest = start + (SETTLE_MIN_AFTER_OPEN_S if opening else 0.0)
+        max_reads = SETTLE_MAX_READS * (2 if opening else 1)
+        previous: Optional[tuple[tuple[str, str, bool], ...]] = None
+        try:
+            for reads in range(1, max_reads + 1):
+                front_app, front_title = self._frontmost()
+                if not front_app or rules.secret_app(front_app):
+                    return None
+                nodes = list(self._backend.outline(front_app, MAX_NODES) or [])
+                ready = not opening or (bool(nodes) and rules.same_app(front_app, request.app))
+                current = _fingerprint(nodes) if ready else None
+                now = time.monotonic()
+                if (current is not None and current == previous and now >= earliest) or (
+                    now >= deadline or reads == max_reads
+                ):
+                    return front_app, front_title, nodes
+                previous = current
+                _pause(SETTLE_POLL_S)
+        except Exception as exc:  # the act happened; read the screen as it is
+            _log_failure("computer_settle_failed", exc)
+        return None
 
     def _check_card(self, request: _Request, snapshot: Optional[_Snapshot], card: Any) -> None:
         """An approved act runs only on the screen its card was made from
@@ -1025,11 +1202,14 @@ class ComputerToolkit:
                 "Call desktop.observe to check."
             )
 
-    def _then(self, user_id: str) -> dict[str, Any]:
-        """The fresh outline an act returns. The act already happened, so a
-        failure here is reported inside ``then`` and never as the act's."""
+    def _then(
+        self, user_id: str, settled: Optional[tuple[str, str, list[Node]]] = None
+    ) -> dict[str, Any]:
+        """The fresh outline an act returns, from the settled read when
+        there is one (``_settle``). The act already happened, so a failure
+        here is reported inside ``then`` and never as the act's."""
         try:
-            return self._outline(user_id, app=None, max_chars=DEFAULT_MAX_CHARS)
+            return self._outline(user_id, app=None, max_chars=DEFAULT_MAX_CHARS, read=settled)
         except _Refused as refusal:
             return {"ok": False, "withheld": True, "error": refusal.message}
         except _Failed as failure:
