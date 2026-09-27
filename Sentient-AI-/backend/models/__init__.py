@@ -15,6 +15,7 @@ from models.pending_action import PendingAction, PendingActionStatus
 from models.reminder import Reminder, ReminderSource, ReminderStatus
 from models.slack_link import SlackChannelLink
 from models.user import User
+from models.vault_item import VaultItem
 
 __all__ = [
     "INSTALLATION_ROW_ID",
@@ -41,4 +42,5 @@ __all__ = [
     "ReminderStatus",
     "SlackChannelLink",
     "User",
+    "VaultItem",
 ]

@@ -1,7 +1,8 @@
 /**
  * Tests for Settings: they prove the LLM provider choice sends nulls to follow the install
- * default, deletion requires the password and signs out, the Telegram bot token is admin-only, and
- * the Server section is owner-only with Test-then-Save and sign-up controls.
+ * default, deletion requires the password and signs out, the Telegram bot token is admin-only, the
+ * Server and Payment card sections are owner-only, and a changed purchase cap saves through
+ * updateCapabilitySettings.
  *
  * Why it exists: Guards against saving a provider the user never tested, deleting an account
  * without its password, or showing a non-owner controls the server would refuse.
@@ -9,7 +10,7 @@
 
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { SetupProviders, SetupStatus, User } from "@/types";
+import type { CapabilityStatus, SetupProviders, SetupStatus, User } from "@/types";
 
 vi.mock("@/services/api", () => {
   class ApiError extends Error {
@@ -38,8 +39,13 @@ vi.mock("@/services/api", () => {
     testTelegram: vi.fn(),
     unlinkTelegram: vi.fn(),
     updateCapabilities: vi.fn(),
+    updateCapabilitySettings: vi.fn(),
     updateProfile: vi.fn(),
     updateSettings: vi.fn(),
+    // Owner-only Payment card section: an install with a vault and no card.
+    getVaultItems: vi.fn(async () => ({ items: [], available: true, reason: "" })),
+    saveVaultCard: vi.fn(),
+    deleteVaultItem: vi.fn(),
     // Owner-only Server section. Defaults describe a finished install on
     // gemini with sign-ups closed; tests override per case.
     getSetupStatus: vi.fn(async () => ({
@@ -70,16 +76,19 @@ import {
   ApiError,
   clearStoredSecrets,
   deleteAccount,
+  getCapabilities,
   getMe,
   getSetupProviders,
   getSetupStatus,
   getTelegramStatus,
+  getVaultItems,
   logout,
   removeTelegramToken,
   saveProvider,
   saveTelegram,
   testProvider,
   testTelegram,
+  updateCapabilitySettings,
   updateRegistration,
   updateSettings,
 } from "@/services/api";
@@ -465,5 +474,127 @@ describe("Settings Server section", () => {
     await waitFor(() =>
       expect(server.queryByRole("button", { name: "Clear stored keys" })).not.toBeInTheDocument(),
     );
+  });
+});
+
+describe("Settings Payment card", () => {
+  afterEach(() => {
+    vi.mocked(getMe).mockReset();
+  });
+
+  it("shows the owner the Payment card section and reads the vault", async () => {
+    vi.mocked(getMe).mockResolvedValue(user({ is_admin: true }));
+    render(<Settings />);
+
+    const section = within(await screen.findByRole("region", { name: "Payment card" }));
+    expect(await section.findByText(/no card is stored/i)).toBeInTheDocument();
+    expect(section.getByText(/stored encrypted/i)).toBeInTheDocument();
+    expect(section.getByLabelText("Card number")).toHaveValue("");
+    expect(getVaultItems).toHaveBeenCalled();
+  });
+
+  it("never shows the section, or asks for the vault, for an account that is not the owner", async () => {
+    vi.mocked(getMe).mockResolvedValue(user({ is_admin: false }));
+    render(<Settings />);
+
+    await waitFor(() => expect(screen.getByLabelText("Name")).toHaveValue("Me"));
+    expect(screen.queryByRole("region", { name: "Payment card" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Card number")).not.toBeInTheDocument();
+    expect(getVaultItems).not.toHaveBeenCalled();
+  });
+});
+
+describe("Settings purchase caps", () => {
+  const PURCHASES: CapabilityStatus = {
+    key: "purchases",
+    label: "Buy things for me",
+    description: "Book tickets and make small purchases with the card you stored.",
+    risk: "high",
+    enabled: true,
+    default_enabled: false,
+    available: true,
+    availability_reason: "",
+    probe_state: "not_required",
+    probe_detail: "",
+    fix_url: null,
+    fix_steps: [],
+    effective: "on",
+    reason: "",
+    can_request_access: false,
+    install: null,
+    install_size_hint: null,
+    when_denied: "Buying things is off. Turn on 'Buy things for me' in Permissions.",
+    tools: ["browser.checkout"],
+    settings: { per_purchase_cap_usd: 25, per_day_cap_usd: 50 },
+  };
+
+  afterEach(() => {
+    vi.mocked(getMe).mockReset();
+    vi.mocked(getCapabilities).mockReset();
+    vi.mocked(getCapabilities).mockResolvedValue([]);
+    vi.mocked(updateCapabilitySettings).mockReset();
+  });
+
+  it("saves a changed cap through updateCapabilitySettings and shows the list the server returns", async () => {
+    vi.mocked(getMe).mockResolvedValue(user({ is_admin: true }));
+    vi.mocked(getCapabilities).mockResolvedValue([PURCHASES]);
+    vi.mocked(updateCapabilitySettings).mockResolvedValue([
+      { ...PURCHASES, settings: { per_purchase_cap_usd: 40, per_day_cap_usd: 50 } },
+    ]);
+    render(<Settings />);
+
+    const perPurchase = await screen.findByLabelText("Per purchase (USD)");
+    await waitFor(() => expect(perPurchase).toBeEnabled());
+    fireEvent.change(perPurchase, { target: { value: "40" } });
+    fireEvent.blur(perPurchase);
+
+    await waitFor(() =>
+      expect(updateCapabilitySettings).toHaveBeenCalledWith("purchases", { per_purchase_cap_usd: 40 }),
+    );
+    expect(updateCapabilitySettings).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.getByLabelText("Per purchase (USD)")).toHaveValue(40));
+    await waitFor(() => expect(screen.getByLabelText("Per purchase (USD)")).toBeEnabled());
+  });
+
+  it("shows the server's refusal and the stored value again", async () => {
+    vi.mocked(getMe).mockResolvedValue(user({ is_admin: true }));
+    vi.mocked(getCapabilities).mockResolvedValue([PURCHASES]);
+    // The server's 422 as installation.py words it (SETTINGS_OUT_OF_BOUNDS).
+    vi.mocked(updateCapabilitySettings).mockRejectedValue(
+      new ApiError("Caps must be between $1 and $10,000.", 422),
+    );
+    render(<Settings />);
+
+    const perDay = await screen.findByLabelText("Per day (USD)");
+    await waitFor(() => expect(perDay).toBeEnabled());
+    fireEvent.change(perDay, { target: { value: "9000" } });
+    fireEvent.blur(perDay);
+
+    expect(await screen.findByText("Caps must be between $1 and $10,000.")).toBeInTheDocument();
+    expect(screen.getByLabelText("Per day (USD)")).toHaveValue(50);
+  });
+
+  it("refuses a cap over $10,000 on the page, before the server sees it", async () => {
+    vi.mocked(getMe).mockResolvedValue(user({ is_admin: true }));
+    vi.mocked(getCapabilities).mockResolvedValue([PURCHASES]);
+    render(<Settings />);
+
+    const perDay = await screen.findByLabelText("Per day (USD)");
+    await waitFor(() => expect(perDay).toBeEnabled());
+    fireEvent.change(perDay, { target: { value: "20000" } });
+    fireEvent.blur(perDay);
+
+    expect(await screen.findByText("Enter a whole number of dollars between $1 and $10,000.")).toBeInTheDocument();
+    expect(updateCapabilitySettings).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Per day (USD)")).toHaveValue(50);
+  });
+
+  it("keeps the caps read-only for an account that is not the owner", async () => {
+    vi.mocked(getMe).mockResolvedValue(user({ is_admin: false }));
+    vi.mocked(getCapabilities).mockResolvedValue([PURCHASES]);
+    render(<Settings />);
+
+    await waitFor(() => expect(screen.getByLabelText("Name")).toHaveValue("Me"));
+    expect(screen.getByLabelText("Per purchase (USD)")).toBeDisabled();
   });
 });

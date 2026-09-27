@@ -23,6 +23,7 @@ from services.tools.browser.snapshot import (
     filter_yaml,
     find_lines,
     host_path,
+    redact,
     strip_url,
     summarize,
 )
@@ -331,6 +332,56 @@ def test_typed_secrets_are_redacted_in_escaped_and_percent_encoded_forms():
     assert "  - /url: /reset?u=[redacted]&e=[redacted]&f=[redacted]" in out.lines
 
 
+CARD_ECHO = (
+    '- textbox "Card no" [ref=e7] [box=8,8,200,21]: 4242 4242 4242 4242\n'
+    '- textbox "CSC" [ref=e8] [box=8,40,80,21]: "987"\n'
+    '- paragraph [ref=e9] [box=8,70,400,18]: Charged 4242-4242-4242-4242 (4242424242424242), code 987, ends 4242\n'
+    '- paragraph [ref=e10] [box=8,90,400,18]: Order 1987, table 9872, $9.87, expires 12/28\n'
+    '- textbox "Ends" [ref=e11] [box=8,120,80,21]: 12/28'
+)
+CARD_SECRETS = ["4242424242424242", "987", "12/28"]
+
+
+def test_a_card_number_is_redacted_in_every_grouping_and_a_code_as_a_whole_run():
+    """The typed digits are the secret; a page prints them with spaces or
+    dashes, and the code next to them. A longer number that merely
+    contains the code (an order id, a price) is left alone."""
+    out = filter_yaml(CARD_ECHO, account_mode=True, secrets=CARD_SECRETS, facts=KNOWN)
+    body = text_of(out)
+    assert "4242 4242" not in body and "4242-4242" not in body and "4242424242424242" not in body
+    assert "code [redacted], ends 4242" in body
+    assert "Order 1987, table 9872, $9.87, expires [redacted]" in body
+    assert '- textbox "Ends" [ref=e11]: [redacted]' in out.lines
+    lines = find_lines(CARD_ECHO, "charged", secrets=CARD_SECRETS, facts=KNOWN)
+    assert lines and "4242-4242" not in lines[0] and "code [redacted]" in lines[0]
+
+
+def test_redact_is_the_same_rule_for_plain_page_text():
+    text = "Charged 4242 4242 4242 4242, code 987, id a987b, order 1987, 12/28"
+    assert redact(text, CARD_SECRETS, "•••") == "Charged •••, code •••, id a•••b, order 1987, •••"
+    assert redact("nothing here", CARD_SECRETS) == "nothing here"
+    # A number read off a secret field as the page groups it covers every
+    # other grouping too.
+    assert redact("4242-4242-4242-4242 and 4242424242424242", ["4242 4242 4242 4242"]) == "[redacted] and [redacted]"
+
+
+def test_card_fields_named_by_their_labels_are_redacted_by_name():
+    """The outline's name rule is the checkout's own field classifier:
+    "Card no", "CSC", "Expiry", "Name on card" and "PAN" hide their
+    values even when the live facts say nothing."""
+    raw = (
+        '- textbox "Card no" [ref=e1] [box=8,8,200,21]: 4111111111111111\n'
+        '- textbox "CSC" [ref=e2] [box=8,40,80,21]: "123"\n'
+        '- textbox "Expiry (MM/YY)" [ref=e3] [box=8,70,80,21]: 12/28\n'
+        '- textbox "PAN" [ref=e4] [box=8,100,80,21]: 5555\n'
+        '- textbox "Company" [ref=e5] [box=8,130,80,21]: Acme'
+    )
+    out = filter_yaml(raw, account_mode=True, facts=KNOWN)
+    body = text_of(out)
+    assert "4111" not in body and "123" not in body and "12/28" not in body and "5555" not in body
+    assert '- textbox "Company" [ref=e5]: Acme' in out.lines
+
+
 def test_strip_url_drops_userinfo_in_both_modes():
     assert strip_url("https://bob:pw123@h.example/a?x=1", False) == "https://h.example/a?x=1"
     assert strip_url("https://bob:pw123@h.example/a?x=1", True) == "https://h.example/a"
@@ -596,3 +647,33 @@ async def test_outline_end_to_end_in_account_mode(page):
     )
     assert "  - /url: /reset" in result.lines
     assert "4111" not in "\n".join(result.lines) and not result.truncated
+
+
+@pytest.mark.asyncio
+async def test_page_facts_classifies_card_fields_by_their_labels(page):
+    """A live page whose card fields carry no autocomplete token: the
+    shared classifier reads the label, the name, the placeholder and the
+    aria-labelledby text, and marks them secret; a plain field is not."""
+    from services.tools.browser.snapshot import page_facts, snapshot_raw
+
+    await page.set_content(
+        "<form><label>Card no <input name='ccnum' value='4242 4242 4242 4242'></label>"
+        "<label>CSC <input name='csc' value='987'></label>"
+        "<input placeholder='MM / YY' value='12/28'>"
+        "<span id='nm'>Name on card</span><input aria-labelledby='nm' value='Krish Q'>"
+        "<label>Promo code <input name='promo' value='SAVE10'></label>"
+        "<label>Month <input name='month' value='3'></label></form>"
+    )
+    raw = await snapshot_raw(page)
+    facts = await page_facts(page, raw)
+    assert facts.secret_fields is not None
+    kinds = sorted(facts.secret_fields.values())
+    assert kinds == ["cc-csc", "cc-exp", "cc-name", "cc-number"]
+    from services.tools.browser.snapshot import filter_yaml as filter_pure
+
+    lines = filter_pure(raw, account_mode=True, facts=facts).lines
+    body = "\n".join(lines)
+    assert "4242" not in body and "987" not in body and "12/28" not in body and "Krish Q" not in body
+    assert "SAVE10" in body
+    [month] = [line for line in lines if '- textbox "Month" [ref=' in line]
+    assert "[redacted]" not in month and month.endswith('"3"')

@@ -27,7 +27,7 @@ from typing import Any, Callable
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel, StrictBool
+from pydantic import BaseModel, StrictBool, StrictFloat, StrictInt
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.routes._deps import installation_service, require_admin
@@ -66,6 +66,12 @@ _installs_in_progress: set[str] = set()
 class CapabilitiesPatch(BaseModel):
     # Strict: a security switch must be a real boolean, not "yes" or 1.
     capabilities: dict[str, StrictBool]
+
+
+class CapabilitySettingsPatch(BaseModel):
+    # Strict: a spending cap is a number, never "25", true or null. The
+    # service checks the names and the range.
+    settings: dict[str, StrictInt | StrictFloat]
 
 
 def _system_toolkit(request: Request) -> SystemToolkit:
@@ -129,6 +135,30 @@ async def update_capabilities(
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
             )
+    return {"capabilities": [s.to_dict() for s in statuses]}
+
+
+@router.put("/{key}/settings")
+async def update_settings(
+    key: str,
+    body: CapabilitySettingsPatch,
+    request: Request,
+    current_user: User = Depends(require_admin),
+) -> dict[str, Any]:
+    """Store the owner's values for one capability's settings (the
+    purchases spending caps). Partial: settings not in the patch keep their
+    value. 404 for an unknown capability, 422 for a setting the capability
+    does not have or a value out of range; the service writes the audit
+    row. Answers with the whole report, like the switches do, so the
+    Permissions page re-renders from one shape."""
+    _capability(key)
+    service = installation_service(request)
+    if body.settings:
+        try:
+            await service.set_capability_settings(key, body.settings, actor_id=current_user.id)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+    statuses = await service.report()
     return {"capabilities": [s.to_dict() for s in statuses]}
 
 

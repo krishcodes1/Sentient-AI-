@@ -46,6 +46,12 @@ class Installation(Base):
     capabilities: Mapped[dict[str, Any]] = mapped_column(
         JSON, nullable=False, default=dict, server_default="{}"
     )
+    # Per-capability owner settings keyed by capability, e.g.
+    # {"purchases": {"per_purchase_cap_usd": 25, "per_day_cap_usd": 50}}.
+    # Added by migration 0010 with the same server default.
+    capability_settings: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, default=dict, server_default="{}"
+    )
     llm_provider: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     llm_model: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     # AES-256-GCM blobs (core.security.encrypt_credentials) — never plaintext.

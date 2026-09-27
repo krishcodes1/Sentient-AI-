@@ -9,7 +9,11 @@ Permission engine for Crawler AI agent actions.
 
 Enforces a tiered permission model across all connector types,
 with hard blocks on financial transactions and sensible defaults
-for each integration.
+for each integration. The one financial action that is not blocked
+outright is the built-in browser's checkout (``FINANCIAL_CONFIRM_KEYS``):
+it runs only after the owner approves its card, and only with the
+``purchases`` capability on; every connector's FINANCIAL row stays
+HARD_BLOCKED.
 """
 
 from __future__ import annotations
@@ -139,13 +143,20 @@ _DEFAULT_POLICIES: dict[tuple[str, ActionCategory], PermissionTier] = {
     # consequential (submit, sign up, pay) and refuses it at read tier.
     # Typing, selecting and consequential clicks are browser.act, and the
     # login itself is browser.login: WRITE, so the approval card applies
-    # every time. Nothing in this family deletes or executes, and money
-    # never moves through a browser the agent drives: blocked outright.
+    # every time. browser.checkout pays with the card in the owner's vault:
+    # FINANCIAL, and the one financial row that is USER_CONFIRM rather than
+    # HARD_BLOCKED (FINANCIAL_CONFIRM_KEYS exempts "browser" from the
+    # unconditional block below). It runs only after the owner approves a
+    # card showing the site, the amount and a screenshot, and only with the
+    # "purchases" capability on; the toolkit's own rules (HTTPS, the
+    # merchant asked for, the spending caps, the page unchanged since the
+    # card) refuse what no approval can allow. Nothing in this family
+    # deletes or executes: blocked outright.
     ("browser", ActionCategory.READ): PermissionTier.AUTO_APPROVE,
     ("browser", ActionCategory.WRITE): PermissionTier.USER_CONFIRM,
     ("browser", ActionCategory.DELETE): PermissionTier.HARD_BLOCKED,
     ("browser", ActionCategory.EXECUTE): PermissionTier.HARD_BLOCKED,
-    ("browser", ActionCategory.FINANCIAL): PermissionTier.HARD_BLOCKED,
+    ("browser", ActionCategory.FINANCIAL): PermissionTier.USER_CONFIRM,
     # Todoist
     ("todoist", ActionCategory.READ): PermissionTier.AUTO_APPROVE,
     ("todoist", ActionCategory.WRITE): PermissionTier.USER_CONFIRM,
@@ -159,6 +170,13 @@ _DEFAULT_POLICIES: dict[tuple[str, ActionCategory], PermissionTier] = {
     ("github", ActionCategory.EXECUTE): PermissionTier.USER_CONFIRM,
     ("github", ActionCategory.FINANCIAL): PermissionTier.HARD_BLOCKED,
 }
+
+# Policy keys whose FINANCIAL row is consulted instead of being blocked
+# unconditionally: the built-in browser only (browser.checkout, approved
+# per purchase by the owner). Every connector's FINANCIAL row stays
+# HARD_BLOCKED whatever its tier says, and no FINANCIAL action ever
+# auto-approves (see check_permission).
+FINANCIAL_CONFIRM_KEYS: frozenset[str] = frozenset({"browser"})
 
 # Actions that are always HARD_BLOCKED no matter what
 _HARD_BLOCKED_ACTIONS: set[str] = {
@@ -216,8 +234,13 @@ class PermissionEngine:
         """
         action_lower = action.lower()
 
-        # Hard-block check: financial transactions are always blocked
-        if scope == ActionCategory.FINANCIAL:
+        # Hard-block check: financial transactions are always blocked,
+        # except for the keys in FINANCIAL_CONFIRM_KEYS (the built-in
+        # browser's checkout), whose own row decides — never auto-approve.
+        if (
+            scope == ActionCategory.FINANCIAL
+            and connector_type.lower() not in FINANCIAL_CONFIRM_KEYS
+        ):
             return PermissionDecision(
                 allowed=False,
                 tier=PermissionTier.HARD_BLOCKED,
@@ -240,6 +263,12 @@ class PermissionEngine:
         override_key = (connector_type, scope)
         if override_key in self._overrides:
             tier = self._overrides[override_key]
+
+        # Money moves only after a person says yes to that one purchase:
+        # no default and no override can make a FINANCIAL action run
+        # unattended.
+        if scope == ActionCategory.FINANCIAL and tier == PermissionTier.AUTO_APPROVE:
+            tier = PermissionTier.USER_CONFIRM
 
         return self._evaluate_tier(tier, connector_type, action, scope, user_tier)
 

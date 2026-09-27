@@ -154,7 +154,11 @@ async def client(session_factory):
     # TRUSTED_PROXIES setting. Relying on X-Forwarded-For for isolation only
     # works when the peer is a trusted proxy; a distinct peer is faithful to
     # "these are different external clients" and independent of that config.
-    fake_ip = f"198.51.100.{uuid.uuid4().int % 254 + 1}"
+    # 64 random bits from IPv6's documentation range (2001:db8::/32, never
+    # routed and outside TRUSTED_PROXIES): a /24 gave 254 addresses, and with
+    # thousands of clients two tests sometimes shared a lockout bucket.
+    h = uuid.uuid4().hex
+    fake_ip = f"2001:db8::{h[0:4]}:{h[4:8]}:{h[8:12]}:{h[12:16]}"
     transport = httpx.ASGITransport(app=app, client=(fake_ip, 54321))
     async with httpx.AsyncClient(
         transport=transport,
@@ -263,6 +267,57 @@ def fakesite(monkeypatch):
 
 
 @pytest.fixture
+def fakesite_tls(monkeypatch):
+    """The fake site over HTTPS with a self-signed certificate (spec §9):
+    what the write tiers need, since they refuse ``http://`` pages. Drive
+    it with a session manager built on ``tls_launcher``."""
+    from tests.fakesite import FakeSite
+
+    monkeypatch.setenv("CRAWLER_ALLOW_LOOPBACK_FOR_TESTS", "1")
+    site = FakeSite(tls=True).start()
+    try:
+        yield site
+    finally:
+        site.stop()
+
+
+# The egress guard serves every page it fetched itself (route.fulfill),
+# which Chromium's local-network checks count as a public page: without
+# this a page of the loopback fake site could not open a WebSocket back
+# to it, so the guard's socket handler could not be tested. Tests only.
+CHROMIUM_TEST_ARGS = ["--disable-features=LocalNetworkAccessChecks"]
+
+
+async def tls_launcher(*, headless, channel, user_data_dir, viewport):
+    """The test twin of ``session.playwright_launcher``: headless Chromium,
+    a throwaway context, the same service-worker/download/permission
+    settings, plus ``ignore_https_errors=True`` so the fake site's
+    self-signed certificate is accepted. Only tests may set that flag
+    (``test_browser_session`` holds the production launcher to it);
+    ``headless``/``channel``/``user_data_dir`` are ignored because tests
+    never open a headed window or a real profile. ``CHROMIUM_TEST_ARGS``
+    lets a page open a WebSocket back to the fake site."""
+    from playwright.async_api import ViewportSize, async_playwright
+
+    size = ViewportSize(width=viewport["width"], height=viewport["height"])
+    playwright = await async_playwright().start()
+    try:
+        browser = await playwright.chromium.launch(headless=True, args=CHROMIUM_TEST_ARGS)
+        context = await browser.new_context(
+            viewport=size,
+            service_workers="block",
+            accept_downloads=False,
+            permissions=[],
+            ignore_https_errors=True,
+        )
+    except BaseException:
+        await playwright.stop()
+        raise
+    context._crawler_playwright = playwright
+    return context
+
+
+@pytest.fixture
 def loopback_resolver():
     """A guard resolver that maps every host to 127.0.0.1: the fake site's
     address, and what a DNS-rebinding attacker would love to return."""
@@ -275,7 +330,7 @@ async def page():
     playwright_api = pytest.importorskip("playwright.async_api")
     async with playwright_api.async_playwright() as playwright:
         try:
-            browser = await playwright.chromium.launch(headless=True)
+            browser = await playwright.chromium.launch(headless=True, args=CHROMIUM_TEST_ARGS)
         except playwright_api.Error as exc:
             pytest.skip(f"headless Chromium unavailable: {str(exc).splitlines()[0]}")
         context = await browser.new_context(viewport={"width": 1280, "height": 800})

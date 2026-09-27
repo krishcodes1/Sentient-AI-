@@ -7,6 +7,13 @@ gets. Nothing else in the backend branches on the OS for browser control,
 so every OS-specific behaviour has exactly one Mac, one Windows and one
 container implementation, and one test for each that runs on any OS.
 
+The vault's key custody (purchases spec §4) goes through the same seam:
+``get_secret``/``set_secret``/``delete_secret`` reach the OS secret store
+(Keychain on Mac, DPAPI on Windows) and raise ``SecretStoreUnavailable``
+where there is none (Linux, the container), so services/vault never
+learns which OS it is on. ``vault_id`` is the install's stable identity
+for those secrets: a uuid in ``<data_dir>/vault-id``.
+
 Shared helpers live here so mac.py, linux.py and windows.py stay small.
 """
 
@@ -16,23 +23,39 @@ import os
 import re
 import stat
 import subprocess
+import uuid
 from pathlib import Path
-from typing import Callable, Literal, Mapping, Optional, Protocol
+from typing import Literal, Mapping, Optional, Protocol
 
 PlatformName = Literal["mac", "windows", "linux", "container"]
 
-# argv -> (returncode, combined output). Every platform takes one so tests
-# assert *which argv would run* without running it (as SystemToolkit does).
-Runner = Callable[[list[str], float], tuple[int, str]]
+# argv (+ optional stdin text) -> (returncode, combined output). Every
+# platform takes one so tests assert *which argv would run*, and what it
+# would be fed, without running it (as SystemToolkit does).
+class Runner(Protocol):
+    def __call__(
+        self, argv: list[str], timeout_s: float, stdin: Optional[str] = None
+    ) -> tuple[int, str]: ...
 
 APP_DIR_NAME = "Crawler AI"
 PROFILES_DIR_NAME = "browser-profiles"
+VAULT_ID_FILE = "vault-id"
 # One deadline for every OS probe: these are diagnostics and window
 # nudges, never something a tool result should wait longer for.
 TIMEOUT_S = 10.0
 
 _USER_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+# Secret names become a Keychain account suffix and a file name; the
+# vault uses constants, so anything else is a bug, not a request.
+_SECRET_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _NO_WINDOW: int = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+class SecretStoreUnavailable(Exception):
+    """This platform has no OS secret store the vault key may live in, or
+    the store refused (locked Keychain, DPAPI failure). Callers fail
+    closed: a key that cannot be read is never replaced by a fresh one,
+    because that would silently orphan every blob sealed under it."""
 
 
 class Platform(Protocol):
@@ -53,18 +76,90 @@ class Platform(Protocol):
     def port_owner(self, port: int) -> Optional[str]:
         """"pid name" of the process listening on *port*, for diagnostics."""
 
+    def get_secret(self, name: str) -> Optional[bytes]:
+        """The bytes stored under *name* in the OS secret store; None when
+        nothing is stored. Raises SecretStoreUnavailable when the store
+        cannot answer (never None: absent and unreadable must differ)."""
 
-def run_argv(argv: list[str], timeout_s: float) -> tuple[int, str]:
-    """Run one fixed argv: no shell, stdin closed, stdout+stderr merged.
+    def set_secret(self, name: str, value: bytes) -> None:
+        """Store *value* under *name*, replacing what was there."""
 
-    Failing to start (binary missing) or to finish (timeout) reads as
-    ``(-1, "")``: platform probes must degrade to "unknown", never raise
-    into a tool result. Nothing model-supplied ever reaches *argv*.
+    def delete_secret(self, name: str) -> None:
+        """Remove *name*; a name that is not stored is not an error."""
+
+    def vault_id(self) -> str:
+        """This install's stable id for its secrets: a uuid kept in
+        ``<data_dir>/vault-id`` (0600), created on first use."""
+
+
+def secret_name(name: str) -> str:
+    """*name* when it is a plain identifier; ValueError otherwise, before
+    it can reach an argv or a path."""
+    if not _SECRET_NAME.fullmatch(name):
+        raise ValueError(f"not a secret name: {name!r}")
+    return name
+
+
+def read_or_create_id(path: Path) -> str:
+    """The uuid in *path*, or a fresh one written there (0600) on first use.
+
+    Never overwrites: an existing file that does not hold a uuid is an
+    OSError, because replacing it would change the Keychain account the
+    vault key lives under and orphan the key. A symlink is refused for
+    the same reason make_private_dir refuses one. Two processes racing
+    to create the file both end up with the one that won (O_EXCL)."""
+    if path.is_symlink():
+        raise OSError(f"refusing a symlinked id file: {path}")
+    existing = _read_id(path)
+    if existing is not None:
+        return existing
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fresh = str(uuid.uuid4())
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        winner = _read_id(path)
+        if winner is None:
+            raise OSError(f"id file appeared but holds no id: {path}")
+        return winner
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(fresh + "\n")
+    return fresh
+
+
+def _read_id(path: Path) -> Optional[str]:
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+    if not text:
+        return None
+    try:
+        return str(uuid.UUID(text))
+    except ValueError:
+        raise OSError(f"id file does not hold a uuid: {path}")
+
+
+def run_argv(
+    argv: list[str], timeout_s: float, stdin: Optional[str] = None
+) -> tuple[int, str]:
+    """Run one fixed argv: no shell, stdout+stderr merged, stdin closed
+    unless *stdin* is given, in which case that text is fed to it.
+
+    *stdin* exists for what must never be an argument: the vault key
+    goes to ``security -i`` this way (mac.py), because argv is readable
+    in the process table while the tool runs. Failing to start (binary
+    missing) or to finish (timeout) reads as ``(-1, "")``: platform probes
+    must degrade to "unknown", never raise into a tool result. Nothing
+    model-supplied ever reaches *argv* or *stdin*.
     """
     try:
         proc = subprocess.run(
             argv,
-            stdin=subprocess.DEVNULL,
+            # subprocess.run refuses a stdin together with input; with
+            # input the pipe is its own.
+            stdin=subprocess.DEVNULL if stdin is None else None,
+            input=None if stdin is None else stdin.encode("utf-8"),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             timeout=timeout_s,
@@ -142,6 +237,9 @@ class PosixPlatform:
 
     def profile_dir(self, user_id: str) -> Path:
         return make_private_dir(profile_path(self.data_dir(), user_id))
+
+    def vault_id(self) -> str:
+        return read_or_create_id(self.data_dir() / VAULT_ID_FILE)
 
     def bring_to_front(self, *, pid: Optional[int] = None, title: Optional[str] = None) -> bool:
         # No portable way to raise an X11/Wayland window, and the container

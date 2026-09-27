@@ -21,7 +21,7 @@ Downgrade recreates the enum with its original five labels in their original
 order, and refuses (changing nothing) while any row holds another type.
 
 Revision ID: 0011_connector_type_string
-Revises: 0009_user_llm_nullable
+Revises: 0010_vault_items
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision = "0011_connector_type_string"
-down_revision = "0009_user_llm_nullable"
+down_revision = "0010_vault_items"
 branch_labels = None
 depends_on = None
 

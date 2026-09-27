@@ -289,6 +289,10 @@ class PendingApproval:
     # Why this action deserves a careful look (e.g. its arguments were
     # derived from untrusted tool output). Rendered as a warning in the UI.
     risk_note: Optional[str] = None
+    # A picture of what the card is about (browser.checkout: the checkout
+    # page; browser.act: the page with the target outlined), as a data URL, read from the executor at render time
+    # (``ToolExecutor.approval_image``) and never stored with the card.
+    image: Optional[str] = None
 
 
 @dataclass()
@@ -366,6 +370,66 @@ class TurnUsage:
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
 
 
+# The tool whose presence in a request means "Buy things for me" is on for
+# this install (tool_registry offers it only with purchases and
+# browser_control both on), and the block the system prompt then gains.
+# Kept out of SECURITY_SYSTEM_PROMPT on purpose: an install with buying
+# off sends exactly the request it sent before the feature existed, byte
+# for byte, and the hard limit on purchases stands there unqualified.
+CHECKOUT_TOOL = "browser.checkout"
+# The reserved key a checkout card's page facts live under
+# (services.tools.browser.checkout.toolkit.CARD_KEY; tool_registry names
+# it too). The facts come from the toolkit's read of the page, never from
+# the model.
+CHECKOUT_CARD_KEY = "_checkout"
+
+
+def _merchant_is_host(merchant: str, host: str) -> bool:
+    """Whether the ``merchant`` the model named is the page's host the
+    toolkit read: the same host, or its registrable domain (``example.com``
+    for ``shop.example.com``), with a scheme, a path or a leading ``www.``
+    on either side ignored."""
+
+    def _plain(value: str) -> str:
+        value = value.strip().lower()
+        value = value.split("://", 1)[-1].split("/", 1)[0].split("@")[-1].split(":")[0]
+        return value[4:] if value.startswith("www.") else value
+
+    want, shown = _plain(merchant), _plain(host)
+    return bool(want) and (shown == want or shown.endswith("." + want))
+
+
+PURCHASES_SYSTEM_PROMPT = """\
+<purchases>
+"Buy things for me" is on, so browser.checkout is offered: the one sanctioned
+purchase path, and the only exception to the hard limit above. Money moves
+only when the person approves its card, which shows the site, the amount and
+the items read from the page; the card is filled from the owner's vault,
+never typed by you. Bring the browser to the merchant's checkout page first
+(browser.read, and browser.act for delivery details), then call
+browser.checkout with the site the person named. After a completed checkout,
+tell the person what was bought and the amount, then offer a reminder
+(reminders.create) for the event or delivery date if one is on the
+confirmation page.
+</purchases>"""
+
+# Sent only when a browser tool is offered (``shopping`` in
+# _with_system_prompt), so a turn without the browser pays nothing for it.
+SHOPPING_SYSTEM_PROMPT = """\
+<shopping>
+To find or buy a product in the browser:
+- If the person pasted a link, open exactly that link. Otherwise never guess
+  a shop's addresses: web.search for the shop, product and variant, then open
+  the shop's own result; or open the shop's home page and use its search or
+  menus.
+- A 404 or "page not found" means the address was guessed wrong, not that the
+  product is gone: search instead of trying more addresses.
+- On the product page pick the variant (color, size, model) with browser.act,
+  add it to the cart, then go to the cart and on to checkout.
+- Pay only with browser.checkout, and only when it is offered; without it,
+  stop at checkout and tell the person the cart is ready.
+</shopping>"""
+
 # Receives the turn's progress events (tool_call, tool_result, blocked,
 # pending_approval) as they happen: the SSE stream and the Telegram
 # progress lines both listen through one of these.
@@ -378,19 +442,24 @@ EventSink = Callable[[dict[str, Any]], Awaitable[None]]
 # cannot interpret as text. Everything the model sees passes through here.
 _IMAGE_DATA_URL_PREFIX = "data:image/"
 _MODEL_VIEW_MAX_INLINE = 256
+# What stands in for an image in the model's view: the first when a chat
+# channel showed it to the person, the second when none did (a picture the
+# channel does not forward), so the model never claims a picture was seen.
+IMAGE_DELIVERED = "[image captured and delivered to the user separately]"
+IMAGE_NOT_SHOWN = "[image captured but not shown to the user]"
 
 
-def redact_binary_for_model(value: Any) -> Any:
+def redact_binary_for_model(value: Any, *, placeholder: str = IMAGE_DELIVERED) -> Any:
     if isinstance(value, dict):
-        return {k: redact_binary_for_model(v) for k, v in value.items()}
+        return {k: redact_binary_for_model(v, placeholder=placeholder) for k, v in value.items()}
     if isinstance(value, list):
-        return [redact_binary_for_model(v) for v in value]
+        return [redact_binary_for_model(v, placeholder=placeholder) for v in value]
     if (
         isinstance(value, str)
         and value.startswith(_IMAGE_DATA_URL_PREFIX)
         and len(value) > _MODEL_VIEW_MAX_INLINE
     ):
-        return "[image captured and delivered to the user separately]"
+        return placeholder
     return value
 
 
@@ -496,6 +565,120 @@ DESKTOP_RESUME_CLOSING_LINE = (
     "not, call desktop.observe first (it needs no approval); ask for another "
     "desktop.act only for a step the outline shows is needed."
 )
+# Closes the last follow-up before a message's tool rounds run out: the
+# next model call offers no tools, so the reply says where the task stands
+# instead of breaking off. round_limit_note follows that reply.
+WRAP_UP_CLOSING_LINE = (
+    "This message has used all of its tool steps, so the next reply gets no tools; "
+    "do not ask for one. In plain words and two or three short sentences, tell the "
+    "person what you have done so far and what is left to do. A line inviting them "
+    'to send "continue" is added after your reply.'
+)
+# What the extra rounds of a browser or desktop turn may cost, priced on the
+# model that ran them: the browser task's spend cap
+# (services.tools.browser._shared.BROWSER_MAX_USD), which a desktop turn
+# has no toolkit of its own to enforce.
+TASK_MAX_USD = 0.25
+
+
+def round_limit_note(rounds: int) -> str:
+    """The plain line after the reply of a message that used all *rounds*
+    of its tool rounds."""
+    return f'I stopped after {rounds} steps for this message. Send "continue" and I\'ll pick up from here.'
+
+
+def is_task_tool(name: Any) -> bool:
+    """A tool whose use gives the message the larger round budget
+    (MAX_TASK_TOOL_ROUNDS): the browser's and the desktop's."""
+    return isinstance(name, str) and name.startswith(("browser.", "desktop."))
+
+
+# The policy the permission adapter files a name no catalog knows under
+# (tool_registry.RuntimePermissionAdapter). Such a call from the model is a
+# wrong name, not a refusal the owner needs to see: it never runs, and the
+# model is told the right tool instead (unknown_tool_reply).
+DEFAULT_DENY_POLICY = "default-deny"
+_SHOWN_TOOL_NAME_RE = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
+_OPEN_WORDS = ("open", "goto", "go", "navigate", "visit", "load", "browse", "url")
+# A verb the model reaches for, and the act action that does it.
+_BROWSER_ACT_VERBS = {
+    "click": "click", "tap": "click", "type": "fill", "fill": "fill", "input": "fill",
+    "enter": "fill", "select": "select", "choose": "select", "pick": "select",
+    "press": "press", "check": "check", "submit": "submit",
+}
+_DESKTOP_ACT_VERBS = {
+    "click": "click", "tap": "click", "type": "type", "fill": "type", "input": "type",
+    "press": "key", "key": "key", "keys": "key", "scroll": "scroll", "open": "open_app",
+    "launch": "open_app",
+}
+_READ_WORDS = ("read", "snapshot", "scroll", "find", "back", "text", "page", "wait", "tabs")
+_SEARCH_WORDS = ("search", "google", "lookup")
+_PAY_WORDS = ("checkout", "buy", "pay", "purchase")
+
+
+def _args_text(args: dict[str, str]) -> str:
+    return json.dumps(args, ensure_ascii=False)
+
+
+def _unknown_tool_hint(name: str, offered: set[str]) -> str:
+    """The offered tool that does what *name* sounds like, as one sentence
+    with its arguments; empty when nothing offered fits."""
+    lowered = name.lower()
+    words = set(re.split(r"[^a-z]+", lowered))
+
+    def first(table: Mapping[str, str] | tuple[str, ...]) -> Optional[str]:
+        return next((w for w in table if w in words), None)
+
+    if lowered.startswith(("desktop.", "computer.", "mac.", "app.")):
+        verb = first(_DESKTOP_ACT_VERBS)
+        if verb is not None and "desktop.act" in offered:
+            action = _DESKTOP_ACT_VERBS[verb]
+            extra = {"open_app": {"app": "…"}, "key": {"keys": "…"}, "scroll": {"direction": "down"}}
+            args = {"action": action, **extra.get(action, {"ref": "…"})}
+            return (
+                f"To {verb} in an app use desktop.act with {_args_text(args)}, "
+                "using a ref from the latest desktop.observe outline."
+            )
+        if "desktop.observe" in offered:
+            return 'To look at the apps on this computer use desktop.observe with {"action": "outline"}.'
+        return ""
+    if first(_PAY_WORDS) and "browser.checkout" in offered:
+        return 'To pay on the checkout page use browser.checkout with {"merchant": "…"}.'
+    if first(_SEARCH_WORDS) and "web.search" in offered:
+        return 'To search the web use web.search with {"query": "…"}.'
+    verb = first(_BROWSER_ACT_VERBS)
+    if verb is not None:
+        action = _BROWSER_ACT_VERBS[verb]
+        if "browser.act" in offered:
+            extra = {"fill": {"text": "…"}, "select": {"value": "…"}}
+            args = {"action": action, "ref": "…", **extra.get(action, {})}
+            if action == "press":
+                args = {"action": "press", "key": "Enter"}
+            return (
+                f"To {verb} on a page use browser.act with {_args_text(args)}, "
+                "using a ref from the latest browser.read outline."
+            )
+        if action == "click" and "browser.read" in offered:
+            return 'To follow a link or open a menu use browser.read with {"action": "click", "ref": "…"}.'
+    if first(_OPEN_WORDS):
+        if "browser.read" in offered:
+            return 'To open a page use browser.read with {"action": "open", "url": "…"}.'
+        if "web.fetch_page" in offered:
+            return 'To read a page use web.fetch_page with {"url": "…"}.'
+    if first(_READ_WORDS) and "browser.read" in offered:
+        return 'To read the open page use browser.read with {"action": "snapshot"}.'
+    return ""
+
+
+def unknown_tool_reply(name: Any, offered: list[str]) -> str:
+    """What the model is told when it calls a tool that does not exist
+    (``browser.open``): the right tool for the job, when one is offered,
+    and the names it may call, so it retries in the same turn."""
+    shown = name if isinstance(name, str) and _SHOWN_TOOL_NAME_RE.fullmatch(name) else ""
+    head = f"There is no tool named {shown}." if shown else "There is no tool by that name."
+    hint = _unknown_tool_hint(shown, set(offered)) if shown else ""
+    names = ", ".join(sorted(set(offered))) or "none"
+    return " ".join(part for part in (head, hint, f"The tools you can call are: {names}.") if part)
 
 
 def render_task_facts(*, notes: list[str], summaries: list[str]) -> str:
@@ -736,7 +919,7 @@ def estimate_usd(
     ) / 1_000_000
 
 
-def _stored_to_pending(action: StoredAction) -> PendingApproval:
+def _stored_to_pending(action: StoredAction, image: Optional[str] = None) -> PendingApproval:
     return PendingApproval(
         action_id=action.action_id,
         tool_name=action.tool_name,
@@ -746,6 +929,7 @@ def _stored_to_pending(action: StoredAction) -> PendingApproval:
         expires_at=action.expires_at,
         conversation_id=action.conversation_id,
         risk_note=action.risk_note,
+        image=image,
     )
 
 
@@ -775,6 +959,23 @@ PRECHECK_ERROR_REASON = (
     "Could not check this action before asking for approval; refusing it."
 )
 
+# A browser.act or browser.checkout refused by its toolkit's own rules
+# before (or instead of) its approval card: at the executor's precheck, or
+# by the checkout toolkit's ``begin`` (the async bind that reads the page:
+# not HTTPS, the wrong merchant, no total, over a cap). The toolkit's rule
+# name rides along (``PrecheckRefusal.rule``), as computer_rule's does.
+BROWSER_RULE_POLICY = "browser_rule"
+PURCHASE_RULE_POLICY = "purchase_rule"
+
+# The policy a refusal answered by the bind hook (``approval_arguments`` or
+# its async form returning ``{"refused": True, ...}``) is filed under, by
+# tool. Any other tool's bind refusal is a precheck error: nothing else is
+# expected to refuse there.
+_BIND_REFUSAL_POLICIES: dict[str, str] = {
+    "browser.act": BROWSER_RULE_POLICY,
+    "browser.checkout": PURCHASE_RULE_POLICY,
+}
+
 # The executor's refusal "state" -> the policy it is recorded under.
 _CAPABILITY_POLICY_BY_STATE = {
     "off": CAPABILITY_OFF_POLICY,
@@ -798,11 +999,12 @@ def _capability_refusal(tool_name: str, result: Any) -> Optional[tuple[str, str]
     key = result.get("capability")
     if not isinstance(key, str) or not key:
         return None
-    # Deferred: tool_registry imports this module.
-    from services.agent.tool_registry import capability_of_tool
+    # Deferred: tool_registry imports this module. Every capability the
+    # tool needs counts (browser.checkout: purchases and browser_control).
+    from services.agent.tool_registry import capabilities_of_tool
 
-    cap = capability_of_tool(tool_name)
-    if cap is None or cap.key != key:
+    cap = next((c for c in capabilities_of_tool(tool_name) if c.key == key), None)
+    if cap is None:
         return None
     state = result.get("state")
     policy = (
@@ -1140,6 +1342,26 @@ class ToolExecutor:
         was made from). Must not run the tool or touch anything."""
         return arguments
 
+    async def approval_arguments_async(
+        self, tool_name: str, arguments: dict[str, Any], user_id: str, *, task_id: str
+    ) -> dict[str, Any]:
+        """``approval_arguments`` for a card that must show live facts
+        (browser.checkout reads the page for the amount and the merchant,
+        and keeps its screenshot). The runtime awaits this when the
+        executor has it. A ``{"refused": True, "rule": ..., "error": ...}``
+        answer means the call gets no card: the runtime files it like a
+        precheck refusal and shows the model the answer as the result."""
+        return self.approval_arguments(tool_name, arguments, user_id)
+
+    def approval_image(
+        self, tool_name: str, arguments: Mapping[str, Any], user_id: str
+    ) -> Optional[str]:
+        """A picture for this call's card (browser.checkout: the checkout
+        page the card was made from; browser.act: the page with the target
+        outlined) as an image data URL, or None. Read at
+        render time so the picture is never stored with the card."""
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Runtime
@@ -1207,6 +1429,9 @@ class AgentRuntime:
         self._retired: dict[int, LLMProvider] = {}
         # Upper bound on chained tool rounds within a single chat turn.
         self._max_tool_rounds: int = int(getattr(config, "MAX_TOOL_ROUNDS", 8) or 8)
+        # The bound once the turn has driven the browser or the desktop
+        # (is_task_tool), while its extra rounds cost under TASK_MAX_USD.
+        self._max_task_tool_rounds: int = int(getattr(config, "MAX_TASK_TOOL_ROUNDS", 30) or 30)
 
     # Cap on cached per-user provider instances (see _provider_cache).
     _PROVIDER_CACHE_MAX = 32
@@ -1438,6 +1663,9 @@ class AgentRuntime:
         messages: list[dict[str, Any]],
         memory_block: Optional[str] = None,
         permissions_text: Optional[str] = None,
+        *,
+        purchases: bool = False,
+        shopping: bool = False,
     ) -> list[dict[str, Any]]:
         """Ensure the security system prompt heads the message list.
 
@@ -1451,6 +1679,12 @@ class AgentRuntime:
         so the model explains a switched-off ability instead of guessing.
         It goes before the memory block: it changes only when settings do,
         which keeps the cached prompt prefix stable across turns.
+
+        ``purchases`` (the checkout tool is offered this turn) adds the
+        ``<purchases>`` block right after the policy, before the date: with
+        buying off the system message is the pre-purchases one, unchanged.
+        ``shopping`` (a browser tool is offered) adds the ``<shopping>``
+        playbook after it, before the date, on the same terms.
         """
         # The model has no clock. Day granularity is enough for "next Friday"
         # and keeps the cached prompt prefix identical across a whole day;
@@ -1461,7 +1695,9 @@ class AgentRuntime:
             + (today.tzname() or "local") + ")</today>"
         )
         tail = (
-            f"\n\n{today_line}"
+            (f"\n\n{PURCHASES_SYSTEM_PROMPT}" if purchases else "")
+            + (f"\n\n{SHOPPING_SYSTEM_PROMPT}" if shopping else "")
+            + f"\n\n{today_line}"
             + (f"\n\n{permissions_text}" if permissions_text else "")
             + (f"\n\n{memory_block}" if memory_block else "")
         )
@@ -1618,7 +1854,9 @@ class AgentRuntime:
             + (closing or (BROWSER_CLOSING_LINE if task_facts else GENERIC_CLOSING_LINE))
         )
 
-    def approved_call_message(self, tool_name: str, result: Any) -> str:
+    def approved_call_message(
+        self, tool_name: str, result: Any, *, image_delivered: bool = True
+    ) -> str:
         """The user-role message the turn resumed after an approval starts
         from (api/routes/agent._resume_after_approval): the approved call's
         result in the same fenced envelope a tool round's results come back
@@ -1629,10 +1867,18 @@ class AgentRuntime:
         row: a history that ends on an assistant turn reads to a provider as
         a continuation of the model's own words (Gemini answers one with an
         empty completion), and it puts the result outside the envelope that
-        marks it as data."""
+        marks it as data.
+
+        ``image_delivered`` is whether the channel forwards the result's
+        picture (a checkout's confirmation page) to the person; when it
+        does not, the placeholder says so, and the model cannot tell them
+        to look at a picture they never got."""
         closing = DESKTOP_RESUME_CLOSING_LINE if tool_name == "desktop.act" else None
+        shown = redact_binary_for_model(
+            result, placeholder=IMAGE_DELIVERED if image_delivered else IMAGE_NOT_SHOWN
+        )
         wrapped = self._wrap_tool_results(
-            [{"tool_call_id": "approved", "name": tool_name, "result": result}],
+            [{"tool_call_id": "approved", "name": tool_name, "result": shown}],
             closing=closing,
         )
         return (
@@ -1663,6 +1909,7 @@ class AgentRuntime:
         *,
         observation_slots: Optional[list[ObservationSlot]] = None,
         summaries: Optional[list[str]] = None,
+        closing: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         follow_up = list(messages)
         task_facts = self._task_facts_for(tool_results, summaries if summaries is not None else [])
@@ -1691,7 +1938,7 @@ class AgentRuntime:
                 }
         if llm_response.content.strip():
             follow_up.append({"role": "assistant", "content": llm_response.content})
-        wrapped = self._wrap_tool_results(tool_results, task_facts=task_facts)
+        wrapped = self._wrap_tool_results(tool_results, task_facts=task_facts, closing=closing)
         images = self._images_for_model(tool_results, provider)
         if images:
             follow_up.append(
@@ -1748,7 +1995,7 @@ class AgentRuntime:
 
     # Longest executor-written card sentence kept (the toolkit's are far
     # shorter; this only bounds a misbehaving executor).
-    _APPROVAL_REASON_CHARS = 300
+    _APPROVAL_REASON_CHARS = 600
 
     def _approval_reason(
         self, tool_name: str, arguments: dict[str, Any], user_id: str
@@ -1773,25 +2020,108 @@ class AgentRuntime:
             return generic
         return sentence.strip()[: self._APPROVAL_REASON_CHARS]
 
-    def _approval_arguments(
-        self, tool_name: str, arguments: dict[str, Any], user_id: str
+    async def _approval_arguments(
+        self, tool_name: str, arguments: dict[str, Any], user_id: str, *, task_id: str
     ) -> dict[str, Any]:
         """The arguments an approval card stores: the executor's copy when it
-        ties the card to something (``ToolExecutor.approval_arguments``),
-        else the call's own. A hook that fails or answers nothing usable
-        stores the call's own; an executor that needs the tie then refuses
-        the approved call (fail closed), so this never blocks parking."""
+        ties the card to something (``ToolExecutor.approval_arguments``, or
+        its async form when the executor has one: a browser.checkout card
+        is built from the live page), else the call's own. A hook that
+        fails or answers nothing usable stores the call's own; an executor
+        that needs the tie then refuses the approved call (fail closed), so
+        this never blocks parking. A refusal answer (``{"refused": True}``)
+        is returned as is; ``_bind_refusal`` files it."""
+        bind_async = getattr(self._executor, "approval_arguments_async", None)
         bind = getattr(self._executor, "approval_arguments", None)
-        if not callable(bind):
-            return arguments
         try:
-            bound = bind(tool_name, arguments, user_id)
+            if callable(bind_async):
+                bound = await bind_async(tool_name, arguments, user_id, task_id=task_id)
+            elif callable(bind):
+                bound = bind(tool_name, arguments, user_id)
+            else:
+                return arguments
         except Exception as exc:
             logger.warning(
                 "approval_arguments_failed", tool=tool_name, error_type=type(exc).__name__
             )
             return arguments
         return bound if isinstance(bound, dict) else arguments
+
+    @staticmethod
+    def _card_risk_note(
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        card_arguments: Mapping[str, Any],
+        taint_reason: Optional[str],
+        taint: TaintTracker,
+    ) -> Optional[str]:
+        """The warning a card carries when its arguments came from untrusted
+        content, or None.
+
+        A browser.checkout card is the normal exception: the model read the
+        shop's page and then named that shop as ``merchant``, so the taint
+        tracker sees the host in an untrusted result. The checkout toolkit
+        has already checked that merchant against the page's own origin
+        (``_checkout.host``, read from the page, not from the model), and
+        the card is built from those facts, so when the two agree there is
+        nothing to warn about. A merchant that does not match the page, or
+        a note copied from the page, gets one plain sentence instead of the
+        security jargon other tools' cards carry."""
+        if not taint_reason:
+            return None
+        if tool_name == CHECKOUT_TOOL:
+            facts = card_arguments.get(CHECKOUT_CARD_KEY)
+            host = facts.get("host") if isinstance(facts, Mapping) else None
+            merchant = arguments.get("merchant")
+            if isinstance(host, str) and isinstance(merchant, str) and _merchant_is_host(merchant, host):
+                rest = {k: v for k, v in arguments.items() if k != "merchant"}
+                if taint.taint_reason(rest) is None:
+                    return None
+                return (
+                    "Part of this request came from a web page. Check the site and the "
+                    "amount on the card before approving."
+                )
+            return "The site name came from a web page; check it matches where you meant to buy."
+        return (
+            f"Heads up: this request was shaped by external content — {taint_reason}. "
+            "Check the recipient/target below before approving."
+        )
+
+    @staticmethod
+    def _bind_refusal(tool_name: str, bound: Mapping[str, Any]) -> Optional[PrecheckRefusal]:
+        """The refusal the bind hook answered instead of card arguments
+        (``{"refused": True, "rule": ..., "error": ...}``: the checkout
+        toolkit found the page not HTTPS, the wrong merchant, no total, an
+        amount over a cap), or None when *bound* is a card's arguments. Filed
+        like a precheck refusal: the tool's own policy, the rule, and the
+        answer as the model's result."""
+        if bound.get("refused") is not True:
+            return None
+        rule = bound.get("rule")
+        return PrecheckRefusal(
+            reason=str(bound.get("error") or f"{tool_name} was refused."),
+            policy=_BIND_REFUSAL_POLICIES.get(tool_name, PRECHECK_ERROR_POLICY),
+            result=dict(bound),
+            rule=rule if isinstance(rule, str) else "",
+        )
+
+    def _approval_image(
+        self, tool_name: str, arguments: Mapping[str, Any], user_id: str
+    ) -> Optional[str]:
+        """The picture a card shows (``ToolExecutor.approval_image``), when
+        the executor has one and it is an image data URL; None otherwise. A
+        hook that fails costs the card its picture, never the card."""
+        picture = getattr(self._executor, "approval_image", None)
+        if not callable(picture):
+            return None
+        try:
+            image = picture(tool_name, arguments, user_id)
+        except Exception as exc:
+            logger.warning("approval_image_failed", tool=tool_name, error_type=type(exc).__name__)
+            return None
+        if isinstance(image, str) and image.startswith(_IMAGE_DATA_URL_PREFIX):
+            return image
+        return None
 
     def _precheck_approval(
         self, tool_name: str, arguments: dict[str, Any], user_id: str
@@ -2008,7 +2338,13 @@ class AgentRuntime:
         # Everything below, the computer toolkit's own checks included,
         # answers "stopped?" for this turn's mark.
         with agent_cancel.watching(user_id, stop_mark):
-            messages = self._with_system_prompt(messages, memory_block, permissions_text)
+            messages = self._with_system_prompt(
+                messages,
+                memory_block,
+                permissions_text,
+                purchases=any(t.name == CHECKOUT_TOOL for t in tools or []),
+                shopping=any(is_browser_tool(t.name) for t in tools or []),
+            )
             turn_provider, turn_model = await self._select_provider(llm_provider, llm_model)
             if usage_sink is not None:
                 usage_sink.provider, usage_sink.model = turn_provider, turn_model
@@ -2171,6 +2507,20 @@ class AgentRuntime:
         # summary so far.
         observation_slots: list[ObservationSlot] = []
         browser_summaries: list[str] = []
+        # The names the model was offered this turn: an unknown name is
+        # answered from these (unknown_tool_reply).
+        offered_names = [str(t.get("name", "")) for t in tool_schemas]
+        # Set once a browser or desktop call has run this turn: from then
+        # on the turn may take MAX_TASK_TOOL_ROUNDS rounds, while what it
+        # has cost so far (priced on the model that ran) is under
+        # TASK_MAX_USD. The browser toolkit's own caps still apply.
+        task_turn = False
+        turn_usd = 0.0
+
+        def round_budget() -> int:
+            if task_turn and turn_usd < TASK_MAX_USD:
+                return max(self._max_tool_rounds, self._max_task_tool_rounds)
+            return self._max_tool_rounds
 
         # Thinking off on browser rounds (spec §10), for providers that take
         # a budget; every other provider keeps its plain signature.
@@ -2210,7 +2560,7 @@ class AgentRuntime:
                 stopped = True
                 break
 
-            allow_tools = bool(tool_schemas) and rounds_used < self._max_tool_rounds
+            allow_tools = bool(tool_schemas) and rounds_used < round_budget()
             llm_response: LLMResponse = await provider.complete(
                 messages=messages,
                 tools=tool_schemas if allow_tools else None,
@@ -2219,6 +2569,9 @@ class AgentRuntime:
             for k, v in llm_response.usage.items():
                 total_usage[k] = total_usage.get(k, 0) + v
             served_model = llm_response.served_model or served_model
+            turn_usd += estimate_usd(
+                llm_response.usage or {}, turn_provider, turn_model, llm_response.served_model
+            )
             if usage_sink is not None:
                 usage_sink.served_model = served_model
 
@@ -2313,6 +2666,39 @@ class AgentRuntime:
                         user_id, tc.name, tc.arguments
                     )
                     policy = await self._permissions.get_policy_name(user_id, tc.name)
+                    if policy == DEFAULT_DENY_POLICY and tc.name not in offered_tools:
+                        # A name the model made up (browser.open): denied
+                        # like any unknown tool, so nothing runs, but it is
+                        # a wrong name rather than a refusal. The model is
+                        # told the right tool as this call's result and
+                        # retries in this turn; the owner sees no block.
+                        # Nothing ran, so the answer stands whether or not
+                        # the audit write succeeds.
+                        try:
+                            await self._audit.log(
+                                {
+                                    "event": "tool_unknown",
+                                    "user_id": user_id,
+                                    "tool": tc.name,
+                                    "arguments": tc.arguments,
+                                    "reason": reason,
+                                    "policy": policy,
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                }
+                            )
+                        except Exception as exc:
+                            logger.error("audit_write_failed_unknown_tool", error=str(exc))
+                        record = {
+                            "tool_call_id": tc.id,
+                            "name": tc.name,
+                            "result": {
+                                "ok": False,
+                                "error": unknown_tool_reply(tc.name, offered_names),
+                            },
+                        }
+                        round_results.append(record)
+                        tool_results.append(record)
+                        continue
                     blocked_actions.append(
                         BlockedAction(tool_name=tc.name, reason=reason, policy=policy)
                     )
@@ -2384,6 +2770,18 @@ class AgentRuntime:
                     # owner presses Stop); the same rules run again when an
                     # approved call executes.
                     precheck = self._precheck_approval(tc.name, tc.arguments, user_id)
+                    # The card stores what the executor ties it to (a
+                    # desktop.act: the screen it was made from; a
+                    # browser.checkout: the page's facts, read now), and
+                    # its sentence is read from that same copy. A bind
+                    # that refuses instead (the checkout page failed a
+                    # rule) is filed exactly as a precheck refusal is.
+                    card_arguments: dict[str, Any] = tc.arguments
+                    if precheck is None:
+                        card_arguments = await self._approval_arguments(
+                            tc.name, tc.arguments, user_id, task_id=task_id
+                        )
+                        precheck = self._bind_refusal(tc.name, card_arguments)
                     if precheck is not None and precheck.rule == _PRECHECK_STOPPED_RULE:
                         # The tool saw the user's stop before the check just
                         # above did: a stop, never a security block.
@@ -2437,13 +2835,9 @@ class AgentRuntime:
                         tool_results.append(record)
                         continue
 
-                    # The card stores what the executor ties it to (a
-                    # desktop.act: the screen it was made from), and its
-                    # sentence is read from that same copy. From storing it
-                    # to its audit row, nothing stops half-way: a stored
-                    # card can be approved, so it must not be left
-                    # unaudited by a chat's /stop (_RunsToEnd).
-                    card_arguments = self._approval_arguments(tc.name, tc.arguments, user_id)
+                    # From storing the card to its audit row, nothing stops
+                    # half-way: a stored card can be approved, so it must
+                    # not be left unaudited by a chat's /stop (_RunsToEnd).
                     section = _RunsToEnd()
                     # A failure after the cancel landed ends the turn as
                     # stopped, not as an error sent after the stop.
@@ -2458,11 +2852,8 @@ class AgentRuntime:
                                 ttl_minutes=self._approval_ttl_minutes,
                                 # Tell the human WHY this one deserves scrutiny when
                                 # its arguments came from untrusted content.
-                                risk_note=(
-                                    f"Heads up: this request was shaped by external content — {taint_reason}. "
-                                    "Check the recipient/target below before approving."
-                                    if taint_reason
-                                    else None
+                                risk_note=self._card_risk_note(
+                                    tc.name, tc.arguments, card_arguments, taint_reason, taint
                                 ),
                             )
                         )
@@ -2470,12 +2861,16 @@ class AgentRuntime:
                             section.finish()
                             skipped_calls = list(llm_response.tool_calls[index:])
                             break
-                        pending_approvals.append(_stored_to_pending(stored))
+                        pending = _stored_to_pending(
+                            stored,
+                            image=self._approval_image(stored.tool_name, stored.arguments, user_id),
+                        )
+                        pending_approvals.append(pending)
                         # Emit the SAME shape the REST contract uses
                         # (PendingApprovalOut), so a streamed approval card
-                        # renders complete — tool name, arguments, reason and
-                        # risk note — instead of the client having to refetch
-                        # to learn what it is being asked to approve.
+                        # renders complete — tool name, arguments, reason,
+                        # risk note and picture — instead of the client having
+                        # to refetch to learn what it is being asked to approve.
                         await section.run(
                             emit(
                                 {
@@ -2488,6 +2883,7 @@ class AgentRuntime:
                                         "expires_at": stored.expires_at,
                                         "conversation_id": stored.conversation_id,
                                         "risk_note": stored.risk_note,
+                                        "image": pending.image,
                                     },
                                 }
                             )
@@ -2733,6 +3129,8 @@ class AgentRuntime:
                 except Exception as exc:  # noqa: BLE001 - accounting must never fail a turn
                     logger.warning("browser_spend_record_failed", error=str(exc)[:200])
 
+            task_turn = task_turn or any(is_task_tool(name) for name in ran_this_round)
+
             if skipped_calls or agent_cancel.is_cancelled(user_id):
                 # A stop skipped part of this round, or landed while its
                 # last call ran or its card was recorded. Either way the
@@ -2782,6 +3180,8 @@ class AgentRuntime:
 
             # Feed the results back and loop — the next call still offers
             # tools (until the round budget runs out) so calls can chain.
+            # When it will not, the results close by asking for a reply that
+            # says what was done and what is left.
             messages = self._follow_up_messages(
                 messages,
                 llm_response,
@@ -2789,14 +3189,15 @@ class AgentRuntime:
                 provider,
                 observation_slots=observation_slots,
                 summaries=browser_summaries,
+                closing=WRAP_UP_CLOSING_LINE if rounds_used >= round_budget() else None,
             )
 
         if hit_round_limit:
-            final_content = (final_content or "").rstrip() + (
-                f"\n\n[Stopped: reached the limit of {self._max_tool_rounds} "
-                "tool rounds for a single message. Send a follow-up message "
-                "to continue.]"
-            )
+            # The model's own account of where the task stands (asked for
+            # by WRAP_UP_CLOSING_LINE), then one plain line on how to go on.
+            note = round_limit_note(rounds_used)
+            final_content = (final_content or "").rstrip()
+            final_content = f"{final_content}\n\n{note}" if final_content else note
 
         # 4. Scan the FINAL model output — including the follow-up
         #    completion after tool execution, which is the path most
@@ -3175,6 +3576,7 @@ class AgentRuntime:
                         "expires_at": pa.expires_at,
                         "conversation_id": pa.conversation_id,
                         "risk_note": pa.risk_note,
+                        "image": pa.image,
                     }
                     for pa in response.pending_approvals
                 ],
@@ -3190,9 +3592,13 @@ class AgentRuntime:
     # ------------------------------------------------------------------
 
     async def list_pending_approvals(self, user_id: str) -> list[PendingApproval]:
-        """Return all live (unexpired, undecided) approvals for the user."""
+        """Return all live (unexpired, undecided) approvals for the user,
+        each with its picture when the executor still holds one."""
         stored = await self._approvals.list_pending(user_id)
-        return [_stored_to_pending(a) for a in stored]
+        return [
+            _stored_to_pending(a, image=self._approval_image(a.tool_name, a.arguments, user_id))
+            for a in stored
+        ]
 
     async def deny_action(self, action_id: str, user_id: str) -> dict[str, Any]:
         """Drop a pending action without executing it."""

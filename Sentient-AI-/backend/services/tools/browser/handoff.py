@@ -16,6 +16,7 @@ into ``otp_ref`` (a Playwright selector, IdP origin only).
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Optional
@@ -156,6 +157,10 @@ def classify(facts: dict[str, Any]) -> Optional[Challenge]:
     return None
 
 
+# How long one IdP frame may take to answer (``_shared.REF_TIMEOUT_MS``).
+_FRAME_TIMEOUT_S = 3.0
+
+
 async def collect_facts(page: "Page") -> dict[str, Any]:
     """One evaluate on the main frame, plus one per IdP-hosted child frame
     (Duo's prompt lives in an iframe on the school's IdP page)."""
@@ -165,8 +170,10 @@ async def collect_facts(page: "Page") -> dict[str, Any]:
         if frame is page.main_frame or not _is_mfa_host(frame.url):
             continue
         try:
-            facts["idp_frames"].append(await frame.evaluate(_FACTS_JS))
-        except Exception:  # noqa: BLE001 - detached mid-read; nothing to hand off in it
+            # Bounded: Playwright's frame.evaluate has none, and a frame
+            # still without a document never answers.
+            facts["idp_frames"].append(await asyncio.wait_for(frame.evaluate(_FACTS_JS), _FRAME_TIMEOUT_S))
+        except Exception:  # noqa: BLE001 - detached mid-read or no document; nothing to hand off in it
             continue
     return facts
 

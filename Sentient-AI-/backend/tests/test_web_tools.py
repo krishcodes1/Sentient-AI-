@@ -19,8 +19,9 @@ transport, and refusal tests use IP literals or names resolvable from
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
@@ -31,7 +32,13 @@ from services.tools.net import (
     build_guarded_client,
     validated_addresses,
 )
-from services.tools.web import WebToolError, WebToolkit
+from services.tools.html_text import clean_result_rows
+from services.tools.web import (
+    BROWSER_SEARCH_PAGES,
+    SEARCH_BLOCKED,
+    WebToolError,
+    WebToolkit,
+)
 
 PUBLIC_ADDRESS = "93.184.216.34"
 
@@ -174,7 +181,167 @@ async def test_search_reports_upstream_failure():
 
     result = await toolkit(handler, {"html.duckduckgo.com": (PUBLIC_ADDRESS,)}).search("q")
     assert result["ok"] is False
+    assert result["blocked"] is True
     assert result["status_code"] == 503
+
+
+# What html.duckduckgo.com answered instead of results (HTTP 202): the
+# anomaly modal and its duck picture challenge, no result__a rows.
+CHALLENGE_HTML = (Path(__file__).parent / "fixtures" / "ddg_challenge.html").read_text()
+DDG = {"html.duckduckgo.com": (PUBLIC_ADDRESS,)}
+
+
+def challenged(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(202, html=CHALLENGE_HTML)
+
+
+@pytest.mark.asyncio
+async def test_a_bot_check_is_reported_as_blocked_not_as_an_empty_search():
+    result = await toolkit(challenged, DDG).execute("search", {"query": "dbrand grip"})
+
+    assert result["ok"] is False
+    assert result["blocked"] is True
+    assert result["error"] == SEARCH_BLOCKED
+    assert "Don't guess addresses" in result["hint"]
+    assert result["status_code"] == 202
+    assert "results" not in result and "count" not in result
+
+
+@pytest.mark.asyncio
+async def test_a_bot_check_served_with_200_is_still_blocked():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, html=CHALLENGE_HTML)
+
+    result = await toolkit(handler, DDG).search("q")
+    assert result["ok"] is False and result["blocked"] is True
+
+
+@pytest.mark.asyncio
+async def test_no_rows_on_a_page_that_reads_like_a_bot_check_is_blocked():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            html="<html><body><p>Unfortunately, bots use DuckDuckGo too.</p>"
+            "<p>Please complete the following challenge.</p></body></html>",
+        )
+
+    result = await toolkit(handler, DDG).search("q")
+    assert result["ok"] is False and result["blocked"] is True
+
+
+class FakeBrowser:
+    """web.search's browser fallback as the executor hands it over: one
+    answer per results page, in order; records the pages asked for."""
+
+    def __init__(self, *answers: dict[str, Any]) -> None:
+        self.answers = list(answers)
+        self.urls: list[str] = []
+
+    async def __call__(self, url: str, script: str, ready: str) -> dict[str, Any]:
+        self.urls.append(url)
+        assert "querySelectorAll" in script and ready
+        return self.answers.pop(0)
+
+
+DBRAND = "https://www.dbrand.com/shop/grip/iphone-16-pro-max-cases"
+WRAPPED_DBRAND = (
+    "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.dbrand.com%2Fshop%2Fgrip"
+    "%2Fiphone-16-pro-max-cases&rut=abc"
+)
+
+
+@pytest.mark.asyncio
+async def test_a_blocked_search_runs_in_the_browser_when_one_is_given():
+    browser = FakeBrowser(
+        {
+            "ok": True,
+            "rows": [
+                {"title": "Ad", "url": "https://duckduckgo.com/y.js?ad_provider=bingv7aa", "snippet": ""},
+                {"title": " Grip  Case ", "url": WRAPPED_DBRAND, "snippet": "Holo White"},
+                {"title": "Grip Case again", "url": WRAPPED_DBRAND, "snippet": "duplicate"},
+                "not a row",
+            ],
+        }
+    )
+    result = await toolkit(challenged, DDG).execute(
+        "search", {"query": "dbrand grip holo white"}, browser=browser
+    )
+
+    assert result == {
+        "ok": True,
+        "query": "dbrand grip holo white",
+        "source": "browser",
+        "results": [{"title": "Grip Case", "url": DBRAND, "snippet": "Holo White"}],
+        "count": 1,
+    }
+    # DuckDuckGo's own page first, with the query encoded into it.
+    assert len(browser.urls) == 1
+    first = urlparse(browser.urls[0])
+    assert (first.hostname, parse_qs(first.query)["q"]) == ("duckduckgo.com", ["dbrand grip holo white"])
+
+
+@pytest.mark.asyncio
+async def test_the_browser_fallback_moves_on_when_a_page_is_challenged_or_fails():
+    browser = FakeBrowser(
+        {"ok": True, "rows": [], "challenge": True, "text": "Unfortunately, bots use DuckDuckGo too."},
+        {"ok": True, "rows": [{"title": "Grip", "url": DBRAND, "snippet": ""}]},
+    )
+    result = await toolkit(challenged, DDG).search("q", browser=browser)
+    assert result["source"] == "browser" and result["results"][0]["url"] == DBRAND
+    assert [urlparse(u).hostname for u in browser.urls] == ["duckduckgo.com", "www.bing.com"]
+    assert len(BROWSER_SEARCH_PAGES) == 2
+
+    failing = FakeBrowser({"ok": False, "error": "The results page could not be read."},
+                          {"ok": True, "rows": [], "text": ""})
+    result = await toolkit(challenged, DDG).search("q", browser=failing)
+    assert result["ok"] is False and result["blocked"] is True
+    assert "Don't guess addresses" in result["hint"]
+    assert len(failing.urls) == 2
+
+
+@pytest.mark.asyncio
+async def test_an_unavailable_browser_stops_the_fallback_and_reports_blocked():
+    browser = FakeBrowser({"ok": False, "unavailable": True, "error": "Browser control is turned off."})
+    result = await toolkit(challenged, DDG).search("q", browser=browser)
+
+    assert result["ok"] is False and result["blocked"] is True
+    assert result["error"] == SEARCH_BLOCKED
+    assert len(browser.urls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_search_the_endpoint_answers_never_touches_the_browser():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, html=SEARCH_HTML)
+
+    browser = FakeBrowser()
+    result = await toolkit(handler, DDG).execute("search", {"query": "q"}, browser=browser)
+    assert result["ok"] is True and "source" not in result
+    assert browser.urls == []
+
+
+@pytest.mark.asyncio
+async def test_the_browser_fallback_cannot_come_from_tool_arguments():
+    result = await toolkit(unreachable_handler).execute(
+        "search", {"query": "q", "browser": "https://evil.example/"}
+    )
+    assert result["ok"] is False and "Invalid arguments" in result["error"]
+
+
+def test_bing_and_duckduckgo_tracking_links_are_unwrapped_without_being_followed():
+    rows = [
+        {"title": "dbrand", "url": "https://www.bing.com/ck/a?!&&p=4f&ptn=3&u=a1aHR0cHM6Ly93d3cuZGJyYW5kLmNvbS9zaG9wL2dyaXAvaXBob25lLTE2LXByby1tYXgtY2FzZXM&ntb=1", "snippet": "s"},
+        {"title": "ddg", "url": "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fnews.example.org%2Fa", "snippet": ""},
+        {"title": "Bing itself", "url": "https://www.bing.com/maps", "snippet": ""},
+        {"title": "advert", "url": "https://www.bing.com/aclk?ld=e8&u=aHR0cHM6Ly9jYXNlcy5leGFtcGxl", "snippet": ""},
+        {"title": "not base64", "url": "https://www.bing.com/ck/a?u=a1%%%", "snippet": ""},
+        {"title": "script", "url": "javascript:alert(1)", "snippet": ""},
+        {"title": "", "url": "https://example.com/untitled", "snippet": ""},
+    ]
+    urls = [row["url"] for row in clean_result_rows(rows, 10, 200)]
+    assert urls == [DBRAND, "https://news.example.org/a", "https://www.bing.com/maps"]
+    assert len(clean_result_rows(rows * 20, 10, 200)) == 3
+    assert clean_result_rows("not a list", 10, 200) == []
 
 
 @pytest.mark.asyncio
@@ -183,6 +350,7 @@ async def test_search_empty_result_set_is_not_an_error():
         return httpx.Response(200, html="<html><body>no results</body></html>")
 
     result = await toolkit(handler, {"html.duckduckgo.com": (PUBLIC_ADDRESS,)}).search("q")
+    # A results page with nothing that reads as a bot check: a real empty.
     assert result == {"ok": True, "query": "q", "results": [], "count": 0}
 
 

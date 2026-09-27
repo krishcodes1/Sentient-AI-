@@ -96,9 +96,9 @@ both kinds of database.
 
 ## Connector revisions (0011 to 0014)
 
-These four came with the connectors work. `0010` is deliberately skipped
-(another branch owns that id), so the chain runs
-`0009_user_llm_nullable` -> `0011` -> `0012` -> `0013` -> `0014`. Each one
+These four came with the connectors work and follow the purchases
+revision, so the chain runs
+`0009_user_llm_nullable` -> `0010_vault_items` -> `0011` -> `0012` -> `0013` -> `0014`. Each one
 checks the live schema before changing it (like 0004 to 0009), because an
 adopted pre-Alembic database is built from the current models before it is
 stamped and upgraded, so the change may already be there.

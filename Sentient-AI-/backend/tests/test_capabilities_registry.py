@@ -134,3 +134,49 @@ def test_reminders_now_is_the_clock_and_stays_on():
 def test_get_unknown_key_raises():
     with pytest.raises(KeyError):
         capabilities.get("nope")
+
+
+# ── purchases (spec 2026-09-25) ──────────────────────────────────────────
+
+
+def test_browser_tools_are_claimed_by_three_separate_switches():
+    # Exact names on all three: a "browser." prefix on browser_control would
+    # claim act and checkout twice, and the switches gate different things.
+    assert capabilities.capability_for_tool("browser.checkout").key == "purchases"
+    assert capabilities.capability_for_tool("browser.act").key == "browser_act"
+    assert capabilities.capability_for_tool("browser.read").key == "browser_control"
+    assert capabilities.get("browser_control").tools == ("browser.read",)
+    assert capabilities.get("browser_act").tools == ("browser.act",)
+    assert capabilities.get("purchases").tools == ("browser.checkout",)
+    assert not any(p.endswith(".") for p in capabilities.get("browser_control").tools)
+
+
+# ── browser_act (reading and acting are separate switches) ────────────────
+
+
+def test_browser_act_is_registered_off_high_risk_and_needs_browser_control():
+    cap = capabilities.get("browser_act")
+    assert cap.label == "Fill in forms and click on sites"
+    assert cap.default_enabled is False and cap.risk == "high"
+    assert cap.requires == ("browser_control",)
+    assert capabilities.default_switches()["browser_act"] is False
+    assert capabilities.settings_defaults("browser_act") == {}
+    keys = capabilities.keys()
+    assert keys.index("browser_control") < keys.index("browser_act")
+
+
+def test_every_required_capability_is_registered():
+    for cap in capabilities.REGISTRY:
+        for key in cap.requires:
+            assert key in capabilities.keys() and key != cap.key, cap.key
+
+
+def test_purchases_is_registered_off_by_default_with_its_settings():
+    cap = capabilities.get("purchases")
+    assert cap.default_enabled is False and cap.risk == "high"
+    assert capabilities.default_switches()["purchases"] is False
+    assert capabilities.settings_defaults("purchases") == {
+        "per_purchase_cap_usd": 25,
+        "per_day_cap_usd": 50,
+    }
+    assert capabilities.settings_defaults("browser_control") == {}

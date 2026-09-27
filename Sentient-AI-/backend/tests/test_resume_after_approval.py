@@ -222,6 +222,155 @@ async def test_the_resumed_turn_gets_the_result_whole_as_a_user_turn(client, ses
         app.dependency_overrides.pop(agent_routes.get_runtime, None)
 
 
+# A checkout result as the toolkit returns it: the confirmation page as a
+# JPEG data URL for the person (long enough to be redacted for the model).
+JPEG = "data:image/jpeg;base64," + "/9j/4AAQ" * 100
+SVG = "data:image/svg+xml;base64," + "PHN2Zz4=" * 100
+CHECKOUT_RESULT = {
+    "ok": True,
+    "merchant": "shop.example.com",
+    "amount": "23.40",
+    "currency": "USD",
+    "confirmation_text_summary": "Thank you Order number 8841",
+    "summary": "[step 3] checkout → shop.example.com/order-confirmed",
+    "mode": "private",
+}
+
+
+async def _park_checkout(session_factory, user, conv_id):
+    from services.agent.approvals import DbApprovalStore
+
+    store = DbApprovalStore(session_factory=session_factory)
+    return await store.create(
+        user_id=str(user.id),
+        tool_name="browser.checkout",
+        arguments={
+            "merchant": "shop.example.com",
+            "_checkout": {"checkout_id": "chk-1", "host": "shop.example.com", "amount_usd": "23.40"},
+        },
+        reason="Pay $23.40 to shop.example.com with Visa ····4242",
+        conversation_id=conv_id,
+    )
+
+
+async def _decided_checkout(client, session_factory, provider, result, email):
+    """Park a checkout card in a fresh conversation and approve it over
+    HTTP. Returns (the decision response body, the model's last request,
+    the transcript rows)."""
+    from api.routes import agent as agent_routes
+    from main import app
+    from models.conversation import Message
+    from sqlalchemy import select
+
+    runtime, _ = _runtime(session_factory, provider, RecordingExecutor(result=result))
+    app.dependency_overrides[agent_routes.get_runtime] = lambda: runtime
+    try:
+        user, token = await make_user(session_factory, email)
+        conv = (
+            await client.post("/api/agent/conversations", headers=auth_headers(token), json={})
+        ).json()
+        await client.post(
+            f"/api/agent/conversations/{conv['id']}/messages",
+            headers=auth_headers(token),
+            json={"content": "buy the ticket"},
+        )
+        action = await _park_checkout(session_factory, user, conv["id"])
+        decided = await client.post(
+            f"/api/agent/approvals/{action.action_id}",
+            headers=auth_headers(token),
+            json={"approved": True},
+        )
+        assert decided.status_code == 200, decided.text
+        async with session_factory() as session:
+            rows = list(
+                (
+                    await session.execute(
+                        select(Message)
+                        .where(Message.conversation_id == uuid.UUID(conv["id"]))
+                        .order_by(Message.created_at)
+                    )
+                ).scalars()
+            )
+        return decided.json(), provider.calls[-1], rows
+    finally:
+        app.dependency_overrides.pop(agent_routes.get_runtime, None)
+
+
+@pytest.mark.asyncio
+async def test_the_web_gets_the_approved_calls_confirmation_picture(client, session_factory):
+    """The confirmation screenshot of an approved checkout reaches the web
+    chat: on the decision response, keyed to the transcript row that
+    records the decision (the row itself keeps only the placeholder), and
+    the model is told it was delivered."""
+    from services.agent.providers import LLMResponse
+    from services.agent.runtime import IMAGE_DELIVERED, IMAGE_NOT_SHOWN
+
+    provider = ScriptedProvider([LLMResponse(content="Ask away."), LLMResponse(content="Bought it.")])
+    body, request, rows = await _decided_checkout(
+        client, session_factory, provider, {**CHECKOUT_RESULT, "user_image": JPEG}, "web-shot@example.com"
+    )
+    [decision_row] = [r for r in rows if r.content.startswith("[Approved] Executed 'browser.checkout'")]
+    assert body["message_id"] == str(decision_row.id)
+    assert body["images"] == [
+        {"tool": "browser.checkout", "source": "shop.example.com", "index": 0, "data_url": JPEG}
+    ]
+    # The saved row and the model's view carry the placeholder, never the picture.
+    assert JPEG not in str(decision_row.tool_calls) and JPEG not in str(body["result"] or "")
+    last = [m for m in request if m.get("role") != "system"][-1]
+    assert last["role"] == "user" and IMAGE_DELIVERED in last["content"]
+    assert IMAGE_NOT_SHOWN not in last["content"] and JPEG not in last["content"]
+
+
+@pytest.mark.asyncio
+async def test_the_model_is_not_told_a_picture_reached_the_person_when_none_did(client, session_factory):
+    """A picture no channel forwards (not a raster data URL) is dropped
+    from the response, and the model's placeholder says it was not shown."""
+    from services.agent.providers import LLMResponse
+    from services.agent.runtime import IMAGE_DELIVERED, IMAGE_NOT_SHOWN
+
+    provider = ScriptedProvider([LLMResponse(content="Ask away."), LLMResponse(content="Bought it.")])
+    body, request, _ = await _decided_checkout(
+        client, session_factory, provider, {**CHECKOUT_RESULT, "user_image": SVG}, "web-noshot@example.com"
+    )
+    assert body["images"] == [] and body["message_id"]
+    last = [m for m in request if m.get("role") != "system"][-1]
+    assert IMAGE_NOT_SHOWN in last["content"] and IMAGE_DELIVERED not in last["content"]
+    assert SVG not in last["content"]
+
+
+@pytest.mark.asyncio
+async def test_a_channel_gets_the_confirmation_photo_before_the_reply(client, session_factory):
+    """The Telegram applier's outcome carries the approved call's own
+    photo first (the resumed turn took none here), captioned from the
+    toolkit's facts, so the owner sees the confirmation page in the chat."""
+    from api.routes.agent import build_decision_applier
+    from main import app
+    from services.agent.providers import LLMResponse
+
+    provider = ScriptedProvider([LLMResponse(content="Bought it: $23.40.")])
+    runtime, _ = _runtime(
+        session_factory, provider, RecordingExecutor(result={**CHECKOUT_RESULT, "user_image": JPEG})
+    )
+    user, token = await make_user(session_factory, "tg-shot@example.com")
+    conv = (await client.post("/api/agent/conversations", headers=auth_headers(token), json={})).json()
+    action = await _park_checkout(session_factory, user, conv["id"])
+    saved = getattr(app.state, "agent_runtime", None)
+    app.state.agent_runtime = runtime
+    try:
+        outcome = await build_decision_applier(app, session_factory=session_factory)(
+            str(user.id), action.action_id, True
+        )
+    finally:
+        if saved is None:
+            del app.state.agent_runtime
+        else:
+            app.state.agent_runtime = saved
+    assert outcome["status"] == "approved" and outcome["summary"] == "Bought it: $23.40."
+    assert outcome["images"] == [
+        {"data_url": JPEG, "caption": "Order confirmation on shop.example.com: $23.40"}
+    ]
+
+
 @pytest.mark.asyncio
 async def test_resume_failure_does_not_fail_the_approval(client, session_factory):
     """The approval already happened and the tool already ran, so a broken

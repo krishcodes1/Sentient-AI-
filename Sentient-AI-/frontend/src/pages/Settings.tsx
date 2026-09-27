@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import CapabilityList, { CapabilityListError } from "@/components/CapabilityList";
+import PaymentCardSettings from "@/components/PaymentCardSettings";
 import ServerSettings from "@/components/ServerSettings";
 import type { CapabilityStatus, User } from "@/types";
 import {
@@ -40,6 +41,7 @@ import {
   testTelegram,
   unlinkTelegram,
   updateCapabilities,
+  updateCapabilitySettings,
   updateProfile,
   updateSettings,
   type TelegramLink,
@@ -473,6 +475,22 @@ export default function Settings() {
     }
   };
 
+  // One changed field of a capability's settings (a purchase cap). The
+  // server answers with the whole list, so a refused value simply shows the
+  // stored one again once the row is no longer busy.
+  const handleCapabilitySettingsChange = async (key: string, patch: Record<string, number>) => {
+    setCapabilitiesBusyKey(key);
+    setCapabilitiesFeedback(null);
+    try {
+      const updated = await updateCapabilitySettings(key, patch);
+      setCapabilities(updated);
+    } catch (err) {
+      setCapabilitiesFeedback({ ok: false, text: (err as Error).message });
+    } finally {
+      setCapabilitiesBusyKey((k) => (k === key ? null : k));
+    }
+  };
+
   const handleInstallCapability = async (key: string) => {
     setCapabilitiesBusyKey(key);
     setCapabilitiesFeedback(null);
@@ -754,9 +772,15 @@ export default function Settings() {
             onRequestAccess={(key) => void handleRequestCapabilityAccess(key)}
             onInstall={(key) => void handleInstallCapability(key)}
             busyKey={capabilitiesBusyKey}
+            onSettingsChange={(key, patch) => void handleCapabilitySettingsChange(key, patch)}
           />
         )}
       </section>
+
+      {/* Payment card (owner only): the card "Buy things for me" pays with.
+          Entered here and nowhere else; the vault route refuses anyone
+          else, so the section is not rendered for them at all. */}
+      {me?.is_admin && <PaymentCardSettings />}
 
       {/* Server (owner only): the install-wide AI provider and sign-ups,
           as set up by the wizard. Not rendered at all for anyone else. */}

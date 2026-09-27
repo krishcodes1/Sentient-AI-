@@ -23,6 +23,14 @@ to be pointed at a hostile URL, so three constraints shape the module:
 - **Cost.** Every field that comes back is capped. The user pays per
   token for anything a tool returns, and a page is unbounded input.
 
+``search`` never reports a bot check as an empty search. When the
+endpoint answers with anything but a results page (a status other than
+200, or DuckDuckGo's "anomaly" challenge) it runs the query in Crawler's
+own browser, when the executor hands it one ("Control a browser" is on):
+the browser.read session, read tier, behind the same egress guard, one
+page load per results page and no clicks. Otherwise it answers
+``blocked`` with what to do instead.
+
 ``screenshot`` needs Playwright, which is deliberately *not* in
 requirements.txt: it pulls a browser download that most deployments do
 not want. Without it the action returns an actionable error instead of
@@ -41,13 +49,18 @@ from __future__ import annotations
 import asyncio
 import base64
 import inspect
+import re
 from typing import Any, Awaitable, Callable, Optional
 from urllib.parse import urlencode
 
 import httpx
 import structlog
 
-from services.tools.html_text import extract_readable_text, parse_search_results
+from services.tools.html_text import (
+    clean_result_rows,
+    extract_readable_text,
+    parse_search_results,
+)
 from services.tools.net import (
     AddressResolver,
     EgressBlocked,
@@ -61,6 +74,67 @@ logger = structlog.get_logger(__name__)
 # account. The HTML variant is used over lite/ because it is the one
 # that carries snippets.
 SEARCH_ENDPOINT = "https://html.duckduckgo.com/html/"
+
+# Results pages that render for a real browser, tried in order in
+# Crawler's own browser when the endpoint above asks for a bot check.
+# ``{query}`` is the encoded ``q=...`` pair. Tests point them at the fake
+# site (``WebToolkit(search_pages=...)``).
+BROWSER_SEARCH_PAGES: tuple[str, ...] = (
+    "https://duckduckgo.com/?{query}&ia=web",
+    "https://www.bing.com/search?{query}",
+)
+
+SEARCH_BLOCKED = (
+    "The search engine asked for a bot check, so web search is unavailable right now."
+)
+SEARCH_BLOCKED_HINT = (
+    "Open the shop's own site and use its links, or ask the person for the link. "
+    "Don't guess addresses."
+)
+
+# What DuckDuckGo serves instead of results when it takes a request for a
+# bot: HTTP 202 and an "anomaly" page with a picture challenge ("Select
+# all squares containing a duck"). The markers are its markup; the text
+# is checked only on a page with no result rows.
+_CHALLENGE_MARKERS = ("anomaly-modal", "anomaly.js", 'id="challenge-form"')
+_CHALLENGE_TEXT = re.compile(
+    r"bots use duckduckgo|complete the following challenge|select all squares|"
+    r"unusual traffic|not a robot|verify (that )?you('re| are) (a )?human",
+    re.IGNORECASE,
+)
+
+# Reads result rows off a results page as a real browser renders it:
+# DuckDuckGo's JavaScript page (``result-title-a``) and Bing's
+# (``li.b_algo``). Links are read, never followed; ads are left out by the
+# selectors and by clean_result_rows afterwards.
+_BROWSER_RESULTS_JS = r"""
+() => {
+  const clean = el => (el ? (el.innerText || el.textContent || '') : '').replace(/\s+/g, ' ').trim();
+  const rows = [];
+  const add = (link, snippet) => {
+    if (rows.length < 30) rows.push({title: clean(link), url: link.href || '', snippet: clean(snippet)});
+  };
+  document.querySelectorAll('a[data-testid="result-title-a"]').forEach(a => {
+    const box = a.closest('article, li');
+    add(a, box && box.querySelector('[data-result="snippet"], [data-testid="result-snippet"]'));
+  });
+  document.querySelectorAll('li.b_algo h2 a').forEach(a => {
+    const box = a.closest('li.b_algo');
+    add(a, box && box.querySelector('.b_caption p, p[class*="b_lineclamp"], .b_algoSlug'));
+  });
+  return {
+    rows,
+    challenge: !!document.querySelector('[class*="anomaly-modal"], #challenge-form'),
+    text: (document.body ? document.body.innerText : '').slice(0, 2000),
+  };
+}
+"""
+# Matches once the rows (or DuckDuckGo's challenge) are on the page.
+_BROWSER_RESULTS_READY = (
+    'a[data-testid="result-title-a"], li.b_algo h2 a, [class*="anomaly-modal"], #challenge-form'
+)
+# One results page in the browser, load to rows; two pages at most.
+_BROWSER_PAGE_TIMEOUT_S = 20.0
 
 # Identify honestly. Wikimedia (and anyone else following the same robot
 # policy) answers a browser UA coming from a non-browser TLS stack with
@@ -104,6 +178,11 @@ _MISSING_BROWSER_HINT = (
 )
 
 CaptureResult = tuple[bytes, str, int, int]
+# Loads one results page in Crawler's own browser and runs a script on it:
+# ``(url, script, ready_selector) -> {"ok": True, <what the script
+# returned>}``, or an error; ``unavailable`` when the browser may not be
+# used (the executor's ``_results_page``).
+BrowserPage = Callable[[str, str, str], Awaitable[dict[str, Any]]]
 
 
 class WebToolError(Exception):
@@ -124,6 +203,18 @@ def _error(message: str, **extra: Any) -> dict[str, Any]:
     return {"ok": False, "error": message, **extra}
 
 
+def _challenged(status_code: int, html: str, results: list[dict[str, Any]]) -> bool:
+    """True when the endpoint's answer is not a results page: any status
+    but 200, DuckDuckGo's anomaly markup, or no rows on a page that reads
+    like a bot check. Only then is an empty answer not a real one."""
+    if status_code != 200:
+        return True
+    lowered = html.lower()
+    if any(marker in lowered for marker in _CHALLENGE_MARKERS):
+        return True
+    return not results and _CHALLENGE_TEXT.search(html) is not None
+
+
 class WebToolkit:
     """Executes the built-in ``web.*`` actions.
 
@@ -141,19 +232,31 @@ class WebToolkit:
         transport: Optional[httpx.AsyncBaseTransport] = None,
         capture: Optional[Callable[..., Any]] = None,
         playwright_loader: Optional[Callable[[], Any]] = None,
+        search_pages: tuple[str, ...] = BROWSER_SEARCH_PAGES,
     ) -> None:
         self._timeout_s = timeout_s
         self._resolver = resolver
         self._transport = transport
         self._capture = capture
         self._playwright_loader = playwright_loader or _load_playwright
+        self._search_pages = search_pages
 
     # -- Dispatch ------------------------------------------------------------
 
-    async def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
-        """Run one ``web.*`` action. Unknown actions fail closed."""
+    async def execute(
+        self, action: str, params: dict[str, Any], *, browser: Optional[BrowserPage] = None
+    ) -> dict[str, Any]:
+        """Run one ``web.*`` action. Unknown actions fail closed.
+
+        *browser* is the executor's, never the model's: search's fallback
+        (see ``search``). The handler the arguments are bound to does not
+        take it, so no tool argument can stand in for it."""
+
+        async def search(query: str, max_results: int = _DEFAULT_RESULTS) -> dict[str, Any]:
+            return await self.search(query, max_results, browser=browser)
+
         handlers: dict[str, Callable[..., Awaitable[dict[str, Any]]]] = {
-            "search": self.search,
+            "search": search,
             "fetch_page": self.fetch_page,
             "screenshot": self.screenshot,
         }
@@ -193,9 +296,19 @@ class WebToolkit:
     # -- Actions -------------------------------------------------------------
 
     async def search(
-        self, query: str, max_results: int = _DEFAULT_RESULTS
+        self,
+        query: str,
+        max_results: int = _DEFAULT_RESULTS,
+        *,
+        browser: Optional[BrowserPage] = None,
     ) -> dict[str, Any]:
-        """Search the public web and return compact result rows."""
+        """Search the public web and return compact result rows.
+
+        An answer that is not a results page (``_challenged``) is never
+        reported as an empty search: the query is run in Crawler's own
+        browser when *browser* is given (``source: "browser"``), and
+        otherwise, or when that is challenged too, reported as ``blocked``
+        with a hint that keeps the model from guessing addresses."""
         query = (query or "").strip()
         if not query:
             return _error("A non-empty 'query' is required.")
@@ -209,19 +322,57 @@ class WebToolkit:
         async with self._client() as client:
             response = await client.get(url)
 
-        if response.status_code >= 400:
-            return _error(
-                f"Search failed with HTTP {response.status_code}.",
-                status_code=response.status_code,
-            )
+        status = response.status_code
+        results = parse_search_results(response.text, limit, _SNIPPET_CHARS) if status == 200 else []
+        if not _challenged(status, response.text, results):
+            # A results page. With no rows and nothing that reads as a bot
+            # check, the engine searched and found nothing: a fact about
+            # the query, so the model may rephrase.
+            return {"ok": True, "query": query, "results": results, "count": len(results)}
 
-        results = parse_search_results(response.text, limit, _SNIPPET_CHARS)
-        if not results:
-            # Distinguishable from a network failure on purpose: a zero
-            # result set is a fact about the query, and the model should
-            # rephrase rather than retry.
-            return {"ok": True, "query": query, "results": [], "count": 0}
-        return {"ok": True, "query": query, "results": results, "count": len(results)}
+        logger.warning("web_search_challenged", status_code=status)
+        if browser is not None:
+            found = await self._search_in_browser(query, limit, browser)
+            if found is not None:
+                return found
+        return _error(SEARCH_BLOCKED, blocked=True, hint=SEARCH_BLOCKED_HINT, status_code=status)
+
+    async def _search_in_browser(
+        self, query: str, limit: int, browser: BrowserPage
+    ) -> Optional[dict[str, Any]]:
+        """Run *query* on each of ``search_pages`` in Crawler's own browser
+        until one shows result rows; None when the browser may not be used,
+        or every page was challenged, empty or did not load. Each page is
+        one GET load, bounded by _BROWSER_PAGE_TIMEOUT_S; the result links
+        are read off the page and unwrapped, never followed."""
+        encoded = urlencode({"q": query})
+        for template in self._search_pages:
+            try:
+                page = await asyncio.wait_for(
+                    browser(template.format(query=encoded), _BROWSER_RESULTS_JS, _BROWSER_RESULTS_READY),
+                    _BROWSER_PAGE_TIMEOUT_S,
+                )
+            except TimeoutError:
+                logger.warning("web_search_browser_timed_out")
+                continue
+            if page.get("unavailable"):
+                return None
+            if not page.get("ok"):
+                continue
+            rows = clean_result_rows(page.get("rows"), limit, _SNIPPET_CHARS)
+            if rows:
+                return {
+                    "ok": True,
+                    "query": query,
+                    "source": "browser",
+                    "results": rows,
+                    "count": len(rows),
+                }
+            challenged = bool(page.get("challenge")) or bool(
+                _CHALLENGE_TEXT.search(str(page.get("text") or ""))
+            )
+            logger.warning("web_search_browser_no_rows", challenged=challenged)
+        return None
 
     async def fetch_page(
         self, url: str, max_chars: int = _DEFAULT_PAGE_CHARS

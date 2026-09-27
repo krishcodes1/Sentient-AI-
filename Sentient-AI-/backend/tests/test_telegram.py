@@ -503,6 +503,48 @@ async def test_new_command_starts_a_fresh_conversation_once(session_factory, fak
 
 
 @pytest.mark.asyncio
+async def test_typing_stops_when_the_turn_ends_whether_it_replied_or_failed(
+    session_factory, fake_api
+):
+    """"typing…" is refreshed only while a turn runs: once the turn replies
+    (or fails), the refresher is cancelled, so a finished turn never looks
+    like one still working."""
+    import asyncio
+
+    await _link(session_factory, "tg-typing@example.com", 424)
+    running: list[int] = []
+    stopped: list[int] = []
+
+    async def keep_typing(chat_id):
+        running.append(chat_id)
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            stopped.append(chat_id)
+            raise
+
+    async def chat(user_id, text, *, new_conversation=False):
+        await asyncio.sleep(0.05)  # the turn runs a while: typing is on
+        if text == "boom":
+            raise RuntimeError("the step never came back")
+        return {"content": "dbrand.com took too long to load; want me to try again?"}
+
+    service = _make_service(session_factory)
+    service.chat = chat
+    service._keep_typing = keep_typing
+    await service._handle_message(telegram_dm(424, "open dbrand"))
+    await service.wait_for_chats()
+    assert running == stopped == [424]
+    assert fake_api.sent_messages()[-1]["text"].startswith("dbrand.com took too long to load")
+
+    await service._handle_message(telegram_dm(424, "boom"))
+    await service.wait_for_chats()
+    assert running == stopped == [424, 424]
+    assert "unexpected error" in fake_api.sent_messages()[-1]["text"]
+    await service._client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_chat_error_and_pending_are_surfaced(session_factory, fake_api):
     await _link(session_factory, "tg-err@example.com", 606)
 

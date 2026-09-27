@@ -53,6 +53,8 @@ import MarkdownMessage from "@/components/MarkdownMessage";
 import ProviderErrorText from "@/components/ProviderErrorText";
 import ToolScreenshot from "@/components/ToolScreenshot";
 import { hasDroppedScreenshot } from "@/components/toolScreenshots";
+import ApprovalPicture from "@/components/ApprovalPicture";
+import PurchaseApproval from "@/components/PurchaseApproval";
 import ChatComposer from "@/components/ChatComposer";
 import { ConversationTokenTotal, MessageTokenCaption } from "@/components/TokenUsage";
 import { DESKTOP_QUERY, useMediaQuery } from "@/hooks/useMediaQuery";
@@ -77,7 +79,7 @@ const STOP_FALLBACK_MS = 10_000;
 // Dashboard chunk doesn't drag in this whole page. Not re-exported from
 // here: a page module that exports non-components loses Fast Refresh.
 import { formatCountdown, useCountdown } from "./approvalCountdown";
-import { shownArguments } from "./approvalArguments";
+import { ACT_PICTURE_ALT, PURCHASE_TOOL, isSentenceCard, shownArguments } from "./approvalArguments";
 
 // Ids for optimistic bubbles, replaced by the server's ids once the turn is
 // saved. They only have to be unique within this tab, so a counter does the
@@ -247,22 +249,40 @@ function ApprovalCard({
           </span>
         )}
       </div>
-      <p className="text-xs mb-2" style={{ color: "var(--text-secondary)" }}>
-        Tool <strong>{approval.tool_name}</strong> wants to run.
-      </p>
-      {Object.keys(shownArguments(approval)).length > 0 && (
-        <pre
-          className="text-xs mb-2 p-2 rounded-[8px] overflow-x-auto"
-          style={{
-            background: "var(--claw-surface)",
-            color: "var(--text-secondary)",
-            border: "1px solid var(--claw-border)",
-          }}
-        >
-          {JSON.stringify(shownArguments(approval), null, 2)}
-        </pre>
+      {/* A purchase is judged on what the page says (amount, merchant,
+          items, screenshot), so its card shows those instead of the model's
+          arguments. */}
+      {approval.tool_name === PURCHASE_TOOL ? (
+        <PurchaseApproval approval={approval} />
+      ) : isSentenceCard(approval) ? (
+        // A browser.act step is approved on the page it will run on: the
+        // picture taken when the card was made, its target outlined in red.
+        <ApprovalPicture approval={approval} alt={ACT_PICTURE_ALT} className="mb-2" />
+      ) : (
+        <>
+          <p className="text-xs mb-2" style={{ color: "var(--text-secondary)" }}>
+            Tool <strong>{approval.tool_name}</strong> wants to run.
+          </p>
+          {Object.keys(shownArguments(approval)).length > 0 && (
+            <pre
+              className="text-xs mb-2 p-2 rounded-[8px] overflow-x-auto"
+              style={{
+                background: "var(--claw-surface)",
+                color: "var(--text-secondary)",
+                border: "1px solid var(--claw-border)",
+              }}
+            >
+              {JSON.stringify(shownArguments(approval), null, 2)}
+            </pre>
+          )}
+        </>
       )}
-      <p className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
+      {/* A browser.act card is this sentence and nothing else: what will be
+          typed, chosen or clicked, and on which site, from the toolkit's facts. */}
+      <p
+        className={isSentenceCard(approval) ? "text-sm mb-3" : "text-xs mb-3"}
+        style={{ color: isSentenceCard(approval) ? "var(--text-primary)" : "var(--text-muted)" }}
+      >
         {approval.reason}
       </p>
       {/* Backend-flagged risk: the request was shaped by external/untrusted
@@ -923,7 +943,7 @@ export default function Chat() {
   };
 
   const handleApprovalDecision = async (actionId: string, approved: boolean) => {
-    await decideApproval(actionId, approved);
+    const decided = await decideApproval(actionId, approved);
     // Record before removing: a poll that was already in flight must not
     // put this card back on screen.
     decidedApprovals.current.add(actionId);
@@ -935,8 +955,13 @@ export default function Chat() {
         const conv = await getConversation(activeConv);
         // Screenshots are never saved: carry the ones on screen over to
         // their saved rows (same ids since onSaved), or they would vanish.
+        // The approved call's own pictures (a checkout's confirmation page)
+        // arrive once, with the decision, and belong under its row.
         setMessages((prev) => {
           const shots = new Map(prev.map((m) => [m.id, m.screenshots]));
+          if (decided.message_id && decided.images?.length) {
+            shots.set(decided.message_id, decided.images);
+          }
           return (conv.messages ?? []).map((m) => {
             const screenshots = shots.get(m.id);
             return screenshots ? { ...m, screenshots } : m;

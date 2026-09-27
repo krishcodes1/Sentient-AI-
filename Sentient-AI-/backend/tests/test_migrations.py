@@ -348,7 +348,7 @@ def test_no_pending_autogenerate_diff(tmp_path):
 # 0011: connector_type ENUM -> VARCHAR(64)
 # ---------------------------------------------------------------------------
 
-_BEFORE_0011 = "0009_user_llm_nullable"
+_BEFORE_0011 = "0010_vault_items"
 _REVISION_0011 = "0011_connector_type_string"
 
 
