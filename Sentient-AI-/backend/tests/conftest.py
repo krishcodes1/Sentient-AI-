@@ -82,6 +82,19 @@ def _no_real_computer_backend(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _no_real_retry_pauses(monkeypatch):
+    """Gemini's retries pause a second or two between tries in production;
+    no test waits for them. Tests of the pauses record them instead
+    (tests/test_gemini_retries.py)."""
+    from services.agent.providers import GeminiProvider
+
+    async def no_pause(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(GeminiProvider, "_retry_sleep", staticmethod(no_pause))
+
+
 @pytest_asyncio.fixture
 async def session_factory():
     """Test database with all tables created.

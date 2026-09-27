@@ -1781,20 +1781,42 @@ async def _apply_decision(
     if recorded is not None:
         result["decision_images"] = _turn_images(own_call)
         result["decision_message_id"] = str(recorded.id)
+    # A resumed turn that failed on a provider hiccup before anything ran or
+    # was billed is run once more before the chat is asked to send
+    # "continue" (_resume_worth_retrying): nothing happened, so nothing is
+    # repeated.
+    retried = False
+    while True:
+        try:
+            resumed = await _resume_after_approval(
+                mcp_catalog,
+                current_user,
+                db,
+                runtime,
+                conversation,
+                installation,
+                turn,
+                stop_mark=resume_stop_mark,
+                on_event=on_event,
+                approved=approved_call,
+                channel=channel,
+            )
+        except Exception as exc:
+            if retried or not _resume_worth_retrying(exc, turn):
+                _note_resume_failure(result, exc, conversation, own_photos)
+                await _record_failed_resume(db, conversation, turn)
+                return result
+            retried = True
+            logger.info(
+                "resume_after_approval_retry",
+                conversation_id=str(conversation.id),
+                error_type=type(exc).__name__,
+                error=str(exc)[:200],
+            )
+            await asyncio.sleep(RESUME_RETRY_DELAY_S)
+            continue
+        break
     try:
-        resumed = await _resume_after_approval(
-            mcp_catalog,
-            current_user,
-            db,
-            runtime,
-            conversation,
-            installation,
-            turn,
-            stop_mark=resume_stop_mark,
-            on_event=on_event,
-            approved=approved_call,
-            channel=channel,
-        )
         if resumed is not None:
             db.add(resumed.message)
             conversation.updated_at = datetime.now(timezone.utc)
@@ -1816,26 +1838,64 @@ async def _apply_decision(
                 "images": (own_photos + resumed.images)[:MAX_CHANNEL_IMAGES],
             }
     except Exception as exc:
-        logger.warning(
-            "resume_after_approval_failed",
-            conversation_id=str(conversation.id),
-            error_type=type(exc).__name__,
-            error=str(exc)[:200],
-        )
-        result["assistant_notes"] = {"error": resume_failure_text(exc), "images": own_photos}
-        # The calls the turn ran before failing (a desktop.observe) and the
-        # tokens it billed close the turn in the transcript, as a message
-        # turn's failure does (build_chat_applier); without the row they
-        # would vanish, and the next turn could run them again.
-        if any(turn.usage.values()) or turn.tool_calls:
-            try:
-                db.add(_unfinished_turn_message(conversation.id, turn, _FAILED_REPLY))
-                conversation.updated_at = datetime.now(timezone.utc)
-                await db.flush()
-            except Exception as row_exc:
-                await db.rollback()
-                logger.error("resume_failure_row_not_written", error=str(row_exc)[:200])
+        _note_resume_failure(result, exc, conversation, own_photos)
+        await _record_failed_resume(db, conversation, turn)
     return result
+
+
+# The pause before a failed resumed turn is run again (see _apply_decision).
+RESUME_RETRY_DELAY_S = 2.0
+
+
+def _resume_worth_retrying(exc: BaseException, turn: TurnUsage) -> bool:
+    """True when the turn resumed after an approval failed on a provider
+    hiccup (a rate limit, a server error, a dropped connection, a blank
+    completion the provider marked retryable) before it ran a tool or was
+    billed a token: running it again then repeats nothing. An error that
+    would come back the same (a bad key, a bad request, no provider) is not
+    worth another try."""
+    if turn.tool_calls or any(turn.usage.values()):
+        return False
+    if isinstance(exc, ProviderNotConfigured) or not isinstance(exc, ProviderError):
+        return False
+    status = exc.status_code
+    return (
+        bool(getattr(exc, "retryable", False))
+        or status == 429
+        or (status is not None and status >= 500)
+        or (status is None and "could not reach" in (exc.detail or "").lower())
+    )
+
+
+def _note_resume_failure(
+    result: Dict[str, Any], exc: BaseException, conversation: Any, photos: list[dict[str, str]]
+) -> None:
+    """What a channel says when the resumed turn could not go on: the
+    failure in plain words (resume_failure_text), after the approved call's
+    own photos."""
+    logger.warning(
+        "resume_after_approval_failed",
+        conversation_id=str(conversation.id),
+        error_type=type(exc).__name__,
+        error=str(exc)[:200],
+    )
+    result["assistant_notes"] = {"error": resume_failure_text(exc), "images": photos}
+
+
+async def _record_failed_resume(db: AsyncSession, conversation: Any, turn: TurnUsage) -> None:
+    """The calls the failed resumed turn ran (a desktop.observe) and the
+    tokens it billed close the turn in the transcript, as a message turn's
+    failure does (build_chat_applier); without the row they would vanish,
+    and the next turn could run them again."""
+    if not (any(turn.usage.values()) or turn.tool_calls):
+        return
+    try:
+        db.add(_unfinished_turn_message(conversation.id, turn, _FAILED_REPLY))
+        conversation.updated_at = datetime.now(timezone.utc)
+        await db.flush()
+    except Exception as row_exc:
+        await db.rollback()
+        logger.error("resume_failure_row_not_written", error=str(row_exc)[:200])
 
 
 async def _decide_and_record(

@@ -27,6 +27,7 @@ product?" question without the photo is worse than an error.
 from __future__ import annotations
 
 import abc
+import asyncio
 import json
 import re
 from dataclasses import dataclass, field
@@ -47,10 +48,24 @@ class ProviderError(Exception):
     """A provider call failed. The message is safe to surface to users and
     logs: it never contains request URLs, API keys, or auth headers."""
 
-    def __init__(self, provider: str, status_code: int | None, detail: str):
+    def __init__(
+        self,
+        provider: str,
+        status_code: int | None,
+        detail: str,
+        *,
+        retryable: bool = False,
+        retry_after: Optional[float] = None,
+    ):
         self.provider = provider
         self.status_code = status_code
         self.detail = detail
+        # Whether asking again may work (a rate limit, a server error, a
+        # dropped connection, a blank completion), and how long the provider
+        # asked to wait first, when it said. Set by providers that retry
+        # themselves (GeminiProvider); False everywhere else.
+        self.retryable = retryable
+        self.retry_after = retry_after
         suffix = f" (HTTP {status_code})" if status_code else ""
         super().__init__(f"{provider} provider error{suffix}: {detail}")
 
@@ -109,6 +124,49 @@ def _raise_provider_error(provider: str, exc: httpx.HTTPStatusError) -> None:
     """Convert an httpx error into a ProviderError without leaking the URL."""
     body = exc.response.text[:300] if exc.response is not None else ""
     raise ProviderError(provider, exc.response.status_code, body) from None
+
+
+# Gemini is called over plain HTTP, so it gets the retries the SDK providers
+# have built in (``_MAX_RETRIES``): a rate limit, a server error, a dropped
+# connection or a blank completion is asked again after a short pause, so one
+# hiccup does not end a task with "send 'continue'". An error that would come
+# back the same (a bad key or model, a blocked prompt, a safety stop) is not.
+_RETRY_STATUS = frozenset({408, 429, 500, 502, 503, 504})
+_RETRY_BASE_S = 1.0
+# Longest pause, whatever the provider asks for: a task waits seconds, not a
+# minute, for a quota window to reopen.
+_RETRY_MAX_S = 8.0
+# How a blank completion ended when the model ran and produced nothing usable;
+# SAFETY, RECITATION and the like would only repeat.
+_RETRY_FINISH_REASONS = frozenset(
+    {"STOP", "OTHER", "MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL", "unknown"}
+)
+_SECONDS = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*s?\s*$")
+
+
+def _retry_after(response: httpx.Response) -> Optional[float]:
+    """The wait a rate-limited answer asks for, in seconds: the Retry-After
+    header, or Google's RetryInfo detail (``"retryDelay": "3.5s"``); None
+    when it names none."""
+    header = _SECONDS.match(response.headers.get("retry-after", ""))
+    if header:
+        return float(header.group(1))
+    try:
+        details = response.json().get("error", {}).get("details", [])
+    except (ValueError, AttributeError):
+        return None
+    for detail in details if isinstance(details, list) else []:
+        delay = _SECONDS.match(str(detail.get("retryDelay", ""))) if isinstance(detail, dict) else None
+        if delay:
+            return float(delay.group(1))
+    return None
+
+
+def _retry_delay(attempt: int, asked: Optional[float]) -> float:
+    """Seconds to wait before retry number ``attempt + 1``: what the provider
+    asked for, else 1 s then 2 s; never more than ``_RETRY_MAX_S``."""
+    wait = asked if asked is not None else _RETRY_BASE_S * (2**attempt)
+    return min(max(wait, 0.0), _RETRY_MAX_S)
 
 
 def _raise_transport_error(provider: str, exc: httpx.TransportError) -> None:
@@ -1058,14 +1116,46 @@ class GeminiProvider(LLMProvider):
         if gemini_tools:
             payload["tools"] = gemini_tools
 
+        # Asked again after a short pause when the error says it may work
+        # (see _RETRY_STATUS), at most _MAX_RETRIES times, as the SDK
+        # providers do on their own.
+        attempt = 0
+        while True:
+            try:
+                return await self._complete_once(payload)
+            except ProviderError as exc:
+                if not exc.retryable or attempt >= _MAX_RETRIES:
+                    raise
+                delay = _retry_delay(attempt, exc.retry_after)
+                attempt += 1
+                logger.info(
+                    "gemini_retry", attempt=attempt, status=exc.status_code, delay_s=delay
+                )
+                await self._retry_sleep(delay)
+
+    # Swapped for a recorder in tests.
+    _retry_sleep = staticmethod(asyncio.sleep)
+
+    async def _complete_once(self, payload: dict[str, Any]) -> LLMResponse:
+        """One generateContent call. Raises ProviderError, marked
+        ``retryable`` when asking again may work."""
         try:
             resp = await self._client.post(self._build_url(), json=payload)
         except httpx.TransportError as exc:
-            _raise_transport_error("gemini", exc)
-        try:
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            _raise_provider_error("gemini", exc)
+            raise ProviderError(
+                "gemini",
+                None,
+                f"could not reach the provider ({type(exc).__name__})",
+                retryable=True,
+            ) from None
+        if resp.is_error:
+            raise ProviderError(
+                "gemini",
+                resp.status_code,
+                resp.text[:300],
+                retryable=resp.status_code in _RETRY_STATUS,
+                retry_after=_retry_after(resp) if resp.status_code == 429 else None,
+            )
         try:
             data = resp.json()
         except json.JSONDecodeError:
@@ -1080,9 +1170,15 @@ class GeminiProvider(LLMProvider):
         candidates = data.get("candidates", [])
         if not candidates:
             feedback = data.get("promptFeedback") or {}
-            reason = feedback.get("blockReason") or "no candidates returned"
+            block = feedback.get("blockReason")
+            reason = block or "no candidates returned"
             raise ProviderError(
-                "gemini", None, f"provider returned an empty response ({reason})"
+                "gemini",
+                None,
+                f"provider returned an empty response ({reason})",
+                # A blocked prompt would be blocked again; none at all may be
+                # a hiccup.
+                retryable=not block,
             )
 
         parts = candidates[0].get("content", {}).get("parts", [])
@@ -1112,6 +1208,7 @@ class GeminiProvider(LLMProvider):
                 "gemini",
                 None,
                 f"provider returned an empty completion (finishReason: {finish})",
+                retryable=finish in _RETRY_FINISH_REASONS,
             )
 
         usage = self._usage(data.get("usageMetadata"))
