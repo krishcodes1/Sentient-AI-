@@ -83,6 +83,9 @@ MAX_NAME_CHARS = 300
 VISIT_FACTOR = 10
 AX_MESSAGING_TIMEOUT_S = 1.0
 OUTLINE_DEADLINE_S = 5.0
+# Most menus, and items of the open menu, the menu bar lists.
+MAX_MENUS = 20
+MAX_MENU_ITEMS = 60
 OPEN_APP_WAIT_S = 5.0
 # Pause after every posted event so the target app neither coalesces nor
 # drops a burst of synthetic input.
@@ -225,6 +228,8 @@ _ROLE_LABELS = {
     "AXSecureTextField": "secure text field",
 }
 _SUBROLE_LABELS = {
+    "AXDialog": "dialog",
+    "AXSystemDialog": "dialog",
     "AXSecureTextField": "secure text field",
     "AXSearchField": "search field",
     "AXCloseButton": "close button",
@@ -687,13 +692,84 @@ class MacBackend:
             for app in self._running_apps()
         ]
 
-    def list_windows(self) -> list[WindowInfo]:
+    def list_windows(self, app: Optional[str] = None) -> list[WindowInfo]:
         windows: list[WindowInfo] = []
-        for app in self._running_apps():
-            for index, window in enumerate(self._windows_of(self._app_element(app.pid))):
+        if app is not None:
+            try:
+                targets = [self._find_app(app)]
+            except AppNotFoundError:
+                return []
+        else:
+            targets = self._running_apps()
+        for target in targets:
+            for index, window in enumerate(self._windows_of(self._app_element(target.pid))):
                 title = _text(self._attr(window, "AXTitle"))
-                windows.append(WindowInfo(app=app.name, title=title, index=index))
+                windows.append(WindowInfo(app=target.name, title=title, index=index))
         return windows
+
+    def menu_bar(self, app: Optional[str]) -> list[Node]:
+        """*app*'s menu bar (the frontmost app's when None): a "menu bar
+        item" node per menu, and under the menu that is open its items
+        (separators left out). The Apple menu, always the first, is never
+        listed: its Restart, Shut Down, Log Out, Lock Screen and Force Quit
+        are never Crawler's to choose. Pressing a menu's ref opens it;
+        pressing an item's ref chooses it. [] when there is none."""
+        if app:
+            try:
+                element = self._app_element(self._find_app(app).pid)
+            except AppNotFoundError:
+                return []
+        else:
+            found = self._frontmost_app()
+            if found is None:
+                return []
+            element = found[1]
+        bar = self._attr(element, "AXMenuBar")
+        if bar is None:
+            return []
+        menus: list[Node] = []
+        for item in list(self._attr(bar, "AXChildren") or ())[1 : MAX_MENUS + 1]:
+            title = _text(self._attr(item, "AXTitle"))
+            if not title:
+                continue
+            items: tuple[Node, ...] = ()
+            if self._attr(item, "AXSelected"):
+                items = self._menu_items(item)
+            menus.append(
+                _make_node(
+                    role="menu bar item",
+                    name=title,
+                    bounds=self._bounds(item),
+                    handle=item,
+                    enabled=self._attr(item, "AXEnabled") is not False,
+                    children=items,
+                )
+            )
+        return menus
+
+    def _menu_items(self, menu_bar_item: Any) -> tuple[Node, ...]:
+        """The items of an open menu, in order, separators (no title) left
+        out; at most MAX_MENU_ITEMS."""
+        menus = list(self._attr(menu_bar_item, "AXChildren") or ())
+        if not menus:
+            return ()
+        items: list[Node] = []
+        for entry in self._attr(menus[0], "AXChildren") or ():
+            title = _text(self._attr(entry, "AXTitle"))
+            if not title:
+                continue
+            items.append(
+                _make_node(
+                    role="menu item",
+                    name=title,
+                    bounds=self._bounds(entry),
+                    handle=entry,
+                    enabled=self._attr(entry, "AXEnabled") is not False,
+                )
+            )
+            if len(items) >= MAX_MENU_ITEMS:
+                break
+        return tuple(items)
 
     def frontmost(self) -> tuple[str, str]:
         found = self._frontmost_app()

@@ -1403,3 +1403,39 @@ async def test_toolkit_observes_and_acts_through_the_windows_backend(desk):
     done = await kit.execute("act", {"action": "click", "ref": ref('"Save"')}, user_id="u1")
     assert done["ok"] is True, done
     assert desk.save.invoked == 1 and desk.w32.sent == []
+
+
+# ── window context: one app's windows, dialogs labelled ──────────────────────
+
+
+def test_list_windows_for_one_app(desk):
+    backend = desk.backend()
+    assert [(w.title, w.index) for w in backend.list_windows("Notepad")] == [
+        ("Untitled - Notepad", 0),
+        ("notes.txt - Notepad", 1),
+    ]
+    assert backend.list_windows("No Such App") == []
+
+
+def test_a_standard_dialog_box_is_outlined_as_a_dialog(desk):
+    ok = FakeControl(BUTTON, "OK", rect=(420, 330, 480, 350), invoke=True, pid=100)
+    dialog = FakeControl(
+        WINDOW,
+        "Save changes?",
+        rect=(300, 250, 600, 360),
+        pid=100,
+        hwnd=0x900,
+        cls="#32770",
+        children=[ok],
+    )
+    dialog.desk = desk
+    ok.desk = desk
+    desk.root.children.insert(0, dialog)
+    desk.w32.pids[0x900] = 100
+    desk.w32.foreground = 0x900
+    nodes = desk.backend().outline(None, 50)
+    assert nodes[0].role == "dialog" and nodes[0].name == "Save changes?"
+    assert [c.name for c in nodes[0].children] == ["OK"]
+    # An ordinary window is still a window.
+    desk.w32.foreground = 0x100
+    assert desk.backend().outline(None, 50)[0].role == "window"
