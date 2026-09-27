@@ -657,7 +657,8 @@ OLD_CREDENTIAL_REQUIREMENTS = {
 
 OLD_NETWORK_POLICY_KEYS = {"canvas": "canvas", "google_workspace": "google", "robinhood": "robinhood"}
 
-_COURSE = {"type": "string", "description": "Canvas course id"}
+_COURSE = {"type": "string", "description": "Numeric Canvas course id from canvas.get_courses (not the course code)"}
+_ASSIGNMENT = {"type": "string", "description": "Numeric Canvas assignment id from canvas.get_assignments"}
 # (action, category, required_scope, policy_key, properties, required)
 OLD_CATALOG: dict[str, list[tuple[str, ActionCategory, str, Optional[str], dict, list]]] = {
     "canvas": [
@@ -667,14 +668,14 @@ OLD_CATALOG: dict[str, list[tuple[str, ActionCategory, str, Optional[str], dict,
         ("get_calendar_events", R, "calendar.read", None, {}, []),
         (
             "get_submissions", R, "submissions.read", None,
-            {"course_id": {"type": "string"}, "assignment_id": {"type": "string"}},
+            {"course_id": _COURSE, "assignment_id": _ASSIGNMENT},
             ["course_id", "assignment_id"],
         ),
         (
             "submit_assignment", W, "submissions.write", None,
             {
-                "course_id": {"type": "string"},
-                "assignment_id": {"type": "string"},
+                "course_id": _COURSE,
+                "assignment_id": _ASSIGNMENT,
                 "submission_data": {"type": "object"},
             },
             ["course_id", "assignment_id", "submission_data"],

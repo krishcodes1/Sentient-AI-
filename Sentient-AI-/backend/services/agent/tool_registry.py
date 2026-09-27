@@ -1397,6 +1397,18 @@ class _Builtin:
     task_scoped: bool = False
 
 
+# Provider error codes (lower-cased) that mean the token itself lacks a
+# scope, as opposed to a 403 for one item the account may not open.
+_SCOPE_REFUSAL_CODES: frozenset[str] = frozenset(
+    {
+        "insufficient_scope",  # RFC 6750 bearer tokens
+        "missing_scope",  # Slack
+        "access_token_scope_insufficient",  # Google
+        "insufficientpermissions",  # Google (legacy reason)
+    }
+)
+
+
 class ConnectorToolExecutor:
     """Dispatches an approved tool call through the real connector stack.
 
@@ -2328,10 +2340,16 @@ class ConnectorToolExecutor:
     def _auth_refusal(
         exc: Exception, resolved: ResolvedTool, credentials: Mapping[str, Any]
     ) -> str:
-        """The tool error for a provider's auth refusal. A 403 (the token
-        lacks a permission) names the catalog scope the action needs, says
-        where to grant it and tells the model not to retry; anything else
-        keeps the connector's own safe message."""
+        """The tool error for a provider's auth refusal; anything but a 403
+        keeps the connector's own safe message.
+
+        A 403 is not always a token problem: providers also answer it for
+        one item the account may not open (an unpublished or date-restricted
+        course, a private repository). Only when the provider's error code
+        says the token lacks a scope is that stated as fact; otherwise the
+        model is told both explanations and how to tell them apart, so it
+        does not send the user to fix a token that works everywhere else.
+        """
         message = str(exc)
         scope = resolved.spec.required_scope
         if getattr(exc, "status_code", None) != 403 or not scope:
@@ -2342,9 +2360,19 @@ class ConnectorToolExecutor:
             fix = f"use Grant more access on the {label} card in Connectors"
         else:
             fix = f"give the {label} token that permission (or replace it) in Connectors"
+        code = str(getattr(exc, "vendor_code", None) or "").lower()
+        if code in _SCOPE_REFUSAL_CODES:
+            return (
+                f"{message} The connection lacks the '{scope}' permission: {fix}. "
+                "Do not retry this call until then."
+            )
         return (
-            f"{message} This action needs the '{scope}' permission: {fix}. "
-            "Do not retry this call until then."
+            f"{message} {label} refused this request. If the same kind of request "
+            "works for other items (another course, repository or file), this item "
+            "is not available to this account (for example unpublished, restricted "
+            "by date or private): tell the user that. Only if it fails for every "
+            f"item does the connection lack the '{scope}' permission: {fix}. "
+            "Do not retry the same call."
         )
 
     @staticmethod

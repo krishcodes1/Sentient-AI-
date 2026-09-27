@@ -323,7 +323,78 @@ async def test_canvas_get_courses_builds_authorized_request():
     assert request.headers["Authorization"] == "Bearer tok-123"
     assert request.url.params["enrollment_state"] == "active"
     assert request.url.params["per_page"] == "100"
+    assert request.url.params["include[]"] == "term"
     assert courses == [{"id": 1, "name": "Biology"}]
+
+
+def _days_from_now(days):
+    from datetime import datetime, timedelta, timezone
+
+    return (datetime.now(timezone.utc) + timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+@pytest.mark.asyncio
+async def test_canvas_get_courses_drops_finished_terms_and_puts_current_first():
+    # A student whose school never concluded old terms: dozens of "active"
+    # enrollments. Returned raw, they overflowed the result budget and the
+    # current term was cut off.
+    import json
+
+    iso = _days_from_now
+    old = [
+        {"id": 100 + i, "name": f"Old {i}", "course_code": f"OLD{i}", "syllabus_body": "x" * 3000,
+         "term": {"name": "Fall 2023", "start_at": iso(-1100), "end_at": iso(-990)}}
+        for i in range(30)
+    ]
+    payload = old + [
+        {"id": 1, "name": "Earlier current", "term": {"name": "Fall 2026", "start_at": iso(-40), "end_at": iso(60)}},
+        {"id": 2, "name": "Later current", "course_code": "BIO2",
+         "term": {"name": "Fall 2026", "start_at": iso(-10), "end_at": iso(60)}},
+        {"id": 3, "name": "Next term", "term": {"name": "Spring 2027", "start_at": iso(100), "end_at": iso(200)}},
+        {"id": 4, "name": "No dates", "term": {"name": "Default Term"}},
+        # The term ended, but the course's own dates run on: not hidden.
+        {"id": 5, "name": "Extended", "end_at": iso(20), "term": {"name": "Summer 2026", "end_at": iso(-5)}},
+        {"id": 6, "access_restricted_by_date": True},
+        "not a course",
+    ]
+    recorder = _Recorder(_json_ok(payload))
+    async with _wired(_canvas(), recorder) as connector:
+        await connector.authenticate({"access_token": "tok-123"})
+        courses = await connector.get_courses()
+
+    # Current (most recently started first, then ongoing without a start),
+    # then upcoming, then undated; finished and restricted ones are gone.
+    assert [c["id"] for c in courses] == [2, 1, 5, 3, 4]
+    assert {k: courses[0][k] for k in ("id", "name", "course_code", "term")} == {
+        "id": 2, "name": "Later current", "course_code": "BIO2", "term": "Fall 2026",
+    }
+    assert set(courses[0]) == {"id", "name", "course_code", "term", "start_at", "end_at"}
+    assert all("syllabus_body" not in c for c in courses)
+    assert len(json.dumps(courses)) < 2000
+
+
+@pytest.mark.asyncio
+async def test_canvas_get_courses_falls_back_to_recent_when_every_term_ended():
+    iso = _days_from_now
+    payload = [
+        {"id": i, "name": f"C{i}", "term": {"start_at": iso(-400 + i), "end_at": iso(-300 + i)}}
+        for i in range(12)
+    ]
+    recorder = _Recorder(_json_ok(payload))
+    async with _wired(_canvas(), recorder) as connector:
+        await connector.authenticate({"access_token": "tok-123"})
+        courses = await connector.get_courses()
+
+    assert [c["id"] for c in courses] == [11, 10, 9, 8, 7, 6, 5, 4, 3, 2]
+
+
+@pytest.mark.asyncio
+async def test_canvas_get_courses_rejects_a_non_list_reply():
+    recorder = _Recorder(_json_ok({"errors": [{"message": "nope"}]}))
+    async with _wired(_canvas(), recorder) as connector:
+        await connector.authenticate({"access_token": "tok-123"})
+        with pytest.raises(ConnectorError, match="Malformed response"):
+            await connector.get_courses()
 
 
 @pytest.mark.asyncio

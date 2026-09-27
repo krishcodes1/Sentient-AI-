@@ -647,6 +647,44 @@ def test_auth_refusal_for_a_pasted_token_and_for_a_401():
     assert ConnectorToolExecutor._auth_refusal(expired, resolved, {}) == str(expired)
 
 
+def test_a_403_for_one_item_is_not_blamed_on_the_token():
+    # Canvas answers 403 for one course a student may not open (unpublished,
+    # restricted by date) while the same token reads every other course.
+    # Telling the model the token lacks a permission sent the user to fix a
+    # token that works.
+    from services.agent.tool_registry import CONNECTOR_CATALOG, ResolvedTool
+    from services.connectors.base import AuthenticationError
+
+    spec = next(s for s in CONNECTOR_CATALOG["canvas"] if s.action == "get_assignments")
+    resolved = ResolvedTool("canvas", "get_assignments", spec)
+    refused = AuthenticationError(
+        "HTTP 403 from Canvas LMS: missing permission or scope.", status_code=403
+    )
+
+    text = ConnectorToolExecutor._auth_refusal(refused, resolved, {"access_token": "canvas-test"})
+    assert "not available to this account" in text
+    assert "Only if it fails for every item" in text
+    assert "'assignments.read'" in text and "Do not retry the same call" in text
+    assert "The connection lacks" not in text
+    assert "canvas-test" not in text
+
+
+def test_a_403_the_provider_marks_as_a_scope_problem_says_so():
+    from services.agent.tool_registry import CONNECTOR_CATALOG, ResolvedTool
+    from services.connectors.base import AuthenticationError
+
+    spec = next(s for s in CONNECTOR_CATALOG["github"] if s.action == "create_issue")
+    resolved = ResolvedTool("github", "create_issue", spec)
+    for code in ("insufficient_scope", "INSUFFICIENT_SCOPE", "ACCESS_TOKEN_SCOPE_INSUFFICIENT"):
+        refused = AuthenticationError(
+            "HTTP 403 from GitHub: missing permission or scope.", status_code=403, vendor_code=code
+        )
+        text = ConnectorToolExecutor._auth_refusal(refused, resolved, {"oauth_provider": "github"})
+        assert f"The connection lacks the '{spec.required_scope}' permission" in text
+        assert "Grant more access on the GitHub card" in text
+        assert "not available to this account" not in text
+
+
 # ---------------------------------------------------------------------------
 # Commit and revoke ordering
 # ---------------------------------------------------------------------------

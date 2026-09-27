@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import urlencode
 
@@ -43,6 +44,34 @@ from .definition import (
 logger = structlog.get_logger(__name__)
 
 
+def _canvas_time(value: Any) -> Optional[datetime]:
+    """A Canvas ISO 8601 timestamp as an aware datetime, or None."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _shape_course(
+    course: dict[str, Any],
+    term: dict[str, Any],
+    start: Optional[datetime],
+    end: Optional[datetime],
+) -> dict[str, Any]:
+    """The fields of a course the model needs; absent ones are left out."""
+    shaped = {k: course[k] for k in ("id", "name", "course_code") if course.get(k) is not None}
+    if term.get("name"):
+        shaped["term"] = term["name"]
+    if start:
+        shaped["start_at"] = start.isoformat()
+    if end:
+        shaped["end_at"] = end.isoformat()
+    return shaped
+
+
 # The tool catalog for Canvas: one ToolSpec per action the model may call.
 # The registry derives the connector entries of CONNECTOR_CATALOG from it.
 ACTIONS: tuple[ToolSpec, ...] = (
@@ -57,7 +86,7 @@ ACTIONS: tuple[ToolSpec, ...] = (
         "get_assignments",
         "List assignments for a Canvas course.",
         ActionCategory.READ,
-        _schema(course_id={"type": "string", "description": "Canvas course id", "required": True}),
+        _schema(course_id={"type": "string", "description": "Numeric Canvas course id from canvas.get_courses (not the course code)", "required": True}),
         required_scope="assignments.read",
         starter=True,
     ),
@@ -65,7 +94,7 @@ ACTIONS: tuple[ToolSpec, ...] = (
         "get_grades",
         "Get the user's grades for a Canvas course.",
         ActionCategory.READ,
-        _schema(course_id={"type": "string", "description": "Canvas course id", "required": True}),
+        _schema(course_id={"type": "string", "description": "Numeric Canvas course id from canvas.get_courses (not the course code)", "required": True}),
         required_scope="grades.read",
     ),
     ToolSpec(
@@ -80,8 +109,8 @@ ACTIONS: tuple[ToolSpec, ...] = (
         "List submissions for a Canvas assignment.",
         ActionCategory.READ,
         _schema(
-            course_id={"type": "string", "required": True},
-            assignment_id={"type": "string", "required": True},
+            course_id={"type": "string", "description": "Numeric Canvas course id from canvas.get_courses (not the course code)", "required": True},
+            assignment_id={"type": "string", "description": "Numeric Canvas assignment id from canvas.get_assignments", "required": True},
         ),
         required_scope="submissions.read",
     ),
@@ -90,8 +119,8 @@ ACTIONS: tuple[ToolSpec, ...] = (
         "Submit work to a Canvas assignment.",
         ActionCategory.WRITE,
         _schema(
-            course_id={"type": "string", "required": True},
-            assignment_id={"type": "string", "required": True},
+            course_id={"type": "string", "description": "Numeric Canvas course id from canvas.get_courses (not the course code)", "required": True},
+            assignment_id={"type": "string", "description": "Numeric Canvas assignment id from canvas.get_assignments", "required": True},
             submission_data={"type": "object", "required": True},
         ),
         required_scope="submissions.write",
@@ -439,10 +468,53 @@ class CanvasConnector(BaseConnector):
     # -- Public data methods -------------------------------------------------
 
     async def get_courses(self) -> list[dict[str, Any]]:
-        """Fetch all active courses for the authenticated user."""
-        return await self._api_get(
-            "/courses", params={"enrollment_state": "active", "per_page": 100}
+        """The user's current and upcoming courses, current first.
+
+        Canvas keeps an enrollment "active" until the school concludes the
+        term, so a student can have years of finished courses marked
+        active, each a ~3 KB object. Returned raw, 40 of them overflowed
+        the result budget and the current term was cut off. So each course
+        is reduced to the fields the model needs, courses whose term (and
+        course) end dates have all passed are dropped, and courses without
+        dates are kept at the end. If nothing is left, the ten most
+        recently started courses are returned instead.
+        """
+        raw = await self._api_get(
+            "/courses",
+            params={"enrollment_state": "active", "include[]": "term", "per_page": 100},
         )
+        if not isinstance(raw, list):
+            raise ConnectorError("Malformed response from Canvas LMS")
+        now = datetime.now(timezone.utc)
+        current: list[tuple[datetime, dict[str, Any]]] = []
+        upcoming: list[tuple[datetime, dict[str, Any]]] = []
+        undated: list[dict[str, Any]] = []
+        ended: list[tuple[datetime, dict[str, Any]]] = []
+        for course in raw:
+            if not isinstance(course, dict) or course.get("access_restricted_by_date"):
+                continue
+            raw_term = course.get("term")
+            term: dict[str, Any] = raw_term if isinstance(raw_term, dict) else {}
+            starts = [t for t in (_canvas_time(course.get("start_at")), _canvas_time(term.get("start_at"))) if t]
+            ends = [t for t in (_canvas_time(course.get("end_at")), _canvas_time(term.get("end_at"))) if t]
+            shaped = _shape_course(course, term, min(starts) if starts else None, max(ends) if ends else None)
+            if ends and max(ends) < now:
+                ended.append((min(starts) if starts else max(ends), shaped))
+            elif starts and min(starts) > now:
+                upcoming.append((min(starts), shaped))
+            elif starts or ends:
+                # Ongoing without a start date sorts after the dated ones.
+                current.append((min(starts) if starts else datetime.min.replace(tzinfo=timezone.utc), shaped))
+            else:
+                undated.append(shaped)
+        result = (
+            [c for _, c in sorted(current, key=lambda x: x[0], reverse=True)]
+            + [c for _, c in sorted(upcoming, key=lambda x: x[0])]
+            + undated
+        )
+        if not result:
+            result = [c for _, c in sorted(ended, key=lambda x: x[0], reverse=True)[:10]]
+        return result
 
     async def get_assignments(self, course_id: int | str) -> list[dict[str, Any]]:
         """Fetch assignments for a given course."""
