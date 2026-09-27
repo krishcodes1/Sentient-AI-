@@ -70,6 +70,14 @@ class Conversation(Base):
         onupdate=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
+    # Tool names this conversation loaded through tools.find, oldest first,
+    # at most 24 (services/agent/context_manager.merge_loaded). They are
+    # offered ahead of the starter tools on every later turn. NULL means none
+    # yet; the column is only written on a turn that changed it.
+    loaded_tools: Mapped[Optional[List[str]]] = mapped_column(
+        JSON,
+        nullable=True,
+    )
 
     # Relationships
     user: Mapped["User"] = relationship(  # noqa: F821

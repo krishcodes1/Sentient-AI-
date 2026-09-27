@@ -19,8 +19,15 @@ import type {
   Connector,
   ConnectorHealthEntry,
   ConnectorTestResult,
+  ConnectorTypeInfo,
   CreateConnectorRequest,
   UpdateConnectorRequest,
+  OAuthDeviceResponse,
+  OAuthDraftRequest,
+  OAuthFlowStatus,
+  OAuthStartResponse,
+  SlackLinkCode,
+  SlackLinkStatus,
   AuditLog,
   AuditLogFilters,
   AuditIntegrityCheck,
@@ -613,6 +620,67 @@ export async function testConnector(id: string): Promise<ConnectorTestResult> {
 
 export async function getConnectorHealth(): Promise<ConnectorHealthEntry[]> {
   return request<ConnectorHealthEntry[]>("/connectors/health");
+}
+
+/** The connector catalog the Connectors page renders its cards and forms
+ * from (one entry per registered connector; MCP is not in it). */
+export async function getConnectorTypes(): Promise<ConnectorTypeInfo[]> {
+  return request<ConnectorTypeInfo[]>("/connectors/types");
+}
+
+// OAuth broker. `provider` is a catalog entry's `auth.provider`.
+
+/** Start a browser sign-in; open `authorization_url` in the system
+ * browser, then poll getOAuthStatus. 503 when the server has no client id. */
+export async function startOAuth(
+  provider: string,
+  draft: OAuthDraftRequest,
+): Promise<OAuthStartResponse> {
+  return request<OAuthStartResponse>(`/oauth/${encodeURIComponent(provider)}/start`, {
+    method: "POST",
+    body: JSON.stringify(draft),
+  });
+}
+
+/** Start a device-code sign-in: the user types `user_code` at
+ * `verification_uri` while the server polls the provider. */
+export async function startDeviceOAuth(
+  provider: string,
+  draft: OAuthDraftRequest,
+): Promise<OAuthDeviceResponse> {
+  return request<OAuthDeviceResponse>(`/oauth/${encodeURIComponent(provider)}/device`, {
+    method: "POST",
+    body: JSON.stringify(draft),
+  });
+}
+
+export async function getOAuthStatus(
+  provider: string,
+  flowId: string,
+): Promise<OAuthFlowStatus> {
+  const params = new URLSearchParams({ flow: flowId });
+  return request<OAuthFlowStatus>(
+    `/oauth/${encodeURIComponent(provider)}/status?${params.toString()}`,
+  );
+}
+
+// Slack DM linking for a Slack connector that carries an app-level token.
+
+/** A one-time code the user sends to the Crawler bot as a Slack DM. */
+export async function createSlackLink(connectorId: string): Promise<SlackLinkCode> {
+  return request<SlackLinkCode>(`/connectors/${encodeURIComponent(connectorId)}/slack/link`, {
+    method: "POST",
+  });
+}
+
+export async function getSlackLinkStatus(connectorId: string): Promise<SlackLinkStatus> {
+  return request<SlackLinkStatus>(`/connectors/${encodeURIComponent(connectorId)}/slack/link`);
+}
+
+export async function unlinkSlack(connectorId: string): Promise<void> {
+  await request<void>(`/connectors/${encodeURIComponent(connectorId)}/slack/link`, {
+    method: "DELETE",
+  });
 }
 
 // Audit Logs

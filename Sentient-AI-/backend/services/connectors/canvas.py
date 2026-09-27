@@ -16,11 +16,14 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import urlencode
 
 import httpx
 import structlog
+
+from services.agent.permissions import ActionCategory
 
 from .base import (
     AuthenticationError,
@@ -29,8 +32,107 @@ from .base import (
     UserConfirmationRequired,
     path_segment,
 )
+from .definition import (
+    AuthSpec,
+    ConnectorDefinition,
+    CredentialField,
+    NetworkSpec,
+    ToolSpec,
+    _schema,
+)
 
 logger = structlog.get_logger(__name__)
+
+
+def _canvas_time(value: Any) -> Optional[datetime]:
+    """A Canvas ISO 8601 timestamp as an aware datetime, or None."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _shape_course(
+    course: dict[str, Any],
+    term: dict[str, Any],
+    start: Optional[datetime],
+    end: Optional[datetime],
+) -> dict[str, Any]:
+    """The fields of a course the model needs; absent ones are left out."""
+    shaped = {k: course[k] for k in ("id", "name", "course_code") if course.get(k) is not None}
+    if term.get("name"):
+        shaped["term"] = term["name"]
+    if start:
+        shaped["start_at"] = start.isoformat()
+    if end:
+        shaped["end_at"] = end.isoformat()
+    return shaped
+
+
+# The tool catalog for Canvas: one ToolSpec per action the model may call.
+# The registry derives the connector entries of CONNECTOR_CATALOG from it.
+ACTIONS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        "get_courses",
+        "List the user's active Canvas courses.",
+        ActionCategory.READ,
+        required_scope="courses.read",
+        starter=True,
+    ),
+    ToolSpec(
+        "get_assignments",
+        "List assignments for a Canvas course.",
+        ActionCategory.READ,
+        _schema(course_id={"type": "string", "description": "Numeric Canvas course id from canvas.get_courses (not the course code)", "required": True}),
+        required_scope="assignments.read",
+        starter=True,
+    ),
+    ToolSpec(
+        "get_grades",
+        "Get the user's grades for a Canvas course.",
+        ActionCategory.READ,
+        _schema(course_id={"type": "string", "description": "Numeric Canvas course id from canvas.get_courses (not the course code)", "required": True}),
+        required_scope="grades.read",
+    ),
+    ToolSpec(
+        "get_calendar_events",
+        "List upcoming Canvas calendar events.",
+        ActionCategory.READ,
+        required_scope="calendar.read",
+        starter=True,
+    ),
+    ToolSpec(
+        "get_submissions",
+        "List submissions for a Canvas assignment.",
+        ActionCategory.READ,
+        _schema(
+            course_id={"type": "string", "description": "Numeric Canvas course id from canvas.get_courses (not the course code)", "required": True},
+            assignment_id={"type": "string", "description": "Numeric Canvas assignment id from canvas.get_assignments", "required": True},
+        ),
+        required_scope="submissions.read",
+    ),
+    ToolSpec(
+        "submit_assignment",
+        "Submit work to a Canvas assignment.",
+        ActionCategory.WRITE,
+        _schema(
+            course_id={"type": "string", "description": "Numeric Canvas course id from canvas.get_courses (not the course code)", "required": True},
+            assignment_id={"type": "string", "description": "Numeric Canvas assignment id from canvas.get_assignments", "required": True},
+            submission_data={"type": "object", "required": True},
+        ),
+        required_scope="submissions.write",
+    ),
+)
+
+# /api/v1/ is the Canvas REST surface; /login/oauth2/token is the OAuth
+# code-exchange and refresh endpoint. The interactive /login/oauth2/auth
+# page is browser-side and stays blocked. Shared by the hosted
+# (*.instructure.com) and self-hosted cases, so a self-hosted instance is
+# never reachable at paths the hosted one is not.
+_CANVAS_PATHS: tuple[str, ...] = ("/api/v1/", "/login/oauth2/token")
 
 
 class CanvasConnector(BaseConnector):
@@ -105,6 +207,75 @@ class CanvasConnector(BaseConnector):
         from core.network_security import normalize_policy_host
 
         return normalize_policy_host(self._base_url)
+
+    # -- Registry hooks --------------------------------------------------------
+
+    @classmethod
+    def from_credentials(
+        cls, credentials: dict[str, Any], *, timeout_s: Optional[float] = None
+    ) -> CanvasConnector:
+        """Build an instance for the stored ``base_url`` and client pair."""
+        return cls(
+            base_url=str(credentials["base_url"]),
+            client_id=str(credentials.get("client_id", "")),
+            client_secret=str(credentials.get("client_secret", "")),
+            timeout_s=timeout_s,
+        )
+
+    @classmethod
+    def validate_credentials(cls, credentials: dict[str, Any]) -> list[str]:
+        """``base_url`` must be an http(s) URL that names a host.
+
+        A missing ``base_url`` is reported by the factory's required-field
+        check, so only a present value is examined here.
+        """
+        from core.network_security import normalize_policy_host
+
+        base_url = str(credentials.get("base_url", ""))
+        if not base_url:
+            return []
+        if not base_url.startswith(("http://", "https://")):
+            return ["base_url must start with http:// or https://"]
+        if not normalize_policy_host(base_url):
+            # Without a hostname there is nothing to add to the network
+            # allowlist, so every call this connector ever makes would be
+            # refused. Say so now instead of at first use.
+            return ["base_url must include a hostname"]
+        return []
+
+    @property
+    def policy_extra_hosts(self) -> tuple[str, ...]:
+        """The self-hosted instance host, held to the policy's instance paths.
+
+        A Canvas instance the user self-hosts is not under
+        ``*.instructure.com``, so its host is the single extra allowlist
+        entry for this connector; the SSRF address policy still applies.
+        """
+        host = self.instance_host
+        return (host,) if host else ()
+
+    def updated_credentials(self, original: dict[str, Any]) -> dict[str, Any] | None:
+        """Credentials to persist when this session rotated a token, else None.
+
+        A 401 refresh (``_refresh_access_token``) mints a new access token
+        and Canvas may rotate the refresh token with it; a code exchange
+        produces both. Without persisting them the next call starts from a
+        dead token, and a rotated refresh token would be lost for good.
+        """
+        if not self._access_token:
+            return None
+        if self._access_token == original.get("access_token") and (
+            self._refresh_token or None
+        ) == (original.get("refresh_token") or None):
+            return None
+        updated = dict(original)
+        updated["access_token"] = self._access_token
+        if self._refresh_token:
+            updated["refresh_token"] = self._refresh_token
+        # A consumed one-time authorization code must never be replayed.
+        updated.pop("code", None)
+        updated.pop("code_verifier", None)
+        return updated
 
     # -- OAuth 2.0 + PKCE ----------------------------------------------------
 
@@ -297,10 +468,53 @@ class CanvasConnector(BaseConnector):
     # -- Public data methods -------------------------------------------------
 
     async def get_courses(self) -> list[dict[str, Any]]:
-        """Fetch all active courses for the authenticated user."""
-        return await self._api_get(
-            "/courses", params={"enrollment_state": "active", "per_page": 100}
+        """The user's current and upcoming courses, current first.
+
+        Canvas keeps an enrollment "active" until the school concludes the
+        term, so a student can have years of finished courses marked
+        active, each a ~3 KB object. Returned raw, 40 of them overflowed
+        the result budget and the current term was cut off. So each course
+        is reduced to the fields the model needs, courses whose term (and
+        course) end dates have all passed are dropped, and courses without
+        dates are kept at the end. If nothing is left, the ten most
+        recently started courses are returned instead.
+        """
+        raw = await self._api_get(
+            "/courses",
+            params={"enrollment_state": "active", "include[]": "term", "per_page": 100},
         )
+        if not isinstance(raw, list):
+            raise ConnectorError("Malformed response from Canvas LMS")
+        now = datetime.now(timezone.utc)
+        current: list[tuple[datetime, dict[str, Any]]] = []
+        upcoming: list[tuple[datetime, dict[str, Any]]] = []
+        undated: list[dict[str, Any]] = []
+        ended: list[tuple[datetime, dict[str, Any]]] = []
+        for course in raw:
+            if not isinstance(course, dict) or course.get("access_restricted_by_date"):
+                continue
+            raw_term = course.get("term")
+            term: dict[str, Any] = raw_term if isinstance(raw_term, dict) else {}
+            starts = [t for t in (_canvas_time(course.get("start_at")), _canvas_time(term.get("start_at"))) if t]
+            ends = [t for t in (_canvas_time(course.get("end_at")), _canvas_time(term.get("end_at"))) if t]
+            shaped = _shape_course(course, term, min(starts) if starts else None, max(ends) if ends else None)
+            if ends and max(ends) < now:
+                ended.append((min(starts) if starts else max(ends), shaped))
+            elif starts and min(starts) > now:
+                upcoming.append((min(starts), shaped))
+            elif starts or ends:
+                # Ongoing without a start date sorts after the dated ones.
+                current.append((min(starts) if starts else datetime.min.replace(tzinfo=timezone.utc), shaped))
+            else:
+                undated.append(shaped)
+        result = (
+            [c for _, c in sorted(current, key=lambda x: x[0], reverse=True)]
+            + [c for _, c in sorted(upcoming, key=lambda x: x[0])]
+            + undated
+        )
+        if not result:
+            result = [c for _, c in sorted(ended, key=lambda x: x[0], reverse=True)[:10]]
+        return result
 
     async def get_assignments(self, course_id: int | str) -> list[dict[str, Any]]:
         """Fetch assignments for a given course."""
@@ -384,3 +598,61 @@ class CanvasConnector(BaseConnector):
             return resp.status_code == 200
         except Exception:
             return False
+
+
+DEFINITION = ConnectorDefinition(
+    key="canvas",
+    label="Canvas LMS",
+    description="Courses, assignments, grades, calendar events and submissions from your school's Canvas.",
+    icon="graduation-cap",
+    auth=AuthSpec(
+        methods=("token",),
+        fields=(
+            CredentialField(
+                "base_url",
+                "Canvas URL",
+                type="url",
+                placeholder="https://yourschool.instructure.com",
+                hint="Your school's Canvas address.",
+            ),
+            CredentialField(
+                "access_token",
+                "Access token",
+                placeholder="Paste your Canvas access token",
+                hint="Canvas, Account, Settings, + New access token.",
+            ),
+            CredentialField(
+                "client_id",
+                "Developer key client ID (for token renewal)",
+                type="text",
+                required=False,
+                hint="Only needed with a refresh token.",
+            ),
+            CredentialField(
+                "client_secret",
+                "Developer key secret (for token renewal)",
+                required=False,
+                hint="Only needed with a refresh token.",
+            ),
+            CredentialField(
+                "refresh_token",
+                "Refresh token",
+                required=False,
+                hint="Lets Crawler AI renew an expired access token by itself.",
+            ),
+        ),
+        token_auth_method="bearer_token",
+        notes="base_url is your school's Canvas instance, e.g. https://myschool.instructure.com",
+    ),
+    network=NetworkSpec(
+        policy_key="canvas",
+        hosts={"*.instructure.com": _CANVAS_PATHS},
+        # Self-hosted Canvas instances on plain http are accepted today
+        # (validate_credentials allows http:// base URLs).
+        https_only=False,
+        instance_paths=_CANVAS_PATHS,
+    ),
+    actions=ACTIONS,
+    connector_class=CanvasConnector,
+    docs_url="https://canvas.instructure.com/doc/api/file.oauth.html",
+)

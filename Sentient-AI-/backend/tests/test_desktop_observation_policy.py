@@ -718,7 +718,12 @@ async def chars_per_request(rounds: int) -> list[int]:
     executor = DesktopExecutor(mail_desktop(rows=100))
     await run(provider, executor, DESKTOP_TOOLS, max_rounds=rounds)
     assert len(executor.fake.events) == rounds - 1  # every act ran
-    return [sum(len(text_of(m)) for m in call["messages"]) for call in provider.calls]
+    # The system prompt is the same in every request with or without the
+    # policy (and cached), so it is left out: it would only dilute the ratio.
+    return [
+        sum(len(text_of(m)) for m in call["messages"] if m["role"] != "system")
+        for call in provider.calls
+    ]
 
 
 @pytest.mark.asyncio

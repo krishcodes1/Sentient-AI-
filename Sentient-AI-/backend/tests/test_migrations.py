@@ -200,13 +200,16 @@ def test_users_email_index_is_unique(migrated):
 
 def test_user_owned_rows_cascade_on_delete(migrated):
     """Deleting a user must not strand their audit logs, conversations,
-    connectors, memories or parked approvals."""
+    connectors, memories, parked approvals, connector sign-in flows or
+    Slack DM links."""
     for table in (
         "audit_logs",
         "connector_configs",
         "conversations",
         "memories",
+        "oauth_states",
         "pending_actions",
+        "slack_channel_links",
     ):
         cascades = {
             fk[3]
@@ -214,6 +217,15 @@ def test_user_owned_rows_cascade_on_delete(migrated):
             if fk[1] == "users"
         }
         assert cascades == {"CASCADE"}, f"{table}.user_id is missing ON DELETE CASCADE"
+
+
+def test_slack_links_cascade_with_their_connector(migrated):
+    """A Slack DM link dies with its connector, is keyed by it, and is
+    found by user through an index."""
+    table = migrated["slack_channel_links"]
+    assert (("connector_id",), "connector_configs", ("id",), "CASCADE") in table["foreign_keys"]
+    assert table["primary_key"] == ("connector_id",)
+    assert table["indexes"]["ix_slack_channel_links_user_id"] == (("user_id",), False)
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +345,164 @@ def test_no_pending_autogenerate_diff(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# 0011: connector_type ENUM -> VARCHAR(64)
+# ---------------------------------------------------------------------------
+
+_BEFORE_0011 = "0010_vault_items"
+_REVISION_0011 = "0011_connector_type_string"
+
+
+def _seed_connector(sync_url: str, connector_type: str) -> str:
+    """Insert one user and one connector row with raw SQL (the ORM model
+    describes the head schema, not the revision under test)."""
+    connector_id = uuid.uuid4().hex
+    engine = sa.create_engine(sync_url)
+    try:
+        with engine.begin() as conn:
+            user_id = conn.execute(sa.text("SELECT id FROM users")).scalar()
+            if user_id is None:
+                user_id = uuid.uuid4().hex
+                conn.execute(
+                    sa.text(
+                        "INSERT INTO users (id, email, hashed_password, is_active, "
+                        "created_at, updated_at) VALUES (:id, 'c@example.com', 'x', 1, "
+                        "'2026-01-01 00:00:00', '2026-01-01 00:00:00')"
+                    ),
+                    {"id": user_id},
+                )
+            conn.execute(
+                sa.text(
+                    "INSERT INTO connector_configs (id, user_id, connector_type, "
+                    "display_name, is_active, auth_method, encrypted_credentials, "
+                    "granted_scopes, permission_tier, rate_limit_per_minute, "
+                    "created_at, updated_at) VALUES (:id, :user_id, :type, 'Mine', 1, "
+                    "'bearer_token', :blob, '[]', 'user_confirm', 30, "
+                    "'2026-01-01 00:00:00', '2026-01-01 00:00:00')"
+                ),
+                {
+                    "id": connector_id,
+                    "user_id": user_id,
+                    "type": connector_type,
+                    "blob": b"\x00",
+                },
+            )
+    finally:
+        engine.dispose()
+    return connector_id
+
+
+def _connector_type_column(sync_url: str) -> sa.types.TypeEngine:
+    engine = sa.create_engine(sync_url)
+    try:
+        columns = sa.inspect(engine).get_columns("connector_configs")
+    finally:
+        engine.dispose()
+    return next(c["type"] for c in columns if c["name"] == "connector_type")
+
+
+def _stored_types(sync_url: str) -> list[str]:
+    engine = sa.create_engine(sync_url)
+    try:
+        with engine.connect() as conn:
+            return sorted(
+                conn.execute(
+                    sa.text("SELECT connector_type FROM connector_configs")
+                ).scalars()
+            )
+    finally:
+        engine.dispose()
+
+
+def _recorded_revision(sync_url: str) -> str:
+    engine = sa.create_engine(sync_url)
+    try:
+        with engine.connect() as conn:
+            return conn.execute(
+                sa.text("SELECT version_num FROM alembic_version")
+            ).scalar_one()
+    finally:
+        engine.dispose()
+
+
+def test_0011_widens_the_column_and_keeps_existing_rows(tmp_path):
+    db_path = tmp_path / "widen.db"
+    config = _alembic_config(f"sqlite+aiosqlite:///{db_path}")
+    sync_url = f"sqlite:///{db_path}"
+    command.upgrade(config, _BEFORE_0011)
+    assert str(_connector_type_column(sync_url)) == "VARCHAR(16)"
+    _seed_connector(sync_url, "canvas")
+    _seed_connector(sync_url, "mcp")
+
+    command.upgrade(config, _REVISION_0011)
+
+    assert str(_connector_type_column(sync_url)) == "VARCHAR(64)"
+    assert _stored_types(sync_url) == ["canvas", "mcp"]
+    # A registry key longer than the old 16 characters now fits.
+    _seed_connector(sync_url, "a_connector_key_longer_than_sixteen")
+    assert "a_connector_key_longer_than_sixteen" in _stored_types(sync_url)
+
+
+def test_0011_keeps_the_index_and_the_cascading_foreign_key(tmp_path):
+    """The SQLite path rebuilds the table; the rebuild must not drop the
+    user_id index or the ON DELETE CASCADE."""
+    db_path = tmp_path / "rebuild.db"
+    command.upgrade(_alembic_config(f"sqlite+aiosqlite:///{db_path}"), _REVISION_0011)
+    table = _snapshot(f"sqlite:///{db_path}")["connector_configs"]
+    assert table["indexes"]["ix_connector_configs_user_id"] == (("user_id",), False)
+    assert (("user_id",), "users", ("id",), "CASCADE") in table["foreign_keys"]
+
+
+def test_0011_downgrade_restores_the_legacy_column(tmp_path):
+    db_path = tmp_path / "restore.db"
+    config = _alembic_config(f"sqlite+aiosqlite:///{db_path}")
+    sync_url = f"sqlite:///{db_path}"
+    command.upgrade(config, _REVISION_0011)
+    _seed_connector(sync_url, "google_workspace")
+
+    command.downgrade(config, _BEFORE_0011)
+
+    assert str(_connector_type_column(sync_url)) == "VARCHAR(16)"
+    assert _stored_types(sync_url) == ["google_workspace"]
+    assert _recorded_revision(sync_url) == _BEFORE_0011
+
+
+def test_0011_downgrade_refuses_types_the_old_enum_cannot_hold(tmp_path):
+    db_path = tmp_path / "refuse.db"
+    config = _alembic_config(f"sqlite+aiosqlite:///{db_path}")
+    sync_url = f"sqlite:///{db_path}"
+    command.upgrade(config, _REVISION_0011)
+    _seed_connector(sync_url, "canvas")
+    _seed_connector(sync_url, "github")
+
+    with pytest.raises(RuntimeError, match="github") as excinfo:
+        command.downgrade(config, _BEFORE_0011)
+
+    # Only the offending type is named, and the fix is spelled out.
+    assert "type(s) github," in str(excinfo.value)
+    assert "Delete those connectors first" in str(excinfo.value)
+    # Nothing changed: still the wide column, every row intact, still at 0011.
+    assert str(_connector_type_column(sync_url)) == "VARCHAR(64)"
+    assert _stored_types(sync_url) == ["canvas", "github"]
+    assert _recorded_revision(sync_url) == _REVISION_0011
+
+
+def test_0011_upgrade_is_a_no_op_on_an_already_converted_column(tmp_path):
+    """An adopted database built from the current models already has
+    VARCHAR(64); re-running the revision must leave it and its rows alone."""
+    db_path = tmp_path / "noop.db"
+    config = _alembic_config(f"sqlite+aiosqlite:///{db_path}")
+    sync_url = f"sqlite:///{db_path}"
+    command.upgrade(config, _REVISION_0011)
+    _seed_connector(sync_url, "notion")
+    command.stamp(config, _BEFORE_0011)
+
+    command.upgrade(config, _REVISION_0011)
+
+    assert str(_connector_type_column(sync_url)) == "VARCHAR(64)"
+    assert _stored_types(sync_url) == ["notion"]
+
+
+# ---------------------------------------------------------------------------
 # Postgres-only: native ENUM types
 # ---------------------------------------------------------------------------
 
@@ -346,9 +516,12 @@ def test_no_pending_autogenerate_diff(tmp_path):
     ),
 )
 def test_postgres_enum_types_match_the_models():
-    """`mcp` reached live databases through `ALTER TYPE ... ADD VALUE`; a
-    baseline that creates connector_type without it would let a fresh
-    deployment reject every MCP connector the app can create.
+    """The native ENUM types an upgraded database ends up with match the
+    model enums, and `connector_type` is no longer one of them: revision
+    0011 turned the column into VARCHAR(64) (validated against the
+    connector registry at the API) and dropped the type, so a new connector
+    needs no `ALTER TYPE`. A leftover type would also make `alembic check`
+    and the create_all schema disagree.
 
     Runs against a throwaway database so it cannot disturb the shared test
     schema the rest of the suite uses.
@@ -356,7 +529,7 @@ def test_postgres_enum_types_match_the_models():
     from sqlalchemy.engine import make_url
     from sqlalchemy.ext.asyncio import create_async_engine
 
-    from models.connector import AuthMethod, ConnectorType, PermissionTier
+    from models.connector import AuthMethod, PermissionTier
 
     admin_url = make_url(TEST_DATABASE_URL)
     scratch = f"migration_check_{uuid.uuid4().hex[:12]}"
@@ -398,10 +571,27 @@ def test_postgres_enum_types_match_the_models():
             finally:
                 await engine.dispose()
 
+        async def _connector_type_column() -> tuple[str, int | None]:
+            engine = create_async_engine(scratch_url)
+            try:
+                async with engine.connect() as conn:
+                    row = await conn.execute(
+                        sa.text(
+                            "SELECT data_type, character_maximum_length "
+                            "FROM information_schema.columns "
+                            "WHERE table_name = 'connector_configs' "
+                            "AND column_name = 'connector_type'"
+                        )
+                    )
+                    data_type, length = row.one()
+                    return str(data_type), length
+            finally:
+                await engine.dispose()
+
         labels = asyncio.run(_enum_labels())
 
-        assert "mcp" in labels["connector_type"]
-        assert set(labels["connector_type"]) == {t.value for t in ConnectorType}
+        assert "connector_type" not in labels
+        assert asyncio.run(_connector_type_column()) == ("character varying", 64)
         assert set(labels["auth_method"]) == {m.value for m in AuthMethod}
         assert set(labels["permission_tier"]) == {t.value for t in PermissionTier}
     finally:

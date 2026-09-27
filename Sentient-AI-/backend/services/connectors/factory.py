@@ -18,51 +18,35 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from services.connectors import registry as _registry
 from services.connectors.base import BaseConnector, ConnectorError
-from services.connectors.canvas import CanvasConnector
-from services.connectors.google_workspace import GoogleWorkspaceConnector
-from services.connectors.robinhood import RobinhoodConnector
 
 
 class CredentialError(ConnectorError):
     """Raised when stored credentials are missing required fields."""
 
 
-# connector_type (ConnectorType enum value) -> network policy key in
-# core.network_security.DEFAULT_POLICIES.
-NETWORK_POLICY_KEYS: dict[str, str] = {
-    "canvas": "canvas",
-    "google_workspace": "google",
-    "robinhood": "robinhood",
-}
+# connector_type -> network policy key in core.network_security.DEFAULT_POLICIES.
+# Derived from each connector's DEFINITION (services/connectors/registry.py).
+NETWORK_POLICY_KEYS: dict[str, str] = _registry.network_policy_keys()
 
+
+# MCP servers are dispatched by services.mcp, not built here, so their
+# requirements are the one entry kept by hand.
+_MCP_REQUIREMENTS: dict[str, Any] = {
+    "required": ["url"],
+    "optional": ["headers"],
+    "notes": (
+        "Streamable-HTTP MCP endpoint, e.g. https://example.com/mcp. "
+        "Every MCP tool call requires your approval."
+    ),
+}
 
 # Human-readable credential requirements per connector type. Used both for
 # server-side validation and for the connector setup UI hints.
 CREDENTIAL_REQUIREMENTS: dict[str, dict[str, Any]] = {
-    "canvas": {
-        "required": ["base_url", "access_token"],
-        "optional": ["client_id", "client_secret", "refresh_token"],
-        "notes": "base_url is your school's Canvas instance, e.g. https://myschool.instructure.com",
-    },
-    "google_workspace": {
-        "required": ["access_token"],
-        "optional": ["refresh_token", "client_id", "client_secret"],
-        "notes": "OAuth access token with the Gmail/Calendar scopes you intend to grant.",
-    },
-    "robinhood": {
-        "required": ["api_key", "api_secret"],
-        "optional": [],
-        "notes": "Read-only API credentials. Trading is permanently blocked by the platform.",
-    },
-    "mcp": {
-        "required": ["url"],
-        "optional": ["headers"],
-        "notes": (
-            "Streamable-HTTP MCP endpoint, e.g. https://example.com/mcp. "
-            "Every MCP tool call requires your approval."
-        ),
-    },
+    **_registry.credential_requirements(),
+    "mcp": _MCP_REQUIREMENTS,
 }
 
 
@@ -106,15 +90,9 @@ def validate_credentials(connector_type: str, credentials: dict[str, Any]) -> li
         for field_name in requirements["required"]
         if not str(credentials.get(field_name, "")).strip()
     ]
-    if connector_type == "canvas":
-        base_url = str(credentials.get("base_url", ""))
-        if base_url and not base_url.startswith(("http://", "https://")):
-            problems.append("base_url must start with http:// or https://")
-        elif base_url and not canvas_instance_host(base_url):
-            # Without a hostname there is nothing to add to the network
-            # allowlist, so every call this connector ever makes would be
-            # refused. Say so now instead of at first use.
-            problems.append("base_url must include a hostname")
+    definition = _registry.get_definition(connector_type)
+    if definition is not None:
+        problems.extend(definition.connector_class.validate_credentials(credentials))
     if connector_type == "mcp":
         url = str(credentials.get("url", ""))
         if url and not url.startswith(("http://", "https://")):
@@ -140,34 +118,20 @@ def create_connector(
     if problems:
         raise CredentialError("; ".join(problems))
 
-    connector: BaseConnector
-    if connector_type == "canvas":
-        connector = CanvasConnector(
-            base_url=str(credentials["base_url"]),
-            client_id=str(credentials.get("client_id", "")),
-            client_secret=str(credentials.get("client_secret", "")),
-            timeout_s=timeout_s,
-        )
-    elif connector_type == "google_workspace":
-        connector = GoogleWorkspaceConnector(
-            client_id=str(credentials.get("client_id", "")),
-            client_secret=str(credentials.get("client_secret", "")),
-            timeout_s=timeout_s,
-        )
-    elif connector_type == "robinhood":
-        connector = RobinhoodConnector(timeout_s=timeout_s)
-    else:
+    definition = _registry.get_definition(connector_type)
+    if definition is None:
+        # 'mcp' passes validation but is dispatched by services.mcp.
         raise CredentialError(f"Unsupported connector type '{connector_type}'")
+    connector = definition.connector_class.from_credentials(
+        credentials, timeout_s=timeout_s
+    )
 
     # Arm deny-by-default outbound filtering before any request is possible.
-    # A Canvas instance the user self-hosts is not under *.instructure.com,
-    # so its host is added as the single extra allowlist entry for this
-    # connector — the SSRF address policy still applies to it.
-    extra_hosts: tuple[str, ...] = ()
-    if isinstance(connector, CanvasConnector) and connector.instance_host:
-        extra_hosts = (connector.instance_host,)
+    # policy_extra_hosts carries a host the user configured (a self-hosted
+    # Canvas); it is held to the policy's instance paths and the SSRF
+    # address policy still applies to it.
     connector.set_network_policy(
-        NETWORK_POLICY_KEYS[connector_type], extra_hosts=extra_hosts
+        definition.network.policy_key, extra_hosts=connector.policy_extra_hosts
     )
 
     if rate_limit is not None:

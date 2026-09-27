@@ -19,10 +19,11 @@ Provides:
 from __future__ import annotations
 
 import ipaddress
+import re
 import socket
 from dataclasses import dataclass, field
-from typing import Optional
-from urllib.parse import urlparse
+from typing import Iterable, Optional
+from urllib.parse import ParseResult, unquote, urlparse
 
 import structlog
 
@@ -210,6 +211,15 @@ class NetworkPolicy:
     # ``extra_hosts`` argument of ``check_network_policy``). Empty means
     # the connector has no notion of a self-hosted instance, and a caller
     # passing extra hosts for it gets nothing.
+    https_only: bool = False
+    # Refuse plain http and any port other than 443. Set for every
+    # connector declared through services/connectors/definition.py.
+    redirect_hosts: dict[str, list[str]] = field(default_factory=dict)
+    # host -> path prefixes reachable only as a download redirect target:
+    # GET, never carrying our Authorization header.
+    ws_hosts: list[str] = field(default_factory=list)
+    # Exact WebSocket hosts (wss, port 443), checked by
+    # check_websocket_policy; never added to the http(s) allowlist.
 
 
 # /api/v1/ is the Canvas REST surface; /login/oauth2/token is the OAuth
@@ -343,86 +353,313 @@ def normalize_policy_host(host: str) -> str:
         return candidate
 
 
+def _glob_label_regex(label_pattern: str) -> re.Pattern[str]:
+    """Compile a first-label glob: each ``*`` matches ``[a-z0-9-]*``.
+
+    Deliberately not ``fnmatch``: its ``*`` crosses dots (and its ``[``
+    and ``?`` are metacharacters), so ``evil.com`` could be smuggled into
+    what was meant to be a single label.
+    """
+    parts = [re.escape(part) for part in label_pattern.split("*")]
+    return re.compile("[a-z0-9-]*".join(parts))
+
+
+def host_matches(hostname: str, pattern: str) -> bool:
+    """True when *hostname* is covered by the allowlist entry *pattern*.
+
+    Three shapes are understood:
+
+    - an exact host (``api.github.com``), compared case-insensitively;
+    - ``*.suffix``: any subdomain of ``suffix`` at any depth, plus the
+      apex itself (the historical Canvas semantics, also needed for
+      multi-label download hosts such as ``public.xx.files.1drv.com``);
+    - a leftmost-label glob (``*-my.sharepoint.com``,
+      ``productionresultssa*.blob.core.windows.net``): ``*`` may appear
+      only in the first label, matches letters, digits and hyphens (never
+      a dot), and every other label must match exactly.
+
+    A ``*`` anywhere past the first label never matches, so a malformed
+    entry fails closed instead of widening the allowlist.
+    """
+    host = hostname.lower().rstrip(".")
+    entry = pattern.strip().lower()
+    if not host or not entry:
+        return False
+    if "*" not in entry:
+        return host == entry
+    first, dot, rest = entry.partition(".")
+    if not dot or not rest or "*" in rest:
+        return False
+    if first == "*":
+        return host == rest or host.endswith("." + rest)
+    host_first, host_dot, host_rest = host.partition(".")
+    if not host_dot or host_rest != rest:
+        return False
+    return _glob_label_regex(first).fullmatch(host_first) is not None
+
+
+def _wildcard_specificity(pattern: str) -> int:
+    # More literal characters means a narrower pattern; it wins, so a
+    # broad ``*.x`` entry can never shadow a narrower glob's paths.
+    return len(pattern.replace("*", ""))
+
+
+def match_host_pattern(hostname: str, patterns: Iterable[str]) -> Optional[str]:
+    """The entry of *patterns* that covers *hostname*, most specific first.
+
+    Exact entries are consulted before any wildcard, whatever order the
+    list is written in, so an exact host's path list can never be
+    replaced by a wildcard's broader one. Among wildcards the one with
+    the most literal characters wins.
+    """
+    entries = list(patterns)
+    for entry in entries:
+        if "*" not in entry and host_matches(hostname, entry):
+            return entry
+    wildcards = sorted(
+        (entry for entry in entries if "*" in entry),
+        key=_wildcard_specificity,
+        reverse=True,
+    )
+    for entry in wildcards:
+        if host_matches(hostname, entry):
+            return entry
+    return None
+
+
+def _path_allowed(path: str, prefixes: list[str]) -> bool:
+    # An entry with no prefixes allows nothing: deny by default. (It used
+    # to allow every path, which turned a forgotten path list into an
+    # open host.)
+    return any(path.startswith(prefix) for prefix in prefixes)
+
+
+# Percent-decoding rounds tried when looking for a dot segment: enough for
+# a double-encoded ``%252e%252e``, bounded so a hostile path cannot spin.
+_DOT_SEGMENT_DECODE_ROUNDS = 3
+_SEGMENT_SPLIT_RE = re.compile(r"[/\\]")
+
+
+def _has_dot_segment(path: str) -> bool:
+    """True when *path* holds a ``.`` or ``..`` segment in any spelling.
+
+    The allowlist compares path prefixes on the raw path, and httpx
+    normalises only literal dot segments. ``/allowed/%2e%2e/secret`` would
+    pass a ``/allowed/`` prefix while a server or proxy that decodes it
+    serves ``/secret``. Each decoding round is split on both slash kinds
+    (``%2f`` and ``%5c`` decode into separators) and a segment's
+    ``;param`` suffix is ignored (``..;`` is a dot segment to some servers).
+    No connector needs such a segment: ``path_segment()`` never emits one.
+    """
+    current = path
+    for _ in range(_DOT_SEGMENT_DECODE_ROUNDS):
+        for segment in _SEGMENT_SPLIT_RE.split(current):
+            if segment.split(";", 1)[0] in (".", ".."):
+                return True
+        decoded = unquote(current)
+        if decoded == current:
+            return False
+        current = decoded
+    # Still decoding after the last round: refuse rather than guess.
+    return True
+
+
+def _transport_problem(parsed: ParseResult, policy: NetworkPolicy) -> Optional[str]:
+    """Why *parsed* fails the policy's scheme, port or authority rules."""
+    try:
+        port = parsed.port
+    except ValueError:
+        return "Malformed URL"
+    if parsed.username is not None or parsed.password is not None:
+        # Credentials in the authority are never how a connector
+        # authenticates; refusing them removes an ambiguity that is used
+        # to disguise the real host.
+        return "Credentials in the URL are not permitted"
+    if policy.https_only:
+        if parsed.scheme != "https":
+            return (
+                f"Scheme '{parsed.scheme}' not allowed; "
+                f"{policy.connector_type} is HTTPS only"
+            )
+        if port is not None and port != 443:
+            return f"Port {port} not allowed; {policy.connector_type} allows only 443"
+    return None
+
+
 def check_network_policy(
     url: str,
     connector_type: str,
     *,
     extra_hosts: tuple[str, ...] = (),
+    method: Optional[str] = None,
+    has_authorization: Optional[bool] = None,
+    resolve: bool = True,
 ) -> SSRFCheckResult:
     """
     Check if a URL is allowed by the connector's network policy.
 
     Enforces deny-by-default: only explicitly allowlisted hosts and
-    path prefixes are permitted.
+    path prefixes are permitted, and a host entry with no path prefixes
+    allows nothing.
 
     ``extra_hosts`` carries the hosts the *user* configured for this
-    connector — a self-hosted Canvas domain, for instance, which no
-    static allowlist can know. They are matched exactly (never as
+    connector (a self-hosted Canvas domain, for instance, which no
+    static allowlist can know). They are matched exactly (never as
     wildcards, so one configured host can never open a whole domain) and
     are held to the policy's ``instance_paths``, so a self-hosted
     instance is reachable at the same endpoints as the hosted one and no
-    others. The SSRF check above still applies to them unchanged:
-    a configured host that resolves into a private range is refused.
-    """
-    # First, run SSRF check
-    ssrf_result = check_ssrf(url)
-    if not ssrf_result.safe:
-        return ssrf_result
+    others. The SSRF check still applies to them unchanged: a configured
+    host that resolves into a private range is refused.
 
+    ``method`` and ``has_authorization`` describe the request. They only
+    matter for the policy's ``redirect_hosts`` (pre-signed download
+    hosts), which are reachable solely by a GET carrying none of the
+    connector's credentials. Leaving either unset keeps those hosts shut.
+
+    The allowlist is decided before any DNS lookup, so an off-list host
+    is refused without being resolved. ``check_ssrf`` is then looked up
+    as a module global at call time (tests replace it), and its
+    ``resolved_ips`` are returned for the caller to pin.
+
+    ``resolve=False`` skips that lookup (no DNS, no blocking) and returns
+    no addresses. Only for a caller that already holds validated pins for
+    the URL's origin and dials nothing else, such as a connector's second
+    request to the same host within one call.
+    """
     policy = DEFAULT_POLICIES.get(connector_type)
     if not policy:
-        # Unknown connector type — deny by default
+        # Unknown connector type: deny by default
         return SSRFCheckResult(
             safe=False,
             reason=f"No network policy defined for connector '{connector_type}'",
         )
 
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return SSRFCheckResult(safe=False, reason="Malformed URL")
+    problem = _transport_problem(parsed, policy)
+    if problem is not None:
+        return SSRFCheckResult(safe=False, reason=problem)
+
     hostname = parsed.hostname or ""
     path = parsed.path or "/"
+    if _has_dot_segment(path):
+        # Checked before the prefix match: a dot segment can climb out of
+        # an allowlisted prefix once the server decodes it.
+        return SSRFCheckResult(
+            safe=False,
+            reason=f"Path '{path}' contains a dot segment, which is not permitted",
+        )
 
-    # Check host allowlist (supports wildcard prefix matching)
-    host_allowed = False
-    matched_host = None
-    allowed_paths: list[str] = []
-    for allowed_host in policy.allowed_hosts:
-        if allowed_host.startswith("*."):
-            suffix = allowed_host[1:]  # e.g., ".instructure.com"
-            if hostname.endswith(suffix) or hostname == allowed_host[2:]:
-                host_allowed = True
-                matched_host = allowed_host
-                break
-        elif hostname == allowed_host:
-            host_allowed = True
-            matched_host = allowed_host
-            break
-
+    allowed_paths: Optional[list[str]] = None
+    matched_host = match_host_pattern(hostname, policy.allowed_hosts)
     if matched_host is not None:
         allowed_paths = policy.allowed_paths.get(matched_host, [])
     elif policy.instance_paths:
         for configured in extra_hosts:
             if hostname and hostname == normalize_policy_host(configured):
-                host_allowed = True
                 allowed_paths = policy.instance_paths
                 break
 
-    if not host_allowed:
+    if allowed_paths is None and policy.redirect_hosts:
+        redirect_host = match_host_pattern(hostname, policy.redirect_hosts)
+        if redirect_host is not None:
+            if (method or "").upper() != "GET" or has_authorization is not False:
+                return SSRFCheckResult(
+                    safe=False,
+                    reason=(
+                        f"Host '{hostname}' is a download host for {connector_type}: "
+                        "reachable only by GET without credentials"
+                    ),
+                )
+            allowed_paths = policy.redirect_hosts.get(redirect_host, [])
+
+    if allowed_paths is None:
         return SSRFCheckResult(
             safe=False,
             reason=f"Host '{hostname}' not in allowlist for {connector_type}",
         )
 
-    # Check path allowlist
-    if allowed_paths:
-        path_allowed = any(path.startswith(prefix) for prefix in allowed_paths)
-        if not path_allowed:
+    if not _path_allowed(path, allowed_paths):
+        return SSRFCheckResult(
+            safe=False,
+            reason=f"Path '{path}' not in allowed paths for {hostname}",
+        )
+
+    if not resolve:
+        if parsed.scheme not in _ALLOWED_SCHEMES:
             return SSRFCheckResult(
-                safe=False,
-                reason=f"Path '{path}' not in allowed paths for {hostname}",
+                safe=False, reason=f"Scheme '{parsed.scheme}' not allowed."
             )
+        return SSRFCheckResult(safe=True)
+
+    ssrf_result = check_ssrf(url)
+    if not ssrf_result.safe:
+        return ssrf_result
 
     return SSRFCheckResult(
         safe=True,
         resolved_ip=ssrf_result.resolved_ip,
         resolved_ips=ssrf_result.resolved_ips,
+    )
+
+
+def check_websocket_policy(url: str, policy_key: str) -> SSRFCheckResult:
+    """Check a WebSocket URL against the policy's exact ``ws_hosts``.
+
+    Only ``wss`` on port 443 to a listed host is accepted, and every
+    address the host resolves to must be public. The global http/https
+    scheme allowlist used by ``check_ssrf`` is deliberately not widened:
+    WebSocket egress is its own, narrower gate.
+
+    The returned ``resolved_ips`` are the addresses the caller must dial
+    (keeping the hostname for TLS SNI); resolving again at connect time
+    would reopen the DNS rebinding window.
+
+    Blocking: an allowed URL is resolved synchronously
+    (``socket.getaddrinfo``). Async code, such as a WebSocket chat
+    channel, must call it through ``asyncio.to_thread``, as the connector
+    request hook does for ``check_network_policy``; calling it directly on
+    the event loop stalls every other task for the lookup.
+    """
+    policy = DEFAULT_POLICIES.get(policy_key)
+    if not policy:
+        return SSRFCheckResult(
+            safe=False,
+            reason=f"No network policy defined for connector '{policy_key}'",
+        )
+    try:
+        parsed = urlparse(url)
+        port = parsed.port
+    except ValueError:
+        return SSRFCheckResult(safe=False, reason="Malformed URL")
+    if parsed.scheme != "wss":
+        return SSRFCheckResult(
+            safe=False,
+            reason=f"Scheme '{parsed.scheme}' not allowed. Only wss is permitted for WebSockets.",
+        )
+    if port is not None and port != 443:
+        return SSRFCheckResult(
+            safe=False, reason=f"Port {port} not allowed for WebSockets; only 443"
+        )
+    if parsed.username is not None or parsed.password is not None:
+        return SSRFCheckResult(
+            safe=False, reason="Credentials in the URL are not permitted"
+        )
+    hostname = (parsed.hostname or "").rstrip(".")
+    allowed = {entry.strip().lower() for entry in policy.ws_hosts}
+    if not hostname or hostname not in allowed:
+        return SSRFCheckResult(
+            safe=False,
+            reason=f"WebSocket host '{hostname}' not in allowlist for {policy_key}",
+        )
+    try:
+        addresses = resolve_public_addresses(hostname, 443, url=url)
+    except SSRFBlocked as exc:
+        return SSRFCheckResult(
+            safe=False, reason=exc.reason, resolved_ip=exc.resolved_ip
+        )
+    return SSRFCheckResult(
+        safe=True, resolved_ip=addresses[0], resolved_ips=addresses
     )

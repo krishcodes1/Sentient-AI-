@@ -17,6 +17,7 @@ from services.capabilities import (
     reminders,
     screen,
     site_screenshots,
+    slack,
     telegram,
     web_browsing,
 )
@@ -38,6 +39,7 @@ REGISTRY: tuple[Capability, ...] = (
     reminders.CAPABILITY,
     installs.CAPABILITY,
     telegram.CAPABILITY,
+    slack.CAPABILITY,
     browser_control.CAPABILITY,
     browser_act.CAPABILITY,
     computer_control.CAPABILITY,
@@ -62,7 +64,11 @@ def settings_defaults(key: str) -> dict[str, Any]:
 # nobody claimed fails the registry test instead of being silently always-on.
 # An entry here wins over a capability's family prefix: reminders.now is the
 # model's clock, which it needs whether or not Reminders is switched on.
-ALWAYS_ON_TOOLS: frozenset[str] = frozenset({"system.capabilities", "reminders.now"})
+# tools.find only searches tools the user can already use, so no switch
+# gates it.
+ALWAYS_ON_TOOLS: frozenset[str] = frozenset(
+    {"system.capabilities", "reminders.now", "tools.find"}
+)
 
 _BY_KEY: dict[str, Capability] = {c.key: c for c in REGISTRY}
 
@@ -110,7 +116,9 @@ def default_switches() -> dict[str, bool]:
     return {c.key: c.default_enabled for c in REGISTRY}
 
 
-def default_context(*, telegram_configured: bool = False) -> ReportContext:
+def default_context(
+    *, telegram_configured: bool = False, slack_configured: bool = False
+) -> ReportContext:
     """Gather the environment facts for one report. This is the only place
     that touches the OS for availability; availability() reads the result."""
     # Both deferred, like browser_installed: the registry stays importable
@@ -128,6 +136,7 @@ def default_context(*, telegram_configured: bool = False) -> ReportContext:
         playwright_installed=playwright_installed(),
         browser_channel=layer.browser_channel() or "",
         host_platform=layer.name,
+        slack_configured=slack_configured,
     )
 
 

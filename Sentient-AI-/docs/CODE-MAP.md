@@ -135,12 +135,17 @@ the chat gets what ran and why it stopped, in plain words
 
 ## Connectors (`backend/services/connectors/`)
 
-- `base.py` — `BaseConnector` framework: rate limiting, error types (`AuthenticationError`, `HardBlockError`, `UserConfirmationRequired`), `path_segment` helper.
-- `canvas.py` — Canvas LMS connector (courses, assignments, grades).
-- `google_workspace.py` — Gmail/Calendar connector.
-- `robinhood.py` — Robinhood Crypto connector (read-heavy; trading hard-blocked).
-- `factory.py` — builds a live connector instance from stored (encrypted) credentials; credential validation.
-- `backend/models/connector.py` — `ConnectorConfig` model, `ConnectorType`/`AuthMethod`/`PermissionTier` enums.
+- `README.md`: the recipe for adding a connector and every rule the registry enforces. Read it first.
+- **Adding a connector:** copy `_template.py` to `<key>.py` (header, `ACTIONS`, the class, `DEFINITION`), append `_load("<key>")` to `REGISTRY` in `registry.py`, copy `tests/connectors/_template_test.py` to `tests/connectors/test_<key>.py` without its skip line, then run `tests/test_connector_registry.py` plus the new file. The catalog, credential rules, network allowlist, permission rows and the Connectors page all follow from the definition; no other file changes.
+- `definition.py`: the declaration types (`ToolSpec`, `CredentialField`, `OAuthSpec`, `AuthSpec`, `NetworkSpec`, `ConnectorDefinition`).
+- `registry.py`: `REGISTRY` (one `_load` line per connector), validated at import; derives the tool catalog, `CREDENTIAL_REQUIREMENTS`, network policies, default permission rows and `GET /api/connectors/types` (`connector_types_payload`).
+- `base.py`: `BaseConnector`: rate limiting, error types (`AuthenticationError`, `HardBlockError`, `UserConfirmationRequired`, `RateLimitExceededError`), `path_segment`, the policy-checked and DNS-pinned HTTP helpers `_request` / `_request_json` (one bounded retry, errors with status and vendor code only), `_auth_headers` (secrets) and `_static_headers` (non-secret), `_dispatch`.
+- `shaping.py`: output helpers every connector uses (`clamp_limit`, `cap_text`, `collect_pages`, `pick`).
+- `factory.py`: builds a live connector from stored (encrypted) credentials, arms its network policy, validates credentials; public names kept for older callers.
+- `oauth.py` / `oauth_config.py`: the OAuth broker (PKCE browser sign-in, device code, refresh before expiry, revoke after delete) and the client id / redirect URI resolver (env settings only). HTTP surface: `backend/api/routes/oauth.py`; flow rows: `backend/models/oauth_state.py`.
+- Connectors: `canvas.py` (Canvas LMS), `google_workspace.py` + `google_api/` (Gmail, Calendar, Drive, Docs, Sheets, Contacts), `microsoft.py` + `microsoft_api/` (Outlook mail and calendar, OneDrive, To Do, contacts), `github.py` + `github_api/`, `notion.py` + `notion_api/`, `slack.py` + `slack_api/` + `slack_manifest.json`, `robinhood.py` (read-only crypto; trading hard-blocked). A `<key>_api/` package holds one mixin module per action area when the connector would be too large for one file.
+- Slack DM channel (runs on each user's Slack connector tokens): `backend/services/notifications/slack.py` (Socket Mode channel), `slack_manager.py` (one channel per Slack app), `backend/api/routes/slack.py` (link code routes), `backend/models/slack_link.py`, `backend/services/capabilities/slack.py`.
+- `backend/models/connector.py`: `ConnectorConfig` (`connector_type` is a plain string validated against the registry), `ConnectorType`/`AuthMethod`/`PermissionTier` enums. Owner setup of the sign-in apps: `docs/connectors-setup.md`.
 
 ## MCP (`backend/services/mcp/`)
 

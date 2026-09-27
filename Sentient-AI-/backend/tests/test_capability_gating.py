@@ -123,11 +123,15 @@ def test_every_builtin_type_has_a_stance_and_an_executor_entry():
     """Step 2 of services/capabilities/README.md in one check: a new
     built-in family needs its tier stand-in (build_tools would KeyError on
     the offer without it) and its executor entry (dispatch would refuse
-    it), and neither map may keep a family the catalog no longer has."""
-    from services.agent.tool_registry import _BUILTIN_STANCE
+    it), and neither map may keep a family the catalog no longer has. A
+    family the runtime answers itself (tools.find) has no executor entry."""
+    from services.agent.tool_registry import RUNTIME_BUILTIN_TYPES, _BUILTIN_STANCE
 
     assert set(_BUILTIN_STANCE) == set(BUILTIN_CONNECTOR_TYPES)
-    assert set(ConnectorToolExecutor()._builtins) == set(BUILTIN_CONNECTOR_TYPES)
+    assert set(ConnectorToolExecutor()._builtins) == (
+        set(BUILTIN_CONNECTOR_TYPES) - RUNTIME_BUILTIN_TYPES
+    )
+    assert RUNTIME_BUILTIN_TYPES <= set(BUILTIN_CONNECTOR_TYPES)
 
 
 def test_default_offer_excludes_screen_and_includes_web():

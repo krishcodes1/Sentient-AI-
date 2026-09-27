@@ -106,7 +106,12 @@ def test_is_browser_tool_and_the_budget_table():
     assert is_browser_tool("browser.read") and is_browser_tool("browser.act")
     assert not is_browser_tool("web.search") and not is_browser_tool(None)
     # desktop.observe / desktop.act budgets: tests/test_computer_control_wiring.py
-    assert RESULT_CHAR_BUDGETS == {"browser.": 8000, "desktop.observe": 18000, "desktop.act": 11000}
+    # Connector long-read budgets: tests/test_tool_offering.py
+    assert {k: RESULT_CHAR_BUDGETS[k] for k in ("browser.", "desktop.observe", "desktop.act")} == {
+        "browser.": 8000,
+        "desktop.observe": 18000,
+        "desktop.act": 11000,
+    }
     assert result_char_budget("browser.read", 2000) == 8000 and result_char_budget("web.search", 2000) == 2000
 
 

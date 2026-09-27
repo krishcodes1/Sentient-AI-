@@ -454,10 +454,14 @@ async def test_connector_financial_actions_are_still_never_executed():
 
 
 def test_every_builtin_type_still_has_a_stance_and_an_executor_entry():
-    from services.agent.tool_registry import BUILTIN_CONNECTOR_TYPES
+    from services.agent.tool_registry import BUILTIN_CONNECTOR_TYPES, RUNTIME_BUILTIN_TYPES
 
     assert set(_BUILTIN_STANCE) == set(BUILTIN_CONNECTOR_TYPES)
-    assert set(ConnectorToolExecutor()._builtins) == set(BUILTIN_CONNECTOR_TYPES)
+    # Runtime built-ins (tools.find) are answered by the agent runtime, so
+    # they have no executor entry (services/capabilities/README.md).
+    assert set(ConnectorToolExecutor()._builtins) == (
+        set(BUILTIN_CONNECTOR_TYPES) - RUNTIME_BUILTIN_TYPES
+    )
 
 
 # ── 6. approval hooks ────────────────────────────────────────────────────

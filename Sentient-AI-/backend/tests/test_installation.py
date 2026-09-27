@@ -53,6 +53,13 @@ def _pinned_env(monkeypatch):
     monkeypatch.setattr(settings, "LLM_PROVIDER", "anthropic", raising=False)
     monkeypatch.setattr(settings, "LLM_MODEL", "claude-sonnet-5", raising=False)
     monkeypatch.setattr(settings, "TELEGRAM_BOT_TOKEN", "", raising=False)
+    for oauth_setting in (
+        "GOOGLE_OAUTH_CLIENT_ID",
+        "GOOGLE_OAUTH_CLIENT_SECRET",
+        "MICROSOFT_OAUTH_CLIENT_ID",
+        "GITHUB_OAUTH_CLIENT_ID",
+    ):
+        monkeypatch.setattr(settings, oauth_setting, "", raising=False)
     monkeypatch.setattr(settings, "ALLOW_REGISTRATION", True, raising=False)
 
 

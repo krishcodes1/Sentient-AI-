@@ -452,7 +452,9 @@ async def test_dynamic_tool_selection_caps_tool_count():
 
     sent_tools = provider.calls[0]["tools"]
     assert sent_tools is not None
-    assert len(sent_tools) <= 15
+    from services.agent.context_manager import MAX_OFFERED_TOOLS
+
+    assert len(sent_tools) == MAX_OFFERED_TOOLS < len(tools)
 
 
 @pytest.mark.asyncio

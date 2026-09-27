@@ -65,14 +65,43 @@ _SENSITIVE_KEYS = re.compile(
     r"(token|password|passwd|secret|api[_-]?key|access[_-]?key|"
     r"authorization|credential|private[_-]?key|client[_-]?secret|"
     r"session[_-]?id|cookie|bearer|refresh[_-]?token|ssn|"
-    r"credit[_-]?card|card[_-]?number|cvv|cvc)",
+    r"credit[_-]?card|card[_-]?number|cvv|cvc|"
+    # OAuth PKCE verifier, and a device code only at the end of the key, so
+    # "device_code_url" (a public address) is kept.
+    r"code[_-]?verifier|device[_-]?code(?![_-]?[a-z0-9]))|"
+    # OAuth authorization codes and states, matched as the WHOLE key only:
+    # a substring match would also hit "statement", "zip_code" or "barcode".
+    r"^(?:code|state|oauth[_-]?(?:code|state)|auth[_-]?code)$",
     re.IGNORECASE,
 )
 
+# Token formats redacted wherever they appear inside a string. Every
+# alternative starts with a fixed prefix, and the prefixes that also occur
+# in ordinary text (secret_, ntn_, 1//) carry a long body floor, so a word
+# such as "secret_santa" survives. A match runs to the end of the token.
 _SENSITIVE_VALUE_PATTERNS = re.compile(
-    r"(?:eyJ[A-Za-z0-9_-]{10,}\.)|"               # JWT prefix
+    # A full JWT or JWE (header.payload.signature and beyond), or a bare header.
+    r"(?:eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+){0,3})|"
     r"(?:sk-[A-Za-z0-9]{20,})|"                    # OpenAI-style keys
-    r"(?:ghp_[A-Za-z0-9]{36})|"                    # GitHub PATs
+    r"(?:github_pat_[A-Za-z0-9_]{22,})|"           # GitHub fine-grained PATs
+    r"(?:gh[opusr]_[A-Za-z0-9]{36,})|"             # GitHub classic, OAuth, app tokens
+    r"(?:xox[abepr]-[A-Za-z0-9-]{10,})|"           # Slack bot, user, refresh tokens
+    r"(?:xapp-[A-Za-z0-9-]{10,})|"                 # Slack app-level tokens
+    r"(?:secret_[A-Za-z0-9]{32,})|"                # Notion integration secrets (legacy)
+    r"(?:ntn_[A-Za-z0-9]{32,})|"                   # Notion integration tokens
+    r"(?:ya29\.[A-Za-z0-9_-]{20,})|"               # Google OAuth access tokens
+    r"(?:(?<![A-Za-z0-9/])1//[A-Za-z0-9_-]{30,})|"  # Google OAuth refresh tokens
+    r"(?:GOCSPX-[A-Za-z0-9_-]{20,})|"              # Google OAuth client secrets
+    # Microsoft: personal-account access tokens are opaque "EwB..." blobs
+    # (standard base64, hundreds of chars); personal-account refresh tokens
+    # and codes look like "M.C5xx_BAY.0.U.<body>"; work and school (Entra ID
+    # v2) refresh tokens start "0.A" or "1.A". Work and school access tokens
+    # are JWTs (above). Each needs a long unbroken body, so "EwB", "M.C."
+    # or "version 1.A" in prose is kept. A match never ends on a dot, so
+    # the full stop after a token in a sentence survives.
+    r"(?:(?<![A-Za-z0-9+/])EwB[A-Za-z0-9+/=_-]{100,})|"
+    r"(?:(?<![A-Za-z0-9.])M\.[CR][0-9]{1,4}_[A-Za-z0-9]{2,8}\.[A-Za-z0-9!*$._-]{29,}[A-Za-z0-9!*$_-])|"
+    r"(?:(?<![A-Za-z0-9.])[01]\.A[A-Za-z0-9_*.-]{99,}[A-Za-z0-9_*-])|"
     r"(?:AKIA[A-Z0-9]{16})|"                       # AWS access keys
     r"(?:\b[0-9]{13,19}\b)",                        # Credit card numbers
     re.ASCII,

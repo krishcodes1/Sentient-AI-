@@ -60,6 +60,7 @@ import json
 import secrets
 import time
 import uuid as uuid_module
+import weakref
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Coroutine, Optional
 
@@ -68,6 +69,7 @@ import structlog
 from sqlalchemy import select, update
 
 from services.agent import cancel as agent_cancel
+from services.notifications import cards
 from services.notifications.progress import TurnProgress, takes_keyword, takes_on_event
 from services.tools.browser.checkout import NOTICE as PURCHASE_NOTICE
 
@@ -118,6 +120,18 @@ _CONFLICT_BACKOFF_MAX_S = 300.0
 # A conflict that persists is re-announced at most this often: visible in
 # the logs without a line per retry.
 _CONFLICT_REWARN_S = 3600.0
+
+# One approval card's parts go out at a time per chat, so two cards never
+# interleave: service -> chat id -> lock. Keyed weakly by the service, so
+# the locks go away with it.
+_CARD_LOCKS: weakref.WeakKeyDictionary[TelegramService, dict[Any, asyncio.Lock]] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _card_lock(service: TelegramService, chat_id: Any) -> asyncio.Lock:
+    """The lock that serialises *chat_id*'s approval cards on *service*."""
+    return _CARD_LOCKS.setdefault(service, {}).setdefault(chat_id, asyncio.Lock())
 
 
 class _PollerConflict(Exception):
@@ -606,13 +620,37 @@ class TelegramService:
                 ]
             if getattr(action, "risk_note", None):
                 lines += ["", f"⚠️ {action.risk_note}"]
-            args = (
-                ""
-                if action.tool_name == _ACT_TOOL
-                else _short_json(_card_arguments(action.tool_name, action.arguments or {}))
-            )
-            if args and args != "{}":
-                lines += ["", "Arguments:", args]
+            if action.tool_name != _ACT_TOOL:
+                # Every argument in full (F3): a long card goes out as
+                # labelled, paced parts, the buttons on the last. An
+                # oversized card or a lost part gets a notice instead, and no
+                # buttons. The act card keeps its one sentence (above).
+                card = cards.layout_card(
+                    lines,
+                    _card_arguments(action.tool_name, action.arguments or {}),
+                    tool_name=str(action.tool_name),
+                    max_chars=_MESSAGE_CHUNK,
+                    length=cards.utf16_len,
+                )
+
+                async def send_part(text: str) -> bool:
+                    return await self._api("sendMessage", chat_id=chat_id, text=text) is not None
+
+                async with _card_lock(self, chat_id):
+                    ready = await cards.send_card_parts(
+                        card,
+                        send_part,
+                        retry_hint="Send /pending to get it again, or decide in the web app.",
+                    )
+                if not ready:
+                    logger.warning(
+                        "telegram_approval_card_withheld",
+                        action_id=action.action_id,
+                        parts=card.parts,
+                        oversized=card.notice is not None,
+                    )
+                    return
+                lines = list(card.final_lines)
             lines += ["", f"Expires in {_expires_in_text(action.expires_at)}."]
             text = "\n".join(lines)
             if action.tool_name == _ACT_TOOL:

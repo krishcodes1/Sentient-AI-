@@ -18,7 +18,7 @@ below still work as before.
 
 **Secure-by-Design Agentic AI Platform**
 
-A self-hosted AI assistant platform with security, user control, and auditability built into every layer. Crawler AI integrates with Canvas LMS, Google Workspace, Robinhood Crypto, and more — with fine-grained permission scoping, multi-layer prompt injection defense, and tamper-evident audit logging.
+A self-hosted AI assistant platform with security, user control, and auditability built into every layer. Crawler AI integrates with Google Workspace, Microsoft 365, GitHub, Slack, Notion, Canvas LMS, Robinhood Crypto (read-only) and any MCP server (see [Integrations](#integrations)), with fine-grained permission scoping, multi-layer prompt injection defense, and tamper-evident audit logging.
 
 **Assistant features:** streaming chat with live tool-progress and rendered
 markdown, persistent per-user memory (saved facts injected into every
@@ -396,6 +396,7 @@ them read-only.
 | **Reminders** | Setting, listing and cancelling reminders, delivered to you over Telegram when it's linked | On |
 | **Install optional software** | Installing optional components from a fixed list (e.g. the hidden browser above), asking you before every install | On |
 | **Telegram chat and approvals** | Chatting with Crawler from Telegram and approving pending actions from your phone. Needs a bot token configured (`.env` or the wizard's Telegram step). | On |
+| **Slack chat and approvals** | Chatting with Crawler in a Slack DM and approving pending actions from Slack. Needs a Slack connector with an app-level token (`xapp-`), linked from its card; see [Integrations](#integrations). | On |
 
 See `backend/services/capabilities/README.md` if you're adding a new one —
 declaring a capability there is what drives the switch, the gating, and the
@@ -408,6 +409,62 @@ is the step-by-step checklist: native install, the wizard with Gemini,
 Claude and GPT, Telegram, the macOS permission grants, and every live flow
 with what to expect. [`docs/testing/computer-control-headless-mac.md`](docs/testing/computer-control-headless-mac.md)
 is the lower-level smoke test of the Mac computer-control backend.
+
+## Integrations
+
+Each user connects their own accounts on the **Connectors** page. A card
+shows what the service can do, how to connect it, and the permissions you
+can grant: read permissions are preselected, write permissions are opt-in,
+and a permission marked "always asks before running" (every delete, and
+every send, post, comment, merge, publish or share) gets an approval card
+whatever approval tier you choose. Crawler only ever sees the tools of the
+permissions you granted.
+
+| Service | What Crawler can do | How you connect it |
+|---------|---------------------|--------------------|
+| **Google Workspace** | Gmail, Google Calendar, Drive, Docs, Sheets and Contacts (44 actions) | **Sign in with Google** (needs the server setup below), or paste an OAuth access token (add a refresh token plus client id and secret so it renews itself) |
+| **Microsoft 365** | Outlook mail and calendar, OneDrive files, Microsoft To Do and contacts (34 actions); work, school and personal accounts | **Sign in with Microsoft**, or **Sign in with a code** on a machine without a browser (both need the server setup below) |
+| **GitHub** | Repositories, files, issues, pull requests, Actions runs and failed logs, notifications, releases and gists (41 actions) | **Sign in with a code** (device flow, needs the server setup below), or paste a fine-grained personal access token |
+| **Slack** | Read channels, history, threads, users and files, search messages; post, reply, schedule, react, upload, set your status and manage channels (17 actions). Optional: chat with Crawler in a Slack DM | Open **Create the Slack app from its manifest** on the card, install the app to your workspace, and paste its bot token (`xoxb-`). Add the app-level token (`xapp-`) for DMs and the user token (`xoxp-`) for search and status |
+| **Notion** | Search, read and edit the pages and databases you share with the integration, comments (15 actions) | Create an internal integration at notion.so/profile/integrations, paste its secret, then share pages with it (page menu, Connections) |
+| **Canvas LMS** | Courses, assignments, grades, calendar events and submissions, and submitting an assignment (6 actions) | Paste your school's Canvas URL and an access token |
+| **Robinhood Crypto** | Read-only portfolio, holdings and prices (3 actions); trading is permanently blocked | Paste read-only API credentials |
+| **MCP servers** | The tools of any Streamable HTTP MCP server you register; every call needs approval | Server URL (and optional headers) |
+
+**Server setup for sign-in (owner, once per install).** "Sign in with
+Google / Microsoft / GitHub" needs an OAuth app registered with that
+provider and its client id in `backend/.env` (`GOOGLE_OAUTH_CLIENT_ID` and
+`GOOGLE_OAUTH_CLIENT_SECRET`, `MICROSOFT_OAUTH_CLIENT_ID`,
+`GITHUB_OAUTH_CLIENT_ID`), then a backend restart. Register
+`<OAUTH_REDIRECT_BASE>/api/oauth/callback/<provider>` as the redirect URI,
+for example `http://127.0.0.1:3000/api/oauth/callback/google`. Until a
+client id is set, the card says sign-in is not set up and offers the token
+form where the service has one. Step-by-step instructions for each provider,
+the scopes involved, and Google's limits for unverified apps are in
+[`docs/connectors-setup.md`](docs/connectors-setup.md). Slack, Notion,
+Canvas and Robinhood need no server setup.
+
+**After connecting.** A signed-in connection renews itself; use
+**Reconnect** on its card if the provider revokes it, and **Grant more
+access** to add permissions without starting over. Removing a connector
+also revokes its grant at Google and Slack; for GitHub, Microsoft and
+Notion, remove the app's access on the provider's site as well.
+
+**Slack DMs.** On a Slack connector with an app-level token, click **Link
+Slack DMs**, then send the code it shows to the Crawler bot in a Slack DM
+within 10 minutes. From then on the bot answers only you, and approval
+cards arrive there with Approve and Deny buttons. Use one Slack app per
+Crawler user for DMs. The owner can turn Slack DMs off for the whole install
+with the **Slack chat and approvals** switch. Run a single backend process
+(one worker) while Slack DMs are on: two processes on one Slack app would
+split its DMs and button presses at random (see [SECURITY.md](SECURITY.md)).
+
+**Many tools, small requests.** A request offers the model at most 24
+tools: the everyday ones first, including a few "starter" tools per
+connector. When it needs something else it calls `tools.find`, which looks
+through the tools you can use and adds the matches to the conversation.
+
+Adding a connector to the code: [`backend/services/connectors/README.md`](backend/services/connectors/README.md).
 
 ---
 
@@ -446,6 +503,10 @@ it already has.
 | `MISTRAL_API_KEY` | If using Mistral | Get from [console.mistral.ai](https://console.mistral.ai). Optional when using the wizard. |
 | `OLLAMA_BASE_URL` | If using Ollama | Native run: `http://localhost:11434` (default). Under Docker, `localhost` means the backend container itself, not your host, so use `http://host.docker.internal:11434` instead. |
 | `TELEGRAM_BOT_TOKEN` | No | Bot token from @BotFather for Telegram chat and approvals. Optional when using the wizard, which can save and test it instead; see [Permissions](#permissions). |
+| `OAUTH_REDIRECT_BASE` | No | Where providers send the browser back after sign-in: an `http(s)` origin with no path (default `http://127.0.0.1:3000`). Register `<OAUTH_REDIRECT_BASE>/api/oauth/callback/<provider>` with each OAuth app. See [`docs/connectors-setup.md`](docs/connectors-setup.md). |
+| `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET` | No | A Google OAuth client ("Desktop app" type) for **Sign in with Google**. Empty = that button is unavailable. |
+| `MICROSOFT_OAUTH_CLIENT_ID` | No | A Microsoft Entra public client app registration (no secret) for **Sign in with Microsoft** and its device code option. |
+| `GITHUB_OAUTH_CLIENT_ID` | No | A GitHub OAuth app with device flow enabled (no secret) for GitHub's **Sign in with a code**. |
 | `RATE_LIMIT_PER_MINUTE` | No | General per-IP API rate limit (default 60) |
 | `AUTH_RATE_LIMIT_PER_MINUTE` | No | Stricter per-IP limit on login/register (default 10) |
 | `TRUSTED_PROXIES` | Review for prod | CIDRs whose `X-Forwarded-For` is believed for client-IP attribution. Default trusts loopback + all private ranges (where the compose nginx sits) — narrow it to your proxy's address if anything else can reach the API from a private network. |
@@ -493,7 +554,7 @@ crawler-ai/
 │   ├── models/                 # SQLAlchemy ORM models (incl. pending_actions)
 │   ├── services/
 │   │   ├── agent/              # LLM runtime, providers, prompt guard, permissions, approvals, tool registry
-│   │   ├── connectors/         # Canvas LMS, Google Workspace, Robinhood + factory
+│   │   ├── connectors/         # Registry, OAuth broker, Google, Microsoft, GitHub, Slack, Notion, Canvas, Robinhood
 │   │   ├── mcp/                # MCP client + server integration (experimental)
 │   │   ├── audit.py            # Tamper-evident audit logging (hash chain)
 │   │   └── auth.py             # JWT authentication
@@ -537,6 +598,10 @@ still open — lives in **[SECURITY.md](SECURITY.md)**. Highlights:
   verification in the UI and a CLI verifier
 - **SSRF protection + deny-by-default network policies** — connectors and
   MCP servers can only reach allowlisted, public endpoints (redirects included)
+- **Connector sign-in (OAuth)**: PKCE, a single-use state stored only as an
+  HMAC, a redirect URI fixed by configuration, no client secrets in source,
+  tokens refreshed before expiry and revoked on delete where the provider
+  allows it; deletes, sends, posts, merges and shares always ask first
 - **MCP server support (experimental)** — register external MCP servers;
   every MCP tool requires approval, financial-looking tools are refused
 - **Rate limiting** — per-IP throttling with a stricter bucket on
@@ -555,9 +620,11 @@ Crawler AI solves the token explosion problem seen in platforms like OpenClaw:
 
 - **Sliding window** — keeps last 12 messages in full, summarizes older ones
 - **Tool result compression** — truncates large API responses to 2000 chars
-- **Dynamic tool selection** — sends only the relevant schemas rather than the
-  whole catalog (17 built-in connector actions today, plus every tool exposed
-  by the MCP servers a user has registered, which is unbounded)
+- **Bounded tool offering**: a request carries at most 24 tool schemas
+  (core built-ins, the tools this conversation loaded, each connector's
+  starter tools, then the rest), in the same order turn after turn so the
+  prompt cache holds. The model finds anything else with `tools.find`, which
+  loads up to 8 matching tools into the conversation
 - **Semantic caching** — caches identical queries to avoid duplicate API calls
 - **Accurate token estimation** — uses ~3.5 chars/token (not the broken 4.0 estimate that causes 47% undercounting)
 

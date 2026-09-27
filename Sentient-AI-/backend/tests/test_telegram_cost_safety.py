@@ -963,12 +963,13 @@ def test_core_tools_survive_a_large_connector():
         )
     ]
     active = ["google_workspace", "web", "reminders"]
-    offered = select_offered_tools(tools, active)
+    # A cap below the tool count (the default cap is 24 now).
+    offered = select_offered_tools(tools, active, max_tools=15)
     names = {t["name"] for t in offered}
     assert len(offered) == 15
     assert {"web.search", "web.fetch_page", "reminders.now"} <= names
     # Stable across calls (the cached request prefix depends on it).
-    assert offered == select_offered_tools(tools, active)
+    assert offered == select_offered_tools(tools, active, max_tools=15)
 
 
 @pytest.mark.asyncio

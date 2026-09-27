@@ -27,6 +27,9 @@ behaviour that is load-bearing.
 
 from __future__ import annotations
 
+import asyncio
+import ssl
+import threading
 from typing import Any, Iterable, Optional
 
 import httpcore
@@ -34,6 +37,32 @@ import httpx
 
 # (ascii host, port) -> addresses that passed the policy for it.
 PinTable = dict[tuple[str, int], tuple[str, ...]]
+
+_shared_ssl_context: Optional[ssl.SSLContext] = None
+_ssl_context_lock = threading.Lock()
+
+
+def shared_ssl_context() -> ssl.SSLContext:
+    """The one verifying TLS context every pinned transport uses.
+
+    httpx builds a fresh context (and reads the whole CA bundle from disk)
+    for each transport it creates, synchronously. Connectors, the OAuth
+    token client and the web tools create a client per call, so that cost
+    would land on the event loop every time. The context is built once and
+    shared; an ``SSLContext`` is safe to share, and pins stay per transport.
+    """
+    global _shared_ssl_context
+    if _shared_ssl_context is None:
+        with _ssl_context_lock:
+            if _shared_ssl_context is None:
+                _shared_ssl_context = httpx.create_ssl_context()
+    return _shared_ssl_context
+
+
+async def warm_ssl_context() -> None:
+    """Build the shared TLS context in a worker thread (call at startup),
+    so the CA bundle is never loaded on the event loop."""
+    await asyncio.to_thread(shared_ssl_context)
 
 
 class PinningUnavailable(Exception):
@@ -129,6 +158,7 @@ class PinnedHTTPTransport(httpx.AsyncHTTPTransport):
         network_backend: Optional[httpcore.AsyncNetworkBackend] = None,
         **kwargs: Any,
     ) -> None:
+        kwargs.setdefault("verify", shared_ssl_context())
         super().__init__(**kwargs)
         # httpx builds the httpcore pool itself and forwards no
         # ``network_backend``, so swapping it afterwards is the only way
@@ -161,8 +191,13 @@ def pin_for_request(
     """
     if not addresses:
         return
+    pins[pin_key(request)] = addresses
+
+
+def pin_key(request: httpx.Request) -> tuple[str, int]:
+    """The ``(ascii host, port)`` pin-table key for *request*'s origin."""
     from core.network_security import default_port_for_scheme
 
     host = request.url.raw_host.decode("ascii").lower()
     port = request.url.port or default_port_for_scheme(request.url.scheme)
-    pins[(host, port)] = addresses
+    return host, port

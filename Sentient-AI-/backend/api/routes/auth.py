@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Optional
 
@@ -23,9 +23,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, EmailStr, Field
+from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api.routes.oauth import session_factory_dependency
 from core.config import LLM_PROVIDERS, settings
 from core.database import get_db
 from core.security import (
@@ -37,9 +39,11 @@ from core.security import (
 from core.validation import MODEL_ID_RULES, SafeStr, is_valid_model_id, normalize_email
 from models.audit import AuditStatus
 from models.installation import INSTALLATION_ROW_ID, Installation
+from models.slack_link import SlackChannelLink
 from models.user import User
 from services.audit import append_auth_event
 from services.auth import get_current_user, login_lockout
+from services.connectors import oauth as oauth_broker
 
 logger = structlog.get_logger(__name__)
 
@@ -825,7 +829,11 @@ async def export_account(
             "connectors",
             lambda c: {
                 "display_name": c.display_name,
-                "connector_type": c.connector_type.value,
+                # A plain string column since 0011; the export keeps rows
+                # whose type is no longer registered, verbatim.
+                "connector_type": str(
+                    getattr(c.connector_type, "value", c.connector_type)
+                ),
                 "granted_scopes": c.granted_scopes,
                 "permission_tier": c.permission_tier.value,
                 "is_active": c.is_active,
@@ -865,9 +873,11 @@ async def export_account(
 
 @router.delete("/account", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_account(
+    request: Request,
     body: Optional[AccountDeleteRequest] = None,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    session_factory: Callable[[], AsyncSession] = Depends(session_factory_dependency),
 ) -> None:
     """Permanently delete the current user.
 
@@ -888,6 +898,11 @@ async def delete_account(
     same cascade that erases the account erases its audit chain. That is
     the correct outcome for an erasure request, so the durable record of
     the event is the application log, not a row that deletes itself.
+
+    Each connector's grant is revoked at its provider (best effort, in the
+    background) only after the deletion has committed; the credentials are
+    read before the cascade removes them. A revoke problem never blocks
+    the deletion.
     """
     supplied = body.current_password if body is not None else None
     if not supplied:
@@ -942,10 +957,81 @@ async def delete_account(
                 ),
             )
 
+    revocations = await _collect_revocations(db, current_user.id)
     logger.warning(
         "account_deleted",
         user_id=str(current_user.id),
         email=current_user.email,
     )
+    # The Slack DM links hold Slack user ids: removed explicitly, since a
+    # SQLite database without foreign key enforcement would keep them.
+    await db.execute(
+        sa_delete(SlackChannelLink).where(SlackChannelLink.user_id == current_user.id)
+    )
     await db.delete(current_user)
     await db.flush()
+    # Commit before any revoke: a failed commit must not leave a live
+    # account whose connectors' grants were already revoked.
+    await db.commit()
+    _reconcile_slack_channels(request)
+    for connector_type, credentials in revocations:
+        oauth_broker.schedule_revoke(
+            connector_type,
+            credentials,
+            user_id=current_user.id,
+            session_factory=session_factory,
+        )
+
+
+def _reconcile_slack_channels(request: Request) -> None:
+    """After an account is deleted, have the Slack manager stop that user's
+    DM channels (their sockets and tokens in memory) in the background. Best
+    effort: a failure to schedule is logged and never fails the request."""
+    manager = getattr(request.app.state, "slack_manager", None)
+    if manager is None:
+        return
+    try:
+        manager.schedule_reconcile()
+    except Exception as exc:
+        logger.warning("slack_reconcile_schedule_failed", error_type=type(exc).__name__)
+
+
+async def _collect_revocations(
+    db: AsyncSession, user_id: uuid.UUID
+) -> list[tuple[str, dict[str, Any]]]:
+    """``(connector_type, credentials)`` for each of the user's connectors
+    whose grant can be revoked at the provider, read before the cascade
+    deletes the rows. Best effort: a failure here is logged and never
+    blocks the account deletion.
+
+    A grant another user's connector still uses is skipped, and a token two
+    of this user's connectors share is revoked once."""
+    from api.routes.connectors import grant_markers, revocable_credentials, revoke_is_shared
+    from models.connector import ConnectorConfig, connector_type_key
+
+    try:
+        rows = (
+            await db.execute(select(ConnectorConfig).where(ConnectorConfig.user_id == user_id))
+        ).scalars().all()
+        revocations: list[tuple[str, dict[str, Any]]] = []
+        seen: set[tuple[str, frozenset[tuple[str, str]]]] = set()
+        for row in rows:
+            credentials = revocable_credentials(row)
+            if credentials is None:
+                continue
+            type_key = connector_type_key(row.connector_type)
+            tokens = frozenset(m for m in grant_markers(credentials) if m[0] == "token")
+            if (tokens and (type_key, tokens) in seen) or await revoke_is_shared(
+                db, type_key, credentials, exclude_user_id=user_id
+            ):
+                continue
+            seen.add((type_key, tokens))
+            revocations.append((type_key, credentials))
+        return revocations
+    except Exception as exc:
+        logger.error(
+            "account_delete_revoke_collection_failed",
+            user_id=str(user_id),
+            error_type=type(exc).__name__,
+        )
+        return []

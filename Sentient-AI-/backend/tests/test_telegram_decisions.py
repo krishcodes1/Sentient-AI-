@@ -32,6 +32,7 @@ from typing import Any, AsyncIterator, Optional
 
 import httpx
 import pytest
+import structlog
 
 from services.agent import cancel as agent_cancel
 from services.agent.providers import LLMResponse, ToolCall
@@ -891,6 +892,10 @@ async def test_stopping_the_bot_does_not_wait_forever_on_a_wedged_call(
         assert await _wait_for(executor.started.is_set)
         [chat_task] = service._chat_tasks[8282]
         with capture_logs() as logs:
+            # The app sets cache_logger_on_first_use, so a module logger an
+            # earlier test used after configure_logging() keeps its old
+            # processors and bypasses the capture; bind a fresh one inside it.
+            monkeypatch.setattr(tg, "logger", structlog.get_logger(tg.__name__))
             await asyncio.wait_for(service.stop(), 2.0)
         assert not chat_task.done()
         executor.release.set()

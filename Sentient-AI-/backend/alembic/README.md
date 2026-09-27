@@ -88,9 +88,35 @@ deployments differ. A follow-up revision can converge them:
 ALTER TABLE memories ALTER COLUMN source TYPE memory_source USING source::memory_source;
 ```
 
-The same applies to the `connector_type` enum: a stamped database has `mcp`
-appended last (from `ALTER TYPE ... ADD VALUE`), a fresh one has it in
-declaration order. Only the type's sort order differs; nothing reads it.
+The same applied to the `connector_type` enum: a stamped database had `mcp`
+appended last (from `ALTER TYPE ... ADD VALUE`), a fresh one had it in
+declaration order. Revision `0011_connector_type_string` removes that
+difference: it turns the column into `VARCHAR(64)` and drops the type on
+both kinds of database.
+
+## Connector revisions (0011 to 0014)
+
+These four came with the connectors work and follow the purchases
+revision, so the chain runs
+`0009_user_llm_nullable` -> `0010_vault_items` -> `0011` -> `0012` -> `0013` -> `0014`. Each one
+checks the live schema before changing it (like 0004 to 0009), because an
+adopted pre-Alembic database is built from the current models before it is
+stamped and upgraded, so the change may already be there.
+
+| Revision | What it does | Downgrade |
+|---|---|---|
+| `0011_connector_type_string` | `connector_configs.connector_type` goes from the `connector_type` ENUM to `VARCHAR(64)`. Postgres converts in place (`USING connector_type::text`) and then runs `DROP TYPE IF EXISTS connector_type`; SQLite rebuilds the table in a batch operation. | Recreates the enum with its original five labels (`canvas`, `google_workspace`, `robinhood`, `mcp`, `custom`), and refuses, changing nothing, while any row holds another type. Delete those connectors first. |
+| `0012_oauth_states` | Creates `oauth_states`, one row per connector sign-in (only the HMAC of `state` is stored, plus the encrypted PKCE verifier or device code), with indexes on `user_id` and `expires_at` and a unique one on `state_hash`. | Drops the table and its indexes. |
+| `0013_conversation_loaded_tools` | Adds the nullable JSON column `conversations.loaded_tools`: the tools `tools.find` loaded for that conversation. NULL means none, so no backfill. | Drops the column. |
+| `0014_slack_channel_links` | Creates `slack_channel_links`, one row per Slack connector with a DM link or a pending one-time code (only the code's HMAC is stored), with an index on `user_id` and a unique (`team_id`, `slack_user_id`) pair. | Drops the table and its index. |
+
+**Why the enum became a string.** Connectors are now declared in
+`services/connectors/registry.py`, and adding one must not need a schema
+change. The API validates `connector_type` against the registry instead.
+The Python `ConnectorType` enum stays for existing imports and
+comparisons: it is a `str` enum, and the model stores a member as its plain
+value. A row whose type is no longer registered is listed as unavailable
+rather than breaking a reader.
 
 ## Writing a new migration
 

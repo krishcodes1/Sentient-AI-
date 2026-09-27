@@ -60,14 +60,11 @@ export type PermissionTier =
   | "admin_only"
   | "hard_blocked";
 
-// "custom" is no longer creatable (the backend rejects it with 422) but
-// stays in the union so connectors created before that change still render.
-export type ConnectorType =
-  | "canvas"
-  | "google_workspace"
-  | "robinhood"
-  | "mcp"
-  | "custom";
+// A connector registry key (GET /connectors/types), "mcp", or a type stored
+// before its connector left the registry (the legacy "custom" among them).
+// The backend column is a plain string validated against the registry, so
+// the frontend keeps it open rather than listing the keys by hand.
+export type ConnectorType = string;
 
 export type AuthMethod = "oauth2" | "api_key" | "bearer_token";
 
@@ -83,6 +80,15 @@ export interface Connector {
   rate_limit_per_minute: number;
   created_at: string;
   updated_at: string;
+  /** False when this server can no longer use the row's type (its
+   * connector left the registry, or the legacy "custom"). Such a row is
+   * listed so it can be deleted and is never offered to the agent. Older
+   * servers omit it, which means available. */
+  available?: boolean;
+  /** True when the provider refused this sign-in's refresh token, so the
+   * user must Reconnect before the agent can use it. Cleared by a
+   * reconnect. Older servers omit it. */
+  needs_reconnect?: boolean;
 }
 
 export interface CreateConnectorRequest {
@@ -461,4 +467,114 @@ export interface ProviderChoice {
   model: string;
   /** Omitted when the server already holds the key. */
   api_key?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Connector catalog (GET /connectors/types), the OAuth broker (/oauth) and
+// Slack DM linking (/connectors/{id}/slack/link).
+// ---------------------------------------------------------------------------
+
+/** How a connector can be connected, in the order the UI should prefer. */
+export type ConnectorAuthKind = "oauth" | "device" | "token";
+
+/** One credential input of a pasted-token connector. */
+export interface ConnectorCredentialField {
+  key: string;
+  label: string;
+  type: "text" | "password" | "url";
+  required: boolean;
+  placeholder: string;
+  hint: string;
+}
+
+/** The most dangerous action category among the actions a scope unlocks. */
+export type ConnectorScopeCategory = "read" | "write" | "execute" | "delete";
+
+export interface ConnectorScopeInfo {
+  scope: string;
+  category: ConnectorScopeCategory;
+  /** Some action behind this scope always asks before running, whatever
+   * the connector's approval policy. */
+  always_confirm: boolean;
+  actions: string[];
+}
+
+export interface ConnectorAuthInfo {
+  methods: ConnectorAuthKind[];
+  fields: ConnectorCredentialField[];
+  /** The OAuth broker's URL segment, or null for token-only connectors. */
+  provider: string | null;
+  /** The server has a client id for this provider, so "oauth" and
+   * "device" can actually run. */
+  oauth_configured: boolean;
+  /** The auth_method to send when creating a pasted-token connector. */
+  token_auth_method: AuthMethod;
+  notes: string;
+}
+
+/** One entry of GET /connectors/types (backend registry.connector_types_payload). */
+export interface ConnectorTypeInfo {
+  key: string;
+  label: string;
+  description: string;
+  /** A kebab-case lucide icon name, e.g. "graduation-cap". */
+  icon: string;
+  docs_url: string;
+  creatable: boolean;
+  auth: ConnectorAuthInfo;
+  scopes: { read: ConnectorScopeInfo[]; write: ConnectorScopeInfo[] };
+}
+
+/** The connector a sign-in creates, or (with connector_id) reconnects. The
+ * broker asks for the union of a reconnected row's scopes and these. */
+export interface OAuthDraftRequest {
+  display_name?: string;
+  granted_scopes?: string[];
+  permission_tier?: PermissionTier;
+  rate_limit_per_minute?: number;
+  connector_id?: string;
+}
+
+export interface OAuthStartResponse {
+  flow_id: string;
+  authorization_url: string;
+  expires_at: string;
+}
+
+export interface OAuthDeviceResponse {
+  flow_id: string;
+  user_code: string;
+  verification_uri: string;
+  expires_at: string;
+  /** Seconds between polls. */
+  interval: number;
+}
+
+export type OAuthFlowState = "pending" | "complete" | "error" | "expired";
+
+export interface OAuthFlowStatus {
+  status: OAuthFlowState;
+  connector_id?: string;
+  error?: string;
+  user_code?: string;
+  verification_uri?: string;
+  expires_at?: string;
+  interval?: number;
+}
+
+export interface SlackLinkCode {
+  code: string;
+  expires_at: string;
+}
+
+export interface SlackLinkStatus {
+  linked: boolean;
+  team_id?: string | null;
+  slack_user_id?: string | null;
+  /** The DM channel for this connector's app token is connected. */
+  channel_running: boolean;
+  pending_code_expires_at?: string | null;
+  /** The connector holds an app-level token (xapp-), which linking needs.
+   * Absent from servers that predate the field. */
+  has_app_token?: boolean;
 }

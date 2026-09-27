@@ -58,6 +58,9 @@ class ReportContext:
     # and the container marker. "" when not gathered; a rule that needs it
     # then derives it from ``platform`` and ``in_container``.
     host_platform: str = ""
+    # For slack: at least one Slack DM channel (a Slack connector with an
+    # app-level token) is running in this process.
+    slack_configured: bool = False
 
 
 @dataclass(frozen=True)

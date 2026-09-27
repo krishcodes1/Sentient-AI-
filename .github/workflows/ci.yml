@@ -342,8 +342,10 @@ jobs:
       # No Chromium here (spec §11.1: Windows CI covers unit tests only);
       # the browser-backed tests skip themselves through the `page`/`kit`
       # fixtures, and the platform suite runs the Windows layer for real.
+      # The connector registry and connector suites are platform neutral:
+      # provider calls are mocked, and they need no database.
       - name: Unit tests
-        run: python -m pytest tests/test_platform.py tests/test_browser_snapshot.py tests/test_browser_session.py tests/test_browser_handoff.py tests/test_browser_guard.py tests/test_browser_runtime.py tests/test_capability_gating.py tests/test_capabilities_report.py -q -p no:cacheprovider
+        run: python -m pytest tests/test_platform.py tests/test_browser_snapshot.py tests/test_browser_session.py tests/test_browser_handoff.py tests/test_browser_guard.py tests/test_browser_runtime.py tests/test_capability_gating.py tests/test_capabilities_report.py tests/test_connector_registry.py tests/connectors/ -q -p no:cacheprovider
 
       - name: Types
         run: python -m mypy services/platform services/tools/browser

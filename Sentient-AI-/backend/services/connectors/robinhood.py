@@ -23,6 +23,8 @@ from typing import Any, Optional
 import httpx
 import structlog
 
+from services.agent.permissions import ActionCategory, PermissionTier
+
 from .base import (
     AuthenticationError,
     BaseConnector,
@@ -30,8 +32,50 @@ from .base import (
     HardBlockError,
     UserConfirmationRequired,
 )
+from .definition import (
+    AuthSpec,
+    ConnectorDefinition,
+    CredentialField,
+    NetworkSpec,
+    ToolSpec,
+    _schema,
+)
 
 logger = structlog.get_logger(__name__)
+
+
+# The tool catalog for Robinhood. execute_trade is declared (FINANCIAL) so
+# every layer can recognise and refuse it; it is never offered or run.
+ACTIONS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        "get_crypto_portfolio",
+        "View the Robinhood crypto portfolio (read-only).",
+        ActionCategory.READ,
+        required_scope="crypto.read",
+        starter=True,
+    ),
+    ToolSpec(
+        "get_crypto_prices",
+        "Get current prices for crypto symbols (read-only).",
+        ActionCategory.READ,
+        _schema(symbols={"type": "array", "items": {"type": "string"}, "required": True}),
+        required_scope="crypto.read",
+    ),
+    ToolSpec(
+        "get_crypto_holdings",
+        "View current crypto holdings (read-only).",
+        ActionCategory.READ,
+        required_scope="crypto.read",
+        starter=True,
+    ),
+    ToolSpec(
+        "execute_trade",
+        "Execute a crypto trade. Permanently blocked by platform policy.",
+        ActionCategory.FINANCIAL,
+        _schema(symbol={"type": "string", "required": True}, side={"type": "string", "required": True}),
+        required_scope="crypto.trade",
+    ),
+)
 
 # Actions that are permanently blocked -- no override possible.
 _HARD_BLOCKED_ACTIONS: frozenset[str] = frozenset(
@@ -88,6 +132,13 @@ class RobinhoodConnector(BaseConnector):
     @property
     def required_scopes(self) -> list[str]:
         return ["crypto.read"]
+
+    @classmethod
+    def from_credentials(
+        cls, credentials: dict[str, Any], *, timeout_s: Optional[float] = None
+    ) -> RobinhoodConnector:
+        """Build an instance; the key pair is read in ``authenticate``."""
+        return cls(timeout_s=timeout_s)
 
     # -- Authentication (API key + HMAC signing) -----------------------------
 
@@ -313,3 +364,41 @@ class RobinhoodConnector(BaseConnector):
             return resp.status_code < 500
         except Exception:
             return False
+
+
+DEFINITION = ConnectorDefinition(
+    key="robinhood",
+    label="Robinhood (read-only)",
+    description="Read-only view of your Robinhood crypto portfolio, holdings and prices. Trading is permanently blocked.",
+    icon="trending-up",
+    auth=AuthSpec(
+        methods=("token",),
+        fields=(
+            CredentialField("api_key", "API key", placeholder="Robinhood Crypto API key"),
+            CredentialField("api_secret", "API secret", placeholder="Robinhood Crypto API secret"),
+        ),
+        token_auth_method="api_key",
+        notes="Read-only API credentials. Trading is permanently blocked by the platform.",
+    ),
+    network=NetworkSpec(
+        policy_key="robinhood",
+        # Only the read-only endpoints the connector uses. Trading and order
+        # endpoints (e.g. /api/v1/crypto/trading/orders/) are deliberately
+        # absent, so the financial hard block holds at the network layer too.
+        hosts={
+            "trading.robinhood.com": (
+                "/api/v1/crypto/trading/accounts/",
+                "/api/v1/crypto/trading/holdings/",
+                "/api/v1/crypto/marketdata/",
+            ),
+        },
+        https_only=True,
+    ),
+    actions=ACTIONS,
+    connector_class=RobinhoodConnector,
+    docs_url="https://docs.robinhood.com/crypto/trading/",
+    financial_ok=True,
+    # Every Robinhood read shows financial data, so it keeps the approval
+    # card the hand-written policy row has always required.
+    policy_overrides={("robinhood", ActionCategory.READ): PermissionTier.USER_CONFIRM},
+)
