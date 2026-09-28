@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import date
+from typing import Any
 
 import pytest
 import structlog
@@ -29,6 +30,13 @@ NUMBER = "4242 4242 4242 4242"
 DIGITS = "4242424242424242"
 CVC = "123"
 CARD = {"label": "", "number": NUMBER, "exp_month": 12, "exp_year": 2099, "cvc": CVC, "name": "Krish Q"}
+# Fields a random value fills. The CVC is three digits, which an id or a
+# timestamp can hold by chance, so it is looked for only in the others.
+_RANDOM_FIELDS = frozenset({"id", "item_id", "created_at", "last_used_at", "timestamp"})
+
+
+def _card_text(fields: dict[str, Any]) -> str:
+    return str({k: v for k, v in fields.items() if k not in _RANDOM_FIELDS})
 
 
 @pytest.fixture
@@ -71,7 +79,20 @@ async def test_put_card_returns_a_masked_view(session_factory, vault):
     assert set(body) == {
         "id", "kind", "label", "origins", "masked", "brand", "last4", "created_at", "last_used_at"
     }
-    assert DIGITS not in repr(view) and CVC not in str(body)
+    assert DIGITS not in repr(view) and CVC not in _card_text(body)
+
+
+@pytest.mark.asyncio
+async def test_an_id_that_happens_to_hold_the_cvc_digits_is_no_leak(
+    session_factory, vault, monkeypatch
+):
+    # A CI run drew the item id 123be183-..., and "123" is this file's CVC:
+    # the check looked in the whole item and failed with no card data shown.
+    monkeypatch.setattr(uuid, "uuid4", lambda: uuid.UUID("123be183-d9fa-4c0a-ade7-47a9b13b8c4d"))
+    user = await _owner(session_factory)
+    body = (await vault.put_card(user, **CARD)).to_dict()
+    assert body["id"].startswith(CVC)
+    assert CVC not in _card_text(body) and DIGITS not in str(body)
 
 
 @pytest.mark.asyncio
@@ -238,7 +259,7 @@ async def test_open_card_decrypts_for_the_checkout_and_stamps_last_used(
     assert opened[0]["kind"] == "card" and opened[0]["label"] == "Blue Visa"
     assert opened[0]["purpose"] == "checkout shop.example.com"
     for event in capture:
-        assert DIGITS not in str(event) and CVC not in str(event) and "Krish" not in str(event)
+        assert DIGITS not in str(event) and CVC not in _card_text(event) and "Krish" not in str(event)
 
     secret.wipe()
     assert secret.number == "" and secret.cvc == ""
