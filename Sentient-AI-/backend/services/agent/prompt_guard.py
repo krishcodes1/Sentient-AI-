@@ -27,6 +27,7 @@ from __future__ import annotations
 import base64
 import re
 import unicodedata
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
@@ -145,6 +146,120 @@ def _mostly_printable(text: str) -> bool:
     return printable / len(text) >= 0.85
 
 
+class _ForwardSearch:
+    """The leftmost match of one pattern at or after a position, remembered.
+
+    The hidden-markup scanner asks each of these from positions that only
+    move forward, so a remembered answer stays good until the scan passes it
+    and no stretch of text is searched twice.
+    """
+
+    def __init__(self, pattern: re.Pattern[str], text: str) -> None:
+        self._pattern = pattern
+        self._text = text
+        self._searched_from: Optional[int] = None
+        self._found: Optional[re.Match[str]] = None
+
+    def at_or_after(self, pos: int) -> Optional[re.Match[str]]:
+        found = self._found
+        if (
+            self._searched_from is not None
+            and self._searched_from <= pos
+            and (found is None or found.start() >= pos)
+        ):
+            return found
+        self._searched_from = pos
+        self._found = self._pattern.search(self._text, pos)
+        return self._found
+
+
+class _HiddenMarkupScanner:
+    """Finds HTML comments, script and style blocks, markdown comment links
+    and display:none divs in time linear in the length of the text.
+
+    It replaced one regex with those alternatives, and on markup that closes
+    it returns exactly the spans that regex did. The regex searched to the
+    end of the text again from every opener that never closed, so a tool
+    result of repeated "<!--" took quadratic time and the display:none branch
+    cubic time (24 KB: 0.45 s and 83 s). Here each search is remembered, and
+    an opener that nothing closes is reported as hidden content running to
+    the end of the text, the way a browser renders an unclosed comment or
+    script.
+
+    It offers the findall/finditer pair PromptGuard uses on re.Pattern, so it
+    sits in the pattern table beside the regexes.
+    """
+
+    _OPENER = re.compile(
+        r"(?P<comment><!--)"
+        r"|<\s*(?:(?P<script>script)|(?P<style>style)|(?P<div>div\s+style\s*=\s*[\"']))"
+        r"|(?P<markdown>\[//\]:\s*#\s*\()",
+        re.IGNORECASE,
+    )
+    _TAG_END = re.compile(r">")
+    # One remembered search per step. A closer's step is named after its
+    # opener's group in _OPENER.
+    _STEPS: dict[str, re.Pattern[str]] = {
+        "comment": re.compile(r"-->"),
+        "script": re.compile(r"<\s*/\s*script\s*>", re.IGNORECASE),
+        "style": re.compile(r"<\s*/\s*style\s*>", re.IGNORECASE),
+        "markdown": re.compile(r"\)"),
+        "script_tag_end": _TAG_END,
+        "style_tag_end": _TAG_END,
+        "div_display_none": re.compile(r"display\s*:\s*none", re.IGNORECASE),
+        "div_quote": re.compile(r"[\"']"),
+        "div_tag_end": _TAG_END,
+    }
+    _WHOLE = re.compile(r".*", re.DOTALL)
+
+    def finditer(self, text: str) -> Iterator[re.Match[str]]:
+        searches = {step: _ForwardSearch(pattern, text) for step, pattern in self._STEPS.items()}
+        pos = 0
+        while (opener := self._OPENER.search(text, pos)) is not None:
+            end = self._region_end(opener, searches)
+            if end is None:
+                pos = opener.start() + 1
+                continue
+            # A real Match over the region, so callers handle it like a regex hit.
+            region = self._WHOLE.match(text, opener.start(), end)
+            if region is not None:
+                yield region
+            pos = end
+
+    def findall(self, text: str) -> list[str]:
+        return [region.group() for region in self.finditer(text)]
+
+    @staticmethod
+    def _region_end(
+        opener: re.Match[str], searches: dict[str, _ForwardSearch]
+    ) -> Optional[int]:
+        """Where the hidden region *opener* starts ends, or None when the
+        opener does not start one after all."""
+        kind = opener.lastgroup
+        if kind is None:  # never: every branch of _OPENER is a named group
+            return None
+        if kind == "div":
+            # The regex's lazy chain: display:none, then a quote, then ">".
+            display_none = searches["div_display_none"].at_or_after(opener.end())
+            if display_none is None:
+                return None
+            quote = searches["div_quote"].at_or_after(display_none.end())
+            if quote is None:
+                return None
+            tag_end = searches["div_tag_end"].at_or_after(quote.end())
+            return tag_end.end() if tag_end else None
+        body_start = opener.end()
+        if kind in ("script", "style"):
+            tag_end = searches[f"{kind}_tag_end"].at_or_after(body_start)
+            if tag_end is None:
+                # "<script" with no ">" after it never opens a block.
+                return None
+            body_start = tag_end.end()
+        closer = searches[kind].at_or_after(body_start)
+        # Nothing closes it, so everything after the opener is hidden.
+        return closer.end() if closer else len(opener.string)
+
+
 class PromptGuard:
     """Multi-layer prompt injection defense engine."""
 
@@ -152,7 +267,7 @@ class PromptGuard:
     # Layer 1 — Pattern matching
     # ------------------------------------------------------------------ #
 
-    _INJECTION_PATTERNS: list[tuple[str, re.Pattern, str]] = [
+    _INJECTION_PATTERNS: list[tuple[str, re.Pattern | _HiddenMarkupScanner, str]] = [
         (
             "ignore_instructions",
             re.compile(
@@ -202,14 +317,11 @@ class PromptGuard:
             "high",
         ),
         (
+            # A linear scanner rather than a regex: tool results are
+            # attacker-written, and the regex was quadratic on unclosed
+            # openers. See _HiddenMarkupScanner.
             "hidden_html_markdown",
-            re.compile(
-                r"<!--.*?-->|<\s*script[^>]*>.*?<\s*/\s*script\s*>|"
-                r"<\s*style[^>]*>.*?<\s*/\s*style\s*>|"
-                r"\[//\]:\s*#\s*\(.*?\)|"
-                r"<\s*div\s+style\s*=\s*[\"'].*?display\s*:\s*none.*?[\"'].*?>",
-                re.IGNORECASE | re.DOTALL,
-            ),
+            _HiddenMarkupScanner(),
             "medium",
         ),
         (
