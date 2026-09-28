@@ -1078,6 +1078,42 @@ async def test_create_provider_builds_ollama_without_a_key(transport):
     await provider.aclose()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("configured", "used"),
+    [
+        ("http://localhost:11434", "http://host.docker.internal:11434"),
+        ("http://127.0.0.1:11434/", "http://host.docker.internal:11434"),
+        ("http://[::1]:11434", "http://host.docker.internal:11434"),
+        ("http://LOCALHOST", "http://host.docker.internal"),
+        ("http://ollama.internal:11434", "http://ollama.internal:11434"),
+        ("http://192.168.1.20:11434", "http://192.168.1.20:11434"),
+    ],
+)
+async def test_ollama_on_localhost_means_the_computer_when_crawler_runs_in_docker(
+    monkeypatch, configured, used
+):
+    # The installer's backend/.env names localhost, which inside the
+    # backend's container is the container itself; the owner's Ollama runs
+    # on the computer. An address naming any other host is used as written.
+    from services.capabilities import env as crawler_env
+
+    monkeypatch.setattr(crawler_env, "in_container", lambda: True)
+    provider = create_provider("ollama", "llama3.2", api_key=None, base_url=configured)
+    assert provider._base_url == used
+    await provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_ollama_on_localhost_stays_localhost_outside_a_container(monkeypatch):
+    from services.capabilities import env as crawler_env
+
+    monkeypatch.setattr(crawler_env, "in_container", lambda: False)
+    provider = create_provider("ollama", "llama3.2", api_key=None, base_url="http://localhost:11434")
+    assert provider._base_url == "http://localhost:11434"
+    await provider.aclose()
+
+
 # ---------------------------------------------------------------------------
 # Vision: multimodal content blocks
 # ---------------------------------------------------------------------------

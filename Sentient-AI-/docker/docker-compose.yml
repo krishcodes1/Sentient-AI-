@@ -61,6 +61,11 @@ services:
       # header". This replaces any ALLOWED_HOSTS in backend/.env for this
       # stack; localhost/127.0.0.1 keep the published :8000 port working.
       ALLOWED_HOSTS: '["localhost","127.0.0.1","backend"]'
+    # The computer's own address, for an Ollama running on it: an
+    # OLLAMA_BASE_URL of localhost is sent here (providers.ollama_base_url).
+    # Docker Desktop has the name already; Linux needs the mapping.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       db:
         condition: service_healthy

@@ -32,6 +32,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 import structlog
@@ -1410,6 +1411,28 @@ class OllamaProvider(LLMProvider):
 # Factory
 # ---------------------------------------------------------------------------
 
+# Inside the backend's container, localhost is the container itself, while
+# the Ollama the owner runs is on the computer: Docker names that
+# host.docker.internal (Docker Desktop provides the name; docker-compose.yml
+# maps it on Linux). The installer's backend/.env says localhost, so without
+# this every Ollama call from the Docker install failed to connect.
+_DOCKER_HOST_NAME = "host.docker.internal"
+_LOOPBACK_NAMES = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})
+
+
+def ollama_base_url(configured: str) -> str:
+    """The Ollama address to call: *configured*, except that a loopback one
+    means the computer Docker runs on when Crawler runs in a container. An
+    address naming any other host is used as written."""
+    from services.capabilities import env as crawler_env
+
+    parsed = urlsplit(configured)
+    if (parsed.hostname or "").lower() not in _LOOPBACK_NAMES or not crawler_env.in_container():
+        return configured
+    netloc = _DOCKER_HOST_NAME if parsed.port is None else f"{_DOCKER_HOST_NAME}:{parsed.port}"
+    return urlunsplit(parsed._replace(netloc=netloc))
+
+
 PROVIDER_REGISTRY: dict[str, type[LLMProvider]] = {
     "anthropic": AnthropicProvider,
     "openai": OpenAIProvider,
@@ -1435,7 +1458,7 @@ def create_provider(
         raise ValueError(f"Unknown LLM provider: {provider_name!r}. Supported: {supported}")
 
     if provider_name == "ollama":
-        return OllamaProvider(base_url=base_url, model=model)
+        return OllamaProvider(base_url=ollama_base_url(base_url), model=model)
 
     if not api_key:
         raise ValueError(f"{provider_name.upper()}_API_KEY is required for the {provider_name} provider")

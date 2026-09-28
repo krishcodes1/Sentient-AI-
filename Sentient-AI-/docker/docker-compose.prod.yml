@@ -97,6 +97,11 @@ services:
       # Marks this as a container so the "See my screen" capability reports
       # unavailable instead of failing (backend/services/capabilities/env.py).
       CRAWLER_CONTAINER: "1"
+    # The computer's own address, for an Ollama running on it: an
+    # OLLAMA_BASE_URL of localhost is sent here (providers.ollama_base_url).
+    # Docker Desktop has the name already; Linux needs the mapping.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       db:
         condition: service_healthy

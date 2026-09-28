@@ -320,20 +320,19 @@ If you don't want to pay for API keys, use **Ollama** for free local AI:
    ollama pull llama3.2
    ```
 
-3. **Set in your `.env`**
-
-   Ollama runs on your host machine, not inside a container, so the URL
-   the backend needs depends on how the backend itself is running:
+3. **Pick Ollama in the setup wizard**, or set it in your `.env`:
 
    ```env
    LLM_PROVIDER=ollama
    LLM_MODEL=llama3.2
-   # Native run (Option 2/3/4 above): the backend reaches Ollama directly.
    OLLAMA_BASE_URL=http://localhost:11434
-   # Docker (Option 1): `localhost` inside the backend container is the
-   # container itself, not your Mac/PC — use Docker's host alias instead:
-   # OLLAMA_BASE_URL=http://host.docker.internal:11434
    ```
+
+   `localhost` works for a native run and under Docker alike: inside the
+   backend's container, Crawler sends a `localhost` Ollama address to
+   `host.docker.internal`, which is your Mac/PC. Point
+   `OLLAMA_BASE_URL` at another machine's address to use an Ollama that
+   runs there.
 
 4. Run the backend and frontend as described above. No API key needed.
 
@@ -503,7 +502,7 @@ it already has.
 | `DEEPSEEK_API_KEY` | If using Deepseek | Get from [platform.deepseek.com](https://platform.deepseek.com). Optional when using the wizard. |
 | `GROQ_API_KEY` | If using Groq | Get from [console.groq.com](https://console.groq.com). Optional when using the wizard. |
 | `MISTRAL_API_KEY` | If using Mistral | Get from [console.mistral.ai](https://console.mistral.ai). Optional when using the wizard. |
-| `OLLAMA_BASE_URL` | If using Ollama | Native run: `http://localhost:11434` (default). Under Docker, `localhost` means the backend container itself, not your host, so use `http://host.docker.internal:11434` instead. |
+| `OLLAMA_BASE_URL` | If using Ollama | `http://localhost:11434` (default). Under Docker a `localhost` address is sent to `host.docker.internal` (your Mac/PC), so the default works there too. |
 | `TELEGRAM_BOT_TOKEN` | No | Bot token from @BotFather for Telegram chat and approvals. Optional when using the wizard, which can save and test it instead; see [Permissions](#permissions). |
 | `OAUTH_REDIRECT_BASE` | No | Where providers send the browser back after sign-in: an `http(s)` origin with no path (default `http://127.0.0.1:3000`). Register `<OAUTH_REDIRECT_BASE>/api/oauth/callback/<provider>` with each OAuth app. See [`docs/connectors-setup.md`](docs/connectors-setup.md). |
 | `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET` | No | A Google OAuth client ("Desktop app" type) for **Sign in with Google**. Empty = that button is unavailable. |
