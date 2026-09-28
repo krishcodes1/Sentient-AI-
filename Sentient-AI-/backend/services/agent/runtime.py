@@ -348,9 +348,10 @@ class PrecheckRefusal:
     (``ToolExecutor.precheck_approval``).
 
     ``result`` is what the model is shown as the call's result, so it can
-    say what happened. ``reason`` and ``policy`` go on the blocked event,
-    the ``BlockedAction`` and the audit row; ``rule`` names the tool's own
-    rule (``blocked_app``, ``secure_field``) when it has one.
+    say what happened. ``reason`` and ``policy`` go on the audit row, and
+    on the blocked event and the ``BlockedAction`` when a rule refused the
+    call (``_is_rule_refusal``); ``rule`` names the tool's own rule
+    (``blocked_app``, ``secure_field``, ``stale_ref``) when it has one.
     """
 
     reason: str
@@ -1119,6 +1120,25 @@ def _user_stopped_row(user_id: str, tc: ToolCall, timestamp: str) -> dict[str, A
 # handled as a stop, never filed as a security block.
 _PRECHECK_STOPPED_RULE = "cancelled"
 
+# The rules a precheck answers when the call was wrong as sent rather than
+# refused: a ref the latest outline or page does not have, an act before any
+# look, arguments no action takes (a card's screen or page sent by the model
+# included). The model fixes them by looking again or resending, so they are
+# no security block. The browser toolkits mark them ``refused`` and the
+# computer toolkit does not, so they are told apart by rule name.
+_PRECHECK_FAILURE_RULES = frozenset({"stale_ref", "needs_observe", "invalid_arguments"})
+
+
+def _is_rule_refusal(precheck: PrecheckRefusal) -> bool:
+    """Whether a precheck answer is a rule refusing the call (a blocked app,
+    a password field, a payment step, a checkout over a cap): a ``refused``
+    result under any rule but ``_PRECHECK_FAILURE_RULES``. Only these go
+    into ``blocked_actions`` and the ``blocked`` event, which every channel
+    shows as a security block; anything else is the call's own error, kept
+    to its audit row and its result for the model."""
+    return precheck.result.get("refused") is True and precheck.rule not in _PRECHECK_FAILURE_RULES
+
+
 # Recorded for each tool call of a round that came after a call parked for
 # approval in that round. The turn ends on the card, so the model would never
 # see what those calls return, and a desktop.observe among them would replace
@@ -1407,7 +1427,10 @@ class ToolExecutor:
         usual. Asked before an approval card is made, so the owner is never
         asked to approve what cannot run. A check that must read storage
         (memory.remember: is memory on, is it full) answers with an
-        awaitable, which the runtime awaits. Must not run the tool or change
+        awaitable, which the runtime awaits. A result marked ``refused`` is a
+        security block unless its rule says the call was only wrong as sent
+        (a stale ref, no look yet, bad arguments: ``_is_rule_refusal``); any
+        other is the call's own error. Must not run the tool or change
         anything."""
         return None
 
@@ -2965,7 +2988,8 @@ class AgentRuntime:
 
                     # Refuse before the card what could never run: a call
                     # the tool's own hard rules forbid (desktop.act into
-                    # Terminal, onto a password field, on a stale ref).
+                    # Terminal, onto a password field), or one that fails as
+                    # sent (on a stale ref: the call's own error).
                     # Approving it could only end in the same refusal, and a
                     # card that cannot work teaches the owner to tap
                     # Approve. The model gets the refusal as the call's
@@ -2992,25 +3016,30 @@ class AgentRuntime:
                         skipped_calls = list(llm_response.tool_calls[index:])
                         break
                     if precheck is not None:
-                        blocked_actions.append(
-                            BlockedAction(
-                                tool_name=tc.name,
-                                reason=precheck.reason,
-                                policy=precheck.policy,
-                            )
-                        )
                         rule = {"rule": precheck.rule} if precheck.rule else {}
-                        await emit(
-                            {
-                                "type": "blocked",
-                                "data": {
-                                    "tool": tc.name,
-                                    "reason": precheck.reason,
-                                    "policy": precheck.policy,
-                                    **rule,
-                                },
-                            }
-                        )
+                        # Only a rule's refusal is a security block. A stale
+                        # ref, an act before any look or bad arguments is the
+                        # call's own error: audited and shown to the model,
+                        # which looks again (_is_rule_refusal).
+                        if _is_rule_refusal(precheck):
+                            blocked_actions.append(
+                                BlockedAction(
+                                    tool_name=tc.name,
+                                    reason=precheck.reason,
+                                    policy=precheck.policy,
+                                )
+                            )
+                            await emit(
+                                {
+                                    "type": "blocked",
+                                    "data": {
+                                        "tool": tc.name,
+                                        "reason": precheck.reason,
+                                        "policy": precheck.policy,
+                                        **rule,
+                                    },
+                                }
+                            )
                         # Nothing ran and nothing was parked, so the refusal
                         # stands whether or not the audit write succeeds.
                         try:

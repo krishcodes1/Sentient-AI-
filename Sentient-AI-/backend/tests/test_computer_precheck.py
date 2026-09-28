@@ -1,8 +1,12 @@
 """Tests for refusing a blocked desktop.act before its approval card: the runtime
 asks the executor's precheck_approval before it parks a call, and an act the
 computer toolkit's own hard rules refuse (a blocked app or key combo, a password
-field, a stale ref) gets no approval row, a blocked event and an audit row
-under computer_rule, and the refusal as its result for the model to explain.
+field) gets no approval row, a blocked event and an audit row under
+computer_rule, and the refusal as its result for the model to explain. An act
+that fails there as the call's own error (a stale ref, no outline yet, bad
+arguments) gets no card and keeps its audit row, but is no security block: no
+blocked event, nothing in blocked_actions, so no channel reports one, and the
+model is shown the error and looks again.
 Stop, even when the toolkit is first to see it, skips the act as a stop, never
 as a block. An allowed act is parked exactly as before, a precheck that fails
 refuses the call, and an approved act still meets every rule again when it
@@ -248,6 +252,27 @@ async def assert_refused_before_the_card(
         assert response.content == EXPLAINED
 
 
+async def assert_failed_before_the_card(turn: Turn, response, rule: str, says: str) -> None:
+    # No approval row, no card, nothing sent to the desktop.
+    assert response.pending_approvals == []
+    assert await turn.store.list_pending(U1) == []
+    assert turn.of_type("pending_approval") == []
+    assert turn.fake.events == []
+    # The call's own error, not a security block: no blocked event and
+    # nothing in blocked_actions, which every channel shows as one.
+    assert turn.of_type("blocked") == [] and response.blocked_actions == []
+    # Its audit row still names what it failed on.
+    assert turn.audit.events_for(ACT) == ["tool_blocked"]
+    [row] = [e for e in turn.audit.entries if e.get("tool") == ACT]
+    assert row["policy"] == COMPUTER_RULE_POLICY and row["rule"] == rule
+    assert says in row["reason"]
+    # The error is the call's result: the model was shown it and answered.
+    [acted] = [tr for tr in response.tool_calls if tr["name"] == ACT]
+    assert acted["result"]["ok"] is False and says in acted["result"]["error"]
+    assert says in turn.shown_to_model()
+    assert response.content == EXPLAINED
+
+
 # ── refused before the card ──────────────────────────────────────────────────
 
 
@@ -330,11 +355,68 @@ async def test_a_stale_ref_never_reaches_a_card():
     response = await turn.run(
         OBSERVE, call("t2", ACT, action="click", ref="d999"), LLMResponse(content=EXPLAINED)
     )
-    await assert_refused_before_the_card(
+    await assert_failed_before_the_card(
         turn, response, "stale_ref", "d999 is not in the latest outline"
     )
     [acted] = [tr for tr in response.tool_calls if tr["name"] == ACT]
     assert acted["result"]["stale_ref"] is True  # the toolkit's own hint to observe again
+
+
+@pytest.mark.asyncio
+async def test_after_a_stale_ref_the_model_looks_again_and_gets_its_card():
+    # Seen live on Telegram: a turn that acted on a ref from an outline that
+    # was no longer the latest ended with "Blocked by security policy:
+    # desktop.act". The model is told instead, looks again, and its act on
+    # the fresh ref gets a card; nothing in the turn is a security block.
+    twin = toolkit(mail_desktop())
+    sends = [
+        ref_of(await twin.execute("observe", {"action": "outline"}, user_id=U1), 'button "Send"')
+        for _ in range(3)
+    ]
+    turn = Turn(mail_desktop())
+    response = await turn.run(
+        OBSERVE,
+        call("t2", "desktop.observe", action="outline"),
+        call("t3", ACT, action="click", ref=sends[0]),  # from the first outline
+        call("t4", "desktop.observe", action="outline"),
+        call("t5", ACT, action="click", ref=sends[2]),
+        LLMResponse(content="never asked: the turn ends on the card"),
+    )
+    [pending] = response.pending_approvals
+    assert pending.reason == 'Click "Send" in Mail'
+    assert turn.of_type("blocked") == [] and response.blocked_actions == []
+    [stale] = [tr for tr in response.tool_calls if tr["tool_call_id"] == "t3"]
+    assert stale["result"]["stale_ref"] is True
+    assert "Call desktop.observe again" in str(turn.model.calls[3])
+    assert turn.audit.events_for(ACT) == ["tool_blocked", "tool_pending_approval"]
+    assert turn.fake.events == []
+
+
+@pytest.mark.asyncio
+async def test_a_telegram_reply_after_a_stale_ref_names_no_block(session_factory):
+    # The Telegram poller lists the channel turn's "blocked" tools under
+    # "Blocked by security policy" (_with_turn_notes); a stale ref is not one.
+    from api.routes.agent import build_chat_applier
+    from main import app
+    from services.notifications.telegram import _with_turn_notes
+    from tests.conftest import make_user
+
+    user, _ = await make_user(session_factory)
+    turn = Turn(mail_desktop())
+    use_provider(
+        turn.runtime,
+        Script(OBSERVE, call("t2", ACT, action="click", ref="d999"), LLMResponse(content=EXPLAINED)),
+    )
+    saved = getattr(app.state, "agent_runtime", None)
+    app.state.agent_runtime = turn.runtime
+    try:
+        outcome = await build_chat_applier(app, session_factory=session_factory)(
+            str(user.id), "Send the email in Mail."
+        )
+    finally:
+        app.state.agent_runtime = saved
+    assert outcome["blocked"] == [] and outcome["pending_approvals"] == []
+    assert _with_turn_notes(outcome["content"], outcome) == EXPLAINED
 
 
 @pytest.mark.asyncio
@@ -343,7 +425,7 @@ async def test_acting_before_any_outline_never_reaches_a_card():
     response = await turn.run(
         call("t2", ACT, action="click", ref="d1"), LLMResponse(content=EXPLAINED)
     )
-    await assert_refused_before_the_card(turn, response, "needs_observe", "Look first")
+    await assert_failed_before_the_card(turn, response, "needs_observe", "Look first")
 
 
 @pytest.mark.asyncio
@@ -352,7 +434,7 @@ async def test_invalid_arguments_never_reach_a_card():
     response = await turn.run(
         call("t2", ACT, action="drag", ref="d1"), LLMResponse(content=EXPLAINED)
     )
-    await assert_refused_before_the_card(
+    await assert_failed_before_the_card(
         turn, response, "invalid_arguments", "action must be one of"
     )
 
@@ -919,7 +1001,7 @@ async def test_a_screen_sent_by_the_model_never_reaches_a_card():
         calls(("t2", ACT, {"action": "key", "keys": "enter", CARD_KEY: forged})),
         LLMResponse(content=EXPLAINED),
     )
-    await assert_refused_before_the_card(
+    await assert_failed_before_the_card(
         turn, response, "invalid_arguments", f"does not take {CARD_KEY}"
     )
 
@@ -1307,7 +1389,9 @@ async def test_an_executor_refusal_is_filed_under_its_own_policy():
     # The hook is generic: whatever policy and rule the executor names are
     # what the event and the audit row carry.
     refusal = PrecheckRefusal(
-        reason="Not today.", policy="some_rule", result={"ok": False, "error": "Not today."}
+        reason="Not today.",
+        policy="some_rule",
+        result={"ok": False, "refused": True, "error": "Not today."},
     )
     executor = _Answering(refusal)
     audit = RecordingAudit()
@@ -1325,6 +1409,57 @@ async def test_an_executor_refusal_is_filed_under_its_own_policy():
     [row] = audit.entries
     assert row["event"] == "tool_blocked" and "rule" not in row
     assert executor.dispatched == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("result", "rule", "blocks"),
+    [
+        ({"ok": False, "refused": True, "error": "Not today."}, "blocked_app", True),
+        ({"ok": False, "refused": True, "error": "Not today."}, "", True),
+        # Not refused: the call's own error, whatever its rule.
+        ({"ok": False, "error": "Not today."}, "some_check", False),
+        ({"ok": False, "error": "Not today."}, "", False),
+        # Refused under a rule that only says the call was wrong as sent
+        # (the browser toolkits mark these refused; the computer's do not).
+        ({"ok": False, "refused": True, "error": "Not today."}, "stale_ref", False),
+        ({"ok": False, "refused": True, "error": "Not today."}, "needs_observe", False),
+        ({"ok": False, "refused": True, "error": "Not today."}, "invalid_arguments", False),
+    ],
+)
+async def test_only_a_rule_refusal_is_a_security_block(result, rule, blocks):
+    refusal = PrecheckRefusal(reason="Not today.", policy="some_rule", result=result, rule=rule)
+    executor = _Answering(refusal)
+    audit = RecordingAudit()
+    runtime, store = _parking_runtime(executor, audit)
+    model = Script(call("t1", "x.y"), LLMResponse(content="ok"))
+    use_provider(runtime, model)
+    events: list[dict[str, Any]] = []
+
+    async def sink(event: dict[str, Any]) -> None:
+        events.append(event)
+
+    response = await runtime.chat(
+        messages=[{"role": "user", "content": "go"}],
+        tools=[Tool(name="x.y", description="x", parameters={}, permission_tier="approval")],
+        user_id=U1,
+        event_sink=sink,
+    )
+    # Either way: no card, nothing run, the audit row, the answer for the model.
+    assert response.pending_approvals == [] and await store.list_pending(U1) == []
+    assert executor.dispatched == []
+    [row] = audit.entries
+    assert row["event"] == "tool_blocked" and row["policy"] == "some_rule"
+    assert row.get("rule", "") == rule
+    assert "Not today." in "\n".join(str(m.get("content")) for m in model.calls[-1])
+    blocked = [e["data"] for e in events if e["type"] == "blocked"]
+    if blocks:
+        assert response.blocked_actions == [
+            BlockedAction(tool_name="x.y", reason="Not today.", policy="some_rule")
+        ]
+        assert [b["policy"] for b in blocked] == ["some_rule"]
+    else:
+        assert response.blocked_actions == [] and blocked == []
 
 
 @pytest.mark.asyncio

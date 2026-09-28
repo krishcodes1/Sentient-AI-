@@ -714,6 +714,28 @@ async def test_a_full_memory_gets_no_card(session_factory):
 
 
 @pytest.mark.asyncio
+async def test_a_memory_already_saved_is_the_calls_own_answer_not_a_block(session_factory):
+    # A duplicate refuses nothing: no card, and nothing shown as blocked by
+    # security policy; the model is told it is already saved.
+    user, _ = await make_user(session_factory, email="mem-e2e-dup@example.com")
+    uid = str(user.id)
+    async with session_factory() as session:
+        session.add(Memory(user_id=user.id, content=GOOD["content"], source=MemorySource.user))
+        await session.commit()
+    runtime, store = _runtime(session_factory)
+
+    response, model, events = await _turn(
+        runtime, uid, _remember(**GOOD), LLMResponse(content="Already saved.")
+    )
+
+    assert response.pending_approvals == [] and await store.list_pending(uid) == []
+    assert [e for e in events if e["type"] == "blocked"] == []
+    assert response.blocked_actions == []
+    shown = "\n".join(str(m.get("content")) for m in model.calls[-1])
+    assert "already in the user's saved memories" in shown
+
+
+@pytest.mark.asyncio
 async def test_injection_shaped_text_gets_no_card(session_factory):
     user, _ = await make_user(session_factory, email="mem-e2e-inject@example.com")
     uid = str(user.id)

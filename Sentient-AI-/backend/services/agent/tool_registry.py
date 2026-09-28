@@ -1453,6 +1453,12 @@ COMPUTER_RULE_POLICY = "computer_rule"
 # (memory off, full, a duplicate, a secret, text the Memory API's screen
 # rejects). The toolkit's rule name (memory_off, memory_full ...) rides along.
 MEMORY_RULE_POLICY = "memory_rule"
+# The memory toolkit's answers that are a rule refusing the call, so the
+# runtime shows them as blocked (runtime._is_rule_refusal): the owner's
+# memory switch, the limit, and the screens for injected instructions and
+# secrets. Its other answers (bad or over-long arguments, a duplicate,
+# storage that is down) are the call's own result, shown to the model only.
+_MEMORY_REFUSAL_RULES = frozenset({"memory_off", "memory_full", "memory_screen", "secret"})
 # A watch.* call whose arguments could never run (a URL that is not http(s),
 # an interval under the minimum, arguments too long for the card), refused
 # before its approval card.
@@ -2087,11 +2093,14 @@ class ConnectorToolExecutor:
         result = await self._memory.precheck("remember", arguments, user_id)
         if result is None:
             return None
+        rule = str(result.get("rule") or "invalid_arguments")
+        if rule in _MEMORY_REFUSAL_RULES:
+            result = {**result, "refused": True}
         return PrecheckRefusal(
             reason=str(result.get("error") or "memory.remember was refused."),
             policy=MEMORY_RULE_POLICY,
             result=result,
-            rule=str(result.get("rule") or "invalid_arguments"),
+            rule=rule,
         )
 
     def _watch_precheck(

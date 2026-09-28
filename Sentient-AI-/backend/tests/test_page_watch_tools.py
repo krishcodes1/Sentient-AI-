@@ -1095,9 +1095,10 @@ async def test_a_create_that_could_never_run_gets_no_card():
         watches=watches,
     )
     assert watches.calls == [] and response.pending_approvals == []
-    assert [(b.tool_name, b.policy) for b in response.blocked_actions] == [
-        ("watch.create", WATCH_RULE_POLICY)
-    ]
+    # An interval under the minimum is the call's own error (its rule is
+    # invalid_arguments), not a security block: no card and no blocked
+    # notice, but still an audit row, and the model is told why.
+    assert response.blocked_actions == []
     blocked = [e for e in audit.entries if e.get("event") == "tool_blocked"]
     assert blocked and blocked[0]["policy"] == WATCH_RULE_POLICY
 

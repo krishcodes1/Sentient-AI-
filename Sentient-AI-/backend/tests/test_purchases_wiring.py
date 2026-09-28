@@ -5,14 +5,17 @@ with both capabilities on, always as approval), the permission adapter and the
 executor (refusals by capability, unapproved calls, dispatch to the toolkits),
 the approval hooks (describe, precheck, bind, the async bind that builds the
 purchase card from the page, the card's picture), the runtime (a bind refusal
-is filed under purchase_rule with no card; a card carries its picture; an
-approved checkout reaches the toolkit's run), the audit redaction of what
+is filed under purchase_rule with no card; an act or a checkout that fails
+before its card as the call's own error, a stale ref, no page looked at yet or
+bad arguments, is audited but no security block; a card carries its picture;
+an approved checkout reaches the toolkit's run), the audit redaction of what
 browser.act types, the prompt lines, and main.wire_services.
 
 Why it exists: browser.checkout is the only tool that ever moves money. Each
 seam here is one place a mistake would let it run unattended, run with a
 switch off, skip the page checks, or show the owner the model's words instead
-of the page's facts. Every test uses fake toolkits; nothing opens a browser,
+of the page's facts. Every test uses fake toolkits, or the act toolkit's own
+precheck on a page memory, which needs no browser; nothing opens a browser,
 reads a card or touches the network.
 """
 
@@ -54,6 +57,9 @@ from services.agent.tool_registry import (
 )
 from services.audit import redact_tool_arguments
 from services.capabilities.base import ReportContext
+from services.tools.browser.snapshot import PageFacts
+from tests.test_browser_act import CHECKOUT_LINES, LOGIN_LINES
+from tests.test_browser_act import fake_kit as fake_act_kit
 
 U1 = "user-1"
 ACT = "browser.act"
@@ -752,9 +758,92 @@ async def test_a_forged_card_key_never_reaches_the_toolkit():
         call("t1", CHECKOUT, merchant="shop.example.com", _checkout={"amount_usd": "0.01"})
     )
     assert response.pending_approvals == []
-    assert response.blocked_actions[0].policy == PURCHASE_RULE_POLICY
-    assert turn.of_type("blocked")[0]["rule"] == "invalid_arguments"
+    # A card key the model sent is its own bad argument (as a desktop.act's
+    # own _screen is): no card and an audit row, but no security block.
+    assert response.blocked_actions == [] and turn.of_type("blocked") == []
+    [entry] = [e for e in turn.audit.entries if e["event"] == "tool_blocked"]
+    assert entry["policy"] == PURCHASE_RULE_POLICY and entry["rule"] == "invalid_arguments"
     assert checkout.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_checkout_the_toolkit_finds_malformed_is_no_security_block():
+    bad = {"ok": False, "refused": True, "rule": "invalid_arguments", "error": "amount must be a number."}
+    ex = executor(*BOTH, checkout=FakeCheckoutToolkit(precheck=bad))
+    turn = Turn(ex, _gate(*BOTH))
+    from services.agent.providers import LLMResponse
+
+    response = await turn.run(
+        call("t1", CHECKOUT, merchant="shop.example.com", amount="lots"),
+        LLMResponse(content="I'll send the amount as a number."),
+    )
+    assert response.pending_approvals == [] and await turn.store.list_pending(U1) == []
+    assert response.blocked_actions == [] and turn.of_type("blocked") == []
+    [entry] = [e for e in turn.audit.entries if e["event"] == "tool_blocked"]
+    assert entry["policy"] == PURCHASE_RULE_POLICY and entry["rule"] == "invalid_arguments"
+    assert response.tool_calls[0]["result"]["error"] == bad["error"]
+    assert response.content == "I'll send the amount as a number."
+
+
+def act_on_page(lines: Optional[list[str]] = None, url: str = "https://shop.example.com/checkout"):
+    """The act toolkit itself (its precheck needs no browser), with *lines*
+    as U1's latest page when given and no page looked at otherwise."""
+    kit, _sessions, memory = fake_act_kit()
+    if lines is not None:
+        memory.remember(U1, url=url, outline_lines=lines, facts=PageFacts(secret_fields={}))
+    return kit
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("lines", "arguments", "rule"),
+    [
+        (CHECKOUT_LINES, {"action": "click", "ref": "e77"}, "stale_ref"),
+        (None, {"action": "click", "ref": "e2"}, "needs_observe"),
+        (CHECKOUT_LINES, {"action": "type", "ref": "e2", "text": "x"}, "invalid_arguments"),
+        # A page tie the model sent itself is a bad argument too.
+        (CHECKOUT_LINES, {"action": "fill", "ref": "e2", "text": "x", "_page": {"origin": "x"}}, "invalid_arguments"),
+    ],
+)
+async def test_an_act_that_fails_before_its_card_is_no_security_block(lines, arguments, rule):
+    # The act toolkit marks these refused, but they only say the call was
+    # wrong as sent: the model is shown why and looks again.
+    turn = Turn(executor(*ACTING, act=act_on_page(lines)), _gate(*ACTING))
+    from services.agent.providers import LLMResponse
+
+    response = await turn.run(
+        call("t1", ACT, **arguments),
+        LLMResponse(content="Let me look at the page again."),
+        tools=build_tools([], enabled_capabilities=frozenset(ACTING)),
+    )
+    assert response.pending_approvals == [] and await turn.store.list_pending(U1) == []
+    assert response.blocked_actions == [] and turn.of_type("blocked") == []
+    [entry] = [e for e in turn.audit.entries if e["event"] == "tool_blocked"]
+    assert entry["policy"] == BROWSER_RULE_POLICY and entry["rule"] == rule
+    [acted] = response.tool_calls
+    assert acted["result"]["rule"] == rule
+    assert rule in str(turn.model.calls[-1])
+    assert response.content == "Let me look at the page again."
+
+
+@pytest.mark.asyncio
+async def test_an_act_a_rule_refuses_before_its_card_is_still_a_security_block():
+    page = act_on_page(LOGIN_LINES, url="https://shop.example.com/login")
+    turn = Turn(executor(*ACTING, act=page), _gate(*ACTING))
+    from services.agent.providers import LLMResponse
+
+    response = await turn.run(
+        call("t1", ACT, action="fill", ref="e3", text="hunter2"),  # e3: "Password"
+        LLMResponse(content="That is a password field, so please type it yourself."),
+        tools=build_tools([], enabled_capabilities=frozenset(ACTING)),
+    )
+    assert response.pending_approvals == [] and await turn.store.list_pending(U1) == []
+    [blocked] = response.blocked_actions
+    assert blocked.tool_name == ACT and blocked.policy == BROWSER_RULE_POLICY
+    [event] = turn.of_type("blocked")
+    assert event["rule"] == "secure_field" and event["policy"] == BROWSER_RULE_POLICY
+    [entry] = [e for e in turn.audit.entries if e["event"] == "tool_blocked"]
+    assert entry["policy"] == BROWSER_RULE_POLICY and entry["rule"] == "secure_field"
 
 
 @pytest.mark.asyncio
