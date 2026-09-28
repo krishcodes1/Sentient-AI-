@@ -939,6 +939,35 @@ class MistralProvider(OpenAICompatibleProvider):
 # ---------------------------------------------------------------------------
 
 
+def _gemini_schema(schema: Any) -> Any:
+    """*schema* as Gemini's functionDeclarations read it: one ``type`` per
+    schema, so a JSON Schema list of types (``["string", "null"]``), which
+    Gemini rejects for the whole request ("Proto field is not repeating"),
+    becomes ``anyOf`` over its types, with ``null`` as ``nullable``. Nested
+    properties, items and anyOf are converted the same way; everything else
+    is passed as written. Returns a copy."""
+    if not isinstance(schema, dict):
+        return schema
+    out = dict(schema)
+    if isinstance(out.get("properties"), dict):
+        out["properties"] = {name: _gemini_schema(sub) for name, sub in out["properties"].items()}
+    if "items" in out:
+        out["items"] = _gemini_schema(out["items"])
+    if isinstance(out.get("anyOf"), list):
+        out["anyOf"] = [_gemini_schema(sub) for sub in out["anyOf"]]
+    kinds = out.get("type")
+    if isinstance(kinds, list):
+        del out["type"]
+        types = [kind for kind in kinds if kind != "null"]
+        if "null" in kinds:
+            out["nullable"] = True
+        if len(types) == 1:
+            out["type"] = types[0]
+        elif types and "anyOf" not in out:
+            out["anyOf"] = [{"type": kind} for kind in types]
+    return out
+
+
 class GeminiProvider(LLMProvider):
     """Google Gemini via the REST API."""
 
@@ -1075,7 +1104,9 @@ class GeminiProvider(LLMProvider):
             function_declarations.append({
                 "name": t["name"],
                 "description": t.get("description", ""),
-                "parameters": t.get("parameters", {"type": "object", "properties": {}}),
+                "parameters": _gemini_schema(
+                    t.get("parameters", {"type": "object", "properties": {}})
+                ),
             })
         return [{"functionDeclarations": function_declarations}]
 

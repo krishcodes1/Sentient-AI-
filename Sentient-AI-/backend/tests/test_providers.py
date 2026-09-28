@@ -815,6 +815,46 @@ async def test_gemini_payload_carries_all_system_messages_roles_and_tools(transp
 
 
 @pytest.mark.asyncio
+async def test_gemini_gets_a_list_of_types_as_anyof(transport):
+    # Gemini's functionDeclarations take one type per schema: a JSON Schema
+    # list (Sheets cell values) failed the whole request with "Proto field
+    # is not repeating, cannot start list", so every turn that offered the
+    # tool broke. The same schema reaches the other providers unchanged.
+    transport.responder = lambda request: httpx.Response(
+        200, json={"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}
+    )
+    cells = {"type": ["string", "number", "boolean", "null"]}
+    rows = {
+        "type": "object",
+        "properties": {
+            "values": {"type": "array", "items": {"type": "array", "items": cells}},
+            "note": {"type": ["string", "null"], "description": "optional"},
+        },
+        "required": ["values"],
+    }
+    provider = GeminiProvider(api_key="AIza-secret")
+
+    await provider.complete(
+        [{"role": "user", "content": "add a row"}],
+        tools=[{"name": "sheets.append_rows", "description": "append", "parameters": rows}],
+    )
+
+    sent = transport.last_payload["tools"][0]["functionDeclarations"][0]["parameters"]
+    assert sent["properties"]["values"]["items"]["items"] == {
+        "anyOf": [{"type": "string"}, {"type": "number"}, {"type": "boolean"}],
+        "nullable": True,
+    }
+    assert sent["properties"]["note"] == {
+        "type": "string",
+        "nullable": True,
+        "description": "optional",
+    }
+    assert sent["required"] == ["values"]
+    assert cells == {"type": ["string", "number", "boolean", "null"]}  # not changed in place
+    await provider.aclose()
+
+
+@pytest.mark.asyncio
 async def test_gemini_stream_yields_text_and_skips_unparseable_lines(transport):
     body = "\n".join(
         [
