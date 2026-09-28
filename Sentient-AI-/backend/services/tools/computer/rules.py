@@ -181,11 +181,15 @@ def crawler_window(title: str) -> bool:
 
 # A desktop.act card in one of these apps offers "Allow <app> for 7 days"
 # (services/agent/app_approvals.py; spec 2026-09-25-weekly-app-approvals):
-# everyday apps whose data stays on this computer and that have no store, so
-# an act nobody looked at can neither spend money nor send anything in the
-# owner's name. Browsers, mail and chat apps, file managers, stores (App
-# Store, and the media apps that sell), Shortcuts and anything that runs
-# other programs are never here, and every act in them keeps its own card.
+# everyday apps whose data stays on this computer and that have no store.
+# Some can still send in the owner's name (Calendar answers invitations; a
+# share sheet sends), so an allowed app only lets Crawler look around in it
+# without a card (``app_approvals.weekly_covers``): typing, and any click on
+# a control that changes or sends something, keeps its card. Text editors
+# are not here: their Save sheet writes any file (a shell's startup file
+# included). Browsers, mail and chat apps, file managers, stores (App Store,
+# and the media apps that sell), Shortcuts and anything that runs other
+# programs are never here, and every act in them keeps its own card.
 # Display name → the squashed whole names (``squash``) the app is reported
 # under: the bundle's file name on macOS, the executable's file description
 # or stem on Windows.
@@ -203,8 +207,6 @@ _WEEKLY_APPS: dict[str, tuple[str, ...]] = {
     "Maps": ("maps", "windowsmaps"),
     "Photos": ("photos", "microsoftphotos"),
     "Preview": ("preview",),
-    "TextEdit": ("textedit",),
-    "Notepad": ("notepad", "windowsnotepad"),
     "Paint": ("paint", "mspaint"),
     "Freeform": ("freeform",),
 }

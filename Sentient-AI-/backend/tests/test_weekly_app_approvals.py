@@ -362,6 +362,7 @@ async def test_apps_with_nothing_allowed_says_how_to_allow_one(
 
 @pytest.mark.asyncio
 async def test_unlinking_telegram_revokes_its_approvals(client, session_factory, backend_ready):
+    from models.audit import AuditLog
     from tests.conftest import make_user
 
     user, token = await make_user(session_factory, "wk-unlink@example.com")
@@ -372,6 +373,16 @@ async def test_unlinking_telegram_revokes_its_approvals(client, session_factory,
         response = await client.delete("/api/telegram/link", headers=auth_headers(token))
     assert response.status_code == 204
     assert [a.id for a in await store.list_active(str(user.id))] == [web.id]
+    # Audited, as a revoke from the web or /apps is.
+    async with session_factory() as session:
+        rows = (
+            (await session.execute(select(AuditLog).where(AuditLog.user_id == user.id)))
+            .scalars()
+            .all()
+        )
+    [revoked] = [r.reasoning_chain for r in rows]
+    assert revoked["event"] == "app_approval_revoked"
+    assert revoked["revoked_from"] == "telegram_unlink" and revoked["count"] == 1
 
 
 # ── the web app ──────────────────────────────────────────────────────────────

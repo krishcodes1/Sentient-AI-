@@ -59,8 +59,9 @@ export default function WeeklyAppButton({
         Allow {app} for 7 days
       </button>
       <p id={hintId} className="text-xs mt-1.5" style={{ color: "var(--text-muted)" }}>
-        Crawler then acts in {app} without asking, for requests from this browser, for 7 days.
-        Revoke in Settings.
+        Crawler then scrolls and clicks around in {app} without asking, for requests from this
+        browser, for 7 days. Typing, and buttons that change or send something, still ask. Revoke
+        in Settings.
       </p>
     </div>
   );

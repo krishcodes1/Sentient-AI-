@@ -906,12 +906,14 @@ async def test_bind_records_the_latest_outline_and_reads_nothing():
     screen = card.pop(CARD_KEY)
     assert card == {"action": "click", "ref": send}
     assert screen["app"] == "Mail" and re.fullmatch(r"[0-9a-f]{12}", screen["outline"])
+    # The element the ref names, for a weekly approval's scope.
+    assert screen["target"] == {"role": "button", "name": "Send"}
     # A value the call itself carried is replaced, never kept.
     forged = kit.bind(
         {"action": "key", "keys": "enter", CARD_KEY: {"app": "Messages", "outline": "x"}},
         user_id=U1,
     )
-    assert forged[CARD_KEY] == screen
+    assert forged[CARD_KEY] == {"app": "Mail", "outline": screen["outline"]}
     assert fake.events == [] and fake.reads == []
     # Every outline gets a new id; another user's card is tied to their own.
     await observe(kit)

@@ -255,8 +255,9 @@ def _approval_keyboard(action_id: str, weekly_app: Optional[str] = None) -> dict
 def _weekly_line(weekly_app: str) -> str:
     """What a card that offers the week says about it."""
     return (
-        f"Or allow {weekly_app} for 7 days: Crawler then acts in {weekly_app} "
-        "without a card for requests from this chat. /apps lists and revokes."
+        f"Or allow {weekly_app} for 7 days: Crawler then scrolls and clicks around in "
+        f"{weekly_app} without a card for requests from this chat; typing, and buttons "
+        "that change or send something, still ask. /apps lists and revokes."
     )
 
 
@@ -993,7 +994,10 @@ class TelegramService:
             )
             return
         here = Channel.telegram(chat_id)
-        lines = ["Crawler acts in these apps without a card, until the date shown:", ""]
+        lines = [
+            "Crawler scrolls and clicks around in these apps without a card, until the date shown:",
+            "",
+        ]
         buttons: list[list[dict[str, str]]] = []
         for approval in approvals:
             if approval.holds_for(here):

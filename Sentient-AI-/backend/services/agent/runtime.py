@@ -42,6 +42,8 @@ from services.agent.app_approvals import (
     InMemoryAppApprovalStore,
     WeeklyApproval,
     weekly_app_for,
+    weekly_arguments,
+    weekly_covers,
 )
 from services.agent.approvals import (
     ApprovalStore,
@@ -324,7 +326,8 @@ class PendingApproval:
 @dataclass(frozen=True)
 class _WeeklyRun:
     """A desktop.act a weekly app approval covers: the approval, and the
-    arguments to run it with (bound to the screen, as a card's would be)."""
+    arguments to run it with (bound to the screen, as a card's would be, and
+    marked as run with no tap: ``app_approvals.weekly_arguments``)."""
 
     approval: WeeklyApproval
     arguments: dict[str, Any]
@@ -993,13 +996,16 @@ def _stored_to_pending(action: StoredAction, image: Optional[str] = None) -> Pen
 
 def _weekly_audit_fields(weekly: Optional[_WeeklyRun]) -> dict[str, Any]:
     """What an act's audit rows add when a weekly app approval ran it: the
-    approval's id and app, so the log shows which acts ran without a card."""
+    approval's id, app, channel (telegram or web) and expiry, so the log
+    shows which acts ran without a card, and on whose say-so."""
     if weekly is None:
         return {}
     return {
         "approval": "weekly",
         "app_approval_id": weekly.approval.id,
         "app": weekly.approval.app,
+        "channel": weekly.approval.channel_kind,
+        "expires_at": weekly.approval.expires_at.isoformat(),
     }
 
 
@@ -2214,7 +2220,9 @@ class AgentRuntime:
         the arguments to run it with, or None: the call then goes to its card
         as usual. Only a desktop.act, only one the toolkit's own checks do
         not refuse (the card path refuses those, before any card), bound to
-        the screen as its card would be, and only in an app on the weekly
+        the screen as its card would be, only one that just looks around in
+        the app (``weekly_covers``: typing, and a click that could change or
+        send something, keep their card), and only in an app on the weekly
         list that the owner allowed from this same chat or browser. A store
         that fails answers None: a card, never an act nobody allowed."""
         if channel is None or tool_name != WEEKLY_APPROVAL_TOOL:
@@ -2223,7 +2231,7 @@ class AgentRuntime:
             return None
         bound = await self._approval_arguments(tool_name, arguments, user_id, task_id=task_id)
         app = weekly_app_for(tool_name, bound)
-        if app is None:
+        if app is None or not weekly_covers(bound):
             return None
         try:
             approval = await self._app_approvals.find(user_id=user_id, app=app, channel=channel)
@@ -2234,7 +2242,7 @@ class AgentRuntime:
             return None
         if approval is None or not approval.holds_for(channel):
             return None
-        return _WeeklyRun(approval=approval, arguments=bound)
+        return _WeeklyRun(approval=approval, arguments=weekly_arguments(bound))
 
     async def _record_weekly_use(self, weekly: _WeeklyRun) -> None:
         """Count an act a weekly approval ran (the Settings list shows when

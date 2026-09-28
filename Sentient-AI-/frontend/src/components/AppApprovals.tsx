@@ -80,8 +80,9 @@ export default function AppApprovals() {
         Apps allowed for a week
       </h3>
       <p className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
-        Crawler acts in these apps without asking, only for requests from the browser or Telegram
-        chat that allowed each one. Revoke one to get approval cards for it again.
+        Crawler scrolls and clicks around in these apps without asking, only for requests from the
+        browser or Telegram chat that allowed each one; typing, and buttons that change or send
+        something, still ask. Revoke one to get approval cards for it again.
       </p>
 
       {loadError ? (

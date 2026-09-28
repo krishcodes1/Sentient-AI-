@@ -44,7 +44,7 @@ const ASK = "What am I doing on the 15th?";
 const UNTIL = "2026-10-02T15:14:00Z";
 const ALLOW = "Allow Calendar for 7 days";
 const HELPER =
-  "Crawler then acts in Calendar without asking, for requests from this browser, for 7 days. Revoke in Settings.";
+  "Crawler then scrolls and clicks around in Calendar without asking, for requests from this browser, for 7 days. Typing, and buttons that change or send something, still ask. Revoke in Settings.";
 
 const ME = {
   id: "u1",

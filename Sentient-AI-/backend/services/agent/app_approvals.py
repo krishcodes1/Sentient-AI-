@@ -6,9 +6,11 @@ Why it exists: every desktop.act had its own approval card, and every card
 ends the turn; the task resumes after the tap as a new turn that sends the
 whole conversation to the model again. Reading one day in Calendar took six
 taps and about 129k tokens (spec 2026-09-25-weekly-app-approvals). With an
-app allowed, its acts run at once, in the same turn, under every toolkit rule
-and the taint gate, until the week is up; then the next act raises a normal
-card that offers the week again.
+app allowed, its acts that only look around in it (``weekly_covers``) run at
+once, in the same turn, under every toolkit rule and the taint gate, until the
+week is up; then the next act raises a normal card that offers the week again.
+Typing, and any click or key that could change or send something, keeps its
+card: nobody looks at an act a weekly approval runs.
 
 Tied to a channel (``Channel``): a Telegram approval holds only for turns from
 the same Telegram chat (the linked private chat, which is all the bot
@@ -37,8 +39,9 @@ from typing import Any, Callable, Literal, Mapping, Optional, Protocol
 
 import structlog
 
+from services.tools.computer import keys as keymod
 from services.tools.computer import rules
-from services.tools.computer.toolkit import CARD_KEY
+from services.tools.computer.toolkit import CARD_KEY, WEEKLY_MARK
 
 logger = structlog.get_logger(__name__)
 
@@ -55,6 +58,30 @@ DEVICE_HEADER = "X-Crawler-Device"
 _DEVICE_ID = re.compile(r"[A-Za-z0-9_-]{16,100}")
 # desktop.act actions that name their app themselves.
 _APP_ACTIONS = frozenset({"open_app", "focus_window"})
+# What a weekly approval covers (``weekly_covers``): looking around in the
+# app. Keys that move through a view, bare or with cmd (Calendar's next and
+# previous period).
+_NAV_KEYS = frozenset({"up", "down", "left", "right", "pageup", "pagedown", "home", "end"})
+_NAV_KEY_MODIFIERS = frozenset({"cmd"})
+# Elements a click only selects or shows: a day, a row, a tab, a view.
+_NAV_ROLES = frozenset(
+    {"cell", "row", "list", "table", "tab", "radio button", "text", "static text", "image"}
+)
+# Buttons that only move through a view ("Next month", "Today", "Week").
+_NAV_BUTTON = re.compile(
+    r"(?:go\s+)?(?:next|previous|prev|back|today)(?:\s+(?:day|week|month|year|page))?"
+    r"|day|week|month|year|zoom\s+(?:in|out)",
+    re.IGNORECASE,
+)
+# Names of controls that change or send something, whatever their role: a
+# weekly approval never clicks one ("Decline" on an invitation mails the
+# organizer).
+_CONSEQUENTIAL = re.compile(
+    r"\b(?:send|share|invit\w*|accept|decline|maybe|tentative|reply|forward|delete|remove"
+    r"|trash|erase|save|export|print|publish|post|submit|confirm|buy|pay|purchase|order"
+    r"|subscribe|sign|call|facetime|message|e-?mail|upload|attach|install|allow)\b",
+    re.IGNORECASE,
+)
 
 ChannelKind = Literal["telegram", "web"]
 CHANNEL_KINDS: tuple[str, ...] = ("telegram", "web")
@@ -132,6 +159,52 @@ def weekly_app_for(tool_name: str, arguments: Any) -> Optional[str]:
     in an app on ``rules.WEEKLY_APPS``. *arguments* are the card's (bound)."""
     app = target_app(tool_name, arguments)
     return rules.weekly_app(app) if app else None
+
+
+def weekly_covers(arguments: Any) -> bool:
+    """True when a weekly app approval may run this (bound) desktop.act with
+    no card: it only looks around in the app. Scrolling; opening or
+    switching to the app (the toolkit then leaves alone a front app that may
+    be taking a password); navigation keys; and a click by ref on an element
+    that only selects or shows something (a day cell, a row, a tab, a
+    "Next month" button), as ``bind`` recorded it (``target``). Never
+    ``type``, a click by coordinates, or a click on anything named like a
+    control that changes or sends something (Send, Decline, Delete, Save).
+    Nobody looks at these acts, and a click by ref carries no text the
+    taint gate could match, so everything else keeps its card."""
+    if not isinstance(arguments, Mapping):
+        return False
+    action = arguments.get("action")
+    if action == "scroll" or action in _APP_ACTIONS:
+        return True
+    if action == "key":
+        try:
+            combo = keymod.parse_combo(arguments.get("keys"))
+        except keymod.KeyComboError:
+            return False
+        return combo.key in _NAV_KEYS and combo.modifiers <= _NAV_KEY_MODIFIERS
+    if action not in ("click", "double_click") or not isinstance(arguments.get("ref"), str):
+        return False
+    screen = arguments.get(CARD_KEY)
+    target = screen.get("target") if isinstance(screen, Mapping) else None
+    if not isinstance(target, Mapping):
+        return False
+    role, name = target.get("role"), target.get("name")
+    if not isinstance(role, str) or not isinstance(name, str):
+        return False
+    role, name = role.strip().lower(), name.strip()
+    if _CONSEQUENTIAL.search(name):
+        return False
+    return role in _NAV_ROLES or (role == "button" and bool(_NAV_BUTTON.fullmatch(name)))
+
+
+def weekly_arguments(arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """*arguments* (bound, as a card's) marked as run by a weekly approval
+    (``WEEKLY_MARK`` on the screen): the toolkit then never brings the app
+    forward, since no tap came just before the act."""
+    screen = arguments.get(CARD_KEY)
+    marked = {**(screen if isinstance(screen, Mapping) else {}), WEEKLY_MARK: True}
+    return {**arguments, CARD_KEY: marked}
 
 
 def _key(app: str) -> str:

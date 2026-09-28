@@ -208,9 +208,15 @@ dispatch, so the LLM cannot smuggle its own consent.
 **Weekly app approvals** (`services/agent/app_approvals.py`, spec
 `docs/superpowers/specs/2026-09-25-weekly-app-approvals-design.md`): a
 `desktop.act` card in an app on `rules.WEEKLY_APPS` (Calendar, Reminders,
-Notes, Contacts, Clock, Calculator and similar local apps with no store) also
-offers "Allow <app> for 7 days". Pressing it approves the card and lets later
-acts in that one app run without a card, until the week is up. The approval
+Notes, Contacts, Clock, Calculator and similar local apps with no store; no
+text editors) also offers "Allow <app> for 7 days". Pressing it approves the
+card and lets later acts in that one app that only look around in it
+(scrolling, switching to it, navigation keys, clicks on cells, tabs and
+buttons like "Next month") run without a card, until the week is up. Typing,
+and clicks on anything that changes or sends something (Send, Decline,
+Share, Delete, Save), keep their card. Such an act never brings its app
+forward, and never switches apps while the owner may be typing a password
+in the front app. The approval
 is tied to the channel it was given from: the linked Telegram chat (checked
 again against the account's linked chat on every turn), or one browser, by a
 random device id the web app sends as `X-Crawler-Device` and the server keeps

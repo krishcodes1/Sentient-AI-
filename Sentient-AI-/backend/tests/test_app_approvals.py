@@ -25,9 +25,11 @@ from services.agent.app_approvals import (
     InMemoryAppApprovalStore,
     target_app,
     weekly_app_for,
+    weekly_arguments,
+    weekly_covers,
 )
 from services.tools.computer import rules
-from services.tools.computer.toolkit import CARD_KEY
+from services.tools.computer.toolkit import CARD_KEY, WEEKLY_MARK
 
 T0 = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
 TG = Channel.telegram(9101)
@@ -58,7 +60,6 @@ class Clock:
         ("Contacts", "Contacts"),
         ("Microsoft Sticky Notes", "Sticky Notes"),
         ("CalculatorApp.exe", "Calculator"),
-        ("Notepad", "Notepad"),
         ("Microsoft Photos", "Photos"),
         ("Clock", "Clock"),
     ],
@@ -91,6 +92,9 @@ def test_everyday_local_apps_can_be_allowed_for_a_week(name, display):
         "Finder",
         "File Explorer",
         "Shortcuts",
+        # text editors: their Save sheet writes any file (~/.zshrc, Startup)
+        "TextEdit",
+        "Notepad",
         # blocked apps nothing can approve
         "Terminal",
         "1Password",
@@ -126,6 +130,68 @@ def test_the_target_app_is_the_named_app_or_the_bound_screens():
     moved = {"action": "open_app", "app": "Safari", CARD_KEY: {"app": "Calendar", "outline": ""}}
     assert target_app("desktop.act", moved) == "Safari"
     assert target_app("browser.act", {"action": "click", "app": "Calendar"}) is None
+
+
+def _click(role: str, name: str, action: str = "click") -> dict:
+    screen = {"app": "Calendar", "outline": "ab", "target": {"role": role, "name": name}}
+    return {"action": action, "ref": "d4", CARD_KEY: screen}
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"action": "scroll", "direction": "down"},
+        {"action": "open_app", "app": "Calendar"},
+        {"action": "focus_window", "app": "Calendar"},
+        {"action": "key", "keys": "pagedown"},
+        {"action": "key", "keys": "cmd+right"},
+        _click("cell", "September 15"),
+        _click("button", "Next month"),
+        _click("button", "Today"),
+        _click("radio button", "Week"),
+        _click("row", "Dentist 10:00", action="double_click"),
+    ],
+)
+def test_a_weekly_approval_covers_looking_around(arguments):
+    assert weekly_covers(arguments) is True
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        # typing, and keys that confirm, save or open
+        {"action": "type", "text": "Jordan", "ref": "d4"},
+        {"action": "key", "keys": "enter"},
+        {"action": "key", "keys": "cmd+s"},
+        {"action": "key", "keys": "cmd+shift+s"},
+        {"action": "key", "keys": "ctrl+right"},
+        # controls that answer, send, share, delete or save
+        _click("button", "Decline"),
+        _click("button", "Send"),
+        _click("button", "Add Invitees"),
+        _click("menu item", "Share"),
+        _click("cell", "Delete event"),
+        _click("button", "Save"),
+        # anything not known to only show something
+        _click("button", "Done"),
+        _click("link", "Join meeting"),
+        _click("checkbox", "Completed"),
+        # a click with no element behind it
+        {"action": "click", "x": 10, "y": 10, CARD_KEY: {"app": "Calendar", "outline": "ab"}},
+        {"action": "click", "ref": "d4", CARD_KEY: {"app": "Calendar", "outline": "ab"}},
+        {"action": "click", "ref": "d4"},
+        "not a mapping",
+    ],
+)
+def test_a_weekly_approval_never_covers_typing_or_a_consequential_control(arguments):
+    assert weekly_covers(arguments) is False
+
+
+def test_a_weekly_run_is_marked_on_its_screen():
+    bound = _click("cell", "September 15")
+    marked = weekly_arguments(bound)
+    assert marked[CARD_KEY] == {**bound[CARD_KEY], WEEKLY_MARK: True}
+    assert WEEKLY_MARK not in bound[CARD_KEY]
 
 
 def test_weekly_app_for_is_desktop_act_on_the_list_only():

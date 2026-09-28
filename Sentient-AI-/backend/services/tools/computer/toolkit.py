@@ -30,6 +30,10 @@ approved act runs only while that screen holds (rule ``screen_changed``) and
 only with that tie (rule ``unbound_approval``). When another app took the front
 while the card waited (the Approve tap itself, on this computer), the approved
 act brings its app forward before the live rules run (``_bring_forward``).
+An act a weekly app approval runs (``WEEKLY_MARK`` on its screen) had no tap
+before it, so the owner may be typing anywhere: it never brings its app
+forward, and it switches apps only while the app in front is not one where
+they may be typing a password (``_check_front_free``).
 """
 
 from __future__ import annotations
@@ -131,6 +135,10 @@ _OWNER_STEP = "The owner can do this step themselves."
 # under (see ``ComputerToolkit.bind``). No action takes it, so a call that
 # carries it is refused before any card; only an approved act reads it.
 CARD_KEY = "_screen"
+# Set on that screen by the runtime (never by ``bind``) when a weekly app
+# approval runs the act (services.agent.app_approvals): nobody tapped
+# anything just before it, so it never takes the front on its own.
+WEEKLY_MARK = "weekly"
 _SCREEN_CHANGED = "The screen changed since this was approved. Look again first."
 _UNBOUND = (
     "This approval does not say which screen it was made for, so nothing was done. "
@@ -421,7 +429,8 @@ class ComputerToolkit:
         """Run ``desktop.observe`` or ``desktop.act``. Never raises.
 
         ``approved`` means the act comes from an approval card the owner
-        accepted (the executor's own flag, never the model's). It then runs
+        accepted (the executor's own flag, never the model's), or from a
+        weekly app approval (``WEEKLY_MARK`` on the screen). It then runs
         only with the screen that card was made from under ``CARD_KEY``
         (see ``bind``), and only while that screen holds."""
         return await asyncio.to_thread(self._execute, action_family, params, user_id, approved)
@@ -464,13 +473,23 @@ class ComputerToolkit:
         of *user_id*'s latest outline, both empty when there is none),
         replacing anything the call itself put there. The executor asks it
         when the call is parked; the approved act then runs only on that
-        screen. Calls no backend."""
+        screen. A ref that the outline holds adds its element's role and
+        name (``target``), which say whether a weekly app approval covers a
+        click on it (services.agent.app_approvals). Calls no backend."""
+        params = dict(params or {})
         snapshot = self._snapshot(user_id)
-        screen = {
+        screen: dict[str, Any] = {
             "app": snapshot.app if snapshot else "",
             "outline": snapshot.outline if snapshot else "",
         }
-        return {**dict(params or {}), CARD_KEY: screen}
+        ref = params.get("ref")
+        node = snapshot.refs.get(ref) if snapshot and isinstance(ref, str) else None
+        if node is not None:
+            screen["target"] = {
+                "role": clean_text(node.role, 40),
+                "name": clean_text(node.name, 200),
+            }
+        return {**params, CARD_KEY: screen}
 
     def precheck(
         self, params: Optional[Mapping[str, Any]], *, user_id: str
@@ -763,14 +782,18 @@ class ComputerToolkit:
         request = _parse_act(params)
         self._check_cancel(user_id)
         snapshot = self._snapshot(user_id)
+        weekly = approved and isinstance(card, Mapping) and card.get(WEEKLY_MARK) is True
         if approved:
             self._check_card(request, snapshot, card)
         # Static rules: no backend call of any kind before these pass.
         request = self._static_rules(request, snapshot)
         self._preflight()
-        if request.action not in _APP_ACTIONS:
+        if request.action in _APP_ACTIONS:
+            if weekly:
+                self._check_front_free(request)
+        else:
             assert snapshot is not None  # _static_rules refuses input without one
-            if approved:
+            if approved and not weekly:
                 self._bring_forward(snapshot)
             self._live_rules(request, snapshot)
         # The last word before input is sent: the user may have hit Stop
@@ -870,6 +893,35 @@ class ComputerToolkit:
                 if rules.same_app(self._frontmost()[0], snapshot.app):
                     return
                 time.sleep(_BRING_FORWARD_POLL_S)
+
+    def _check_front_free(self, request: _Request) -> None:
+        """An open_app or focus_window a weekly app approval runs takes the
+        front from whatever the owner is using, with no tap just before it.
+        Refused (rule ``owner_busy``) when that may be a password: a blocked
+        app other than Crawler's own (the login window, a terminal, a
+        password manager), a focused password field, or a front app or
+        focused element that cannot be read. Nothing is refused when the app
+        is in front already. Sends no input."""
+        front_app, _ = self._frontmost()
+        if front_app and rules.same_app(front_app, request.app):
+            return
+        blocked = rules.blocked_app(front_app) if front_app else None
+        busy = not front_app or (blocked is not None and blocked != rules.CRAWLER_APP)
+        if not busy:
+            try:
+                focused = self._backend.focused()
+            except Exception as exc:
+                _log_failure("computer_focused_failed", exc)
+                focused = None
+            busy = focused is None or rules.looks_secure(focused)
+        if busy:
+            what = _label(front_app) if front_app else "The app in front"
+            raise _Refused(
+                "owner_busy",
+                f"{what} is in front and may be taking a password, so Crawler did not switch "
+                f"to {_label(request.app)} on its own. Ask the owner to switch, or try again "
+                "once they are done there.",
+            )
 
     def _live_rules(self, request: _Request, snapshot: _Snapshot) -> None:
         """Rules that need the screen as it is now. They read (frontmost app,

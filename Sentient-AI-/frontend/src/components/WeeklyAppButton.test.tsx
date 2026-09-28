@@ -27,7 +27,7 @@ const CARD: PendingApproval = {
 
 const ALLOW = "Allow Calendar for 7 days";
 const HELPER =
-  "Crawler then acts in Calendar without asking, for requests from this browser, for 7 days. Revoke in Settings.";
+  "Crawler then scrolls and clicks around in Calendar without asking, for requests from this browser, for 7 days. Typing, and buttons that change or send something, still ask. Revoke in Settings.";
 
 describe("WeeklyAppButton", () => {
   it.each([undefined, null, "", "   "])("renders nothing when weekly_app is %j", (weekly_app) => {
@@ -53,7 +53,7 @@ describe("WeeklyAppButton", () => {
     );
 
     expect(screen.getByRole("button", { name: "Allow Reminders for 7 days" })).toBeInTheDocument();
-    expect(screen.getByText(/^Crawler then acts in Reminders without asking/)).toBeInTheDocument();
+    expect(screen.getByText(/^Crawler then scrolls and clicks around in Reminders without asking/)).toBeInTheDocument();
   });
 
   it("reports a press, and none while the card is busy or expired", () => {

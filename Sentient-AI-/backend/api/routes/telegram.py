@@ -26,7 +26,9 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database import get_db
+from models.audit import AuditStatus
 from models.user import User
+from services.audit import append_audit_log
 from services.auth import get_current_user
 
 logger = structlog.get_logger(__name__)
@@ -102,18 +104,45 @@ async def remove_telegram_link(
     """Unlink this account's Telegram chat (approvals stop being pushed).
     The apps allowed for a week from Telegram end with the link
     (services.agent.app_approvals), so linking the same chat again later
-    does not bring them back."""
+    does not bring them back; that is audited (``app_approval_revoked``)
+    as every other revoke is."""
+    user_id = current_user.id
     current_user.telegram_chat_id = None
     current_user.telegram_link_code = None
     current_user.telegram_link_expires_at = None
     await db.flush()
     runtime = getattr(request.app.state, "agent_runtime", None)
-    if runtime is not None:
-        try:
-            await runtime.app_approvals.revoke_channel(
-                user_id=str(current_user.id), kind="telegram"
-            )
-        except Exception as exc:
-            # Unlinked either way: a Telegram approval only holds while its
-            # chat is the linked one (api/routes/agent.linked_channel).
-            logger.warning("telegram_unlink_app_approvals_not_revoked", error=str(exc)[:200])
+    if runtime is None:
+        return
+    try:
+        revoked = await runtime.app_approvals.revoke_channel(user_id=str(user_id), kind="telegram")
+    except Exception as exc:
+        # Unlinked either way: a Telegram approval only holds while its
+        # chat is the linked one (api/routes/agent.linked_channel).
+        logger.warning("telegram_unlink_app_approvals_not_revoked", error=str(exc)[:200])
+        return
+    if not revoked:
+        return
+    # The unlink is committed first, so an audit row that cannot be written
+    # (best effort, as every revoke's: it only takes permissions away)
+    # never undoes it.
+    await db.commit()
+    try:
+        await append_audit_log(
+            db,
+            user_id=user_id,
+            connector_name="desktop",
+            action="act",
+            endpoint="/api/telegram/link",
+            scope_used="desktop",
+            status=AuditStatus.approved,
+            reasoning_chain={
+                "event": "app_approval_revoked",
+                "channel": "telegram",
+                "count": revoked,
+                "revoked_from": "telegram_unlink",
+            },
+        )
+    except Exception as exc:
+        await db.rollback()
+        logger.error("telegram_unlink_revoke_audit_failed", error=str(exc)[:200])

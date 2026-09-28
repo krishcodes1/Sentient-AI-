@@ -14,6 +14,8 @@ keeps the databases that already ran it bootable.
 
 from __future__ import annotations
 
+import pytest
+
 from pathlib import Path
 
 import sqlalchemy as sa
@@ -37,7 +39,9 @@ def _inspect(db_path: Path):
     return engine, sa.inspect(engine)
 
 
-HEAD = "0015_merge_page_watches"
+PAGE_WATCH_MERGE = "0015_merge_page_watches"
+# The single head: the page-watch merge and 0015_app_approvals, joined.
+HEAD = "0016_merge_app_approvals"
 
 
 def _versions(db_path: Path) -> list[str]:
@@ -57,10 +61,24 @@ def test_0011_keeps_its_parent_and_the_merge_is_the_only_head():
     revision = script.get_revision("0011_page_watches")
     assert revision is not None
     assert revision.down_revision == "0009_user_llm_nullable"
-    merge = script.get_revision(HEAD)
+    merge = script.get_revision(PAGE_WATCH_MERGE)
     assert merge is not None
     assert merge.down_revision == ("0014_slack_channel_links", "0011_page_watches")
+    head = script.get_revision(HEAD)
+    assert head is not None
+    assert head.down_revision == (PAGE_WATCH_MERGE, "0015_app_approvals")
     assert script.get_heads() == [HEAD]
+
+
+@pytest.mark.parametrize("first", [PAGE_WATCH_MERGE, "0015_app_approvals"])
+def test_either_0015_line_run_first_reaches_the_single_head(tmp_path, first):
+    # Page watch and weekly app approvals were built in parallel on 0014; a
+    # database that ran either one first still reaches head with no manual step.
+    db_path = tmp_path / "either.db"
+    config = _config(db_path)
+    command.upgrade(config, first)
+    command.upgrade(config, "head")
+    assert _versions(db_path) == [HEAD]
 
 
 def test_upgrade_creates_the_table_and_downgrade_removes_only_it(tmp_path):
@@ -83,8 +101,8 @@ def test_upgrade_creates_the_table_and_downgrade_removes_only_it(tmp_path):
     finally:
         engine.dispose()
 
-    command.upgrade(config, "head")
-    assert _versions(db_path) == [HEAD]
+    command.upgrade(config, PAGE_WATCH_MERGE)
+    assert _versions(db_path) == [PAGE_WATCH_MERGE]
     engine, inspector = _inspect(db_path)
     try:
         assert set(inspector.get_table_names()) == before | {"page_watches"}

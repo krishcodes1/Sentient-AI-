@@ -43,6 +43,10 @@ owner asked for. It never happens:
   put the rest of it into the approved app. Those are refused as before;
 - when the front app cannot be read;
 - for an act nobody approved (every `desktop.act` needs `approved=True`);
+- for an act a weekly approval runs (§3): no tap came just before it, so the owner may
+  be typing anywhere, a browser's password field included. It is refused
+  (`frontmost_changed`) when another app is in front, and the model can ask for
+  `focus_window`, which §3.3 guards;
 - for `open_app` and `focus_window`, which pick their app themselves.
 
 ## 3. Weekly app approvals
@@ -52,14 +56,16 @@ owner asked for. It never happens:
 A `desktop.act` card for an app on the weekly list gets a third button:
 
 - Telegram: `✅ Approve` `❌ Deny` on the first row, `📅 Allow Calendar for 7 days` on
-  the second, plus the line "Or allow Calendar for 7 days: Crawler then acts in
-  Calendar without a card for requests from this chat. /apps lists and revokes."
+  the second, plus the line "Or allow Calendar for 7 days: Crawler then scrolls and
+  clicks around in Calendar without a card for requests from this chat; typing, and
+  buttons that change or send something, still ask. /apps lists and revokes."
 - Web and the desktop app: the same button on the card, for requests from this
   browser.
 
 Pressing it approves this act and allows the app for 7 days. Until then, a
-`desktop.act` in that app runs at once, in the same turn, with no card, when the
-request comes from the same Telegram chat (or the same browser) that allowed it. When
+`desktop.act` in that app that only looks around in it (§3.3) runs at once, in the
+same turn, with no card, when the request comes from the same Telegram chat (or the
+same browser) that allowed it. When
 the week is up the next act raises a normal card with the same button again: that is
 the weekly renewal. Allowing again renews the week.
 
@@ -71,9 +77,11 @@ revokes every approval given from Telegram.
 
 Only the apps on `rules.WEEKLY_APPS`: everyday apps whose data stays on the computer
 and that have no store (Calendar, Reminders, Notes, Contacts, Stickies, Clock,
-Calculator, Weather, Maps, Photos, Preview, TextEdit, Freeform; on Windows also
-Notepad, Paint, Sticky Notes, Microsoft To Do). Matched on the whole app name, exact,
-never by prefix or a bundle-id part.
+Calculator, Weather, Maps, Photos, Preview, Freeform; on Windows also Paint, Sticky
+Notes, Microsoft To Do). Matched on the whole app name, exact, never by prefix or a
+bundle-id part. Some of these can still send in the owner's name (Calendar answers
+and sends invitations; Notes, Photos, Contacts and Preview have share sheets), which
+is why an allowed app covers only looking around (§3.3).
 
 Never on it, so every act there keeps its own card:
 
@@ -83,6 +91,8 @@ Never on it, so every act there keeps its own card:
   owner's name;
 - file managers, stores (the App Store, and Music, TV, Books and Podcasts, which
   sell), Shortcuts and anything that runs other programs;
+- text editors (TextEdit, Notepad): their Save sheet belongs to the app's own window,
+  so typing and keys there could write any file, a shell's startup file included;
 - the blocked apps (§4 of the computer-control spec), which nothing can approve.
 
 An app is added by adding its spellings to `WEEKLY_APPS`, with a test.
@@ -94,6 +104,20 @@ An app is added by adding its spellings to `WEEKLY_APPS`, with a test.
 - The taint gate: an act whose arguments came from untrusted tool data (a web page, an
   email) gets a card with the risk note, as a standing connector approval does.
 - The prompt-guard scan of the arguments.
+- Only acts that look around (`app_approvals.weekly_covers`): scrolling, opening or
+  switching to the app, navigation keys (arrows, page up/down, home, end, bare or with
+  cmd), and a click by ref on an element that only selects or shows something (a
+  cell, row, list, table, tab, radio button, text or image, or a button named like
+  "Next month", "Today" or "Week"), as `ComputerToolkit.bind` recorded it
+  (`_screen.target`). Typing, any other key, a click by coordinates, and a click on
+  anything named like a control that changes or sends something (Send, Share,
+  Invite, Accept, Decline, Reply, Delete, Save, Export and the like) keep their card.
+  Nobody looks at these acts, and a click by ref carries no text the taint gate could
+  match.
+- No tap comes before an act a weekly approval runs, so it never brings its app
+  forward (§2), and `open_app` / `focus_window` are refused (`owner_busy`) while the
+  front app is a blocked app other than Crawler's own, or its focused element is a
+  password field or cannot be read.
 - Only `desktop.act` is covered, and only in the allowed app. The target app is the
   `app` argument for `open_app` and `focus_window`, and the app of the screen the call
   is bound to (`_screen.app`, from `ComputerToolkit.bind`) for everything else. When
@@ -126,8 +150,9 @@ last_used_at, uses, source_action_id. At most one live row per (user, tool, app_
 channel): allowing again renews it.
 
 Audit events: `app_approval_granted` (app, channel kind, expiry, the card's action id),
-`app_approval_revoked`, and on every act run under one, the usual `tool_executing`
-and result rows carry `approval: "weekly"`, `app_approval_id` and `app`.
+`app_approval_revoked` (from the web, `/apps`, or unlinking Telegram, with the count),
+and on every act run under one, the usual `tool_executing` and result rows carry
+`approval: "weekly"`, `app_approval_id`, `app`, `channel` and `expires_at`.
 
 ## 4. API contract
 
