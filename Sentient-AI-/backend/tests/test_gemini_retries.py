@@ -175,3 +175,52 @@ async def test_a_retried_error_never_carries_the_key_or_url(google, pauses):
     text = str(excinfo.value)
     assert "AIza-secret" not in text and "generativelanguage" not in text
     assert json.loads(google.requests[0].content)["contents"]
+
+
+# ── a Stop ends the retries ──────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_stop_during_the_pause_ends_the_retries(google, monkeypatch):
+    # The web Stop is only read between steps, and a retry happens inside
+    # one: once the owner has pressed it, the hiccup is raised as it is
+    # instead of being asked again (and billed) after the Stop.
+    from services.agent import cancel as agent_cancel
+
+    user = "gemini-stop-during-pause"
+    mark = agent_cancel.mark(user)
+    slept: list[float] = []
+
+    async def owner_presses_stop(seconds: float) -> None:
+        slept.append(seconds)
+        agent_cancel.request_cancel(user)
+
+    monkeypatch.setattr(GeminiProvider, "_retry_sleep", staticmethod(owner_presses_stop))
+    google.script = [answer(503, "overloaded"), answer(200, OK)]
+    try:
+        with agent_cancel.watching(user, mark):
+            with pytest.raises(ProviderError) as excinfo:
+                await complete(google)
+    finally:
+        agent_cancel.clear(user)
+    assert excinfo.value.status_code == 503
+    assert len(google.requests) == 1
+    assert slept == [1.0]
+
+
+@pytest.mark.asyncio
+async def test_a_stop_pressed_before_the_hiccup_is_not_waited_out(google, pauses):
+    from services.agent import cancel as agent_cancel
+
+    user = "gemini-stopped-before-retry"
+    mark = agent_cancel.mark(user)
+    agent_cancel.request_cancel(user)
+    google.script = [answer(429, "slow down", headers={"Retry-After": "8"})]
+    try:
+        with agent_cancel.watching(user, mark):
+            with pytest.raises(ProviderError):
+                await complete(google)
+    finally:
+        agent_cancel.clear(user)
+    assert pauses == []
+    assert len(google.requests) == 1

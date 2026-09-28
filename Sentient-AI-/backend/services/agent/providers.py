@@ -36,6 +36,8 @@ from typing import Any, Literal, Optional
 import httpx
 import structlog
 
+from services.agent import cancel as agent_cancel
+
 logger = structlog.get_logger(__name__)
 
 
@@ -1118,13 +1120,20 @@ class GeminiProvider(LLMProvider):
 
         # Asked again after a short pause when the error says it may work
         # (see _RETRY_STATUS), at most _MAX_RETRIES times, as the SDK
-        # providers do on their own.
+        # providers do on their own. Not once the owner has pressed Stop:
+        # the runtime reads the web Stop only between steps, and a retry
+        # happens inside one, so it would otherwise be asked (and billed)
+        # after the Stop.
         attempt = 0
         while True:
             try:
                 return await self._complete_once(payload)
             except ProviderError as exc:
-                if not exc.retryable or attempt >= _MAX_RETRIES:
+                if (
+                    not exc.retryable
+                    or attempt >= _MAX_RETRIES
+                    or agent_cancel.current_work_stopped()
+                ):
                     raise
                 delay = _retry_delay(attempt, exc.retry_after)
                 attempt += 1
@@ -1132,6 +1141,8 @@ class GeminiProvider(LLMProvider):
                     "gemini_retry", attempt=attempt, status=exc.status_code, delay_s=delay
                 )
                 await self._retry_sleep(delay)
+                if agent_cancel.current_work_stopped():
+                    raise
 
     # Swapped for a recorder in tests.
     _retry_sleep = staticmethod(asyncio.sleep)

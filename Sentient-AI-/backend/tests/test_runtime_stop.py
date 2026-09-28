@@ -25,7 +25,7 @@ import pytest
 from core.config import settings
 from services.agent import cancel
 from services.agent.approvals import InMemoryApprovalStore
-from services.agent.providers import LLMResponse, ToolCall
+from services.agent.providers import LLMResponse, ProviderError, ToolCall
 from services.agent.runtime import (
     USER_STOPPED_POLICY,
     USER_STOPPED_REASON,
@@ -368,6 +368,37 @@ async def test_a_final_text_round_is_kept_when_the_stop_lands_during_it():
     response = await runtime.chat(messages=ask(), tools=[SEARCH], user_id=USER)
 
     assert response.content == "final answer" and response.stopped is False
+
+
+@pytest.mark.asyncio
+async def test_a_model_call_that_fails_after_the_stop_ends_the_turn_as_stopped():
+    """A provider error that comes back after the owner pressed Stop (a
+    Gemini retry the Stop cut short) ends the turn as "Stopped.", not as
+    an error: stopping is what the owner asked for."""
+
+    class FailsAfterStop(RecordingProvider):
+        async def complete(self, messages, tools=None):
+            cancel.request_cancel(USER)
+            raise ProviderError("gemini", 503, "overloaded", retryable=True)
+
+    runtime = runtime_with(FailsAfterStop([]))
+
+    response = await runtime.chat(messages=ask(), tools=[SEARCH], user_id=USER)
+
+    assert response.stopped is True
+    assert response.content == "Stopped. I didn't finish the task."
+
+
+@pytest.mark.asyncio
+async def test_a_model_call_that_fails_with_no_stop_is_still_an_error():
+    class Fails(RecordingProvider):
+        async def complete(self, messages, tools=None):
+            raise ProviderError("gemini", 503, "overloaded", retryable=True)
+
+    runtime = runtime_with(Fails([]))
+
+    with pytest.raises(ProviderError):
+        await runtime.chat(messages=ask(), tools=[SEARCH], user_id=USER)
 
 
 @pytest.mark.asyncio

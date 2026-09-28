@@ -137,6 +137,14 @@ def is_cancelled(user_id: str) -> bool:
         return stop is not None and stop.seq > _last_mark.get(uid, 0)
 
 
+def current_work_stopped() -> bool:
+    """Whether the work this code runs as (``watching``) was stopped; False
+    outside ``watching``. For code that has no user id at hand, such as a
+    provider deciding whether to ask the model again after a hiccup."""
+    running = _running.get()
+    return running is not None and stopped_since(running[0], running[1])
+
+
 def clear(user_id: str) -> None:
     """Forget *user_id*'s stop entirely, for every piece of their work,
     running or not. The runtime never calls this (new work takes a fresh

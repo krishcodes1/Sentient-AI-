@@ -2776,11 +2776,23 @@ class AgentRuntime:
                 break
 
             allow_tools = bool(tool_schemas) and rounds_used < round_budget()
-            llm_response: LLMResponse = await provider.complete(
-                messages=messages,
-                tools=tool_schemas if allow_tools else None,
-                **complete_kwargs,
-            )
+            try:
+                llm_response: LLMResponse = await provider.complete(
+                    messages=messages,
+                    tools=tool_schemas if allow_tools else None,
+                    **complete_kwargs,
+                )
+            except ProviderError:
+                # A model call that failed after the owner pressed Stop (a
+                # Gemini retry the Stop cut short) ends the turn as stopped:
+                # stopping is what they asked for, so it is no error.
+                if not agent_cancel.is_cancelled(user_id):
+                    raise
+                final_content = await self._end_stopped_turn(
+                    emit, user_id, ran=calls_ran, skipped=[]
+                )
+                stopped = True
+                break
             for k, v in llm_response.usage.items():
                 total_usage[k] = total_usage.get(k, 0) + v
             served_model = llm_response.served_model or served_model
