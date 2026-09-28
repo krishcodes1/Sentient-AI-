@@ -1,12 +1,15 @@
-"""Tests for migration 0015_page_watches on SQLite: upgrading from 0014 creates
-the table with its columns, indexes and cascading foreign key, downgrading to
-0014 removes exactly that table and keeps every row elsewhere, the round trip
-repeats cleanly, and an adopted database built from the models upgrades
-without trying to create the table twice.
+"""Tests for migration 0011_page_watches and its merge 0015_merge_page_watches on
+SQLite: upgrading from 0014 creates the table with its columns, indexes and
+cascading foreign key, downgrading the page-watch line removes exactly that
+table and keeps every row elsewhere, the round trip repeats cleanly, a
+database that ran 0011_page_watches before the connectors migrations reaches
+head with no manual step, and an adopted database built from the models
+upgrades without trying to create the table twice.
 
 Why it exists: test_migrations.py proves the head schema matches the models;
 this pins the one revision page watch adds, including the way back, so a
-failed rollout can be reverted without touching anyone's other data.
+failed rollout can be reverted without touching anyone's other data, and
+keeps the databases that already ran it bootable.
 """
 
 from __future__ import annotations
@@ -34,22 +37,30 @@ def _inspect(db_path: Path):
     return engine, sa.inspect(engine)
 
 
-def _version(db_path: Path) -> str:
+HEAD = "0015_merge_page_watches"
+
+
+def _versions(db_path: Path) -> list[str]:
     engine = sa.create_engine(f"sqlite:///{db_path}")
     try:
         with engine.connect() as conn:
-            return conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one()
+            rows = conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalars()
+            return sorted(rows)
     finally:
         engine.dispose()
 
 
-def test_0015_follows_0014_and_is_the_only_head():
-    # Rebased after the connectors migrations: one chain, no merge revision.
+def test_0011_keeps_its_parent_and_the_merge_is_the_only_head():
+    # Databases already ran 0011_page_watches on top of 0009, so it keeps
+    # that parent; the merge joins it with the line through 0014.
     script = ScriptDirectory.from_config(_config(Path("unused.db")))
-    revision = script.get_revision("0015_page_watches")
+    revision = script.get_revision("0011_page_watches")
     assert revision is not None
-    assert revision.down_revision == "0014_slack_channel_links"
-    assert script.get_heads() == ["0015_page_watches"]
+    assert revision.down_revision == "0009_user_llm_nullable"
+    merge = script.get_revision(HEAD)
+    assert merge is not None
+    assert merge.down_revision == ("0014_slack_channel_links", "0011_page_watches")
+    assert script.get_heads() == [HEAD]
 
 
 def test_upgrade_creates_the_table_and_downgrade_removes_only_it(tmp_path):
@@ -72,8 +83,8 @@ def test_upgrade_creates_the_table_and_downgrade_removes_only_it(tmp_path):
     finally:
         engine.dispose()
 
-    command.upgrade(config, "0015_page_watches")
-    assert _version(db_path) == "0015_page_watches"
+    command.upgrade(config, "head")
+    assert _versions(db_path) == [HEAD]
     engine, inspector = _inspect(db_path)
     try:
         assert set(inspector.get_table_names()) == before | {"page_watches"}
@@ -133,8 +144,11 @@ def test_upgrade_creates_the_table_and_downgrade_removes_only_it(tmp_path):
     finally:
         engine.dispose()
 
+    # Undo the merge, then the page-watch line only.
     command.downgrade(config, "0014_slack_channel_links")
-    assert _version(db_path) == "0014_slack_channel_links"
+    assert _versions(db_path) == ["0011_page_watches", "0014_slack_channel_links"]
+    command.downgrade(config, "0011_page_watches@-1")
+    assert _versions(db_path) == ["0014_slack_channel_links"]
     engine, inspector = _inspect(db_path)
     try:
         assert set(inspector.get_table_names()) == before
@@ -154,7 +168,52 @@ def test_upgrade_creates_the_table_and_downgrade_removes_only_it(tmp_path):
         engine.dispose()
 
 
-def test_an_adopted_database_upgrades_through_0015(tmp_path):
+def test_a_database_that_ran_0011_first_reaches_head(tmp_path):
+    """The owner's database ran 0011_page_watches on top of 0009 before the
+    vault and connectors migrations existed. ``upgrade head`` (init_db and
+    the container's start command run it) must bring it level with no
+    manual step and keep its watches."""
+    db_path = tmp_path / "ran_0011.db"
+    config = _config(db_path)
+    command.upgrade(config, "0011_page_watches")
+    assert _versions(db_path) == ["0011_page_watches"]
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    try:
+        tables = set(sa.inspect(engine).get_table_names())
+        assert "page_watches" in tables and "vault_items" not in tables
+        with engine.begin() as conn:
+            conn.execute(
+                sa.text(
+                    "INSERT INTO users (id, email, hashed_password, is_active, created_at, "
+                    "updated_at) VALUES ('11111111111111111111111111111111', "
+                    "'keep@example.com', 'x', 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00')"
+                )
+            )
+            conn.execute(
+                sa.text(
+                    "INSERT INTO page_watches (id, user_id, url, label, interval_minutes, "
+                    "next_check_at, created_at) VALUES ('22222222222222222222222222222222', "
+                    "'11111111111111111111111111111111', 'https://example.com/', 'Example', 60, "
+                    "'2026-09-25 12:00:00', '2026-09-25 12:00:00')"
+                )
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    assert _versions(db_path) == [HEAD]
+    engine, inspector = _inspect(db_path)
+    try:
+        assert {"page_watches", "vault_items", "slack_channel_links"} <= set(
+            inspector.get_table_names()
+        )
+        with engine.connect() as conn:
+            assert conn.execute(sa.text("SELECT label FROM page_watches")).scalar_one() == "Example"
+    finally:
+        engine.dispose()
+
+
+def test_an_adopted_database_upgrades_to_head(tmp_path):
     """A database built from the models already has page_watches; stamped at
     0014, the upgrade must not try to create it again."""
     import models  # noqa: F401 - registers every model
@@ -168,8 +227,8 @@ def test_an_adopted_database_upgrades_through_0015(tmp_path):
         engine.dispose()
     config = _config(db_path)
     command.stamp(config, "0014_slack_channel_links")
-    command.upgrade(config, "0015_page_watches")
-    assert _version(db_path) == "0015_page_watches"
+    command.upgrade(config, "head")
+    assert _versions(db_path) == [HEAD]
     engine, inspector = _inspect(db_path)
     try:
         names = {i["name"] for i in inspector.get_indexes("page_watches")}

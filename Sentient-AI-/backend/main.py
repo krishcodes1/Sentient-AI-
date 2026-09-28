@@ -518,10 +518,10 @@ async def wire_services(
     )
 
     # Page watches fetch pages in the background, so the sweeper re-reads
-    # the owner's page_watch switch every sweep and checks nothing while it
-    # is off or blocked (no Telegram token, or Telegram switched off). Alerts
-    # go through the same manager as reminders; with no linked chat the
-    # change is still recorded for watch.list.
+    # the owner's page_watch switch before every check and checks nothing
+    # while it is off or blocked (no Telegram token, or Telegram switched
+    # off). Alerts go through the same manager as reminders; with no linked
+    # chat the change is still recorded for watch.list.
     async def _page_watch_enabled() -> bool:
         return "page_watch" in await installation.enabled_keys()
 

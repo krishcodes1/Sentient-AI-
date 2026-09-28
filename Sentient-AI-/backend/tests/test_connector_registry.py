@@ -774,9 +774,15 @@ def test_connector_catalog_entries_equal_the_old_catalog():
         # The old actions keep their relative order.
         old_names = [old[0] for old in expected]
         assert [n for n in by_name if n in old_names] == old_names, key
-    # Canvas and Robinhood are not extended by the connectors plan.
-    for key in ("canvas", "robinhood"):
-        assert [s.action for s in CONNECTOR_CATALOG[key]] == [o[0] for o in OLD_CATALOG[key]]
+    # Canvas and Robinhood are not extended by the connectors plan; Canvas
+    # gained get_upcoming and grade_whatif since (the assistant tools).
+    assert [s.action for s in CONNECTOR_CATALOG["robinhood"]] == [
+        o[0] for o in OLD_CATALOG["robinhood"]
+    ]
+    canvas_extra = {s.action for s in CONNECTOR_CATALOG["canvas"]} - {
+        o[0] for o in OLD_CATALOG["canvas"]
+    }
+    assert canvas_extra == {"get_upcoming", "grade_whatif"}
     for name, description in OLD_DESCRIPTIONS.items():
         key, action = name.split(".")
         assert next(s for s in CONNECTOR_CATALOG[key] if s.action == action).description == description

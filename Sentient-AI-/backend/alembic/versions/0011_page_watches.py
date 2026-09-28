@@ -8,25 +8,27 @@ run on an adopted database that was built from the models.
 Pages the assistant checks on a schedule for the user.
 
 Guarded with inspector checks and ``if_not_exists`` for the same reason as
-0003-0014: an adopted pre-Alembic database is built from model metadata
+0003-0009: an adopted pre-Alembic database is built from model metadata
 (which already contains this table) before it is stamped and upgraded.
 
-Numbered 0015, after the connectors migrations (0011 to 0014) it was
-rebased onto. It was first written as ``0011_page_watches`` revising 0009;
-a database that ran that revision has a version Alembic no longer knows,
-so reset it once with ``alembic stamp --purge 0009_user_llm_nullable`` and
-then run ``alembic upgrade head`` (the guards make this revision safe to
-run again over the existing table).
+Keep ``down_revision`` at 0009 for good. Databases have already run this
+revision on top of 0009 (the owner's live one among them); renumbered or
+re-parented, it would leave them at a version Alembic no longer knows, and
+``alembic upgrade head`` (run by init_db and the container's start
+command) would fail until someone reset them by hand. The other line
+from 0009 (0010_vault_items, then the connectors migrations 0011 to 0014)
+meets this one in ``0015_merge_page_watches``, which heals a database
+whichever of the two it ran first.
 
-Revision ID: 0015_page_watches
-Revises: 0014_slack_channel_links
+Revision ID: 0011_page_watches
+Revises: 0009_user_llm_nullable
 """
 
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0015_page_watches"
-down_revision = "0014_slack_channel_links"
+revision = "0011_page_watches"
+down_revision = "0009_user_llm_nullable"
 branch_labels = None
 depends_on = None
 

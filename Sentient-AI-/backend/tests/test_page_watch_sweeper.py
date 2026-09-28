@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -534,6 +535,40 @@ async def test_one_sweep_checks_a_bounded_number(session_factory, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_turning_the_switch_off_mid_sweep_stops_the_sweep(session_factory):
+    """The gate is re-read before every check, so a sweep of many due
+    watches stops fetching and alerting as soon as the owner turns
+    page_watch (or Telegram) off, not minutes later."""
+    user, _ = await make_user(session_factory, "sweep-midway@example.com")
+    urls = [f"https://site{i}.example.org/" for i in range(5)]
+    ids = []
+    for url in urls:
+        ids.append(
+            await add_watch(
+                session_factory, user, url, last_hash=snapshot_digest("old"), last_excerpt="old"
+            )
+        )
+    fetch, outbox = FakeFetch(), Outbox()
+    for url in urls:
+        fetch.serve(url, "new text")
+    switch = {"on": True}
+
+    async def enabled() -> bool:
+        return switch["on"]
+
+    async def fetch_then_switch_off(url: str) -> PageSnapshot:
+        result = await fetch(url)
+        switch["on"] = False  # the owner turns it off during the first check
+        return result
+
+    svc = service(session_factory, fetch_then_switch_off, outbox, enabled=enabled)
+    assert await svc.sweep_once() == 1
+    assert fetch.calls == [urls[0]] and len(outbox.sent) == 1
+    for watch_id in ids[1:]:
+        assert (await row(session_factory, watch_id)).last_checked_at is None
+
+
+@pytest.mark.asyncio
 async def test_start_and_stop_run_the_loop(session_factory):
     calls = []
 
@@ -668,6 +703,78 @@ def test_a_first_line_longer_than_the_excerpt_is_not_reported_as_changed():
     assert change_lines(saved, early) == [("-", first[:EXCERPT_CHARS]), ("+", edited_first)]
 
 
+# A page anyone can post lines to can be shaped to be difflib's worst case:
+# the saved excerpt all one line repeated, the page now two lines taking
+# turns (or the other way round). Uncapped, 1000 such lines took ~9 s.
+SAME_LINES = "\n".join(["a"] * 1000)
+ALTERNATING_LINES = "\n".join(["a", "b"] * 500)
+
+
+@pytest.mark.parametrize(
+    "old, new",
+    [(SAME_LINES, ALTERNATING_LINES), (ALTERNATING_LINES, SAME_LINES)],
+    ids=["same-then-alternating", "alternating-then-same"],
+)
+def test_a_page_shaped_to_slow_the_diff_is_compared_quickly(old, new):
+    assert excerpt(old) == old  # precondition: the whole page fits the excerpt
+    started = time.perf_counter()
+    summary = change_summary(old, new, scan=lambda _t: True)
+    assert time.perf_counter() - started < 0.5
+    assert summary
+
+
+@pytest.mark.asyncio
+async def test_a_page_shaped_to_slow_the_diff_does_not_stall_the_event_loop(session_factory):
+    """Every chat, the Telegram poller and approvals share the sweeper's
+    event loop, so the diff runs off it."""
+    user, _ = await make_user(session_factory, "sweep-stall@example.com")
+    await add_watch(
+        session_factory, user, last_hash=snapshot_digest(SAME_LINES), last_excerpt=SAME_LINES
+    )
+    fetch, outbox = FakeFetch(), Outbox()
+    fetch.serve(URL, ALTERNATING_LINES)
+    gaps: list[float] = []
+    stop = asyncio.Event()
+
+    async def heartbeat() -> None:
+        last = time.perf_counter()
+        while not stop.is_set():
+            await asyncio.sleep(0.01)
+            now = time.perf_counter()
+            gaps.append(now - last)
+            last = now
+
+    beat = asyncio.create_task(heartbeat())
+    await asyncio.sleep(0.05)
+    assert await service(session_factory, fetch, outbox).sweep_once() == 1
+    stop.set()
+    await beat
+    assert len(outbox.sent) == 1
+    assert max(gaps) < 1.0
+
+
+def test_only_the_top_of_each_side_is_compared():
+    """Lines past the compared part are handled like the part of the page
+    the excerpt did not keep: never reported as added or removed."""
+    limit = sweeper_module._COMPARE_LINES
+    # New lines at the top push old ones past the compared part of the new
+    # page: only the additions are reported, not the pushed lines.
+    old_lines = [f"row {i}" for i in range(limit - 50)]
+    added = [f"new {i}" for i in range(100)]
+    new = "\n".join(added + old_lines)
+    assert change_lines("\n".join(old_lines), new) == [("+", line) for line in added]
+    # An excerpt with more lines than are compared: a change past the
+    # compared part is further down than Crawler looks, one above it shows.
+    many = [f"r{i}" for i in range(limit + 100)]
+    saved = "\n".join(many)
+    assert excerpt(saved) == saved  # precondition: it fits the excerpt
+    assert change_lines(saved, saved + "\nappended") == []
+    assert change_lines(saved, saved.replace("r10\n", "r10 edited\n", 1)) == [
+        ("-", "r10"),
+        ("+", "r10 edited"),
+    ]
+
+
 def test_defang_keeps_ordinary_text():
     assert defang("Mon 9:00 - Room 101. Bring notes.") == "Mon 9:00 - Room 101. Bring notes."
     assert defang("see a.b/c @d") == f"see a{DOT}b{SLASH}c {AT}d"
@@ -750,7 +857,14 @@ async def test_wire_services_gates_the_sweeper_on_the_owners_switch(session_fact
         assert await sweeper._is_enabled() is False
 
         owner, _ = await make_user(session_factory, "sweep-wiring@example.com")
-        await installation.set_capabilities({"page_watch": True}, actor_id=owner.id)
+
+        async def switch(patch: dict[str, bool]) -> None:
+            # A capability change also reconciles the Slack manager in the
+            # background (main.py); let it finish before the next write.
+            await installation.set_capabilities(patch, actor_id=owner.id)
+            await app.state.slack_manager.wait_idle()
+
+        await switch({"page_watch": True})
         assert await sweeper._is_enabled() is False  # still no bot token
 
         await installation.set_telegram_token("123456:" + "x" * 30, actor_id=owner.id)
@@ -758,14 +872,15 @@ async def test_wire_services_gates_the_sweeper_on_the_owners_switch(session_fact
 
         # A token alone is not enough: with the owner's Telegram switch off
         # no alert can go out, so nothing is fetched either.
-        await installation.set_capabilities({"telegram": False}, actor_id=owner.id)
+        await switch({"telegram": False})
         assert await sweeper._is_enabled() is False
-        await installation.set_capabilities({"telegram": True}, actor_id=owner.id)
+        await switch({"telegram": True})
         assert await sweeper._is_enabled() is True
 
-        await installation.set_capabilities({"page_watch": False}, actor_id=owner.id)
+        await switch({"page_watch": False})
         assert await sweeper._is_enabled() is False
     finally:
         await app.state.telegram_manager.stop()
+        await app.state.slack_manager.stop()
         app.state._state.clear()
         app.state._state.update(saved)

@@ -118,6 +118,18 @@ comparisons: it is a `str` enum, and the model stores a member as its plain
 value. A row whose type is no longer registered is listed as unavailable
 rather than breaking a reader.
 
+## Page watch (0011_page_watches and 0015_merge_page_watches)
+
+`0011_page_watches` creates the `page_watches` table and revises
+`0009_user_llm_nullable`, beside the line above: databases ran it on top of
+0009 before that line landed, and it keeps that parent so they stay at a
+revision Alembic knows. `0015_merge_page_watches` changes no schema; it
+joins `0014_slack_channel_links` and `0011_page_watches` into the one head,
+so `alembic upgrade head` works whichever of the two a database ran first.
+To take page watch out again, undo the merge and then that line only:
+`alembic downgrade 0014_slack_channel_links`, then
+`alembic downgrade 0011_page_watches@-1`.
+
 ## Writing a new migration
 
 ```bash

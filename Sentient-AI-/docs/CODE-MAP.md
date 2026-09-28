@@ -192,7 +192,8 @@ Migrations (`backend/alembic/versions/`), oldest first:
 - `0008_installation.py` — the one-row `installation` table (owner switches, provider, secrets).
 - `0009_user_llm_nullable.py` — makes a user's provider/model nullable ("follow the install default").
 - `0010_vault_items.py` — the `vault_items` table and `installation.capability_settings` (guarded like 0008/0009).
-- `0015_page_watches.py` — the `page_watches` table, after the connectors migrations 0011 to 0014 (first written as `0011_page_watches` revising 0009; its docstring says how to reset a database that ran that).
+- `0011_page_watches.py` — the `page_watches` table; revises 0009, beside 0010 and the connectors migrations 0011 to 0014, because databases already ran it there.
+- `0015_merge_page_watches.py` — no schema change: joins `0014_slack_channel_links` and `0011_page_watches` into the one head.
 
 `backend/alembic/env.py` — reads `DATABASE_URL` from `core.config.settings` (no second credential copy); `backend/alembic/README.md` explains the adoption logic for pre-Alembic deployments.
 

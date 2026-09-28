@@ -29,8 +29,8 @@ and after ``ERROR_LIMIT`` in a row the watch stops (status ``error``) with
 one message saying so. Delivery is Telegram only; with no linked chat the
 change is still recorded (``last_changed_at``) so watch.list reports it.
 
-The owner's ``page_watch`` switch is re-read every sweep: nothing is
-fetched while it is off or blocked (no Telegram bot token, or the owner's
+The owner's ``page_watch`` switch is re-read before every check: nothing
+is fetched while it is off or blocked (no Telegram bot token, or the owner's
 Telegram switch off), and a gate that cannot answer counts as off.
 """
 
@@ -79,9 +79,13 @@ MAX_BACKOFF_MINUTES = 24 * 60
 SUMMARY_MAX_LINES = 6
 SUMMARY_LINE_CHARS = 140
 SUMMARY_CHARS = 700
-# Lines of the new page compared with the saved excerpt. The excerpt is the
-# page's first ~2000 characters, so its counterpart is near the top too.
-_COMPARE_LINES = 1000
+# Lines compared on each side: the saved excerpt's and the new page's. The
+# excerpt is the page's first ~2000 characters, so its counterpart is near
+# the top too. The cap bounds difflib, whose worst case grows about with
+# the cube of the line count: page text anyone can post to (a forum thread,
+# a listing) could otherwise make one diff take seconds (200 lines: under
+# 0.1 s; 1000 lines of one character: about 9 s).
+_COMPARE_LINES = 200
 
 _WITHHELD = (
     "(The changed text is not shown: it looked like instructions aimed at an "
@@ -122,12 +126,22 @@ def change_lines(old_excerpt: Optional[str], new_text: str) -> list[tuple[str, s
     new lines as the old lines it replaced, and a first line the excerpt
     had to shorten counts as unchanged while the new page's first line
     still starts with it.
+
+    Only the first ``_COMPARE_LINES`` lines of each side are compared. Lines
+    past that are treated like the part of the page the excerpt did not
+    keep: on the old side as above, and on the new side an old line is not
+    reported removed when it may just be further down the new page.
     """
     old_lines = (old_excerpt or "").split("\n") if old_excerpt else []
     cut = bool(old_lines) and old_lines[-1] == EXCERPT_CUT_MARK
     if cut:
         old_lines = old_lines[:-1]
-    new_lines = new_text.split("\n")[:_COMPARE_LINES] if new_text else []
+    if len(old_lines) > _COMPARE_LINES:
+        old_lines, cut = old_lines[:_COMPARE_LINES], True
+    new_lines = new_text.split("\n", _COMPARE_LINES) if new_text else []
+    new_cut = len(new_lines) > _COMPARE_LINES
+    if new_cut:
+        new_lines = new_lines[:_COMPARE_LINES]
     if (
         cut
         and len(old_lines) == 1
@@ -151,6 +165,13 @@ def change_lines(old_excerpt: Optional[str], new_text: str) -> list[tuple[str, s
             # text past what was kept. Count only as many new lines as the
             # old lines they replace.
             j2 = min(j2, j1 + (i2 - i1))
+        if new_cut and j1 == len(new_lines):
+            # Old lines past the compared part of the new page.
+            continue
+        if new_cut and j2 == len(new_lines):
+            # The same, the other way round: count only as many old lines
+            # as the new lines that replace them.
+            i2 = min(i2, i1 + (j2 - j1))
         changes.extend(("-", line) for line in old_lines[i1:i2])
         changes.extend(("+", line) for line in new_lines[j1:j2])
     return changes
@@ -238,8 +259,8 @@ class PageWatchService:
 
     ``send(user_id, text)`` is the channel (the Telegram manager's
     ``send_text``, which answers False while no chat is linked or no poller
-    runs). ``enabled()`` is the owner's ``page_watch`` switch, re-read every
-    sweep; None means no gate (tests). ``fetch(url)`` returns a
+    runs). ``enabled()`` is the owner's ``page_watch`` switch, re-read before
+    every check; None means no gate (tests). ``fetch(url)`` returns a
     ``PageSnapshot`` or raises ``WatchFetchError``; it defaults to the
     guarded fetch, and a fetch still running after ``check_deadline_s`` is
     abandoned and counts as a failed check. ``clock`` and ``scan`` are test
@@ -309,9 +330,16 @@ class PageWatchService:
         if not await self._is_enabled():
             return 0
         claims = await self._claim_due(self._clock())
+        checked = 0
         for claim in claims:
+            # Re-read before each check: a sweep can run for minutes, and
+            # nothing is fetched or sent once the owner turns it off. A claim
+            # left unchecked is retried an interval later.
+            if checked and not await self._is_enabled():
+                break
             await self._check(claim)
-        return len(claims)
+            checked += 1
+        return checked
 
     async def _claim_due(self, now: datetime) -> list[_Claim]:
         from models.page_watch import PageWatch, PageWatchStatus
@@ -429,7 +457,12 @@ class PageWatchService:
         if not await self._update(claim.id, values) or not changed:
             return
         scan = self._scan or _prompt_guard_scan()
-        summary = change_summary(claim.last_excerpt, snapshot.text, scan=scan)
+        # Off the loop, like the HTML parsing: the sweeper shares the event
+        # loop with every chat, and the diff and the scan are CPU work on
+        # page text anyone may have written.
+        summary = await asyncio.to_thread(
+            change_summary, claim.last_excerpt, snapshot.text, scan=scan
+        )
         text = change_message(claim.label, claim.url, summary, claim.interval_minutes)
         delivered = await self._deliver(claim, text)
         logger.info("page_watch_changed", watch_id=str(claim.id), delivered=delivered)

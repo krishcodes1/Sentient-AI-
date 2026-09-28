@@ -198,7 +198,8 @@ async def test_bad_arguments_are_refused_before_any_request(params, message):
 async def test_an_unknown_argument_is_refused_before_any_request():
     fake = FakeCanvas()
     async with wired(fake) as connector:
-        with pytest.raises(ConnectorError, match="unexpected keyword"):
+        # BaseConnector.execute reports the TypeError by its type only.
+        with pytest.raises(ConnectorError, match=r"failed \(TypeError\)"):
             await connector.execute("grade_whatif", {"course_id": "42", "user_id": "someone-else"})
     assert fake.requests == []
 

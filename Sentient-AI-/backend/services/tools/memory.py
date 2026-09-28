@@ -61,9 +61,9 @@ CATEGORIES: tuple[str, ...] = tuple(c.value for c in MemoryCategory)
 
 _ARGUMENTS = frozenset({"content", "category"})
 
-# The approval card, as every channel shows it. The runtime keeps this much
-# of the card's sentence (AgentRuntime._APPROVAL_REASON_CHARS; raise both
-# together), which is where a memory is quoted whole when it fits. Telegram
+# The approval card, as every channel shows it. The runtime keeps at least
+# this much of the card's sentence (AgentRuntime._APPROVAL_REASON_CHARS must
+# not drop below it), which is where a memory is quoted whole when it fits. Telegram
 # then shows the arguments as indented JSON, ASCII-escaped and cut at 700
 # characters (services/notifications/telegram.py, _short_json), so a longer
 # memory must be plain ASCII (readable there) whose JSON fits under this

@@ -169,6 +169,16 @@ def no_dns(monkeypatch):
     monkeypatch.setattr(netsec, "check_ssrf", lambda url: netsec.SSRFCheckResult(safe=True))
 
 
+def armed_client(connector: CanvasConnector, fake: FakeCanvas) -> httpx.AsyncClient:
+    """*fake* behind the connector's own network-policy request hook, as
+    production runs it (``_get_client`` refuses a custom transport, since it
+    would bypass DNS pinning; an injected client is the test seam)."""
+    return httpx.AsyncClient(
+        transport=httpx.MockTransport(fake),
+        event_hooks={"request": [connector._enforce_network_policy]},
+    )
+
+
 def wired(fake: FakeCanvas, *, base_url: str = BASE, armed: bool = False) -> CanvasConnector:
     """A CanvasConnector whose HTTP goes to *fake*; with ``armed`` the
     real network-policy hook runs on every request, as in production."""
@@ -177,7 +187,7 @@ def wired(fake: FakeCanvas, *, base_url: str = BASE, armed: bool = False) -> Can
         from core.network_security import normalize_policy_host
 
         connector.set_network_policy("canvas", extra_hosts=(normalize_policy_host(base_url),))
-        connector._get_client(transport=httpx.MockTransport(fake))  # adds the policy hook
+        connector._http_client = armed_client(connector, fake)
     else:
         connector._http_client = httpx.AsyncClient(transport=httpx.MockTransport(fake))
     return connector
@@ -784,11 +794,12 @@ async def test_a_next_link_off_the_instance_is_not_followed(frozen_clock):
 # ---------------------------------------------------------------------------
 
 
-def test_the_canvas_policy_names_the_new_reads():
-    policy = DEFAULT_POLICIES["canvas"]
+def test_the_canvas_policy_admits_the_new_reads(no_dns):
+    # The connector's NetworkSpec (services/connectors/canvas.py) admits the
+    # whole /api/v1/ surface, the two reads included.
     for path in ("/api/v1/planner/items", "/api/v1/users/self/missing_submissions"):
-        assert path in policy.allowed_paths["*.instructure.com"]
-        assert path in policy.instance_paths
+        assert check_network_policy(f"https://school.instructure.com{path}", "canvas").safe, path
+    policy = DEFAULT_POLICIES["canvas"]
     # The login page and the rest of the site stay out.
     assert not any(p.startswith(("/login/oauth2/auth", "/files")) for p in policy.instance_paths)
 
@@ -930,7 +941,7 @@ def fake_canvas_factory(monkeypatch, no_dns):
         connector = real_create(
             connector_type, credentials, rate_limit=rate_limit, timeout_s=timeout_s
         )
-        connector._get_client(transport=httpx.MockTransport(fake))
+        connector._http_client = armed_client(connector, fake)
         return connector
 
     monkeypatch.setattr(factory_module, "create_connector", _create)

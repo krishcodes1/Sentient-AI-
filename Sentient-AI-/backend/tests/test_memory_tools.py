@@ -333,7 +333,8 @@ def test_the_card_limits_mirror_the_runtime_and_telegram():
     from services.agent.runtime import AgentRuntime
     from services.notifications.telegram import _short_json
 
-    assert memory_module._REASON_CHARS == AgentRuntime._APPROVAL_REASON_CHARS
+    # The runtime keeps at least the sentence the toolkit writes.
+    assert memory_module._REASON_CHARS <= AgentRuntime._APPROVAL_REASON_CHARS
     # Telegram cuts the arguments at 700 (the "…" takes the last one).
     assert not _short_json({"x": "y" * (memory_module._CARD_ARGUMENT_CHARS - 12)}).endswith("…")
     assert _short_json({"x": "y" * 700}).endswith("…")
