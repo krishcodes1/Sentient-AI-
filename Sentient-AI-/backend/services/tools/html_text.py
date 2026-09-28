@@ -1,6 +1,6 @@
-"""Parses fetched HTML into readable page text and DuckDuckGo result pages into
-result lists, using only the stdlib html.parser, and cleans the result rows a
-browser read off a results page (web.search's fallback).
+"""Parses fetched HTML into readable page text and DuckDuckGo and Bing result
+pages into result lists, using only the stdlib html.parser, and cleans the
+result rows a browser read off a results page (web.search's fallback).
 
 Why it exists: The web toolkit needs both readers to run on hostile markup
 without adding a scraping dependency to the agent's process, and malformed
@@ -24,7 +24,7 @@ import base64
 import re
 from html.parser import HTMLParser
 from typing import Any, Iterable, Optional
-from urllib.parse import ParseResult, parse_qs, urlparse
+from urllib.parse import ParseResult, parse_qs, urlparse, urlunparse
 
 # Content inside these never reads as page text: it is code, chrome, or
 # controls. Dropping it is most of what makes a fetched page cheap
@@ -206,6 +206,114 @@ class _SearchResultParser(HTMLParser):
             self._buffer.append(data)
 
 
+class _BingResultParser(HTMLParser):
+    """Reads Bing's results page as served to a request with no JavaScript.
+
+    Each organic result is an ``li`` of class ``b_algo``: its title and
+    link are the ``a`` inside its ``h2``, and its snippet is the first
+    paragraph in its ``b_caption`` block (or, in the shorter layout, one of
+    class ``b_lineclamp*`` beside the title). Adverts are ``li.b_ad`` and
+    are never read; neither is the favicon link ahead of each title, a
+    result's own deep links (``h3``), nor the pager. A result stays open
+    until its ``li`` closes, counting the lists nested inside it; a missing
+    close tag ends it at the next result."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.results: list[dict[str, str]] = []
+        self._row: Optional[dict[str, str]] = None
+        self._li_depth = 0
+        self._in_h2 = False
+        self._caption_depth = 0
+        self._capture: Optional[str] = None
+        self._buffer: list[str] = []
+        self._href = ""
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
+        classes = _SearchResultParser._classes(attrs)
+        if tag == "li":
+            if "b_algo" in classes:
+                self._end_row()
+                self._row = {"title": "", "url": "", "snippet": ""}
+                self._li_depth = 1
+            elif self._row is not None:
+                self._li_depth += 1
+            return
+        if self._row is None:
+            return
+        if self._capture is not None:
+            # Inline markup inside a title or snippet (<strong>); a line
+            # break still separates words.
+            if tag == "br":
+                self._buffer.append(" ")
+            return
+        if tag == "h2":
+            self._in_h2 = True
+        elif tag == "a" and self._in_h2 and not self._row["title"]:
+            self._start("title")
+            self._href = dict(attrs).get("href") or ""
+        elif tag == "div" and (self._caption_depth or "b_caption" in classes):
+            self._caption_depth += 1
+        elif tag == "p" and not self._row["snippet"] and (
+            self._caption_depth or any(c.startswith("b_lineclamp") for c in classes)
+        ):
+            self._start("snippet")
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._row is None:
+            return
+        if self._capture == "title" and tag == "a":
+            url = _unwrap_redirect(self._href)
+            text = self._text()
+            if url and text:
+                self._row["title"], self._row["url"] = text, _without_bing_session_id(url)
+            self._capture = None
+        elif self._capture == "snippet" and tag == "p":
+            self._row["snippet"] = self._text()
+            self._capture = None
+        elif tag == "h2":
+            self._in_h2 = False
+        elif tag == "div" and self._caption_depth:
+            self._caption_depth -= 1
+        elif tag == "li":
+            self._li_depth -= 1
+            if self._li_depth <= 0:
+                self._end_row()
+
+    def handle_data(self, data: str) -> None:
+        if self._capture is not None:
+            self._buffer.append(data)
+
+    def _start(self, capture: str) -> None:
+        self._capture = capture
+        self._buffer = []
+
+    def _text(self) -> str:
+        return " ".join("".join(self._buffer).split())
+
+    def _end_row(self) -> None:
+        """Keep the open result when it has a title and a usable link."""
+        row, self._row = self._row, None
+        self._li_depth = 0
+        self._in_h2 = False
+        self._caption_depth = 0
+        self._capture = None
+        if row is not None and row["title"] and row["url"]:
+            self.results.append(row)
+
+
+def _without_bing_session_id(url: str) -> str:
+    """*url* without the ``msockid`` parameter Bing adds to a result's
+    address: an id of the search session, of no use to the result's site
+    and paid for in tokens each time the model reads the row. Every other
+    parameter is kept exactly as written."""
+    parsed = urlparse(url)
+    kept = [part for part in parsed.query.split("&") if not part.lower().startswith("msockid=")]
+    if len(kept) == len(parsed.query.split("&")):
+        return url
+    return urlunparse(parsed._replace(query="&".join(kept)))
+
+
 def _on_domain(hostname: Optional[str], domain: str) -> bool:
     host = (hostname or "").lower()
     return host == domain or host.endswith("." + domain)
@@ -307,6 +415,20 @@ def parse_search_results(html: str, limit: int, snippet_chars: int) -> list[dict
         parser.close()
     except Exception:  # noqa: BLE001 - hostile markup, never fatal
         pass
+    return _bounded(parser.results, limit, snippet_chars)
+
+
+def parse_bing_results(html: str, limit: int, snippet_chars: int) -> list[dict[str, Any]]:
+    """Parse Bing's plain results page into at most *limit* ``{title, url,
+    snippet}`` dicts, in ``parse_search_results``' shape: links unwrapped
+    from Bing's click tracking, adverts left out, cut to size."""
+    parser = _BingResultParser()
+    try:
+        parser.feed(html)
+        parser.close()
+    except Exception:  # noqa: BLE001 - hostile markup, never fatal
+        pass
+    parser._end_row()
     return _bounded(parser.results, limit, snippet_chars)
 
 

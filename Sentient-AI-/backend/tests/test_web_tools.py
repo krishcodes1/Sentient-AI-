@@ -32,7 +32,7 @@ from services.tools.net import (
     build_guarded_client,
     validated_addresses,
 )
-from services.tools.html_text import clean_result_rows
+from services.tools.html_text import clean_result_rows, parse_bing_results
 from services.tools.web import (
     BROWSER_SEARCH_PAGES,
     MAX_PAGE_CHARS,
@@ -180,7 +180,7 @@ async def test_search_reports_upstream_failure():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(503, text="busy")
 
-    result = await toolkit(handler, {"html.duckduckgo.com": (PUBLIC_ADDRESS,)}).search("q")
+    result = await toolkit(handler, ENGINES).search("q")
     assert result["ok"] is False
     assert result["blocked"] is True
     assert result["status_code"] == 503
@@ -190,6 +190,9 @@ async def test_search_reports_upstream_failure():
 # anomaly modal and its duck picture challenge, no result__a rows.
 CHALLENGE_HTML = (Path(__file__).parent / "fixtures" / "ddg_challenge.html").read_text()
 DDG = {"html.duckduckgo.com": (PUBLIC_ADDRESS,)}
+BING = {"www.bing.com": (PUBLIC_ADDRESS,)}
+# Every engine a search may ask: DuckDuckGo, then Bing after a bot check.
+ENGINES = {**DDG, **BING}
 
 
 def challenged(request: httpx.Request) -> httpx.Response:
@@ -198,7 +201,7 @@ def challenged(request: httpx.Request) -> httpx.Response:
 
 @pytest.mark.asyncio
 async def test_a_bot_check_is_reported_as_blocked_not_as_an_empty_search():
-    result = await toolkit(challenged, DDG).execute("search", {"query": "dbrand grip"})
+    result = await toolkit(challenged, ENGINES).execute("search", {"query": "dbrand grip"})
 
     assert result["ok"] is False
     assert result["blocked"] is True
@@ -213,7 +216,7 @@ async def test_a_bot_check_served_with_200_is_still_blocked():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, html=CHALLENGE_HTML)
 
-    result = await toolkit(handler, DDG).search("q")
+    result = await toolkit(handler, ENGINES).search("q")
     assert result["ok"] is False and result["blocked"] is True
 
 
@@ -226,7 +229,7 @@ async def test_no_rows_on_a_page_that_reads_like_a_bot_check_is_blocked():
             "<p>Please complete the following challenge.</p></body></html>",
         )
 
-    result = await toolkit(handler, DDG).search("q")
+    result = await toolkit(handler, ENGINES).search("q")
     assert result["ok"] is False and result["blocked"] is True
 
 
@@ -264,7 +267,7 @@ async def test_a_blocked_search_runs_in_the_browser_when_one_is_given():
             ],
         }
     )
-    result = await toolkit(challenged, DDG).execute(
+    result = await toolkit(challenged, ENGINES).execute(
         "search", {"query": "dbrand grip holo white"}, browser=browser
     )
 
@@ -287,14 +290,14 @@ async def test_the_browser_fallback_moves_on_when_a_page_is_challenged_or_fails(
         {"ok": True, "rows": [], "challenge": True, "text": "Unfortunately, bots use DuckDuckGo too."},
         {"ok": True, "rows": [{"title": "Grip", "url": DBRAND, "snippet": ""}]},
     )
-    result = await toolkit(challenged, DDG).search("q", browser=browser)
+    result = await toolkit(challenged, ENGINES).search("q", browser=browser)
     assert result["source"] == "browser" and result["results"][0]["url"] == DBRAND
     assert [urlparse(u).hostname for u in browser.urls] == ["duckduckgo.com", "www.bing.com"]
     assert len(BROWSER_SEARCH_PAGES) == 2
 
     failing = FakeBrowser({"ok": False, "error": "The results page could not be read."},
                           {"ok": True, "rows": [], "text": ""})
-    result = await toolkit(challenged, DDG).search("q", browser=failing)
+    result = await toolkit(challenged, ENGINES).search("q", browser=failing)
     assert result["ok"] is False and result["blocked"] is True
     assert "Don't guess addresses" in result["hint"]
     assert len(failing.urls) == 2
@@ -303,7 +306,7 @@ async def test_the_browser_fallback_moves_on_when_a_page_is_challenged_or_fails(
 @pytest.mark.asyncio
 async def test_an_unavailable_browser_stops_the_fallback_and_reports_blocked():
     browser = FakeBrowser({"ok": False, "unavailable": True, "error": "Browser control is turned off."})
-    result = await toolkit(challenged, DDG).search("q", browser=browser)
+    result = await toolkit(challenged, ENGINES).search("q", browser=browser)
 
     assert result["ok"] is False and result["blocked"] is True
     assert result["error"] == SEARCH_BLOCKED
@@ -337,13 +340,13 @@ async def test_research_reports_a_blocked_search_instead_of_no_sources():
         requested.append(request.url.host)
         return challenged(request)
 
-    result = await toolkit(handler, DDG).execute("research", {"query": "q"})
+    result = await toolkit(handler, ENGINES).execute("research", {"query": "q"})
 
     assert result["ok"] is False and result["blocked"] is True
     assert result["error"] == SEARCH_BLOCKED
     assert "Don't guess addresses" in result["hint"]
-    # Nothing past the refused search is fetched.
-    assert requested == ["html.duckduckgo.com"]
+    # Nothing past the refused searches is fetched.
+    assert requested == ["html.duckduckgo.com", "www.bing.com"]
 
 
 @pytest.mark.asyncio
@@ -366,14 +369,16 @@ async def test_research_reads_the_sources_the_browser_fallback_found():
             ],
         }
     )
-    result = await toolkit(handler, {**DDG, "www.dbrand.com": (PUBLIC_ADDRESS,)}).execute(
+    result = await toolkit(handler, {**ENGINES, "www.dbrand.com": (PUBLIC_ADDRESS,)}).execute(
         "research", {"query": "dbrand grip"}, browser=browser
     )
 
     assert result["ok"] is True and result["source"] == "browser"
     assert [(r["url"], r["ok"]) for r in result["results"]] == [(DBRAND, True)]
     assert "VESA monitor mount" in result["results"][0]["excerpt"]
-    assert requested == ["html.duckduckgo.com", "www.dbrand.com"]
+    # Bing's page here is an article with no result rows, so the browser
+    # is asked next.
+    assert requested == ["html.duckduckgo.com", "www.bing.com", "www.dbrand.com"]
 
 
 @pytest.mark.asyncio
@@ -382,6 +387,158 @@ async def test_the_research_browser_fallback_cannot_come_from_tool_arguments():
         "research", {"query": "q", "browser": "https://evil.example/"}
     )
     assert result["ok"] is False and "Invalid arguments" in result["error"]
+
+
+# What www.bing.com serves a request with no JavaScript, trimmed from a live
+# page: organic rows (li.b_algo: the h2 link, wrapped in /ck/a, and its
+# snippet paragraph), a favicon link ahead of each title, an advert
+# (li.b_ad), a result's deep links in a nested list, and the pager. The
+# Wikipedia row's address carries Bing's session id (msockid), as live
+# ones do; it is dropped.
+BING_HTML = (Path(__file__).parent / "fixtures" / "bing_results.html").read_text()
+BING_ROWS = [
+    {
+        "title": "Python Release Python 3.14.0 | Python.org",
+        "url": "https://www.python.org/downloads/release/python-3140/",
+        "snippet": "Release date: Oct. 7, 2025 This is the stable release of Python 3.14.0 …",
+    },
+    {
+        "title": "What's new in Python 3.14",
+        "url": "https://docs.python.org/3/whatsnew/3.14.html",
+        "snippet": (
+            "This article explains the new features in Python 3.14, compared to 3.13. "
+            "Editor: Hugo van Kemenade"
+        ),
+    },
+    {
+        "title": "History of Python - Wikipedia",
+        "url": "https://en.wikipedia.org/wiki/History_of_Python",
+        "snippet": "Python 3.14 was released on 7 October 2025.",
+    },
+]
+
+
+def bing_after_a_bot_check(request: httpx.Request) -> httpx.Response:
+    """DuckDuckGo asks for a bot check; Bing answers with its plain page."""
+    if request.url.host == "www.bing.com":
+        return httpx.Response(200, html=BING_HTML)
+    return challenged(request)
+
+
+def test_bings_plain_page_gives_its_organic_rows_only():
+    # No advert, no favicon link read as a title, no deep link or pager,
+    # and no row whose address cannot be decoded.
+    assert parse_bing_results(BING_HTML, 10, 200) == BING_ROWS
+    assert parse_bing_results(BING_HTML, 2, 200) == BING_ROWS[:2]
+    assert len(parse_bing_results(BING_HTML, 10, 20)[1]["snippet"]) == 20
+    assert parse_bing_results(CHALLENGE_HTML, 10, 200) == []
+    assert parse_bing_results("<li class='b_algo'><h2><a href='https://x.example/'>cut", 10, 200) == []
+
+
+def test_bings_session_id_is_dropped_from_result_addresses_and_nothing_else():
+    html = (
+        "<li class='b_algo'><h2><a href='https://www.expedia.com/Flights?from=NYC"
+        "&amp;MSOCKID=ab12&amp;to=LON%2FLHR'>Flights</a></h2></li>"
+        "<li class='b_algo'><h2><a href='https://x.example/page?msockid=ab12'>X</a></h2></li>"
+    )
+    assert [r["url"] for r in parse_bing_results(html, 10, 200)] == [
+        "https://www.expedia.com/Flights?from=NYC&to=LON%2FLHR",
+        "https://x.example/page",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_bot_check_is_answered_from_bings_plain_page_without_a_browser():
+    asked: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        asked.append((request.url.host, request.url.params["q"]))
+        return bing_after_a_bot_check(request)
+
+    result = await toolkit(handler, ENGINES).execute(
+        "search", {"query": "python 3.14 release date"}
+    )
+
+    assert result == {
+        "ok": True,
+        "query": "python 3.14 release date",
+        "source": "bing",
+        "results": BING_ROWS,
+        "count": 3,
+    }
+    assert asked == [
+        ("html.duckduckgo.com", "python 3.14 release date"),
+        ("www.bing.com", "python 3.14 release date"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_bings_plain_page_is_asked_before_the_browser():
+    browser = FakeBrowser()
+    result = await toolkit(bing_after_a_bot_check, ENGINES).search("q", browser=browser)
+    assert result["source"] == "bing" and result["count"] == 3
+    assert browser.urls == []
+
+
+@pytest.mark.asyncio
+async def test_a_bing_page_without_rows_is_not_reported_as_an_empty_search():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "www.bing.com":
+            return httpx.Response(200, html="<html><body><p>Something else</p></body></html>")
+        return challenged(request)
+
+    result = await toolkit(handler, ENGINES).search("q")
+    assert result["ok"] is False and result["blocked"] is True
+    assert result["error"] == SEARCH_BLOCKED
+    assert result["status_code"] == 202
+
+
+@pytest.mark.asyncio
+async def test_bing_refusing_too_moves_on_to_the_browser():
+    # challenged() answers Bing with the same 202 bot check.
+    browser = FakeBrowser({"ok": True, "rows": [{"title": "Grip", "url": DBRAND, "snippet": ""}]})
+    result = await toolkit(challenged, ENGINES).search("q", browser=browser)
+    assert result["source"] == "browser" and result["results"][0]["url"] == DBRAND
+
+
+@pytest.mark.asyncio
+async def test_a_bing_request_that_fails_moves_on_instead_of_failing_the_search():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "www.bing.com":
+            raise httpx.ConnectError("connection reset", request=request)
+        return challenged(request)
+
+    result = await toolkit(handler, ENGINES).execute("search", {"query": "q"})
+    assert result["ok"] is False and result["blocked"] is True
+    assert result["error"] == SEARCH_BLOCKED
+
+
+@pytest.mark.asyncio
+async def test_research_reads_the_sources_bing_found():
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.host)
+        if request.url.host in ENGINES:
+            return bing_after_a_bot_check(request)
+        return httpx.Response(200, html=PAGE_HTML)
+
+    hosts = {
+        **ENGINES,
+        "www.python.org": (PUBLIC_ADDRESS,),
+        "docs.python.org": (PUBLIC_ADDRESS,),
+    }
+    result = await toolkit(handler, hosts).execute(
+        "research", {"query": "python 3.14 release date", "max_sources": 2}
+    )
+
+    assert result["ok"] is True and result["source"] == "bing"
+    assert [(r["url"], r["ok"]) for r in result["results"]] == [
+        (BING_ROWS[0]["url"], True),
+        (BING_ROWS[1]["url"], True),
+    ]
+    assert requested[:2] == ["html.duckduckgo.com", "www.bing.com"]
+    assert sorted(requested[2:]) == ["docs.python.org", "www.python.org"]
 
 
 def test_bing_and_duckduckgo_tracking_links_are_unwrapped_without_being_followed():

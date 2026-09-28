@@ -1,4 +1,4 @@
-"""Implements the web.* built-in tools: DuckDuckGo search, page fetch as text,
+"""Implements the web.* built-in tools: DuckDuckGo and Bing search, page fetch as text,
 research (one search plus a parallel read of its top sources), and a
 Playwright screenshot.
 
@@ -26,11 +26,12 @@ to be pointed at a hostile URL, so three constraints shape the module:
 
 ``search`` never reports a bot check as an empty search. When the
 endpoint answers with anything but a results page (a status other than
-200, or DuckDuckGo's "anomaly" challenge) it runs the query in Crawler's
-own browser, when the executor hands it one ("Control a browser" is on):
-the browser.read session, read tier, behind the same egress guard, one
-page load per results page and no clicks. Otherwise it answers
-``blocked`` with what to do instead.
+200, or DuckDuckGo's "anomaly" challenge) it asks Bing's plain results
+page next, over the same guarded client. When that has no result rows
+either, it runs the query in Crawler's own browser, when the executor
+hands it one ("Control a browser" is on): the browser.read session, read
+tier, behind the same egress guard, one page load per results page and
+no clicks. Otherwise it answers ``blocked`` with what to do instead.
 
 ``screenshot`` needs Playwright, which is deliberately *not* in
 requirements.txt: it pulls a browser download that most deployments do
@@ -70,6 +71,7 @@ from services.agent.prompt_guard import _INVISIBLE_CHARS as _HIDDEN_CHARS
 from services.tools.html_text import (
     clean_result_rows,
     extract_readable_text,
+    parse_bing_results,
     parse_search_results,
 )
 from services.tools.net import (
@@ -85,6 +87,12 @@ logger = structlog.get_logger(__name__)
 # account. The HTML variant is used over lite/ because it is the one
 # that carries snippets.
 SEARCH_ENDPOINT = "https://html.duckduckgo.com/html/"
+
+# Bing's results page, asked over plain HTTP (the same guarded client) when
+# the endpoint above answers with a bot check, which it now does for most
+# requests. Bing serves result rows with no JavaScript, so a default
+# install, whose "Control a browser" switch is off, can still search.
+BING_SEARCH_ENDPOINT = "https://www.bing.com/search"
 
 # Results pages that render for a real browser, tried in order in
 # Crawler's own browser when the endpoint above asks for a bot check.
@@ -407,10 +415,11 @@ class WebToolkit:
         """Search the public web and return compact result rows.
 
         An answer that is not a results page (``_challenged``) is never
-        reported as an empty search: the query is run in Crawler's own
-        browser when *browser* is given (``source: "browser"``), and
-        otherwise, or when that is challenged too, reported as ``blocked``
-        with a hint that keeps the model from guessing addresses."""
+        reported as an empty search: the query goes to Bing's plain results
+        page (``source: "bing"``), then to Crawler's own browser when
+        *browser* is given (``source: "browser"``), and when neither has
+        result rows it is reported as ``blocked`` with a hint that keeps the
+        model from guessing addresses."""
         query = (query or "").strip()
         if not query:
             return _error("A non-empty 'query' is required.")
@@ -433,11 +442,32 @@ class WebToolkit:
             return {"ok": True, "query": query, "results": results, "count": len(results)}
 
         logger.warning("web_search_challenged", status_code=status)
-        if browser is not None:
+        found = await self._search_bing(query, limit)
+        if found is None and browser is not None:
             found = await self._search_in_browser(query, limit, browser)
-            if found is not None:
-                return found
+        if found is not None:
+            return found
         return _error(SEARCH_BLOCKED, blocked=True, hint=SEARCH_BLOCKED_HINT, status_code=status)
+
+    async def _search_bing(self, query: str, limit: int) -> Optional[dict[str, Any]]:
+        """Run *query* on Bing's plain results page; its rows, or None when
+        it has none (a bot check, an error, a layout the parser does not
+        read, a request that failed), so the search moves on instead of
+        reporting an empty one. One GET through the guarded client; the
+        result links are unwrapped, never followed."""
+        url = f"{BING_SEARCH_ENDPOINT}?{urlencode({'q': query})}"
+        try:
+            async with self._client() as client:
+                response = await client.get(url)
+        except (EgressBlocked, httpx.HTTPError) as exc:
+            logger.warning("web_search_bing_failed", error_type=type(exc).__name__)
+            return None
+        status = response.status_code
+        rows = parse_bing_results(response.text, limit, _SNIPPET_CHARS) if status == 200 else []
+        if not rows:
+            logger.warning("web_search_bing_no_rows", status_code=status)
+            return None
+        return {"ok": True, "query": query, "source": "bing", "results": rows, "count": len(rows)}
 
     async def _search_in_browser(
         self, query: str, limit: int, browser: BrowserPage

@@ -24,7 +24,7 @@ from services.tools.system import browser_installed
 from services.tools.web import SEARCH_BLOCKED, WebToolkit
 from tests.test_browser_read import TestPlatform
 from tests.test_purchases_wiring import _gate as gate_with
-from tests.test_web_tools import DBRAND, DDG, challenged, resolver_for
+from tests.test_web_tools import DBRAND, ENGINES, challenged, resolver_for
 
 QUERY = "dbrand grip iphone 16 pro max holo white"
 REDDIT = "https://www.reddit.com/r/dbrand/comments/abc/grip_holo_white/"
@@ -46,7 +46,7 @@ async def browser(fakesite, tmp_path):
 def executor(fakesite, browser, *pages: str, capabilities=("web_browsing", "browser_control")):
     web = WebToolkit(
         transport=httpx.MockTransport(challenged),
-        resolver=resolver_for(DDG),
+        resolver=resolver_for(ENGINES),
         search_pages=tuple(fakesite.url(f"/search-results/{page}?{{query}}") for page in pages),
     )
     read, _ = browser

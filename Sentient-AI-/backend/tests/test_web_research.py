@@ -110,7 +110,8 @@ class FakeWeb:
 
 
 def hosts_of(*urls: str) -> dict[str, tuple[str, ...]]:
-    hosts = {SEARCH_HOST: (PUBLIC_ADDRESS,)}
+    # Bing is asked when the search endpoint answers with a bot check.
+    hosts = {SEARCH_HOST: (PUBLIC_ADDRESS,), "www.bing.com": (PUBLIC_ADDRESS,)}
     for url in urls:
         host = urlparse(url).hostname
         if host and not host[0].isdigit():
