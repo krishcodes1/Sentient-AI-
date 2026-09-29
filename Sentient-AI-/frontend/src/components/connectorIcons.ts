@@ -18,16 +18,16 @@ import {
   Database,
   FileText,
   Folder,
-  Github,
+  GitBranch,
   Globe,
   GraduationCap,
+  Hash,
   Mail,
   MessageSquare,
   NotebookPen,
   NotebookText,
   Plug,
   Server,
-  Slack,
   TrendingUp,
   type LucideIcon,
 } from "lucide-react";
@@ -43,9 +43,9 @@ export const CONNECTOR_ICONS: Readonly<Record<string, LucideIcon>> = {
   database: Database,
   "file-text": FileText,
   folder: Folder,
-  // lucide marks its brand icons deprecated (to be removed in 1.0); the
-  // 0.x pin keeps them, and the fallback covers their eventual removal.
-  github: Github,
+  // lucide 1.0 dropped its brand icons, so the brand names map to plain
+  // stand-ins: a branch for GitHub, a channel hash for Slack.
+  github: GitBranch,
   globe: Globe,
   "graduation-cap": GraduationCap,
   mail: Mail,
@@ -54,7 +54,7 @@ export const CONNECTOR_ICONS: Readonly<Record<string, LucideIcon>> = {
   "notebook-text": NotebookText,
   plug: Plug,
   server: Server,
-  slack: Slack,
+  slack: Hash,
   "trending-up": TrendingUp,
 };
 

@@ -72,7 +72,7 @@ import {
   scopeView,
 } from "@/pages/connectorCatalog";
 import { connectorIcon } from "@/components/connectorIcons";
-import { Plug, Slack } from "lucide-react";
+import { GitBranch, Hash, Plug } from "lucide-react";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -1199,7 +1199,8 @@ describe("connectorCatalog helpers", () => {
   });
 
   it("connectorIcon maps known names and falls back to Plug", () => {
-    expect(connectorIcon("slack")).toBe(Slack);
+    expect(connectorIcon("slack")).toBe(Hash);
+    expect(connectorIcon("github")).toBe(GitBranch);
     expect(connectorIcon("no-such-icon")).toBe(Plug);
     expect(connectorIcon("constructor")).toBe(Plug);
     expect(connectorIcon(undefined)).toBe(Plug);

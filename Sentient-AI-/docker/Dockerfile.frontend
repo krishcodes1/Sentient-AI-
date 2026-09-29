@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# Builds the frontend image: node:20-alpine after `npm ci`, split into a `dev` stage (Vite
+# Builds the frontend image: node:26-alpine after `npm ci`, split into a `dev` stage (Vite
 # dev server with an entrypoint that resyncs the node_modules volume), a `build` stage
 # (`npm run build`) and a `prod` stage (nginx serving dist/ with an /api reverse proxy).
 #
@@ -15,7 +15,7 @@
 # `target: prod`. The nginx config is inlined below (heredoc) because the
 # build context is ../frontend, which cannot COPY files from docker/.
 
-FROM node:20-alpine AS base
+FROM node:26-alpine AS base
 
 WORKDIR /app
 
@@ -70,7 +70,7 @@ FROM base AS build
 RUN npm run build
 
 # ── Production runtime ───────────────────────────────────────────────
-FROM nginx:1.27-alpine AS prod
+FROM nginx:1.29-alpine AS prod
 
 COPY --from=build /app/dist /usr/share/nginx/html
 
