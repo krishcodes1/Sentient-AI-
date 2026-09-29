@@ -28,7 +28,7 @@ jobs:
       run:
         working-directory: Sentient-AI-/backend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -78,7 +78,7 @@ jobs:
       run:
         working-directory: Sentient-AI-/frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -145,7 +145,7 @@ jobs:
       run:
         working-directory: Sentient-AI-/desktop/ui
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -181,7 +181,7 @@ jobs:
       run:
         working-directory: Sentient-AI-/backend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -238,7 +238,7 @@ jobs:
     name: Secret scan (gitleaks)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Full history: a secret removed in a later commit is still in the
           # objects an attacker can fetch.
@@ -277,7 +277,7 @@ jobs:
     env:
       TEST_DATABASE_URL: postgresql+asyncpg://test:test@localhost:5432/test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -323,7 +323,7 @@ jobs:
       run:
         working-directory: Sentient-AI-/backend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python
         uses: actions/setup-python@v5
