@@ -180,3 +180,99 @@ def test_purchases_is_registered_off_by_default_with_its_settings():
         "per_day_cap_usd": 50,
     }
     assert capabilities.settings_defaults("browser_control") == {}
+
+
+def test_hide_personal_details_is_an_always_available_policy_switch_on_by_default():
+    from services.capabilities.base import ReportContext
+    from services.capabilities.prompt import render_permissions_block
+
+    cap = capabilities.get("hide_personal_details")
+    assert cap.label == "Hide personal details from the AI provider"
+    assert cap.tools == () and cap.default_enabled is True and cap.risk == "low"
+    assert cap.install is None and cap.probe is None and not cap.requires
+    assert capabilities.default_switches()["hide_personal_details"] is True
+    assert capabilities.settings_defaults("hide_personal_details") == {}
+    ctx = ReportContext(
+        in_container=True, platform="linux", telegram_configured=False, browser_installed=False
+    )
+    # An install whose stored switches predate it reads the default: on.
+    assert "hide_personal_details" in capabilities.enabled_keys({}, ctx)
+    on = render_permissions_block(capabilities.report({}, ctx))
+    assert "- Hide personal details from the AI provider: on" in on
+    off = render_permissions_block(capabilities.report({"hide_personal_details": False}, ctx))
+    assert f"- Hide personal details from the AI provider: off — {cap.when_denied}" in off
+
+
+def test_tutor_mode_is_registered_on_by_default_low_risk_and_claims_its_runtime_builtin():
+    from services.agent.permissions import _DEFAULT_POLICIES
+    from services.agent.tool_registry import (
+        _BUILTIN_STANCE,
+        _BUILTIN_STARTER_TOOLS,
+        RUNTIME_BUILTIN_TYPES,
+        ConnectorToolExecutor,
+    )
+
+    cap = capabilities.get("tutor_mode")
+    assert cap.label == "Tutor mode (hints, not answers)"
+    assert cap.default_enabled is True and cap.risk == "low"
+    assert cap.tools == ("tutor.",) and cap.install is None
+    assert capabilities.default_switches()["tutor_mode"] is True
+    assert capabilities.settings_defaults("tutor_mode") == {}
+    assert capabilities.capability_for_tool("tutor.start").key == "tutor_mode"
+    # A runtime built-in: a stance and policy rows, but no executor entry and
+    # not a starter.
+    assert "tutor" in RUNTIME_BUILTIN_TYPES and "tutor" in BUILTIN_CONNECTOR_TYPES
+    assert _BUILTIN_STANCE["tutor"] == "auto_approve"
+    assert "tutor.start" not in _BUILTIN_STARTER_TOOLS
+    assert "tutor" not in ConnectorToolExecutor()._builtins
+    assert [spec.action for spec in CONNECTOR_CATALOG["tutor"]] == ["start"]
+    from services.connectors.definition import ActionCategory
+    from services.agent.permissions import PermissionTier
+
+    assert {cat: _DEFAULT_POLICIES[("tutor", cat)] for cat in ActionCategory} == {
+        ActionCategory.READ: PermissionTier.HARD_BLOCKED,
+        ActionCategory.WRITE: PermissionTier.AUTO_APPROVE,
+        ActionCategory.DELETE: PermissionTier.HARD_BLOCKED,
+        ActionCategory.EXECUTE: PermissionTier.HARD_BLOCKED,
+        ActionCategory.FINANCIAL: PermissionTier.HARD_BLOCKED,
+    }
+
+
+# top10:knowledge_base
+def test_the_knowledge_base_switches_are_registered():
+    base = capabilities.get("knowledge_base")
+    assert base.label == "Knowledge base (your documents)" and base.default_enabled is True
+    assert base.tools == ("knowledge.",) and base.risk == "low"
+    assert base.when_denied == "The knowledge base is turned off. The owner can turn it on in Settings → Permissions."
+    for tool in ("knowledge.search", "knowledge.read", "knowledge.list", "knowledge.add", "knowledge.remove"):
+        assert capabilities.capability_for_tool(tool) is base
+    semantic = capabilities.get("knowledge_semantic")
+    assert semantic.label == "Smarter knowledge search (meaning index)"
+    assert semantic.tools == () and semantic.default_enabled is False and semantic.risk == "medium"
+    assert semantic.requires == ("knowledge_base",)
+    assert capabilities.default_switches()["knowledge_semantic"] is False
+    assert capabilities.settings_defaults("knowledge_semantic") == {}
+
+
+def test_low_risk_actions_is_an_always_available_policy_switch_on_by_default():
+    from services.agent.risk import LOW_RISK_SWITCH
+    from services.capabilities.base import ReportContext
+    from services.capabilities.prompt import render_permissions_block
+
+    cap = capabilities.get("low_risk_actions")
+    assert cap.key == LOW_RISK_SWITCH
+    assert cap.label == "Make low-risk changes without asking"
+    assert cap.description.startswith("Let the accounts you choose make small, undoable changes")
+    assert cap.tools == () and cap.default_enabled is True and cap.risk == "medium"
+    assert cap.install is None and cap.probe is None and not cap.requires
+    assert capabilities.default_switches()["low_risk_actions"] is True
+    assert capabilities.settings_defaults("low_risk_actions") == {}
+    ctx = ReportContext(
+        in_container=True, platform="linux", telegram_configured=False, browser_installed=False
+    )
+    # An install whose stored switches predate it reads the default: on.
+    assert "low_risk_actions" in capabilities.enabled_keys({}, ctx)
+    on = render_permissions_block(capabilities.report({}, ctx))
+    assert "- Make low-risk changes without asking: on" in on
+    off = render_permissions_block(capabilities.report({"low_risk_actions": False}, ctx))
+    assert f"- Make low-risk changes without asking: off — {cap.when_denied}" in off

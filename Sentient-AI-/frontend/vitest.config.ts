@@ -26,6 +26,9 @@ export default defineConfig({
     setupFiles: ["./src/test/setup.ts"],
     include: ["src/**/*.test.{ts,tsx}"],
     restoreMocks: true,
+    // Above the async queries' 5 s wait (src/test/setup.ts), so a query that
+    // times out reports its own error rather than a bare test timeout.
+    testTimeout: 15000,
     // Tests replace `fetch` and `window.location`; without this a stub leaks
     // into every later test in the file.
     unstubGlobals: true,

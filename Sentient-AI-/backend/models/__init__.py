@@ -19,6 +19,39 @@ from models.slack_link import SlackChannelLink
 from models.user import User
 from models.vault_item import VaultItem
 
+# Each top10 skill adds its imports under its own anchor. isort is off
+# here so they stay there and parallel branches merge cleanly.
+# isort: off
+# top10:secret_pii_redaction
+
+# top10:file_extraction
+from models.user_file import UserFile
+
+# top10:scheduler_briefing
+from models.scheduled_task import AutomationRun, ScheduledTask
+
+# top10:tutor_mode
+from models.tutor_lock import TutorLock
+
+# top10:knowledge_base
+from models.knowledge import KbChunk, KbCollection, KbDocument, KbEmbedding, KbPosting
+
+# top10:flashcards_quizzes
+from models.study import StudyDeck, StudyItem, StudyQuizAttempt, StudyReview, StudySettings
+
+# top10:event_triggers
+from models.event_trigger import EventTrigger, TriggerEvent
+
+# top10:permission_tiers
+from models.permission_grant import PermissionGrantRow
+
+# top10:voice_notes
+
+# top10:video_transcripts
+from models.media_transcript import MediaTranscript
+
+# isort: on
+
 __all__ = [
     "INSTALLATION_ROW_ID",
     "AppApproval",
@@ -48,4 +81,42 @@ __all__ = [
     "SlackChannelLink",
     "User",
     "VaultItem",
+    # top10:secret_pii_redaction
+
+    # top10:file_extraction
+    "UserFile",
+
+    # top10:scheduler_briefing
+    "AutomationRun",
+    "ScheduledTask",
+
+    # top10:tutor_mode
+    "TutorLock",
+
+    # top10:knowledge_base
+    "KbChunk",
+    "KbCollection",
+    "KbDocument",
+    "KbEmbedding",
+    "KbPosting",
+
+    # top10:flashcards_quizzes
+    "StudyDeck",
+    "StudyItem",
+    "StudyQuizAttempt",
+    "StudyReview",
+    "StudySettings",
+
+    # top10:event_triggers
+    "EventTrigger",
+    "TriggerEvent",
+
+    # top10:permission_tiers
+    "PermissionGrantRow",
+
+    # top10:voice_notes
+
+    # top10:video_transcripts
+    "MediaTranscript",
+
 ]

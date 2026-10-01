@@ -55,7 +55,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import inspect
-import json
 import re
 from contextvars import ContextVar
 from typing import Any, Awaitable, Callable, Optional
@@ -64,10 +63,6 @@ from urllib.parse import urlencode, urlsplit
 import httpx
 import structlog
 
-# The characters the runtime writes out as visible \uXXXX escapes before it
-# shows a result to the model (runtime._wrap_tool_results); a stdlib-only
-# module, so importing it here pulls nothing else from the agent package.
-from services.agent.prompt_guard import _INVISIBLE_CHARS as _HIDDEN_CHARS
 from services.tools.html_text import (
     clean_result_rows,
     extract_readable_text,
@@ -80,8 +75,19 @@ from services.tools.net import (
     build_guarded_client,
     validated_addresses,
 )
+from services.tools.text_budget import clip_as_shown, shown_length
+from services.tools.video.sources import is_youtube_host, is_youtube_url
 
 logger = structlog.get_logger(__name__)
+
+# top10:video_transcripts. Crawler never reads YouTube pages: their text is
+# not the video, and YouTube's terms forbid automated access. fetch_page
+# answers this for a YouTube link (and for a redirect to one, which the
+# client refuses before connecting), and research skips YouTube results.
+YOUTUBE_PAGE_POINTER = (
+    "This is a YouTube video page; its fetched text is not the video. "
+    "Use video.transcript with this link."
+)
 
 # DuckDuckGo's no-JavaScript endpoint: real results, no API key, no
 # account. The HTML variant is used over lite/ because it is the one
@@ -214,6 +220,75 @@ _NON_TEXT_SUFFIXES = (
 # user's turns at once.
 _stop_check: ContextVar[Optional[Callable[[], bool]]] = ContextVar("web_stop_check", default=None)
 
+# top10:file_extraction. A PDF, Word, PowerPoint or Excel response is read
+# as sections in the sandboxed document reader (services/files) instead of
+# being refused as "not readable text": declared by its content type, or
+# sent as a generic binary type and confirmed by its magic bytes. HTML is
+# untouched. Reading a document also needs "Read files and documents"
+# (the executor binds the document context and the switch is read when a
+# document turns up). web.research reads at most two documents per call,
+# text layer only, under the WEB_RESEARCH preset (_DocumentBudget).
+_DOCUMENT_MIMES = frozenset(
+    {
+        "application/pdf",
+        "application/x-pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    }
+)
+# Legacy Office types (.doc, .xls, .ppt) are never read, but they take the
+# document path too, so services/files/detect refuses them with its own
+# sentence (save it as .docx or PDF; a password-protected file: never send
+# the password) rather than "not readable text".
+_LEGACY_OFFICE_MIMES = frozenset(
+    {"application/msword", "application/vnd.ms-excel", "application/vnd.ms-powerpoint"}
+)
+_GENERIC_BINARY_MIMES = frozenset(
+    {
+        "application/octet-stream",
+        "binary/octet-stream",
+        "application/download",
+        "application/force-download",
+        "application/x-download",
+    }
+)
+_DOCUMENT_SUFFIXES = (".pdf", ".docx", ".pptx", ".xlsx")
+_RESEARCH_MAX_DOCUMENTS = 2
+_DOCUMENT_PEEK_BYTES = 1024
+
+
+class _DocumentBudget:
+    """How one web.research call reads documents: the preset and how many
+    document sources it still may read."""
+
+    def __init__(self, preset: Any, slots: int) -> None:
+        self.preset = preset
+        self.left = slots
+
+    def take(self) -> bool:
+        if self.left <= 0:
+            return False
+        self.left -= 1
+        return True
+
+
+_document_budget: ContextVar[Optional[_DocumentBudget]] = ContextVar(
+    "web_document_budget", default=None
+)
+
+
+class _PendingDocument:
+    """A document response read into memory, parsed once the connection is
+    closed."""
+
+    def __init__(self, data: bytes, name: str, mime: Optional[str], url: str, preset: Any) -> None:
+        self.data = data
+        self.name = name
+        self.mime = mime
+        self.url = url
+        self.preset = preset
+
 _SCREENSHOT_WIDTH = 1024
 _SCREENSHOT_HEIGHT = 768
 # Encoded-image ceiling. The runtime stringifies a tool result into the
@@ -263,34 +338,11 @@ def _error(message: str, **extra: Any) -> dict[str, Any]:
     return {"ok": False, "error": message, **extra}
 
 
-def _shown_length(text: str) -> int:
-    """How many characters *text* takes in the JSON the runtime shows the
-    model: a line break or a quote is two, and an invisible character
-    (a soft hyphen, a zero-width joiner, a Unicode tag letter) is the six
-    or twelve of the escape the runtime writes it out as."""
-    shown = json.dumps(text, ensure_ascii=False)[1:-1]
-    return len(_HIDDEN_CHARS.sub(lambda m: json.dumps(m.group())[1:-1], shown))
-
-
-def _clip_as_shown(text: str, limit: int) -> str:
-    """The longest start of *text* whose shown length is at most *limit*.
-
-    Counting raw characters let a page of short lines (a table, a list)
-    come out a third longer than *limit* once escaped, overrun the
-    runtime's web.fetch_page budget and lose its middle there instead.
-    """
-    # Every character shows as at least one, so a text longer than the
-    # limit cannot fit, and the whole of a 2 MB page is never escaped.
-    if len(text) <= limit and _shown_length(text) <= limit:
-        return text
-    low, high = 0, min(len(text), limit)
-    while low < high:
-        middle = (low + high + 1) // 2
-        if _shown_length(text[:middle]) <= limit:
-            low = middle
-        else:
-            high = middle - 1
-    return text[:low]
+# The shown-length measure and clip moved to services/tools/text_budget.py,
+# shared with the document windows (services/files/window.py); these names
+# stay for the callers and tests that know them.
+_shown_length = shown_length
+_clip_as_shown = clip_as_shown
 
 
 def _challenged(status_code: int, html: str, results: list[dict[str, Any]]) -> bool:
@@ -399,7 +451,7 @@ class WebToolkit:
                 "User-Agent": _USER_AGENT,
                 "Accept-Language": "en-US,en;q=0.9",
             },
-            resolver=self._resolver,
+            resolver=_no_youtube(self._resolver),
             transport=self._transport,
         )
 
@@ -510,6 +562,9 @@ class WebToolkit:
         """Fetch a public page and return its readable text."""
         if not url or not isinstance(url, str):
             return _error("A 'url' is required.")
+        if is_youtube_url(url.strip()):
+            # top10:video_transcripts
+            return _error(YOUTUBE_PAGE_POINTER, youtube=True)
 
         try:
             limit = max(200, min(int(max_chars), MAX_PAGE_CHARS))
@@ -525,7 +580,14 @@ class WebToolkit:
                         url=str(response.url),
                     )
                 content_type = (response.headers.get("content-type") or "").lower()
-                if content_type and not content_type.startswith(_READABLE_CONTENT_TYPES):
+                # top10:file_extraction: a PDF or Office document is read as
+                # sections (_document_body, then _read_document below).
+                pending = await self._document_body(response, content_type)
+                if isinstance(pending, dict):
+                    return pending
+                if pending is None and content_type and not content_type.startswith(
+                    _READABLE_CONTENT_TYPES
+                ):
                     return _error(
                         f"Content type '{content_type.split(';')[0]}' is not readable text.",
                         url=str(response.url),
@@ -533,14 +595,19 @@ class WebToolkit:
 
                 chunks: list[bytes] = []
                 size = 0
-                async for chunk in response.aiter_bytes():
-                    chunks.append(chunk)
-                    size += len(chunk)
-                    if size >= _MAX_BODY_BYTES:
-                        break
+                if pending is None:
+                    async for chunk in response.aiter_bytes():
+                        chunks.append(chunk)
+                        size += len(chunk)
+                        if size >= _MAX_BODY_BYTES:
+                            break
                 final_url = str(response.url)
                 encoding = response.charset_encoding or "utf-8"
 
+        if pending is not None:
+            # Parsed after the connection is closed: the parse can take the
+            # preset's whole deadline.
+            return await self._read_document(pending, limit)
         body = b"".join(chunks).decode(encoding, errors="replace")
         title, text = extract_readable_text(body)
         clipped = _clip_as_shown(text, limit)
@@ -571,6 +638,107 @@ class WebToolkit:
             "chars": len(text),
             **note,
         }
+
+    # -- Documents (top10:file_extraction) ------------------------------------
+
+    async def _document_body(
+        self, response: httpx.Response, content_type: str
+    ) -> Optional[_PendingDocument | dict[str, Any]]:
+        """None when *response* is not a document (the page path goes on);
+        a _PendingDocument holding its bytes; or an error result: file
+        reading is off, the document is too large, research already read
+        its two documents, or a generic binary that is not a document."""
+        from services.files import messages as file_messages
+        from services.files.context import document_refusal
+        from services.files.detect import looks_like_document
+        from services.files.limits import WEB_PAGE
+
+        mime = content_type.split(";", 1)[0].strip()
+        declared = mime in _DOCUMENT_MIMES or mime in _LEGACY_OFFICE_MIMES
+        if not declared and mime not in _GENERIC_BINARY_MIMES:
+            return None
+        final_url = str(response.url)
+        budget = _document_budget.get()
+        preset = budget.preset if budget is not None else WEB_PAGE
+        stream = response.aiter_bytes()
+        head = bytearray()
+        if not declared:
+            async for chunk in stream:
+                head += chunk
+                if len(head) >= _DOCUMENT_PEEK_BYTES:
+                    break
+            if not looks_like_document(bytes(head)):
+                return _error(f"Content type '{mime}' is not readable text.", url=final_url)
+        refusal = await document_refusal()
+        if refusal is not None:
+            return _error(refusal, url=final_url, capability="file_reading")
+        if budget is not None and not budget.take():
+            return _error(
+                f"web.research reads at most {_RESEARCH_MAX_DOCUMENTS} documents per call; "
+                "open this one with web.fetch_page.",
+                url=final_url,
+            )
+        declared_size = response.headers.get("content-length")
+        if declared_size and declared_size.isdigit() and int(declared_size) > preset.max_bytes:
+            return _error(
+                file_messages.too_large(int(declared_size), preset.max_bytes),
+                url=final_url,
+                code="too_large",
+            )
+        data = head
+        async for chunk in stream:
+            data += chunk
+            if len(data) > preset.max_bytes:
+                return _error(
+                    file_messages.too_large(None, preset.max_bytes), url=final_url, code="too_large"
+                )
+        name = urlsplit(final_url).path.rsplit("/", 1)[-1] or "document"
+        return _PendingDocument(bytes(data), name[:200], mime if declared else None, final_url, preset)
+
+    async def _read_document(self, pending: _PendingDocument, limit: int) -> dict[str, Any]:
+        """The document as web.fetch_page returns it: the url, a title, the
+        first sections (sized by max_chars, at least WINDOW_MIN_CHARS), a
+        doc_id that files.read continues, and how to continue."""
+        from services.files.context import current as current_documents
+        from services.files.documents import read_document
+        from services.files.limits import WINDOW_MIN_CHARS
+
+        bound = current_documents()
+        if bound is None:
+            from services.files import messages as file_messages
+
+            return _error(file_messages.SWITCHED_OFF, url=pending.url, capability="file_reading")
+        result = await read_document(
+            pending.data,
+            name=pending.name,
+            declared_mime=pending.mime,
+            source="web",
+            preset=pending.preset,
+            user_id=bound.user_id,
+            max_chars=max(WINDOW_MIN_CHARS, limit),
+        )
+        if not result.get("ok"):
+            return _error(
+                str(result.get("error") or "The document could not be read."),
+                url=pending.url,
+                code=result.get("code"),
+            )
+        title = str(result.get("title") or result.get("name") or "")[:200]
+        document: dict[str, Any] = {"ok": True, "url": pending.url, "title": title}
+        for key in (
+            "kind",
+            "pages_total",
+            "sections_total",
+            "sections",
+            "doc_id",
+            "next_start",
+            "truncated",
+            "scanned_pages_unread",
+            "hint",
+        ):
+            if key in result:
+                document[key] = result[key]
+        return document
 
     async def research(
         self,
@@ -618,7 +786,16 @@ class WebToolkit:
         if not found.get("ok"):
             return found
 
-        chosen = await self._admit(_research_candidates(found.get("results") or []), wanted)
+        # top10:file_extraction: document links are candidates only while
+        # documents may be read in this call (at most two, WEB_RESEARCH).
+        from services.files.context import current as current_documents
+        from services.files.context import document_refusal
+        from services.files.limits import WEB_RESEARCH
+
+        documents = current_documents() is not None and await document_refusal() is None
+        chosen = await self._admit(
+            _research_candidates(found.get("results") or [], documents=documents), wanted
+        )
         if not chosen:
             return {
                 "ok": True,
@@ -633,9 +810,15 @@ class WebToolkit:
         limit = min(chars, max(_RESEARCH_MIN_CHARS, _RESEARCH_TOTAL_CHARS // len(chosen)))
         gate = asyncio.Semaphore(_RESEARCH_CONCURRENCY)
         stop = _stop_check.get()
-        sources = await asyncio.gather(
-            *(self._read_source(row, limit, gate, stop) for row in chosen)
+        budget_token = _document_budget.set(
+            _DocumentBudget(WEB_RESEARCH, _RESEARCH_MAX_DOCUMENTS) if documents else None
         )
+        try:
+            sources = await asyncio.gather(
+                *(self._read_source(row, limit, gate, stop) for row in chosen)
+            )
+        finally:
+            _document_budget.reset(budget_token)
         return {
             "ok": True,
             "query": query,
@@ -720,7 +903,14 @@ class WebToolkit:
         final_url = str(page.get("url") or url)
         source["url"] = final_url[:_RESEARCH_URL_CHARS]
         source["host"] = _host_of(final_url)
-        source["excerpt"] = str(page.get("text") or "")
+        if isinstance(page.get("sections"), list):
+            # A document: its first sections up to the shared limit, and the
+            # doc_id files.read continues (top10:file_extraction).
+            source["excerpt"] = _document_excerpt(page["sections"], limit)
+            source["doc_id"] = page.get("doc_id")
+            source["kind"] = page.get("kind")
+        else:
+            source["excerpt"] = str(page.get("text") or "")
         source["ok"] = True
         if not source["title"]:
             source["title"] = str(page.get("title") or "")[:_RESEARCH_TITLE_CHARS]
@@ -853,12 +1043,40 @@ def _host_of(url: str) -> str:
         return ""
 
 
-def _research_candidates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _no_youtube(resolver: AddressResolver) -> AddressResolver:
+    """*resolver* refusing every YouTube host, on every hop (a redirect to
+    YouTube included), before a socket is opened (top10:video_transcripts)."""
+
+    def resolve(url: str) -> tuple[str, ...]:
+        if is_youtube_url(url):
+            raise EgressBlocked(YOUTUBE_PAGE_POINTER)
+        return resolver(url)
+
+    return resolve
+
+
+def _document_excerpt(sections: list[Any], limit: int) -> str:
+    """A document source's excerpt: its first sections, labelled, up to
+    *limit* characters as shown."""
+    parts: list[str] = []
+    for item in sections:
+        if isinstance(item, dict) and isinstance(item.get("text"), str):
+            parts.append(f"[{item.get('label') or ''}] {item['text']}".strip())
+    return clip_as_shown("\n\n".join(parts), limit).rstrip()
+
+
+def _research_candidates(
+    rows: list[dict[str, Any]], *, documents: bool = False
+) -> list[dict[str, Any]]:
     """Search rows worth reading, best first: http(s) only, one per host
     ("www." folded in, so a site is not read twice under two names), and
-    not a link to a document or media file."""
+    not a link to a document or media file. With *documents* (the document
+    reader may be used in this call), links to PDF, Word, PowerPoint and
+    Excel files stay, at most _RESEARCH_MAX_DOCUMENTS of them; media,
+    archives and legacy .doc/.xls/.ppt are skipped either way."""
     picked: list[dict[str, Any]] = []
     seen: set[str] = set()
+    document_links = 0
     for row in rows:
         url = row.get("url")
         if not isinstance(url, str):
@@ -870,12 +1088,21 @@ def _research_candidates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         host = _host_of(url)
         if parts.scheme not in ("http", "https") or not host:
             continue
-        if parts.path.lower().endswith(_NON_TEXT_SUFFIXES):
+        if is_youtube_host(host):
+            # top10:video_transcripts: a video is read with video.transcript.
+            continue
+        path = parts.path.lower()
+        is_document = documents and path.endswith(_DOCUMENT_SUFFIXES)
+        if is_document and document_links >= _RESEARCH_MAX_DOCUMENTS:
+            continue
+        if not is_document and path.endswith(_NON_TEXT_SUFFIXES):
             continue
         key = host[4:] if host.startswith("www.") else host
         if key in seen:
             continue
         seen.add(key)
+        if is_document:
+            document_links += 1
         picked.append(row)
     return picked
 

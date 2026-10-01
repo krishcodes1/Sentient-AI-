@@ -31,7 +31,7 @@ import asyncio
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, Literal, Optional
+from typing import Any, Callable, Literal, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -192,13 +192,17 @@ def _raise_transport_error(provider: str, exc: httpx.TransportError) -> None:
 #
 #   {"type": "text",  "text": "..."}
 #   {"type": "image", "media_type": "image/png", "data": "<base64>"}
+#   {"type": "audio", "media_type": "audio/ogg", "data": "<base64>"}
 #
-# Image ``data`` is raw base64 with no ``data:`` prefix. It is never logged
-# and never scanned as text — the bytes are opaque to every layer above the
-# provider.
+# Image and audio ``data`` is raw base64 with no ``data:`` prefix. It is
+# never logged and never scanned as text — the bytes are opaque to every
+# layer above the provider. An audio block (top10:voice_notes) is only ever
+# sent by the one-shot transcription call of a voice note; a provider that
+# cannot hear audio refuses it (``_reject_audio``) rather than drop it.
 
 TEXT_BLOCK = "text"
 IMAGE_BLOCK = "image"
+AUDIO_BLOCK = "audio"
 
 
 def normalize_content(content: Any) -> list[dict[str, Any]]:
@@ -230,6 +234,18 @@ def has_images(messages: list[dict[str, Any]]) -> bool:
         isinstance(m.get("content"), list)
         and any(
             isinstance(b, dict) and b.get("type") == IMAGE_BLOCK
+            for b in m["content"]
+        )
+        for m in messages
+    )
+
+
+def has_audio(messages: list[dict[str, Any]]) -> bool:
+    """True when any message carries an audio block (top10:voice_notes)."""
+    return any(
+        isinstance(m.get("content"), list)
+        and any(
+            isinstance(b, dict) and b.get("type") == AUDIO_BLOCK
             for b in m["content"]
         )
         for m in messages
@@ -289,6 +305,12 @@ class LLMProvider(abc.ABC):
     # "can I send this photo?" before the request, and a wrong *yes* costs
     # a failed turn while a wrong *no* costs an actionable error message.
     supports_vision: bool = False
+    # top10:knowledge_base: whether embed() works (Gemini, OpenAI itself and
+    # Ollama). Everyone else refuses, and the knowledge base stays keyword-only.
+    supports_embeddings: bool = False
+    # Whether this backend accepts audio content blocks (top10:voice_notes).
+    # Only Gemini does in v1; everywhere else an audio block is refused.
+    supports_audio: bool = False
 
     # Name used in ProviderError; subclasses that serve several vendors
     # override it per instance.
@@ -312,6 +334,20 @@ class LLMProvider(abc.ABC):
                 "Choose a vision-capable provider (Anthropic, OpenAI, or "
                 "Gemini) in Settings, or send the message without images."
             ),
+        )
+
+    def _reject_audio(self, messages: list[dict[str, Any]]) -> None:
+        """Refuse a request carrying audio this backend cannot hear
+        (top10:voice_notes). Converting the block to empty text instead
+        would have the model "transcribe" silence and answer that."""
+        if self.supports_audio or not has_audio(messages):
+            return
+        name = self._provider_name or type(self).__name__
+        raise ProviderError(
+            name,
+            None,
+            f"the '{name}' provider does not accept audio. Voice notes need "
+            "transcription on this computer or a provider that can listen (Gemini).",
         )
 
     def _log_cache_usage(self, usage: dict[str, int]) -> None:
@@ -351,6 +387,44 @@ class LLMProvider(abc.ABC):
         """Release owned HTTP resources. Called when the runtime evicts a
         cached provider instance; default is a no-op for providers that
         own nothing."""
+
+    async def embed(
+        self,
+        texts: list[str],
+        *,
+        kind: Literal["document", "query"] = "document",
+        dims: int = 256,
+        model: Optional[str] = None,
+    ) -> list[list[float]]:
+        """Vectors for *texts* (top10:knowledge_base), L2-normalised, of at
+        most *dims* numbers; *kind* says whether they are passages or a
+        search query. The caller redacts the texts first. This backend has
+        no embedding model."""
+        name = self._provider_name or type(self).__name__
+        raise ProviderError(name, None, "this provider has no embedding model")
+
+
+# top10:knowledge_base: embedding helpers. The model names default from the
+# settings (GEMINI_EMBED_MODEL, OPENAI_EMBED_MODEL, OLLAMA_EMBED_MODEL).
+_EMBED_FAILED = "the embedding request failed"
+
+
+def _embed_setting(name: str, default: str) -> str:
+    from core.config import settings
+
+    value = str(getattr(settings, name, "") or "").strip()
+    return value or default
+
+
+def _unit_vector(values: Any, dims: Optional[int] = None) -> list[float]:
+    """*values* as floats, cut to *dims* when given, scaled to length 1."""
+    if not isinstance(values, (list, tuple)) or not values:
+        raise ValueError("empty vector")
+    numbers = [float(v) for v in values]
+    if dims is not None:
+        numbers = numbers[:dims]
+    norm = sum(v * v for v in numbers) ** 0.5
+    return [v / norm for v in numbers] if norm > 0 else numbers
 
 
 # Outbound request budget for every provider. The SDK defaults are ~10
@@ -571,6 +645,7 @@ class AnthropicProvider(LLMProvider):
         return kwargs
 
     async def complete(self, messages, tools=None) -> LLMResponse:
+        self._reject_audio(messages)
         kwargs = self._build_kwargs(messages, tools)
         if self.thinks_by_default:
             # Per request, not on the client: the other models, and every
@@ -613,6 +688,7 @@ class AnthropicProvider(LLMProvider):
         )
 
     async def stream(self, messages, tools=None):
+        self._reject_audio(messages)
         kwargs = self._build_kwargs(messages, tools)
         async with self._client.messages.stream(**kwargs) as stream:
             async for text in stream.text_stream:
@@ -809,6 +885,7 @@ class OpenAICompatibleProvider(LLMProvider):
 
     async def complete(self, messages, tools=None) -> LLMResponse:
         self._reject_images(messages)
+        self._reject_audio(messages)
         kwargs = self._request_kwargs(messages, tools)
 
         import openai
@@ -839,6 +916,7 @@ class OpenAICompatibleProvider(LLMProvider):
 
     async def stream(self, messages, tools=None):
         self._reject_images(messages)
+        self._reject_audio(messages)
         kwargs = self._request_kwargs(messages, tools, stream=True)
         stream = await self._client.chat.completions.create(**kwargs)
         async for chunk in stream:
@@ -851,6 +929,8 @@ class OpenAIProvider(OpenAICompatibleProvider):
     """OpenAI GPT models."""
 
     supports_vision = True
+    # top10:knowledge_base: OpenAI itself, never the compatible vendors.
+    supports_embeddings = True
 
     # GPT-6 Sol and Luna accept function tools on Chat Completions only
     # with reasoning_effort "none"; both default to "medium"
@@ -882,6 +962,36 @@ class OpenAIProvider(OpenAICompatibleProvider):
                 f"{self._model} cannot use tools through the Chat Completions API "
                 "Crawler AI calls. Choose gpt-6-luna or gpt-6-sol in Settings.",
             )
+
+    async def embed(
+        self,
+        texts: list[str],
+        *,
+        kind: Literal["document", "query"] = "document",
+        dims: int = 256,
+        model: Optional[str] = None,
+    ) -> list[list[float]]:
+        """embeddings.create with OPENAI_EMBED_MODEL (text-embedding-3-small)
+        and ``dimensions`` (top10:knowledge_base). The SDK retries; a failure
+        is a ProviderError naming only the status and the error type."""
+        name = model or _embed_setting("OPENAI_EMBED_MODEL", "text-embedding-3-small")
+        vectors: list[list[float]] = []
+        for start in range(0, len(texts), 256):
+            batch = list(texts[start : start + 256])
+            try:
+                response = await self._client.embeddings.create(model=name, input=batch, dimensions=dims)
+                rows = sorted(response.data, key=lambda row: row.index)
+                if len(rows) != len(batch):
+                    raise ValueError("wrong number of vectors")
+                vectors.extend(_unit_vector(row.embedding, dims) for row in rows)
+            except Exception as exc:  # the SDK's message can echo the request
+                status = getattr(exc, "status_code", None)
+                raise ProviderError(
+                    "openai",
+                    status if isinstance(status, int) else None,
+                    f"{_EMBED_FAILED} ({type(exc).__name__})",
+                ) from None
+        return vectors
 
 
 class GrokProvider(OpenAICompatibleProvider):
@@ -972,6 +1082,10 @@ class GeminiProvider(LLMProvider):
     """Google Gemini via the REST API."""
 
     supports_vision = True
+    # top10:knowledge_base: batchEmbedContents with GEMINI_EMBED_MODEL.
+    supports_embeddings = True
+    # top10:voice_notes: an audio block rides as inlineData, like an image.
+    supports_audio = True
     _provider_name = "gemini"
     # Models whose thinkingBudget may be 0 (thinking off). 2.5 Pro rejects 0
     # with a 400 ("only works in thinking mode") and 2.0 has no
@@ -1058,13 +1172,14 @@ class GeminiProvider(LLMProvider):
         """Translate content blocks into Gemini ``parts``.
 
         Images ride as ``inlineData`` (base64 + mime type), which is the
-        camelCase spelling the rest of this payload already uses.
+        camelCase spelling the rest of this payload already uses; so does
+        audio (a voice note's one-shot transcription, top10:voice_notes).
         """
         if not isinstance(content, list):
             return [{"text": "" if content is None else str(content)}]
         parts: list[dict[str, Any]] = []
         for part in normalize_content(content):
-            if part.get("type") == IMAGE_BLOCK:
+            if part.get("type") in (IMAGE_BLOCK, AUDIO_BLOCK):
                 parts.append(
                     {
                         "inlineData": {
@@ -1150,16 +1265,45 @@ class GeminiProvider(LLMProvider):
         if gemini_tools:
             payload["tools"] = gemini_tools
 
-        # Asked again after a short pause when the error says it may work
-        # (see _RETRY_STATUS), at most _MAX_RETRIES times, as the SDK
-        # providers do on their own. Not once the owner has pressed Stop:
-        # the runtime reads the web Stop only between steps, and a retry
-        # happens inside one, so it would otherwise be asked (and billed)
-        # after the Stop.
+        # A blank completion is read inside the retries (accept): it may be
+        # a hiccup, and is asked again within the same budget as a 503.
+        data = await self._post_with_retries(
+            self._build_url(), payload, accept=self._completion
+        )
+        response = self._completion(data)
+        self._log_cache_usage(response.usage)
+        return response
+
+    async def _post_with_retries(
+        self,
+        url: str,
+        payload: dict[str, Any],
+        *,
+        timeout: Optional[float] = None,
+        accept: Optional[Callable[[dict[str, Any]], object]] = None,
+    ) -> dict[str, Any]:
+        """POST *payload* to *url* (a ``_build_url``) and return the JSON
+        body.
+
+        Asked again after a short pause when the error says it may work
+        (see _RETRY_STATUS; the wait Google asks for is honoured up to
+        _RETRY_MAX_S), at most _MAX_RETRIES times, as the SDK providers do
+        on their own. Not once the owner has pressed Stop: the runtime
+        reads the web Stop only between steps, and a retry happens inside
+        one, so it would otherwise be asked (and billed) after the Stop.
+
+        *timeout* replaces the client's for this request; None keeps it.
+        *accept*, when given, reads a 2xx body and raises ProviderError when
+        the body is unusable, marked ``retryable`` when asking again may
+        help (a blank completion); it runs inside the retries. Errors never
+        carry the key or the URL."""
         attempt = 0
         while True:
             try:
-                return await self._complete_once(payload)
+                data = await self._post_once(url, payload, timeout=timeout)
+                if accept is not None:
+                    accept(data)
+                return data
             except ProviderError as exc:
                 if (
                     not exc.retryable
@@ -1179,11 +1323,14 @@ class GeminiProvider(LLMProvider):
     # Swapped for a recorder in tests.
     _retry_sleep = staticmethod(asyncio.sleep)
 
-    async def _complete_once(self, payload: dict[str, Any]) -> LLMResponse:
-        """One generateContent call. Raises ProviderError, marked
+    async def _post_once(
+        self, url: str, payload: dict[str, Any], *, timeout: Optional[float] = None
+    ) -> dict[str, Any]:
+        """One POST and its JSON body. Raises ProviderError, marked
         ``retryable`` when asking again may work."""
+        options: dict[str, Any] = {} if timeout is None else {"timeout": timeout}
         try:
-            resp = await self._client.post(self._build_url(), json=payload)
+            resp = await self._client.post(url, json=payload, **options)
         except httpx.TransportError as exc:
             raise ProviderError(
                 "gemini",
@@ -1200,16 +1347,21 @@ class GeminiProvider(LLMProvider):
                 retry_after=_retry_after(resp) if resp.status_code == 429 else None,
             )
         try:
-            data = resp.json()
+            data: dict[str, Any] = resp.json()
         except json.JSONDecodeError:
             raise ProviderError(
                 "gemini", resp.status_code, "provider returned a non-JSON response"
             ) from None
+        return data
 
-        # Parse response. An empty candidates list means Gemini refused or
-        # filtered the request (promptFeedback carries the reason) — surface
-        # it instead of returning blank content that would be persisted as
-        # an empty assistant message and poison the semantic cache.
+    def _completion(self, data: dict[str, Any]) -> LLMResponse:
+        """A generateContent body as an LLMResponse. Raises ProviderError,
+        marked ``retryable`` when asking again may work, when it holds no
+        usable answer."""
+        # An empty candidates list means Gemini refused or filtered the
+        # request (promptFeedback carries the reason) — surface it instead
+        # of returning blank content that would be persisted as an empty
+        # assistant message and poison the semantic cache.
         candidates = data.get("candidates", [])
         if not candidates:
             feedback = data.get("promptFeedback") or {}
@@ -1254,14 +1406,12 @@ class GeminiProvider(LLMProvider):
                 retryable=finish in _RETRY_FINISH_REASONS,
             )
 
-        usage = self._usage(data.get("usageMetadata"))
-        self._log_cache_usage(usage)
         served = data.get("modelVersion")
         return LLMResponse(
             content="".join(text_parts),
             tool_calls=tool_calls,
             model=self._model,
-            usage=usage,
+            usage=self._usage(data.get("usageMetadata")),
             served_model=served.strip() if isinstance(served, str) else "",
         )
 
@@ -1322,6 +1472,121 @@ class GeminiProvider(LLMProvider):
         except httpx.TransportError as exc:
             _raise_transport_error("gemini", exc)
 
+    async def embed(
+        self,
+        texts: list[str],
+        *,
+        kind: Literal["document", "query"] = "document",
+        dims: int = 256,
+        model: Optional[str] = None,
+    ) -> list[list[float]]:
+        """models/{GEMINI_EMBED_MODEL}:batchEmbedContents, up to 100 texts a
+        request, taskType RETRIEVAL_DOCUMENT or RETRIEVAL_QUERY and
+        outputDimensionality *dims*, re-normalised (top10:knowledge_base).
+        Retried like complete() (_post_with_retries); the key stays in the
+        header and a failure names only the status."""
+        name = (model or _embed_setting("GEMINI_EMBED_MODEL", "gemini-embedding-001")).strip().lower()
+        name = name.removeprefix("models/")
+        task = "RETRIEVAL_QUERY" if kind == "query" else "RETRIEVAL_DOCUMENT"
+        url = f"{self._base_url}/models/{name}:batchEmbedContents"
+        vectors: list[list[float]] = []
+        for start in range(0, len(texts), 100):
+            batch = list(texts[start : start + 100])
+            payload = {
+                "requests": [
+                    {
+                        "model": f"models/{name}",
+                        "content": {"parts": [{"text": text}]},
+                        "taskType": task,
+                        "outputDimensionality": dims,
+                    }
+                    for text in batch
+                ]
+            }
+            try:
+                data = await self._post_with_retries(url, payload)
+            except ProviderError as exc:
+                raise ProviderError(
+                    "gemini", exc.status_code, _EMBED_FAILED, retryable=exc.retryable
+                ) from None
+            rows = data.get("embeddings")
+            if not isinstance(rows, list) or len(rows) != len(batch):
+                raise ProviderError("gemini", None, "the embedding response was malformed")
+            try:
+                vectors.extend(_unit_vector(row.get("values"), dims) for row in rows)
+            except (AttributeError, TypeError, ValueError):
+                raise ProviderError("gemini", None, "the embedding response was malformed") from None
+        return vectors
+
+    # top10:video_transcripts. A YouTube video read by this provider, for
+    # video.transcript (services/tools/video/provider_video.py) through the
+    # turn's own lease (services/agent/turn_context.py).
+    _VIDEO_TIMEOUT_S = 300.0
+    _WATCH_URL = re.compile(r"https://www\.youtube\.com/watch\?v=[A-Za-z0-9_-]{11}")
+
+    async def read_video_url(
+        self,
+        *,
+        url: str,
+        start_s: int,
+        end_s: int,
+        fps: float = 0.25,
+        instruction: str,
+        prompt: str,
+        response_schema: dict[str, Any],
+        max_output_tokens: int,
+    ) -> LLMResponse:
+        """Have Gemini watch [start_s, end_s] of the public YouTube video at
+        *url* (Gemini's documented YouTube URL input) and answer *prompt* as
+        JSON matching *response_schema*.
+
+        One user content: a ``fileData`` part with the canonical watch URL
+        and its ``videoMetadata`` (start and end offsets, *fps*), then the
+        prompt; *instruction* as the system instruction; no tools; low
+        media resolution and the lowest thinking setting the model takes.
+        *url* must be ``https://www.youtube.com/watch?v=<id>`` (rebuilt from
+        a parsed id by the caller): anything else is a ValueError, so no
+        other address can ride along. Same retries, backoff and Stop as
+        complete(); errors never carry the key or the URL."""
+        if not self._WATCH_URL.fullmatch(url or ""):
+            raise ValueError("read_video_url takes a canonical YouTube watch URL only")
+        start, end = max(0, int(start_s)), max(0, int(end_s))
+        if end <= start:
+            raise ValueError("read_video_url needs end_s after start_s")
+        generation: dict[str, Any] = {
+            "mediaResolution": "MEDIA_RESOLUTION_LOW",
+            "responseMimeType": "application/json",
+            "responseSchema": _gemini_schema(response_schema),
+            "maxOutputTokens": int(max_output_tokens),
+        }
+        generation.update(self._generation_config(0).get("generationConfig", {}))
+        payload: dict[str, Any] = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {
+                            "fileData": {"fileUri": url},
+                            "videoMetadata": {
+                                "startOffset": f"{start}s",
+                                "endOffset": f"{end}s",
+                                "fps": float(fps),
+                            },
+                        },
+                        {"text": prompt},
+                    ],
+                }
+            ],
+            "systemInstruction": {"parts": [{"text": instruction}]},
+            "generationConfig": generation,
+        }
+        data = await self._post_with_retries(
+            self._build_url(), payload, timeout=self._VIDEO_TIMEOUT_S, accept=self._completion
+        )
+        response = self._completion(data)
+        self._log_cache_usage(response.usage)
+        return response
+
 
 # ---------------------------------------------------------------------------
 # Ollama (local)
@@ -1338,6 +1603,8 @@ class OllamaProvider(LLMProvider):
     """
 
     supports_vision = False
+    # top10:knowledge_base: /api/embed with OLLAMA_EMBED_MODEL, on this computer.
+    supports_embeddings = True
     _provider_name = "ollama"
 
     def __init__(self, base_url: str = "http://localhost:11434", model: str = "llama3.2"):
@@ -1368,6 +1635,7 @@ class OllamaProvider(LLMProvider):
 
     async def complete(self, messages, tools=None) -> LLMResponse:
         self._reject_images(messages)
+        self._reject_audio(messages)
         payload: dict[str, Any] = {"model": self._model, "messages": messages, "stream": False}
         ollama_tools = self._convert_tools(tools)
         if ollama_tools:
@@ -1408,6 +1676,7 @@ class OllamaProvider(LLMProvider):
 
     async def stream(self, messages, tools=None):
         self._reject_images(messages)
+        self._reject_audio(messages)
         payload: dict[str, Any] = {"model": self._model, "messages": messages, "stream": True}
         ollama_tools = self._convert_tools(tools)
         if ollama_tools:
@@ -1436,6 +1705,43 @@ class OllamaProvider(LLMProvider):
                         yield content
         except httpx.TransportError as exc:
             _raise_transport_error("ollama", exc)
+
+    # Models trained to be cut short (Matryoshka): truncated to *dims* and
+    # re-normalised; any other model keeps its own size.
+    _TRUNCATABLE_EMBEDDERS = ("nomic-embed-text", "embeddinggemma")
+
+    async def embed(
+        self,
+        texts: list[str],
+        *,
+        kind: Literal["document", "query"] = "document",
+        dims: int = 256,
+        model: Optional[str] = None,
+    ) -> list[list[float]]:
+        """POST /api/embed with OLLAMA_EMBED_MODEL (nomic-embed-text), with
+        its 'search_document: ' / 'search_query: ' prefixes
+        (top10:knowledge_base)."""
+        name = model or _embed_setting("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+        family = name.split(":", 1)[0].rsplit("/", 1)[-1]
+        prefix = ""
+        if family == "nomic-embed-text":
+            prefix = "search_query: " if kind == "query" else "search_document: "
+        cut = dims if family in self._TRUNCATABLE_EMBEDDERS else None
+        try:
+            resp = await self._client.post(
+                "/api/embed", json={"model": name, "input": [prefix + text for text in texts]}
+            )
+        except httpx.TransportError as exc:
+            _raise_transport_error("ollama", exc)
+        if resp.is_error:
+            raise ProviderError("ollama", resp.status_code, _EMBED_FAILED)
+        try:
+            rows = resp.json().get("embeddings")
+            if not isinstance(rows, list) or len(rows) != len(texts):
+                raise ValueError("wrong number of vectors")
+            return [_unit_vector(row, cut) for row in rows]
+        except (AttributeError, TypeError, ValueError):
+            raise ProviderError("ollama", resp.status_code, "the embedding response was malformed") from None
 
 
 # ---------------------------------------------------------------------------
@@ -1474,6 +1780,14 @@ PROVIDER_REGISTRY: dict[str, type[LLMProvider]] = {
     "mistral": MistralProvider,
     "ollama": OllamaProvider,
 }
+
+
+def provider_hears_audio(name: Optional[str]) -> bool:
+    """Whether the provider registered as *name* accepts audio blocks
+    (top10:voice_notes): the class flag, so no key or network is needed.
+    An unknown or empty name hears nothing."""
+    provider_cls = PROVIDER_REGISTRY.get((name or "").strip().lower())
+    return bool(provider_cls is not None and provider_cls.supports_audio)
 
 
 def create_provider(

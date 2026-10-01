@@ -65,6 +65,20 @@ class ReportContext:
     # configured and the owner's "telegram" switch is on, so a message can
     # actually be sent. False when not gathered, which reads as no Telegram.
     telegram_enabled: bool = False
+    # The install-wide default AI provider ("gemini", "ollama", ...; what
+    # InstallationService.llm_defaults answers), for a capability that
+    # depends on which provider serves turns. "" when not gathered.
+    default_provider: str = ""
+    # top10:knowledge_base. For knowledge_semantic: the embedding backend the
+    # meaning index would use ("ollama", "gemini", "openai"; "" when the
+    # install's provider has none), services.knowledge.embeddings.backend_name.
+    embedding_backend: str = ""
+    # top10:voice_notes. For voice_notes: faster-whisper, CTranslate2, PyAV
+    # and the pinned model files are on disk (transcribe.local_engine_installed).
+    speech_local_installed: bool = False
+    # For voice_notes_cloud: the default provider accepts audio blocks
+    # (providers.provider_hears_audio(default_provider)).
+    default_provider_audio: bool = False
 
 
 @dataclass(frozen=True)

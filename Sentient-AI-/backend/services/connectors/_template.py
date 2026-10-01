@@ -47,7 +47,10 @@ _MAX_BODY_CHARS = 4000
 #   every other category also takes keyword-only ``user_confirmed=False``;
 # - no parameter is named ``url``, ``action`` or ``user_confirmed``;
 # - every DELETE, and every send/post/share, sets always_confirm=True;
-# - 2 to 4 everyday reads set starter=True (at most 4).
+# - 2 to 4 everyday reads set starter=True (at most 4);
+# - a WRITE that is a small, undoable change nobody else sees may set
+#   risk="low" with a low_risk_note (at most 80 characters) and, for its id
+#   arguments, ref_args; risk_check may only escalate (services/agent/risk.py).
 ACTIONS: tuple[ToolSpec, ...] = (
     ToolSpec(
         "list_notes",

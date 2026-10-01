@@ -32,6 +32,41 @@ from services.capabilities.base import (
 )
 from services.capabilities.env import crawler_executable, in_container, platform_name
 
+# Each top10 skill adds its imports under its own anchor. isort is off
+# here so they stay there and parallel branches merge cleanly.
+# isort: off
+# top10:secret_pii_redaction
+from services.capabilities import hide_personal_details
+
+# top10:file_extraction
+from services.capabilities import file_reading
+
+# top10:scheduler_briefing
+from services.capabilities import scheduled_tasks
+
+# top10:tutor_mode
+from services.capabilities import tutor_mode
+
+# top10:knowledge_base
+from services.capabilities import knowledge_base, knowledge_semantic
+
+# top10:flashcards_quizzes
+from services.capabilities import study
+
+# top10:event_triggers
+from services.capabilities import event_triggers, trigger_runs
+
+# top10:permission_tiers
+from services.capabilities import low_risk_actions
+
+# top10:voice_notes
+from services.capabilities import voice_notes, voice_notes_cloud
+
+# top10:video_transcripts
+from services.capabilities import video_transcripts
+
+# isort: on
+
 logger = structlog.get_logger(__name__)
 
 REGISTRY: tuple[Capability, ...] = (
@@ -48,6 +83,39 @@ REGISTRY: tuple[Capability, ...] = (
     computer_control.CAPABILITY,
     purchases.CAPABILITY,
     page_watch.CAPABILITY,
+    # top10:secret_pii_redaction
+    hide_personal_details.CAPABILITY,
+
+    # top10:file_extraction
+    file_reading.CAPABILITY,
+
+    # top10:scheduler_briefing
+    scheduled_tasks.CAPABILITY,
+
+    # top10:tutor_mode
+    tutor_mode.CAPABILITY,
+
+    # top10:knowledge_base
+    knowledge_base.CAPABILITY,
+    knowledge_semantic.CAPABILITY,
+
+    # top10:flashcards_quizzes
+    study.CAPABILITY,
+
+    # top10:event_triggers
+    event_triggers.CAPABILITY,
+    trigger_runs.CAPABILITY,
+
+    # top10:permission_tiers
+    low_risk_actions.CAPABILITY,
+
+    # top10:voice_notes
+    voice_notes.CAPABILITY,
+    voice_notes_cloud.CAPABILITY,
+
+    # top10:video_transcripts
+    video_transcripts.CAPABILITY,
+
 )
 
 # Owner-editable settings a capability carries, by key, with their defaults
@@ -56,6 +124,29 @@ REGISTRY: tuple[Capability, ...] = (
 # shows only its switch, and the settings route refuses it.
 _SETTINGS_DEFAULTS: Mapping[str, Mapping[str, Any]] = {
     purchases.CAPABILITY.key: purchases.PURCHASE_SETTINGS_DEFAULTS,
+    # top10:secret_pii_redaction
+
+    # top10:file_extraction
+
+    # top10:scheduler_briefing
+    scheduled_tasks.CAPABILITY.key: scheduled_tasks.SCHEDULE_SETTINGS_DEFAULTS,
+
+    # top10:tutor_mode
+
+    # top10:knowledge_base
+    knowledge_base.CAPABILITY.key: knowledge_base.KNOWLEDGE_SETTINGS_DEFAULTS,
+
+    # top10:flashcards_quizzes
+
+    # top10:event_triggers
+
+    # top10:permission_tiers
+
+    # top10:voice_notes
+
+    # top10:video_transcripts
+    video_transcripts.CAPABILITY.key: video_transcripts.VIDEO_SETTINGS_DEFAULTS,
+
 }
 
 
@@ -125,15 +216,22 @@ def default_context(
     telegram_configured: bool = False,
     slack_configured: bool = False,
     telegram_enabled: bool = False,
+    default_provider: str = "",
+    embedding_backend: Optional[str] = None,
 ) -> ReportContext:
     """Gather the environment facts for one report. This is the only place
     that touches the OS for availability; availability() reads the result.
     *telegram_enabled* is the owner's Telegram switch; it counts only with a
-    token configured."""
+    token configured. *default_provider* is the install's default AI
+    provider, as the caller read it. *embedding_backend* defaults to the
+    knowledge base's rule for that provider and KB_EMBEDDINGS
+    (top10:knowledge_base)."""
     # Both deferred, like browser_installed: the registry stays importable
     # without the toolkit or the platform package.
     from services import platform as platform_layer
+    from services.agent.providers import provider_hears_audio
     from services.tools.system import browser_installed, playwright_installed
+    from services.tools.transcribe import local_engine_installed
 
     layer = platform_layer.current()
     return ReportContext(
@@ -147,7 +245,28 @@ def default_context(
         host_platform=layer.name,
         slack_configured=slack_configured,
         telegram_enabled=telegram_configured and telegram_enabled,
+        default_provider=default_provider,
+        embedding_backend=(
+            _embedding_backend(default_provider) if embedding_backend is None else embedding_backend
+        ),
+        # Voice notes (top10 voice_notes): the local engine on disk, and
+        # whether the default provider hears audio.
+        speech_local_installed=local_engine_installed(),
+        default_provider_audio=provider_hears_audio(default_provider),
     )
+
+
+def _embedding_backend(default_provider: str) -> str:
+    """top10:knowledge_base: the meaning index's backend for this provider
+    (services.knowledge.embeddings.backend_name), "" when unreadable."""
+    try:
+        from core.config import settings
+        from services.knowledge.embeddings import backend_name
+
+        return backend_name(default_provider, getattr(settings, "KB_EMBEDDINGS", None))
+    except Exception as exc:  # a broken fact blocks the switch, never the report
+        logger.warning("embedding_backend_unreadable", error_type=type(exc).__name__)
+        return ""
 
 
 def clear_probe_cache() -> None:

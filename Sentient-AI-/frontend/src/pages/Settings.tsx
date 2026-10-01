@@ -20,8 +20,10 @@ import {
 } from "lucide-react";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import AppApprovals from "@/components/AppApprovals";
+import PermissionGrants from "@/components/PermissionGrants";
 import CapabilityList, { CapabilityListError } from "@/components/CapabilityList";
 import PaymentCardSettings from "@/components/PaymentCardSettings";
+import TutorLocks from "@/components/TutorLocks";
 import ServerSettings from "@/components/ServerSettings";
 import type { CapabilityStatus, User } from "@/types";
 import {
@@ -53,8 +55,25 @@ import {
 // these in sync with PermissionTier in backend/services/agent/permissions.py
 // and the User model.
 const PERMISSION_TIERS = [
-  { value: "auto_approve", label: "Auto Approve", help: "Low-risk read actions run immediately." },
-  { value: "user_confirm", label: "User Confirm", help: "Write actions require explicit approval." },
+  {
+    value: "auto_approve",
+    label: "Auto Approve",
+    help:
+      "Changes run without asking, except sends, deletes, sharing and other high-risk actions. " +
+      "Each connection's own tier (Connectors page) also applies; the stricter one wins.",
+  },
+  {
+    value: "low_risk",
+    label: "Allow low-risk changes",
+    help:
+      "Only low-risk changes run without asking. Each connection's own tier (Connectors page) " +
+      "also applies; the stricter one wins, so a connection left on User Confirm keeps asking.",
+  },
+  {
+    value: "user_confirm",
+    label: "User Confirm",
+    help: "Every change needs your approval; reads run without asking.",
+  },
   {
     value: "admin_only",
     label: "Admin Only",
@@ -778,6 +797,10 @@ export default function Settings() {
         )}
         {/* Each account lists and revokes its own weekly approvals: not gated on is_admin. */}
         <AppApprovals />
+        {/* Tutor locks are owner policy (services/tutor): the owner's only, never rendered for anyone else. */}
+        {me?.is_admin && <TutorLocks />}
+        {/* Each account also lists and revokes its own low-risk grants (permission tiers). */}
+        <PermissionGrants />
       </section>
 
       {/* Payment card (owner only): the card "Buy things for me" pays with.

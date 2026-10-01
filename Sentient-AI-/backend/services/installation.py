@@ -94,8 +94,18 @@ class RegistrationLocked(Exception):
 SETTING_MIN = 1
 SETTING_MAX = 10000
 # The 422 the owner reads when a value is out of bounds: the Permissions
-# page shows it as it is, so it names no internal setting.
+# page shows it as it is, so it names no internal setting. Worded per
+# capability: the purchase caps are dollars, the scheduled-task budgets are
+# cents and counts, so any other capability's settings read as plain whole
+# numbers.
 SETTINGS_OUT_OF_BOUNDS = "Caps must be between $1 and $10,000."
+SETTINGS_OUT_OF_BOUNDS_BY_KEY: dict[str, str] = {"purchases": SETTINGS_OUT_OF_BOUNDS}
+SETTINGS_OUT_OF_BOUNDS_OTHER = "Enter a whole number from 1 to 10,000."
+
+
+def settings_out_of_bounds_message(key: str) -> str:
+    """The out-of-bounds sentence for capability *key*'s settings."""
+    return SETTINGS_OUT_OF_BOUNDS_BY_KEY.get(key, SETTINGS_OUT_OF_BOUNDS_OTHER)
 
 
 def _stored_settings(row: Installation) -> dict[str, dict[str, Any]]:
@@ -363,7 +373,8 @@ class InstallationService:
     ) -> dict[str, Any]:
         """Store the owner's values for capability *key*'s settings and
         return the merged result. Only known settings, only whole numbers
-        of dollars from SETTING_MIN to SETTING_MAX (never a bool: True is 1
+        (dollars for purchases, cents or counts for scheduled tasks) from
+        SETTING_MIN to SETTING_MAX (never a bool: True is 1
         to Python, and "$1 cap" is not what a stray checkbox means; never
         a fraction: a cap is a whole number of dollars). KeyError for an
         unknown capability, ValueError for anything else, worded for the
@@ -386,7 +397,7 @@ class InstallationService:
             or v != int(v)  # a fraction of a dollar (in bounds, so int() is safe)
         )
         if bad:
-            raise ValueError(SETTINGS_OUT_OF_BOUNDS)
+            raise ValueError(settings_out_of_bounds_message(key))
         changes = {str(k): v for k, v in patch.items()}
 
         def mutate(row: Installation) -> Mapping[str, Any]:
@@ -411,15 +422,26 @@ class InstallationService:
         caps = await self.capability_settings("purchases")
         return Decimal(str(caps["per_purchase_cap_usd"])), Decimal(str(caps["per_day_cap_usd"]))
 
+    async def video_limits(self) -> dict[str, int]:
+        """video_minutes_per_call, video_minutes_per_day and
+        keep_transcripts_days as video.transcript enforces them
+        (top10:video_transcripts; services.tools.video.VideoSettings)."""
+        limits = await self.capability_settings("video_transcripts")
+        return {name: int(value) for name, value in limits.items()}
+
     async def context(self) -> ReportContext:
         configured = bool(await self.telegram_token())
         # The Telegram switch is a fact for the capabilities that deliver
         # over Telegram (page_watch): with it off no message goes out.
         switches = await self.capabilities()
+        # Cached with the report, which every change drops (_changed), so a
+        # new default provider ("llm") is in the next report.
+        default_provider, _model = await self.llm_defaults()
         return registry.default_context(
             telegram_configured=configured,
             slack_configured=bool(self._slack_running()),
             telegram_enabled=configured and switches.get("telegram") is True,
+            default_provider=default_provider,
         )
 
     def _cached_view(self) -> Optional[_ReportView]:

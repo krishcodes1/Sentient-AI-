@@ -30,6 +30,10 @@ from .slack_api.writes import WRITE_ACTIONS, SlackWritesMixin
 
 ACTIONS: tuple[ToolSpec, ...] = READ_ACTIONS + WRITE_ACTIONS
 
+# Where a file shared in a DM is downloaded from with the bot token
+# (url_private_download; top10:file_extraction).
+FILES_PRIVATE_PREFIX = "/files-pri/"
+
 # Why each Slack scope in slack_manifest.json is there (JSON has no comments):
 # Bot token (xoxb-):
 #   channels:read, groups:read        list_channels (public / private).
@@ -185,7 +189,10 @@ DEFINITION = ConnectorDefinition(
     ),
     network=NetworkSpec(
         policy_key="slack",
-        hosts={"slack.com": ("/api/",), UPLOAD_HOST: (UPLOAD_PATH_PREFIX,)},
+        # files.slack.com: uploads (/upload/v1/) and, for the DM channel's
+        # file intake (top10:file_extraction), the bot-token download of a
+        # file shared in a DM (/files-pri/).
+        hosts={"slack.com": ("/api/",), UPLOAD_HOST: (UPLOAD_PATH_PREFIX, FILES_PRIVATE_PREFIX)},
         https_only=True,
         # Socket Mode hosts for the DM channel (checked by check_websocket_policy):
         # the two apps.connections.open returns in practice, plus the one

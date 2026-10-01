@@ -164,6 +164,46 @@ server {
         proxy_send_timeout 300s;
         proxy_buffering off;
     }
+
+    # Document uploads from the chat (top10:file_extraction): the raw file
+    # is the request body, up to 20 MB. nginx's 1 MB default would answer
+    # 413 for nearly every real PDF, so this block allows 21 MB (the backend
+    # refuses anything over 20 MB with its own sentence) and streams the body
+    # through unbuffered, so it is never spooled to the proxy's disk.
+    # Otherwise proxied exactly like /api/ (keep the blocks in sync).
+    location /api/files {
+        client_max_body_size 21m;
+        proxy_request_buffering off;
+        proxy_pass http://backend:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+        proxy_buffering off;
+    }
+
+    # A flashcard deck's one-time download link (top10:flashcards_quizzes):
+    # /api/study/export?t=cse_... carries a token that stays a secret until
+    # it is used, so, like the OAuth callback, this location is access-logged
+    # without the query string (log_format oauth_callback above) and keeps
+    # only crit error lines. Otherwise proxied exactly like /api/ (keep the
+    # blocks in sync).
+    location = /api/study/export {
+        access_log /var/log/nginx/access.log oauth_callback;
+        error_log /var/log/nginx/error.log crit;
+        proxy_pass http://backend:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+        proxy_buffering off;
+    }
 }
 EOF
 

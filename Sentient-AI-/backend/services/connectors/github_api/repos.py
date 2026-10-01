@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 from typing import Any, Optional
 
+from services.agent import risk
 from services.agent.permissions import ActionCategory
 from services.connectors.base import ConnectorError, path_segment
 from services.connectors.definition import ToolSpec, _schema
@@ -193,6 +194,10 @@ REPO_ACTIONS: tuple[ToolSpec, ...] = (
             auto_init={"type": "boolean", "description": "Create an initial commit with a README"},
         ),
         required_scope="repo.create",
+        # A public repository is published to everyone.
+        risk_check=risk.when_value(
+            "private", lambda value: value is not True, "high", "it creates a public repository"
+        ),
     ),
     ToolSpec(
         "create_branch",

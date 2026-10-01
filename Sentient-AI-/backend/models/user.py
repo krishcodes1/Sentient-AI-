@@ -145,6 +145,14 @@ class User(Base):
         onupdate=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
+    # The user's IANA time zone ("America/New_York"), or NULL when unknown:
+    # scheduled tasks resolve their zone from it, reminders.now reports the
+    # local time in it, and the web app fills it from the browser
+    # (X-Crawler-Timezone). Validated with zoneinfo before it is stored.
+    timezone: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        nullable=True,
+    )
 
     # Relationships.
     #

@@ -25,10 +25,12 @@ import {
   Search,
   X,
   PanelLeft,
+  FileText,
 } from "lucide-react";
 import clsx from "clsx";
 import type {
   Conversation,
+  FileAttachment,
   Message,
   ToolCall,
   PendingApproval,
@@ -60,7 +62,12 @@ import WeeklyAppButton, {
   type ApprovalDecision,
   type WeeklyGrant,
 } from "@/components/WeeklyAppButton";
+import LowRiskGrantButton, {
+  LowRiskAllowedNote,
+  type LowRiskGrant,
+} from "@/components/LowRiskGrantButton";
 import ChatComposer from "@/components/ChatComposer";
+import { fileChipLabel } from "@/components/fileChips";
 import { ConversationTokenTotal, MessageTokenCaption } from "@/components/TokenUsage";
 import { DESKTOP_QUERY, useMediaQuery } from "@/hooks/useMediaQuery";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
@@ -360,7 +367,40 @@ function ApprovalCard({
         disabled={pending || expired}
         onAllow={() => handle(true, "week")}
       />
+      <LowRiskGrantButton
+        approval={approval}
+        disabled={pending || expired}
+        onAllow={() => handle(true, "low_risk")}
+      />
     </div>
+  );
+}
+
+/** The documents a user turn carried, as chips: name and what the server
+ *  found ("12 pages"). Rendered from `Message.attachments` entries whose kind
+ *  is "file", so a reloaded thread shows them too (top10:file_extraction). */
+function FileChips({ attachments }: { attachments?: Message["attachments"] }) {
+  const files = (attachments ?? []).filter(
+    (a): a is FileAttachment => a?.kind === "file" && typeof (a as FileAttachment).name === "string",
+  );
+  if (files.length === 0) return null;
+  return (
+    <ul className="flex flex-wrap gap-2 mb-2" aria-label="Attached files">
+      {files.map((file) => (
+        <li
+          key={file.file_id}
+          className="inline-flex items-center gap-1.5 rounded-[8px] px-2 py-1 text-xs max-w-full"
+          style={{
+            border: "1px solid var(--claw-border)",
+            color: "var(--text-secondary)",
+            background: "var(--claw-panel)",
+          }}
+        >
+          <FileText className="w-3.5 h-3.5 shrink-0" aria-hidden />
+          <span className="truncate">{fileChipLabel(file)}</span>
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -368,6 +408,8 @@ function ApprovalCard({
 interface FailedTurn {
   content: string;
   images: string[];
+  /** Documents the turn carried (top10:file_extraction). */
+  files?: FileAttachment[];
   error: string;
   /** The optimistic user bubble this attempt left behind, so a retry can
    *  replace exactly that one rather than every pending bubble. */
@@ -400,6 +442,8 @@ export default function Chat() {
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
   // The app the last decision allowed for a week, shown under the cards.
   const [weeklyAllowed, setWeeklyAllowed] = useState<WeeklyGrant | null>(null);
+  // The account the last decision allowed low-risk changes on, likewise.
+  const [lowRiskAllowed, setLowRiskAllowed] = useState<LowRiskGrant | null>(null);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [sending, setSending] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -737,11 +781,12 @@ export default function Chat() {
     errorMessageId: string,
     content: string,
     images: string[],
+    files: FileAttachment[] = [],
   ) => {
     if (sending) return;
     // Drop the error bubble; the resend renders its own fresh pair.
     setMessages((prev) => prev.filter((m) => m.id !== errorMessageId));
-    await sendContent(content, images);
+    await sendContent(content, images, files);
   };
 
   const handleStop = () => {
@@ -762,9 +807,13 @@ export default function Chat() {
     stopAgent().catch(cut);
   };
 
-  const sendContent = async (content: string, images: string[]) => {
+  const sendContent = async (
+    content: string,
+    images: string[],
+    files: FileAttachment[] = [],
+  ) => {
     if (!activeConv || !me || sending) return;
-    if (!content && images.length === 0) return;
+    if (!content && images.length === 0 && files.length === 0) return;
     const conv = activeConv;
 
     // Optimistically render the user message + an empty assistant bubble
@@ -777,6 +826,7 @@ export default function Chat() {
       role: "user",
       content,
       images,
+      ...(files.length > 0 ? { attachments: files } : {}),
       created_at: new Date().toISOString(),
     };
     const streamingAssistant: Message = {
@@ -821,7 +871,13 @@ export default function Chat() {
               // back, and dropping them would blank thumbnails the user can
               // still see in their own message.
               prev.map((m) =>
-                m.id === userTempId ? { ...saved, images: saved.images ?? images } : m,
+                m.id === userTempId
+                  ? {
+                      ...saved,
+                      images: saved.images ?? images,
+                      attachments: saved.attachments ?? (files.length > 0 ? files : undefined),
+                    }
+                  : m,
               ),
             ),
           onToolCall: (name) => setStreamStatus(`Running ${name}…`),
@@ -907,11 +963,13 @@ export default function Chat() {
               provider_error: info,
               retry_content: content,
               retry_images: images,
+              retry_files: files,
             });
           },
         },
         controller.signal,
         images.length > 0 ? images : undefined,
+        files.length > 0 ? files.map((f) => f.file_id) : undefined,
       );
       maybeAutoTitle(conv, content);
       // Any approval raised during this turn arrived over SSE with only
@@ -945,6 +1003,7 @@ export default function Chat() {
         setFailedTurn({
           content,
           images,
+          files,
           userTempId,
           error: (err as Error).message,
         });
@@ -963,6 +1022,7 @@ export default function Chat() {
     decidedApprovals.current.add(actionId);
     setApprovals((prev) => prev.filter((pa) => pa.action_id !== actionId));
     setWeeklyAllowed(decided.weekly ?? null);
+    setLowRiskAllowed(decided.low_risk ?? null);
     // The backend persists an assistant message with the tool outcome —
     // refetch the thread so the result of the decision is visible.
     if (activeConv) {
@@ -1415,6 +1475,7 @@ export default function Chat() {
                     ))}
                   </ul>
                 )}
+                <FileChips attachments={msg.attachments} />
                 {msg.error ? (
                   <div>
                     <p
@@ -1427,7 +1488,9 @@ export default function Chat() {
                         info={msg.provider_error}
                       />
                     </p>
-                    {Boolean(msg.retry_content || msg.retry_images?.length) && (
+                    {Boolean(
+                      msg.retry_content || msg.retry_images?.length || msg.retry_files?.length,
+                    ) && (
                       <button
                         type="button"
                         onClick={() =>
@@ -1435,6 +1498,7 @@ export default function Chat() {
                             msg.id,
                             msg.retry_content ?? "",
                             msg.retry_images ?? [],
+                            msg.retry_files ?? [],
                           )
                         }
                         disabled={sending}
@@ -1528,6 +1592,7 @@ export default function Chat() {
             </div>
           )}
           {weeklyAllowed && <WeeklyAllowedNote weekly={weeklyAllowed} className="ml-11" />}
+          {lowRiskAllowed && <LowRiskAllowedNote grant={lowRiskAllowed} className="ml-11" />}
           {/* A turn that never reached the server. The user's message is
               still on screen above; this offers it back rather than making
               them retype it (or re-pick the images). */}
@@ -1558,7 +1623,7 @@ export default function Chat() {
                   setMessages((prev) =>
                     prev.filter((m) => m.id !== turn.userTempId),
                   );
-                  void sendContent(turn.content, turn.images);
+                  void sendContent(turn.content, turn.images, turn.files ?? []);
                 }}
                 className="inline-flex items-center gap-1.5 px-3 py-2 rounded-[8px] text-xs font-semibold shrink-0"
                 style={{
@@ -1613,12 +1678,14 @@ export default function Chat() {
         )}
 
         <ChatComposer
-          disabled={!activeConv}
+          // Not while the thread loads: its arrival replaces the message list,
+          // so a turn sent before it would vanish from view mid-stream.
+          disabled={!activeConv || loadingMessages}
           sending={sending}
           placeholder={
             activeConv ? "Ask Crawler AI anything..." : "Start a conversation first"
           }
-          onSend={(content, images) => void sendContent(content, images)}
+          onSend={(content, images, files) => void sendContent(content, images, files)}
           onStop={handleStop}
         />
       </div>

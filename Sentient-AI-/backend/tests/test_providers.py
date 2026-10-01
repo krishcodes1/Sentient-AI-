@@ -1457,3 +1457,84 @@ async def test_gemini_thinking_tokens_count_as_output(transport):
     assert resp.usage["output_tokens"] == 1140
     assert "cache_read_tokens" not in resp.usage
     await provider.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Audio blocks (top10:voice_notes)
+# ---------------------------------------------------------------------------
+
+AUDIO_MESSAGES = [
+    {"role": "user", "content": [{"type": "audio", "media_type": "audio/ogg", "data": "T2dnUw=="}]}
+]
+
+
+def test_gemini_turns_an_audio_block_into_inline_data():
+    parts = GeminiProvider._convert_parts(
+        [{"type": "text", "text": "hi"}, {"type": "audio", "media_type": "audio/ogg", "data": "T2dnUw=="}]
+    )
+    assert parts == [{"text": "hi"}, {"inlineData": {"mimeType": "audio/ogg", "data": "T2dnUw=="}}]
+
+
+@pytest.mark.asyncio
+async def test_gemini_sends_the_audio_block_on_the_wire(transport):
+    provider = GeminiProvider(api_key="AIza-secret")
+    transport.responder = lambda request: httpx.Response(
+        200, json={"candidates": [{"content": {"parts": [{"text": "Heard it."}]}}]}
+    )
+    resp = await provider.complete(AUDIO_MESSAGES)
+    assert resp.content == "Heard it."
+    assert transport.last_payload["contents"][0]["parts"] == [
+        {"inlineData": {"mimeType": "audio/ogg", "data": "T2dnUw=="}}
+    ]
+    await provider.aclose()
+
+
+async def _drain(stream: Any) -> None:
+    async for _ in stream:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_anthropic_refuses_audio_instead_of_dropping_it(fake_anthropic):
+    provider = AnthropicProvider(api_key="sk-ant-secret")
+    with pytest.raises(ProviderError, match="does not accept audio"):
+        await provider.complete(AUDIO_MESSAGES)
+    with pytest.raises(ProviderError, match="does not accept audio"):
+        await _drain(provider.stream(AUDIO_MESSAGES))
+    assert fake_anthropic[0].create_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "provider_cls", [OpenAIProvider, GrokProvider, DeepseekProvider, GroqProvider, MistralProvider]
+)
+async def test_openai_compatible_providers_refuse_audio(fake_openai, provider_cls):
+    provider = provider_cls(api_key="sk-secret")
+    with pytest.raises(ProviderError, match="does not accept audio"):
+        await provider.complete(AUDIO_MESSAGES)
+    with pytest.raises(ProviderError, match="does not accept audio"):
+        await _drain(provider.stream(AUDIO_MESSAGES))
+    assert fake_openai[0].create_calls == []
+
+
+@pytest.mark.asyncio
+async def test_ollama_refuses_audio(transport):
+    provider = OllamaProvider()
+    with pytest.raises(ProviderError, match="does not accept audio"):
+        await provider.complete(AUDIO_MESSAGES)
+    with pytest.raises(ProviderError, match="does not accept audio"):
+        await _drain(provider.stream(AUDIO_MESSAGES))
+    assert transport.requests == []
+    await provider.aclose()
+
+
+def test_audio_helpers_and_who_hears_audio():
+    assert providers.has_audio(AUDIO_MESSAGES) is True
+    assert providers.has_audio([{"role": "user", "content": "hi"}]) is False
+    # Audio bytes never reach anything that reads a message's text.
+    assert providers.content_text(AUDIO_MESSAGES[0]["content"]) == ""
+    assert providers.provider_hears_audio("gemini") is True
+    assert providers.provider_hears_audio(" Gemini ") is True
+    for name in ("anthropic", "openai", "ollama", "grok", "deepseek", "groq", "mistral", "", None, "nope"):
+        assert providers.provider_hears_audio(name) is False
+    assert LLMProvider.supports_audio is False and GeminiProvider.supports_audio is True

@@ -15,7 +15,7 @@ import ipaddress
 from typing import Optional
 from urllib.parse import urlsplit
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Substrings that mark a copy-pasted example key rather than a generated
@@ -315,6 +315,29 @@ class Settings(BaseSettings):
     # ── Approvals ─────────────────────────────────────────────────────────
     # How long a pending tool-approval stays actionable before it expires.
     APPROVAL_TTL_MINUTES: int = 15
+
+    # ── Scheduled tasks ───────────────────────────────────────────────────
+    # The IANA time zone a scheduled task runs in when neither the task nor
+    # the user names one (env CRAWLER_TIMEZONE, e.g. "America/New_York").
+    # A container's clock is UTC, so a Docker install sets it; unset, the
+    # assistant asks the user. Checked with zoneinfo wherever it is used.
+    DEFAULT_TIMEZONE: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("CRAWLER_TIMEZONE", "DEFAULT_TIMEZONE"),
+    )
+
+    # ── Knowledge base (top10:knowledge_base) ─────────────────────────────
+    # The meaning index's embedding backend follows the install-wide AI
+    # provider (Gemini, OpenAI or Ollama; any other has none). "ollama" builds
+    # it with Ollama on this computer whatever the provider; "off" never
+    # builds one. Unset: follow the provider.
+    KB_EMBEDDINGS: Optional[str] = None
+    OLLAMA_EMBED_MODEL: str = "nomic-embed-text"
+    GEMINI_EMBED_MODEL: str = "gemini-embedding-001"
+    OPENAI_EMBED_MODEL: str = "text-embedding-3-small"
+    # Numbers per vector (the Gemini and OpenAI models are asked for this
+    # size; nomic-embed-text is cut to it). Changing it re-embeds everything.
+    KB_EMBED_DIMS: int = Field(default=256, ge=8, le=3072)
 
     # ── Environment ───────────────────────────────────────────────────────
     ENVIRONMENT: str = "development"

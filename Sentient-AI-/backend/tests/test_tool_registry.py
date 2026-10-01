@@ -581,3 +581,273 @@ def test_a_financial_action_never_auto_approves_even_by_override():
     )
     decision = engine.check_permission("browser", "checkout", ActionCategory.FINANCIAL)
     assert decision.tier == PermissionTier.USER_CONFIRM and decision.requires_approval is True
+
+
+# ---------------------------------------------------------------------------
+# Permission tiers: the low_risk tier, offer labels, the executor backstop
+# ---------------------------------------------------------------------------
+
+_LOW_CONNECTOR = "c1c1c1c1-1111-4111-8111-111111111111"
+_GMAIL_SCOPES = ("gmail.read", "gmail.modify", "gmail.compose", "calendar.write")
+
+
+def test_tier_strictness_puts_low_risk_between_auto_and_confirm():
+    from services.agent.tool_registry import _TIER_STRICTNESS
+
+    order = sorted(_TIER_STRICTNESS, key=_TIER_STRICTNESS.__getitem__)
+    assert order == ["auto_approve", "low_risk", "user_confirm", "admin_only", "hard_blocked"]
+    assert effective_tier("low_risk", "auto_approve") == "low_risk"
+    assert effective_tier("auto_approve", "low_risk") == "low_risk"
+    assert effective_tier("low_risk", "user_confirm") == "user_confirm"
+    assert effective_tier("user_confirm", "low_risk") == "user_confirm"
+    assert effective_tier("low_risk", "low_risk") == "low_risk"
+
+
+def _low_tools(user_default: str = "low_risk", enabled=None, tier: str = "low_risk"):
+    kwargs = {} if enabled is None else {"enabled_capabilities": enabled}
+    return {
+        t.name: t
+        for t in build_tools(
+            [
+                ConnectorSpec(
+                    "google_workspace",
+                    granted_scopes=_GMAIL_SCOPES,
+                    permission_tier=tier,
+                    connector_id=_LOW_CONNECTOR,
+                    display_name="School Gmail",
+                )
+            ],
+            user_default_tier=user_default,
+            **kwargs,
+        )
+    }
+
+
+def test_low_risk_tier_labels_only_low_eligible_actions():
+    tools = _low_tools()
+    assert tools["google_workspace.modify_labels"].permission_tier == "low_risk"
+    assert tools["google_workspace.create_draft"].permission_tier == "low_risk"
+    assert tools["google_workspace.create_event"].permission_tier == "low_risk"
+    # Sends, deletes and ordinary writes still ask; reads stay auto.
+    assert tools["google_workspace.reply"].permission_tier == "approval"
+    assert tools["google_workspace.trash_message"].permission_tier == "approval"
+    assert tools["google_workspace.update_event"].permission_tier == "approval"
+    assert tools["google_workspace.get_messages"].permission_tier == "auto"
+    # Every connector tool carries its row and account label.
+    gmail = [t for t in tools.values() if t.connector_type == "google_workspace"]
+    assert {t.connector_id for t in gmail} == {_LOW_CONNECTOR}
+    assert {t.account for t in gmail} == {"School Gmail"}
+
+
+def test_a_user_confirm_account_default_caps_the_low_risk_tier():
+    tools = _low_tools(user_default="user_confirm")
+    assert tools["google_workspace.modify_labels"].permission_tier == "approval"
+
+
+def test_the_low_risk_label_needs_the_owners_switch():
+    from services import capabilities as capability_registry
+
+    without = frozenset(k for k in capability_registry.keys() if k != "low_risk_actions")
+    tools = _low_tools(enabled=without)
+    assert tools["google_workspace.modify_labels"].permission_tier == "approval"
+
+
+def test_a_single_row_gets_its_connector_label_when_unnamed():
+    [tool] = [
+        t
+        for t in build_tools([ConnectorSpec("google_workspace", connector_id=_LOW_CONNECTOR)])
+        if t.name == "google_workspace.get_messages"
+    ]
+    assert tool.account == "Google Workspace"
+    web = next(t for t in build_tools([]) if t.name == "web.search")
+    assert (web.connector_id, web.account) == (None, "")
+
+
+# -- the executor's standing-consent backstop --------------------------------
+
+
+class _Counting:
+    """A MockTransport handler that counts every request (none expected)."""
+
+    def __init__(self) -> None:
+        self.requests: list[object] = []
+
+    def __call__(self, request):
+        import httpx
+
+        self.requests.append(request)
+        return httpx.Response(200, json={"id": "m1", "labelIds": ["STARRED"]})
+
+
+@pytest.fixture
+def counted(monkeypatch):
+    import httpx
+
+    import core.network_security as netsec
+    import services.connectors.factory as factory_module
+
+    monkeypatch.setattr(netsec, "check_ssrf", lambda url: netsec.SSRFCheckResult(safe=True))
+    handler = _Counting()
+    real_create = factory_module.create_connector
+
+    def _create(connector_type, credentials, *, rate_limit=None, timeout_s=None):
+        connector = real_create(connector_type, credentials, rate_limit=rate_limit, timeout_s=timeout_s)
+        connector._http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            event_hooks={"request": [connector._enforce_network_policy]},
+        )
+        return connector
+
+    monkeypatch.setattr(factory_module, "create_connector", _create)
+    return handler
+
+
+async def _gmail_row(session_factory, user_id, tier: str) -> str:
+    import json
+
+    from core.security import encrypt_credentials
+    from models.connector import AuthMethod, ConnectorConfig
+    from models.connector import PermissionTier as TierColumn
+
+    async with session_factory() as session:
+        row = ConnectorConfig(
+            user_id=user_id,
+            connector_type="google_workspace",
+            display_name="School Gmail",
+            auth_method=AuthMethod.oauth2,
+            encrypted_credentials=encrypt_credentials(json.dumps({"access_token": "tok"})),
+            granted_scopes=list(_GMAIL_SCOPES),
+            permission_tier=TierColumn(tier),
+        )
+        session.add(row)
+        await session.commit()
+        return str(row.id)
+
+
+async def _account_default(session_factory, user_id, tier: str) -> None:
+    from sqlalchemy import update
+
+    from models.user import User
+
+    async with session_factory() as session:
+        await session.execute(update(User).where(User.id == user_id).values(default_permission_tier=tier))
+        await session.commit()
+
+
+def _switch_gate(on: bool):
+    from services import capabilities as capability_registry
+    from services.capabilities.base import ReportContext
+
+    ctx = ReportContext(in_container=False, platform="win32", telegram_configured=True, browser_installed=True)
+    switches = {k: (on if k == "low_risk_actions" else True) for k in capability_registry.keys()}
+    statuses = capability_registry.statuses_by_key(capability_registry.report(switches, ctx, use_cache=False))
+
+    async def gate():
+        return statuses
+
+    return gate
+
+
+STAR_ARGS = {"message_id": "m1", "add_label_ids": ["STARRED"]}
+TRASH_ARGS = {"message_id": "m1", "add_label_ids": ["TRASH"]}
+INBOX_ARGS = {"message_id": "m1", "remove_label_ids": ["INBOX"]}
+
+
+@pytest.mark.asyncio
+async def test_backstop_refuses_low_risk_runs_that_no_longer_hold(session_factory, counted):
+    from services.agent.permission_grants import InMemoryPermissionGrantStore
+    from tests.conftest import make_user
+
+    user, _ = await make_user(session_factory)
+    await _account_default(session_factory, user.id, "low_risk")
+    await _gmail_row(session_factory, user.id, "low_risk")
+    uid = str(user.id)
+    grants = InMemoryPermissionGrantStore()
+    on = ConnectorToolExecutor(session_factory=session_factory, capability_gate=_switch_gate(True), permission_grants=grants)
+    off = ConnectorToolExecutor(session_factory=session_factory, capability_gate=_switch_gate(False), permission_grants=grants)
+    storeless = ConnectorToolExecutor(session_factory=session_factory, capability_gate=_switch_gate(True))
+    name = "google_workspace.modify_labels"
+
+    for executor, arguments in ((on, INBOX_ARGS), (on, TRASH_ARGS), (off, STAR_ARGS), (storeless, STAR_ARGS)):
+        result = await executor.execute(name, arguments, uid, approved=True, approval="low_risk")
+        assert result["ok"] is False and result["requires_approval"] is True
+    # An unknown kind is refused too.
+    bogus = await on.execute(name, STAR_ARGS, uid, approved=True, approval="whatever")
+    assert bogus["ok"] is False
+    assert counted.requests == []
+
+    ok = await on.execute(name, STAR_ARGS, uid, approved=True, approval="low_risk")
+    assert ok["ok"] is True
+    assert len(counted.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_backstop_refuses_the_wrong_tier_and_a_missing_or_expired_grant(session_factory, counted):
+    from datetime import datetime, timedelta, timezone
+
+    from services.agent.permission_grants import GRANT_TTL, InMemoryPermissionGrantStore
+    from tests.conftest import make_user
+
+    user, _ = await make_user(session_factory)
+    connector_id = await _gmail_row(session_factory, user.id, "user_confirm")
+    uid = str(user.id)
+    now = [datetime(2026, 9, 30, tzinfo=timezone.utc)]
+    grants = InMemoryPermissionGrantStore(now=lambda: now[0])
+    executor = ConnectorToolExecutor(session_factory=session_factory, capability_gate=_switch_gate(True), permission_grants=grants)
+    name = "google_workspace.modify_labels"
+
+    # The tier is user_confirm: "low_risk" does not hold, nor a grant that is not there.
+    for kind in ("low_risk", "low_risk_grant"):
+        assert (await executor.execute(name, STAR_ARGS, uid, approved=True, approval=kind))["ok"] is False
+    # "tier" needs an effective auto_approve.
+    assert (await executor.execute(name, STAR_ARGS, uid, approved=True, approval="tier"))["ok"] is False
+    assert counted.requests == []
+
+    await grants.allow(user_id=uid, connector_id=connector_id)
+    assert (await executor.execute(name, STAR_ARGS, uid, approved=True, approval="low_risk_grant"))["ok"] is True
+    now[0] = now[0] + GRANT_TTL + timedelta(seconds=1)
+    assert (await executor.execute(name, STAR_ARGS, uid, approved=True, approval="low_risk_grant"))["ok"] is False
+    assert len(counted.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_backstop_tier_refuses_high_and_a_human_approval_still_runs(session_factory, counted):
+    from tests.conftest import make_user
+
+    user, _ = await make_user(session_factory)
+    await _account_default(session_factory, user.id, "auto_approve")
+    await _gmail_row(session_factory, user.id, "auto_approve")
+    uid = str(user.id)
+    executor = ConnectorToolExecutor(session_factory=session_factory, capability_gate=_switch_gate(True))
+    name = "google_workspace.modify_labels"
+
+    refused = await executor.execute(name, TRASH_ARGS, uid, approved=True, approval="tier")
+    assert refused["ok"] is False and refused["requires_approval"] is True
+    assert counted.requests == []
+    assert (await executor.execute(name, INBOX_ARGS, uid, approved=True, approval="tier"))["ok"] is True
+    # A person's approval of the HIGH call is unchanged.
+    assert (await executor.execute(name, TRASH_ARGS, uid, approved=True))["ok"] is True
+    assert len(counted.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_backstop_refuses_standing_consent_for_built_ins():
+    executor = ConnectorToolExecutor(session_factory=None)
+    for approval in ("tier", "low_risk", "low_risk_grant"):
+        result = await executor.execute(
+            "reminders.create", {"title": "x", "delay_minutes": 5}, "u1", approved=True, approval=approval
+        )
+        assert result["ok"] is False and result["requires_approval"] is True
+
+
+def test_adapter_grades_and_reads_the_switch():
+    import asyncio
+
+    on = RuntimePermissionAdapter(capability_gate=_switch_gate(True))
+    off = RuntimePermissionAdapter(capability_gate=_switch_gate(False))
+    assert asyncio.run(on.low_risk_enabled()) is True
+    assert asyncio.run(off.low_risk_enabled()) is False
+    # Unwired: the registry default (on).
+    assert asyncio.run(RuntimePermissionAdapter().low_risk_enabled()) is True
+    assert on.grade("google_workspace.modify_labels", STAR_ARGS).is_low
+    assert on.grade("google_workspace.modify_labels", TRASH_ARGS).is_high

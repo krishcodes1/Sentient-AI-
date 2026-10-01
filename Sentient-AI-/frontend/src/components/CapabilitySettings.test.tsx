@@ -2,11 +2,13 @@
  * Tests for CapabilitySettings: they prove the purchase caps show the stored values (or the
  * defaults), save one changed field on blur or Enter and nothing when the value did not change,
  * refuse a blank amount or one outside $1 to $10,000 on this side, follow a value the server
- * saved, and are disabled for a reader who cannot edit; and that no other capability gets any
- * fields.
+ * saved, and are disabled for a reader who cannot edit; that the scheduled-task budgets are
+ * entered in dollars and saved in cents, and the video and knowledge limits as whole numbers; and
+ * that a capability without settings gets no fields.
  *
  * Why it exists: Guards against a request on every tab through the form, against sending the
- * server an amount it would 422, and against the fields leaking onto rows that have no settings.
+ * server a value it would 422, against the fields leaking onto rows that have no settings, and
+ * against messages that send the owner to Settings → Permissions for a limit it cannot change.
  */
 
 import { fireEvent, render, screen } from "@testing-library/react";
@@ -119,6 +121,57 @@ describe("CapabilitySettings", () => {
       />,
     );
     expect(screen.getByLabelText("Per purchase (USD)")).toHaveValue(40);
+  });
+
+  it("enters the scheduled-task budgets in dollars and saves them in cents", () => {
+    const onChange = vi.fn();
+    const scheduled: CapabilityStatus = {
+      ...CAPS[3],
+      key: "scheduled_tasks",
+      settings: { run_cap_cents: 5, day_cap_cents: 25, runs_per_day: 24 },
+    };
+    render(<CapabilitySettings item={scheduled} editable onChange={onChange} />);
+    const perRun = screen.getByLabelText("Per run (USD)");
+    expect(perRun).toHaveValue(0.05);
+    expect(screen.getByLabelText("Per 24 hours (USD)")).toHaveValue(0.25);
+    expect(screen.getByLabelText("Runs per 24 hours")).toHaveValue(24);
+
+    fireEvent.change(perRun, { target: { value: "0.20" } });
+    fireEvent.blur(perRun);
+    expect(onChange).toHaveBeenCalledWith({ run_cap_cents: 20 });
+
+    // A fraction of a cent, nothing, or more than $100.00 is refused here.
+    for (const bad of ["0.005", "", "0", "100.01"]) {
+      fireEvent.change(perRun, { target: { value: bad } });
+      fireEvent.blur(perRun);
+      expect(screen.getByRole("alert")).toHaveTextContent("Enter an amount between $0.01 and $100.00.");
+    }
+    expect(onChange).toHaveBeenCalledTimes(1);
+
+    const runs = screen.getByLabelText("Runs per 24 hours");
+    fireEvent.change(runs, { target: { value: "48" } });
+    fireEvent.blur(runs);
+    expect(onChange).toHaveBeenLastCalledWith({ runs_per_day: 48 });
+  });
+
+  it("gives the video and knowledge base limits whole-number fields", () => {
+    const onChange = vi.fn();
+    const video: CapabilityStatus = { ...CAPS[3], key: "video_transcripts", settings: {} };
+    const { unmount } = render(<CapabilitySettings item={video} editable onChange={onChange} />);
+    const perDay = screen.getByLabelText("Minutes per day");
+    expect(perDay).toHaveValue(240);
+    fireEvent.change(perDay, { target: { value: "2.5" } });
+    fireEvent.blur(perDay);
+    expect(screen.getByRole("alert")).toHaveTextContent("Enter a whole number from 1 to 10,000.");
+    fireEvent.change(perDay, { target: { value: "300" } });
+    fireEvent.blur(perDay);
+    expect(onChange).toHaveBeenCalledWith({ video_minutes_per_day: 300 });
+    unmount();
+
+    const knowledge: CapabilityStatus = { ...CAPS[3], key: "knowledge_base", settings: { file_mb: 40 } };
+    render(<CapabilitySettings item={knowledge} editable onChange={onChange} />);
+    expect(screen.getByLabelText("Largest file (MB)")).toHaveValue(40);
+    expect(screen.getByLabelText("Documents per person")).toHaveValue(400);
   });
 
   it("disables both fields for a reader who cannot edit", () => {

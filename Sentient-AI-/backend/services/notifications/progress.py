@@ -116,6 +116,56 @@ _TOOL_PHRASES: dict[str, Optional[str]] = {
     "watch.delete": "Removing a page watch…",
     "system.capabilities": "Checking what this computer can do…",
     "system.install_capability": "Installing software…",
+    # top10:secret_pii_redaction
+
+    # top10:file_extraction
+    "files.read": "Reading your file…",
+    "files.list": "Checking your files…",
+    "files.forget": "Forgetting a file…",
+    "canvas.list_files": "Looking through course files…",
+    "canvas.get_file_text": "Reading a course file…",
+
+    # top10:scheduler_briefing
+    "schedule.list": "Checking your scheduled tasks…",
+    "schedule.create": "Setting up a scheduled task…",
+    "schedule.briefing": "Setting up your daily briefing…",
+    "schedule.pause": "Changing a scheduled task…",
+    "schedule.delete": "Removing a scheduled task…",
+
+    # top10:tutor_mode
+    "tutor.start": "Switching to tutor mode…",
+
+    # top10:knowledge_base
+    "knowledge.search": "Searching your documents…",
+    "knowledge.read": "Reading your document…",
+    "knowledge.list": "Checking your knowledge base…",
+    "knowledge.remove": "Removing from your knowledge base…",
+
+    # top10:flashcards_quizzes
+    "study.save": "Saving flashcards…",
+    "study.decks": "Checking your flashcards…",
+    "study.edit": "Updating your flashcards…",
+    "study.delete": "Deleting flashcards…",
+    "study.review": "Getting your next card…",
+    "study.quiz": "Preparing your quiz…",
+    "study.progress": "Checking your study progress…",
+    "study.settings": "Updating your study settings…",
+    "study.export": "Preparing your export…",
+
+    # top10:event_triggers
+    "triggers.create": "Setting up your trigger…",
+    "triggers.list": "Checking your triggers…",
+    "triggers.history": "Checking your triggers…",
+    "triggers.update": "Changing a trigger…",
+    "triggers.delete": "Removing a trigger…",
+
+    # top10:permission_tiers
+
+    # top10:voice_notes
+
+    # top10:video_transcripts
+    "video.list": "Checking your saved transcripts…",
+
 }
 
 # Phrases that name the host of the page being opened, with the wording
@@ -124,6 +174,28 @@ _HOST_PHRASES: dict[str, tuple[str, str]] = {
     "web.fetch_page": ("Reading {host}…", "Reading a web page…"),
     "browser.read/open": ("Opening {host}…", "Opening a web page…"),
     "watch.create": ("Setting up a watch on {host}…", "Setting up a page watch…"),
+    # top10:secret_pii_redaction
+
+    # top10:file_extraction
+
+    # top10:scheduler_briefing
+
+    # top10:tutor_mode
+
+    # top10:knowledge_base
+    "knowledge.add": ("Saving {host} to your knowledge base…", "Saving to your knowledge base…"),
+
+    # top10:flashcards_quizzes
+
+    # top10:event_triggers
+
+    # top10:permission_tiers
+
+    # top10:voice_notes
+
+    # top10:video_transcripts
+    "video.transcript": ("Getting the transcript from {host}…", "Getting a transcript…"),
+
 }
 
 # A tool of a known family that has no entry above (a new action, an MCP
@@ -139,6 +211,33 @@ _FAMILY_PHRASES: dict[str, str] = {
     "watch": "Checking your page watches…",
     "system": "Checking this computer's setup…",
     "mcp": "Using a connected app…",
+    # top10:secret_pii_redaction
+
+    # top10:file_extraction
+    "files": "Checking your files…",
+
+    # top10:scheduler_briefing
+    "schedule": "Checking your scheduled tasks…",
+
+    # top10:tutor_mode
+    "tutor": "Switching to tutor mode…",
+
+    # top10:knowledge_base
+    "knowledge": "Checking your knowledge base…",
+
+    # top10:flashcards_quizzes
+    "study": "Checking your flashcards…",
+
+    # top10:event_triggers
+    "triggers": "Checking your triggers…",
+
+    # top10:permission_tiers
+
+    # top10:voice_notes
+
+    # top10:video_transcripts
+    "video": "Working with a video…",
+
 }
 
 _HOST_RE = re.compile(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?")

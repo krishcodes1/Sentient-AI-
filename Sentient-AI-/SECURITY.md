@@ -108,7 +108,8 @@ action (READ / WRITE / DELETE / EXECUTE / FINANCIAL) per connector:
 
 | Tier | Meaning |
 |------|---------|
-| `auto_approve` | Runs immediately (read-only actions on trusted services) |
+| `auto_approve` | Runs immediately (read-only actions on trusted services); on a connection, changes run without a card except anything graded HIGH |
+| `low_risk`     | On a connection ("Allow low-risk changes"): only actions graded LOW run without a card |
 | `user_confirm` | Parked until the user approves it |
 | `admin_only`   | Usable only by the deployment owner (`users.is_admin`); contributes no tools at all for anyone else |
 | `hard_blocked` | Never runs, not configurable |
@@ -136,6 +137,46 @@ the call unless a human approved it, before any rate-limit slot or network
 request is spent. Connector methods for non-READ actions also raise
 `UserConfirmationRequired` before any request unless the executor passes
 the approval through.
+
+**Risk grades and standing consent** (`services/agent/risk.py`,
+`services/agent/permission_grants.py`). Every connector call gets a grade
+computed in code from its catalog entry and the arguments actually sent;
+the model never grades anything. READ is LOW; DELETE, EXECUTE, FINANCIAL
+and always-confirm actions are HIGH; a WRITE is MEDIUM unless its spec opts
+into LOW (`risk="low"`: drafts, stars and your own labels, private events
+without guests, new files and folders at the top of a drive, new docs and
+contacts, To Do tasks, reading GitHub notifications). Arguments can only
+escalate: Gmail's TRASH or SPAM, an Outlook move to Deleted Items or Junk,
+guests on an event and a public gist or repository are HIGH; archiving and
+mark-read, a folder and an overwrite are MEDIUM; an argument the action
+does not take is MEDIUM; a check that fails is HIGH. Built-in and MCP tools
+are HIGH. Standing consent is then decided per call, after the permission
+check and never in an unattended turn:
+
+- `auto_approve` runs a call unless it grades HIGH (a HIGH call gets a card
+  with a plain risk note, which tightens the tier: it no longer runs
+  invitations, trash moves or workflow re-runs unattended).
+- The `low_risk` tier, or a 7-day grant the owner gave from a card ("Allow
+  low-risk changes on <account> for 7 days", per user and connection, not
+  per channel), runs a call only when it grades LOW, the owner's switch
+  "Make low-risk changes without asking" (`low_risk_actions`) is on, and
+  fewer than 10 such runs happened this turn; the reply then ends with a
+  "Done without asking" line built from tool names and account labels.
+- Any tool result PromptGuard flags suspends all standing consent for the
+  rest of the turn.
+- The taint gate still applies; a LOW call may name an object id only when
+  the same connection returned it this turn in an `id` field (`ref_args`).
+- The executor re-grades the arguments it sends and re-checks the tier, the
+  grant and the switch before any rate-limit slot or network request.
+
+A grant is offered only on an untainted, attended card for a LOW action with
+no origin; it is re-checked when the button is pressed, audited
+(`permission_grant_granted`; revoked if that row cannot be written), listed
+and revoked in Settings, Telegram `/grants` and Slack `grants` / `revoke
+grants`, taken back when the connection's credentials are replaced, it is
+reconnected or a scope is added, and deleted with the connection or the
+user. Tier changes are audited (`connector_tier_changed`,
+`account_tier_changed`).
 
 The owner is the first account to register, which on a self-hosted install
 is whoever deployed it. There is no UI to transfer or grant the role; see

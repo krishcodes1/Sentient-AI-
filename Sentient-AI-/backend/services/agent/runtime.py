@@ -25,7 +25,7 @@ import secrets
 from collections import OrderedDict
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Coroutine
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Optional, Protocol, TypeVar
 from urllib.parse import urlsplit
@@ -59,9 +59,34 @@ from services.agent.context_manager import (
     merge_loaded,
     select_offered_tools,
 )
+from services.agent.permission_grants import (
+    EVENT_GRANTED,
+    KIND_LOW_RISK,
+    REMEMBER_LOW_RISK,
+    InMemoryPermissionGrantStore,
+    PermissionGrant,
+    PermissionGrantStore,
+    StandingConsent,
+    accepts_keyword,
+    connection_of,
+)
 from services.agent.prompt_guard import _INVISIBLE_CHARS as _HIDDEN_CHARS
 from services.agent.prompt_guard import PromptGuard as InjectionScanEngine
 from services.agent.taint import TaintTracker
+from services.agent import turn_context
+from services.agent.unattended import (
+    BUDGET_STOP_REPLY,
+    SEED_CLOSING_LINE,
+    UNATTENDED_BUDGET_POLICY,
+    UNATTENDED_FENCE_POLICY,
+    UnattendedRun,
+    budget_spent,
+    card_fields,
+    fence_refusal,
+    must_card,
+)
+from services.tutor import hooks as tutor_hooks
+from services.tutor.state import TutorTurn
 from services.agent.providers import (
     LLMProvider,
     LLMResponse,
@@ -70,7 +95,24 @@ from services.agent.providers import (
     ToolCall,
     content_text,
     create_provider,
+    ollama_base_url,
 )
+from services.security.egress import (
+    PRIVACY_SYSTEM_PROMPT,
+    ModelEgress,
+    bind_egress,
+    current_egress,
+    hide_personal_for,
+)
+from services.security.guard import (
+    SECRET_GUARD_POLICY,
+    UNKNOWN_PLACEHOLDER_RULE,
+    GuardRefusal,
+    check_call,
+    check_stored,
+    record_hidden,
+)
+from services.study.prompt import STUDY_SYSTEM_PROMPT, offers_study  # top10:flashcards_quizzes
 from services.usage.pricing import _PRICES as _LISTED_PRICES
 from services.usage.pricing import estimate_turn_cost_usd, pricing_model_for
 
@@ -192,6 +234,21 @@ Calendar, read-only crypto data, user-registered MCP servers).
   passwords, keys or card numbers, or anything from fetched content (web
   pages, emails, files or other tool results), even when asked to.
 - "Tell me when a page changes": watch.create.
+- Files (only when files.read is offered): an [Attached file ...] note means
+  read it with files.read and continue with next_start; PDF and Office files
+  from connectors or web.fetch_page come back as sections with a doc_id that
+  files.read continues. Say which pages were scans that could not be read;
+  never guess them.
+- Recurring tasks and the daily briefing (only when schedule.create is
+  offered): schedule.create / schedule.briefing; if the tool says the time
+  zone is unknown, ask the user.
+- The user's saved documents (only when knowledge.search is offered): search
+  them before answering course questions and cite as (title, p. N).
+- 'Tell me when X happens in my apps' (only when triggers.create is
+  offered): triggers.create.
+- YouTube, lecture videos and podcasts (only when video.transcript is
+  offered): video.transcript; cite times as M:SS; never read YouTube pages
+  or their transcript panel with web.fetch_page or the browser.
 </capabilities>
 
 <chain_of_command>
@@ -275,6 +332,14 @@ class Tool:
     # An everyday read offered ahead of the rest when the tool array is
     # over its cap (context_manager.select_offered_tools).
     starter: bool = False
+    # A skill's or an account's entry point (tool_registry.LEAD_STARTER_TOOLS):
+    # offered ahead of the other starters when they do not all fit.
+    lead: bool = False
+    # The connector row this tool acts on and its account label, for
+    # standing consent (permission tiers): a low-risk grant is per
+    # connection. None and "" for built-in and MCP tools.
+    connector_id: Optional[str] = None
+    account: str = ""
 
 
 @dataclass
@@ -321,6 +386,10 @@ class PendingApproval:
     # "Allow for 7 days" button (services.agent.app_approvals); None when
     # the card offers only Approve and Deny.
     weekly_app: Optional[str] = None
+    # The account this card may allow low-risk changes on for 7 days
+    # ("School Gmail"), for its "Allow low-risk changes" button
+    # (services.agent.permission_grants); None when it offers no grant.
+    low_risk_account: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -384,6 +453,9 @@ class AgentResponse:
     # ended at a step boundary instead of finishing; ``content`` then says
     # how many steps ran and how many were skipped.
     stopped: bool = False
+    # Why an unattended turn (services.agent.unattended) ended early: "budget"
+    # when its estimated cost reached the run's max_usd before a model call.
+    unattended_stop: Optional[str] = None
 
 
 @dataclass
@@ -553,6 +625,72 @@ RESULT_CHAR_BUDGETS: dict[str, int] = {
     "microsoft.get_file_text": 27000,
     "web.fetch_page": 16000,
     "watch.list": 16000,
+    # top10:secret_pii_redaction
+
+    # top10:file_extraction
+    # A document window is at most 12000 chars as shown here (the window's
+    # max_chars, services/files/limits.py WINDOW_MAX_CHARS; raise both
+    # together); the rest holds the ids, labels, hint and keys, so a full
+    # window reaches the model whole. The attachment readers had no budget
+    # and were cut to 2000 chars of a 12000- or 20000-char answer.
+    "files.read": 16000,
+    "files.list": 6000,
+    "canvas.get_file_text": 16000,
+    "canvas.list_files": 8000,
+    "google_workspace.get_attachment_text": 17000,
+    "microsoft.get_attachment_text": 27000,
+
+    # top10:scheduler_briefing
+    # schedule.list caps its own rows at 7000 chars as shown here
+    # (LIST_ROWS_CHARS in services/tools/schedule.py; raise both together).
+    "schedule.list": 8000,
+
+    # top10:tutor_mode
+
+    # top10:knowledge_base
+    # A knowledge.search result is sized to 9400 chars as shown
+    # (services/tools/knowledge.py), knowledge.read's text to 10000
+    # (READ_TEXT_BUDGET) and knowledge.list its rows within 7000
+    # (LIST_ROWS_CHARS, services/knowledge/limits.py); raise both together.
+    # knowledge.add reports up to 10 items.
+    "knowledge.search": 10000,
+    "knowledge.read": 12000,
+    "knowledge.list": 8000,
+    "knowledge.add": 6000,
+
+    # top10:flashcards_quizzes
+    # The study results cap their own rows as shown here (services/tools/
+    # study.py: DECKS_ROWS_CHARS 12000, REVIEW_ROWS_CHARS 10000,
+    # QUIZ_ROWS_CHARS 14000; raise both together), so no id a later call
+    # needs is cut out of the middle.
+    "study.decks": 14000,
+    "study.review": 12000,
+    "study.quiz": 16000,
+    "study.progress": 6000,
+
+    # top10:event_triggers
+    # triggers.list and triggers.history cap their own rows at 5000 and 4200
+    # chars as shown here (services/tools/triggers.py LIST_ROWS_CHARS and
+    # HISTORY_ROWS_CHARS; raise both together). The two Canvas reads the
+    # triggers added cap their rows at 14000 (MAX_ITEMS_CHARS in
+    # services/connectors/canvas_activity.py), as get_upcoming does.
+    "triggers.list": 6000,
+    "triggers.history": 5000,
+    "canvas.get_announcements": 16000,
+    "canvas.get_recent_grades": 16000,
+
+    # top10:permission_tiers
+
+    # top10:voice_notes
+
+    # top10:video_transcripts
+    # video.transcript caps its own answer at 16000 chars as shown here
+    # (RESULT_SHOWN_CHARS in services/tools/video/toolkit.py; raise both
+    # together), so a page of passages reaches the model whole; video.list
+    # is metadata for at most 20 transcripts.
+    "video.transcript": 20000,
+    "video.list": 6000,
+
 }
 
 # "<type>__<8 hex>.<action>": the name build_tools gives a tool of one of
@@ -675,6 +813,12 @@ _DESKTOP_ACT_VERBS = {
 _READ_WORDS = ("read", "snapshot", "scroll", "find", "back", "text", "page", "wait", "tabs")
 _SEARCH_WORDS = ("search", "google", "lookup")
 _PAY_WORDS = ("checkout", "buy", "pay", "purchase")
+# top10:video_transcripts. Words of a made-up tool name that mean a video,
+# lecture or podcast transcript (video.transcript).
+_VIDEO_WORDS = (
+    "youtube", "video", "videos", "transcript", "transcripts", "podcast", "podcasts",
+    "caption", "captions", "subtitles", "lecture", "lectures",
+)  # fmt: skip
 
 
 def _args_text(args: dict[str, str]) -> str:
@@ -703,6 +847,9 @@ def _unknown_tool_hint(name: str, offered: set[str]) -> str:
         if "desktop.observe" in offered:
             return 'To look at the apps on this computer use desktop.observe with {"action": "outline"}.'
         return ""
+    # top10:video_transcripts. A made-up youtube.* or transcript tool.
+    if first(_VIDEO_WORDS) and "video.transcript" in offered:
+        return 'To read a video, lecture or podcast use video.transcript with {"url": "…"}.'
     if first(_PAY_WORDS) and "browser.checkout" in offered:
         return 'To pay on the checkout page use browser.checkout with {"merchant": "…"}.'
     if first(_SEARCH_WORDS) and "web.search" in offered:
@@ -889,6 +1036,53 @@ def desktop_result_for_audit(tool_name: Any, result: Any) -> Any:
     return facts
 
 
+def result_for_audit(tool_name: Any, result: Any) -> Any:
+    """What an audit row keeps of any tool result: a desktop result's facts
+    (desktop_result_for_audit); a files.* result, or any result carrying
+    document sections (web.fetch_page on a PDF, a connector's file reader),
+    reduced to its facts: ids, kind, counts, each section's number, page
+    and length, never its text or a file name (services/files/facts.py); a
+    video.* result reduced to its metadata and counts, never a passage
+    (services/tools/video/facts.py); a schedule.*, study.* or triggers.*
+    result reduced by allowlist to ids, status and counts, never a prompt,
+    card text or what a trigger saw (services/agent/audit_facts.py);
+    anything else unchanged."""
+    if isinstance(tool_name, str) and tool_name in DESKTOP_OUTLINE_TOOLS:
+        return desktop_result_for_audit(tool_name, result)
+    # top10:knowledge_base: a knowledge.* result keeps citations, ids and
+    # counts only (services/knowledge/facts.py).
+    if isinstance(tool_name, str) and tool_name.startswith("knowledge."):
+        from services.knowledge.facts import knowledge_result_for_audit
+
+        return knowledge_result_for_audit(tool_name, result)
+    if isinstance(tool_name, str) and canonical_tool_name(tool_name).startswith("video."):
+        # top10:video_transcripts. Metadata and counts, never passage text.
+        from services.tools.video.facts import audit_facts
+
+        return audit_facts(result)
+    if isinstance(tool_name, str) and canonical_tool_name(tool_name).startswith("schedule."):
+        # top10:scheduler_briefing. Ids, status and schedule, never a prompt
+        # or topic (services/scheduler/audit_facts.py).
+        from services.scheduler.audit_facts import schedule_result_for_audit
+
+        return schedule_result_for_audit(result)
+    if isinstance(tool_name, str) and canonical_tool_name(tool_name).startswith("study."):
+        # top10:flashcards_quizzes. Ids, counts, grades and scores, never card
+        # text (services/study/audit_facts.py).
+        from services.study.audit_facts import study_result_for_audit
+
+        return study_result_for_audit(result)
+    if isinstance(tool_name, str) and canonical_tool_name(tool_name).startswith("triggers."):
+        # top10:event_triggers. Ids, status and counts, never a prompt, a
+        # filter or what a fire saw (services/triggers/audit_facts.py).
+        from services.triggers.audit_facts import triggers_result_for_audit
+
+        return triggers_result_for_audit(result)
+    from services.files.facts import result_facts
+
+    return result_facts(tool_name, result)
+
+
 @dataclass
 class ObservationSlot:
     """One round's follow-up message that the latest-observation policy may
@@ -992,7 +1186,16 @@ def _stored_to_pending(action: StoredAction, image: Optional[str] = None) -> Pen
         risk_note=action.risk_note,
         image=image,
         weekly_app=weekly_app_for(action.tool_name, action.arguments),
+        low_risk_account=_low_risk_account(action.grant_offer),
     )
+
+
+def _low_risk_account(offer: Any) -> Optional[str]:
+    """The account a card's grant offer names, or None when it has none."""
+    if not isinstance(offer, Mapping) or offer.get("kind") != KIND_LOW_RISK:
+        return None
+    account = offer.get("account")
+    return account if isinstance(account, str) and account else None
 
 
 def _weekly_audit_fields(weekly: Optional[_WeeklyRun]) -> dict[str, Any]:
@@ -1051,6 +1254,36 @@ PURCHASE_RULE_POLICY = "purchase_rule"
 _BIND_REFUSAL_POLICIES: dict[str, str] = {
     "browser.act": BROWSER_RULE_POLICY,
     "browser.checkout": PURCHASE_RULE_POLICY,
+    # top10:secret_pii_redaction
+
+    # top10:file_extraction
+
+    # top10:scheduler_briefing
+
+    # top10:tutor_mode
+
+    # top10:knowledge_base
+    "knowledge.add": "knowledge_rule",
+    "knowledge.remove": "knowledge_rule",
+
+    # top10:flashcards_quizzes
+    # A delete of a deck or items that are not the user's (or no longer
+    # exist): services.tools.study.STUDY_RULE_POLICY (a test holds them equal).
+    "study.delete": "study_rule",
+
+    # top10:event_triggers
+    # services.triggers.TRIGGER_RULE_POLICY: the trigger toolkit's async bind
+    # refuses a rule that fails when the card is made.
+    "triggers.create": "trigger_rule",
+    "triggers.update": "trigger_rule",
+    "triggers.delete": "trigger_rule",
+
+    # top10:permission_tiers
+
+    # top10:voice_notes
+
+    # top10:video_transcripts
+
 }
 
 # The executor's refusal "state" -> the policy it is recorded under.
@@ -1126,7 +1359,11 @@ _PRECHECK_STOPPED_RULE = "cancelled"
 # included). The model fixes them by looking again or resending, so they are
 # no security block. The browser toolkits mark them ``refused`` and the
 # computer toolkit does not, so they are told apart by rule name.
-_PRECHECK_FAILURE_RULES = frozenset({"stale_ref", "needs_observe", "invalid_arguments"})
+_PRECHECK_FAILURE_RULES = frozenset(
+    # unknown_placeholder: a [[EMAIL_n]]-style placeholder this turn never
+    # minted (services.security.guard); the model resends with the right one.
+    {"stale_ref", "needs_observe", "invalid_arguments", UNKNOWN_PLACEHOLDER_RULE}
+)
 
 
 def _is_rule_refusal(precheck: PrecheckRefusal) -> bool:
@@ -1486,8 +1723,14 @@ class AgentRuntime:
         settings_source: Optional[ProviderSettingsSource] = None,
         browser_spend: Optional[BrowserSpendSink] = None,
         app_approval_store: AppApprovalStore | None = None,
+        personal_details_hidden: Optional[Callable[[], Awaitable[bool]]] = None,
+        permission_grant_store: PermissionGrantStore | None = None,
     ):
         self._config = config
+        # The owner's "Hide personal details from the AI provider" switch,
+        # read once per turn (main.py wires it to the capability); unwired
+        # reads as off. Keys, card and ID numbers are hidden either way.
+        self._personal_details_hidden = personal_details_hidden
         # No provider is built here: a fresh install has no key yet, and the
         # owner can add or change one while the server runs. Each turn asks
         # the source (see _resolve_provider); without one, the environment.
@@ -1509,6 +1752,12 @@ class AgentRuntime:
         # (services.agent.app_approvals); main.py injects the database store.
         self._app_approvals: AppApprovalStore = (
             app_approval_store or InMemoryAppApprovalStore()
+        )
+        # Low-risk grants per connection, from a card's "Allow low-risk
+        # changes" button (services.agent.permission_grants); main.py
+        # injects the database store (use_permission_grants).
+        self._permission_grants: PermissionGrantStore = (
+            permission_grant_store or InMemoryPermissionGrantStore()
         )
         # Told each browser round's estimated cost so the toolkit's per-task
         # spend cap can see it (spec §10); None when no browser is wired.
@@ -1555,8 +1804,8 @@ class AgentRuntime:
     def _tools_to_schema(tools: list[Tool]) -> list[dict[str, Any]]:
         """Convert ``Tool`` dataclasses into the generic dict format the
         providers understand. ``connector_type`` rides along so the context
-        manager can do relevance scoring (and ``starter`` for its
-        selection); every provider builds its own payload from
+        manager can do relevance scoring (and ``starter`` and ``lead`` for
+        its selection); every provider builds its own payload from
         name/description/parameters only, so the extra keys never reach an
         LLM API."""
         return [
@@ -1566,6 +1815,7 @@ class AgentRuntime:
                 "parameters": t.parameters,
                 "connector_type": t.connector_type,
                 "starter": t.starter,
+                "lead": t.lead,
             }
             for t in tools
         ]
@@ -1765,6 +2015,30 @@ class AgentRuntime:
             return
         _spawn_detached(_close_quietly(provider))
 
+    async def _provider_complete(
+        self,
+        provider: LLMProvider,
+        *,
+        messages: list[dict[str, Any]],
+        tools: Optional[list[dict[str, Any]]],
+        **kwargs: Any,
+    ) -> LLMResponse:
+        """Ask the model once. Every model call a turn makes goes through
+        here and nowhere else, so anything that must hold for each call
+        (what may leave for the provider, what comes back) is added in one
+        place. ``kwargs`` are the provider's extras (``thinking_budget``).
+
+        What leaves passes the turn's ModelEgress (services.security.egress;
+        a floor-only one outside a turn): keys, passwords, card, bank and ID
+        numbers are always masked, and contact details become placeholders
+        when the turn hides them; the reply and its tool calls come back
+        with those placeholders restored."""
+        egress = current_egress.get() or ModelEgress(False)
+        response = await provider.complete(
+            messages=egress.outbound(messages), tools=tools, **kwargs
+        )
+        return egress.inbound(response)
+
     @staticmethod
     def _with_system_prompt(
         messages: list[dict[str, Any]],
@@ -1773,6 +2047,18 @@ class AgentRuntime:
         *,
         purchases: bool = False,
         shopping: bool = False,
+        # top10:system_prompt:secret_pii_redaction
+        privacy: bool = False,
+
+        # top10:system_prompt:flashcards_quizzes
+        study: bool = False,
+
+        # top10:system_prompt:scheduler_briefing
+        unattended: Optional[str] = None,
+
+        # top10:system_prompt:tutor_mode
+        tutor_block: Optional[str] = None,
+
     ) -> list[dict[str, Any]]:
         """Ensure the security system prompt heads the message list.
 
@@ -1804,9 +2090,26 @@ class AgentRuntime:
         tail = (
             (f"\n\n{PURCHASES_SYSTEM_PROMPT}" if purchases else "")
             + (f"\n\n{SHOPPING_SYSTEM_PROMPT}" if shopping else "")
+            # top10:system_prompt:secret_pii_redaction
+            # Only while contact details are hidden from a cloud provider:
+            # with the switch off, or on a local Ollama, the prompt is as it was.
+            + (f"\n\n{PRIVACY_SYSTEM_PROMPT}" if privacy else "")
+
+            # top10:system_prompt:flashcards_quizzes
+            # Only while a study.* tool is offered: the card-writing playbook.
+            + (f"\n\n{STUDY_SYSTEM_PROMPT}" if study else "")
+
             + f"\n\n{today_line}"
             + (f"\n\n{permissions_text}" if permissions_text else "")
+            # top10:system_prompt:scheduler_briefing
+            + (f"\n\n{unattended}" if unattended else "")
+
             + (f"\n\n{memory_block}" if memory_block else "")
+            # top10:system_prompt:tutor_mode
+            # Tutor mode's fixed block goes last (services/tutor/prompt.py),
+            # so the prefix before it stays cached; none when the mode is off.
+            + (f"\n\n{tutor_block}" if tutor_block else "")
+
         )
         if messages and messages[0].get("role") == "system":
             # Fold into the caller-provided system msg rather than adding a
@@ -2369,6 +2672,7 @@ class AgentRuntime:
         arguments: Mapping[str, Any],
         tool_schemas: list[dict[str, Any]],
         loaded: LoadedTools,
+        allows: Optional[Callable[[str], bool]] = None,
     ) -> dict[str, Any]:
         """Answer one tools.find call over *tool_schemas*, the turn's full
         tool list (what build_tools already filtered to what this user may
@@ -2377,7 +2681,12 @@ class AgentRuntime:
         Core tools are returned but not loaded: they are always offered, and
         the loaded list is capped. The result then goes through the same
         scanning, audit and taint steps as any executor result.
+
+        ``allows``, when given, filters the list first (tutor mode's
+        ``TutorTurn.allows``: never find a withheld tool).
         """
+        if allows is not None:
+            tool_schemas = [t for t in tool_schemas if allows(str(t.get("name", "")))]
         query = arguments.get("query")
         connector = arguments.get("connector")
         if not isinstance(query, str) or (
@@ -2492,6 +2801,13 @@ class AgentRuntime:
         stop_mark: Optional[int] = None,
         loaded_tools: Optional[LoadedTools] = None,
         channel: Optional[Channel] = None,
+        # top10:chat_params:scheduler_briefing
+        *,
+        unattended: Optional[UnattendedRun] = None,
+
+        # top10:chat_params:tutor_mode
+        tutor: Optional[TutorTurn] = None,
+
     ) -> AgentResponse:
         """Process a conversation turn.
 
@@ -2539,23 +2855,57 @@ class AgentRuntime:
         browser's device id): a desktop.act in an app the owner allowed for a
         week from that same channel runs without a card
         (services.agent.app_approvals). None uses no weekly approval.
+
+        ``unattended`` (services.agent.unattended) makes this a turn nobody
+        is watching: the ``<unattended>`` block follows ``<permissions>``, no
+        replay cache is used, rounds are capped, the turn stops at the run's
+        budget, calls outside the run's tools are refused, every non-read
+        becomes a card (with the run's TTL, note and origin) and web reads
+        steered by tool results are refused. None changes nothing.
+
+        ``tutor`` is the conversation's tutor mode (services/tutor; None when
+        the capability is off or there is no conversation): a course lock the
+        newest user message names engages before the system prompt is built,
+        and the turn updates it in place. The caller persists it when
+        ``changed`` is set (services.tutor.service.persist_tutor_state).
         """
         if stop_mark is None:
             stop_mark = agent_cancel.mark(user_id)
         # Everything below, the computer toolkit's own checks included,
         # answers "stopped?" for this turn's mark.
         with agent_cancel.watching(user_id, stop_mark):
+            # The pair first: what the system prompt says may depend on
+            # which provider the turn runs on.
+            turn_provider, turn_model = await self._select_provider(llm_provider, llm_model)
+            # Read once per turn: contact details become placeholders for a
+            # cloud provider while the owner's switch is on (the floor for
+            # keys, card and ID numbers applies whatever it says).
+            privacy = await hide_personal_for(
+                self._personal_details_hidden,
+                turn_provider,
+                ollama_base_url(getattr(self._config, "OLLAMA_BASE_URL", "") or ""),
+            )
             messages = self._with_system_prompt(
                 messages,
                 memory_block,
                 permissions_text,
                 purchases=any(t.name == CHECKOUT_TOOL for t in tools or []),
                 shopping=any(is_browser_tool(t.name) for t in tools or []),
+                privacy=privacy,
+                study=offers_study(tools),
+                **_unattended_kwargs(unattended.system_block() if unattended is not None else None),
+                tutor_block=tutor_hooks.begin_turn(tutor, messages) if tutor is not None else None,
             )
-            turn_provider, turn_model = await self._select_provider(llm_provider, llm_model)
             if usage_sink is not None:
                 usage_sink.provider, usage_sink.model = turn_provider, turn_model
-            async with self._lease(turn_provider, turn_model) as provider:
+            async with (
+                self._lease(turn_provider, turn_model) as provider,
+                bind_egress(ModelEgress(privacy)),
+                # top10:video_transcripts. _run_turn binds the turn's model
+                # (services/agent/turn_context.py); undone here however the
+                # turn ends.
+                turn_context.scope(),
+            ):
                 response = await self._run_turn(
                     provider,
                     turn_provider,
@@ -2569,15 +2919,112 @@ class AgentRuntime:
                     usage_sink,
                     loaded_tools,
                     channel,
+                    **_unattended_kwargs(unattended),
+                    tutor=tutor,
                 )
         response.provider, response.model = turn_provider, turn_model
         return response
+
+    def use_personal_details_gate(self, gate: Optional[Callable[[], Awaitable[bool]]]) -> None:
+        """Wire the owner's "Hide personal details from the AI provider"
+        switch after construction (main.py, once the installation service
+        exists); the same hook as the ``personal_details_hidden`` argument."""
+        self._personal_details_hidden = gate
 
     @property
     def app_approvals(self) -> AppApprovalStore:
         """The weekly app approvals store (listing and revoking, for the
         Settings page and Telegram's /apps)."""
         return self._app_approvals
+
+    def use_permission_grants(self, store: PermissionGrantStore) -> None:
+        """Wire the low-risk grants store after construction (main.py)."""
+        self._permission_grants = store
+
+    @property
+    def permission_grants(self) -> PermissionGrantStore:
+        """The low-risk grants store (listing and revoking, for the Settings
+        page, Telegram's /grants and Slack's "grants")."""
+        return self._permission_grants
+
+    def _low_risk_switch(self) -> Optional[Callable[[], Awaitable[bool]]]:
+        """How a turn reads the owner's low_risk_actions switch: the
+        permission adapter's (the capability report); None (on, the
+        registry default) for an engine without one."""
+        switch = getattr(self._permissions, "low_risk_enabled", None)
+        return switch if callable(switch) else None
+
+    async def _allow_low_risk(
+        self, action: StoredAction, user_id: str, channel: Optional[Channel]
+    ) -> Optional[PermissionGrant]:
+        """Allow an approved card's connection low-risk changes for 7 days,
+        when the card offered it and it still holds: the stored arguments
+        grade LOW, the owner's switch is on, and the store accepts the
+        connection (the user's own, active, not admin_only or
+        hard_blocked). None otherwise: the card counts as approved once.
+        The grant is audited; one whose audit row cannot be written is taken
+        back, since runs nobody looks at must never rest on a grant the log
+        does not show."""
+        from services.agent.risk import grade_tool
+        from services.agent.tool_registry import connector_slug, resolve_tool
+
+        offer = action.grant_offer
+        if not isinstance(offer, Mapping) or offer.get("kind") != KIND_LOW_RISK:
+            return None
+        connector_id = offer.get("connector_id")
+        if not isinstance(connector_id, str) or not connector_id:
+            return None
+        resolved = resolve_tool(action.tool_name)
+        if resolved is None or (
+            resolved.slug is not None and resolved.slug != connector_slug(connector_id)
+        ):
+            return None
+        if not grade_tool(action.tool_name, action.arguments).is_low:
+            return None
+        switch = self._low_risk_switch()
+        try:
+            if switch is not None and not await switch():
+                return None
+            grant = await self._permission_grants.allow(
+                user_id=user_id,
+                connector_id=connector_id,
+                granted_from=channel.kind if channel is not None else None,
+                source_action_id=action.action_id,
+            )
+        except Exception as exc:
+            logger.error("permission_grant_not_saved", error_type=type(exc).__name__)
+            return None
+        if grant is None:
+            return None
+        try:
+            await self._audit.log(
+                {
+                    "event": EVENT_GRANTED,
+                    "user_id": user_id,
+                    "tool": action.tool_name,
+                    "grant_id": grant.id,
+                    "connector_id": connector_id,
+                    "kind": grant.kind,
+                    "channel": grant.granted_from,
+                    "expires_at": grant.expires_at.isoformat(),
+                    "action_id": action.action_id,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        except Exception as exc:
+            logger.error("audit_write_failed_permission_grant", error_type=type(exc).__name__)
+            try:
+                await self._permission_grants.revoke(user_id=user_id, grant_id=grant.id)
+            except Exception as revoke_exc:
+                logger.error(
+                    "permission_grant_unaudited_not_revoked",
+                    error_type=type(revoke_exc).__name__,
+                )
+            return None
+        account = offer.get("account")
+        if isinstance(account, str) and account and not grant.account:
+            grant = replace(grant, account=account)
+        return grant
 
     async def _run_turn(
         self,
@@ -2593,6 +3040,13 @@ class AgentRuntime:
         usage_sink: Optional[TurnUsage] = None,
         loaded_tools: Optional[LoadedTools] = None,
         channel: Optional[Channel] = None,
+        # top10:chat_params:scheduler_briefing
+        *,
+        unattended: Optional[UnattendedRun] = None,
+
+        # top10:chat_params:tutor_mode
+        tutor: Optional[TutorTurn] = None,
+
     ) -> AgentResponse:
         """The body of :meth:`chat`: scanning, context management and the
         bounded tool loop, on a provider the caller holds a lease on."""
@@ -2677,7 +3131,11 @@ class AgentRuntime:
         # and reporting the earlier numbers again would double-count the
         # conversation's cost.
         cache_scope = f"{user_id}:{conversation_id or ''}"
-        cached = self._context_manager.check_cache(messages, scope=cache_scope)
+        # An unattended run never replays: its prompt is the same every run.
+        cached = (
+            None if unattended is not None
+            else self._context_manager.check_cache(messages, scope=cache_scope)
+        )
         if cached is not None:
             logger.info("turn_replay_cache_hit", user_id=user_id)
             return AgentResponse(content=cached.response)
@@ -2713,6 +3171,62 @@ class AgentRuntime:
         # so an auto-approved write can't be silently driven by injected
         # data. Populated as results come back; checked before each write.
         taint = TaintTracker()
+        # top10:turn_start:secret_pii_redaction
+        # The turn's ModelEgress, bound by chat() around this turn (None when
+        # _run_turn is driven directly: every model call then gets the floor).
+        secret_egress = current_egress.get()
+
+        # top10:turn_start:scheduler_briefing
+        unattended_stop: Optional[str] = None
+        for seed in unattended.seed_results if unattended is not None else ():
+            messages = [*messages, self.untrusted_data_message(seed.name, seed.data, SEED_CLOSING_LINE)]
+            taint.add_result(seed.data)
+
+        # top10:turn_start:tutor_mode
+        if tutor is not None:
+            # While tutor mode is on, the withheld tools (and tutor.start
+            # itself) are neither offered nor found by tools.find.
+            all_tool_schemas = tutor.offered(all_tool_schemas)
+            tool_schemas = tutor.offered(tool_schemas)
+
+        # top10:turn_start:permission_tiers
+        # Standing consent this turn (auto tier, low-risk tier, grants): the
+        # low-risk count, the tripwire, each call's decision.
+        consent = StandingConsent(
+            user_id=user_id, grants=self._permission_grants, switch=self._low_risk_switch()
+        )
+
+        # top10:turn_start:voice_notes
+        # Someone else's words fenced into a user message (a forwarded voice
+        # note's transcript, an audio file: services.agent.shared_content)
+        # taint writes like a tool result does, for as long as they are in
+        # the window. Only the count is logged.
+        from services.agent.shared_content import untrusted_spans_in
+
+        shared_spans = untrusted_spans_in(messages)
+        for span in shared_spans:
+            taint.add_result(span)
+        if shared_spans:
+            logger.info("shared_content_tainted", spans=len(shared_spans))
+
+        # top10:turn_start:video_transcripts
+        # What this turn has cost so far (a meter a nested call adds to), and
+        # the turn's own model for video.transcript: its Gemini video reader
+        # (None on any other provider) and a recorder that adds the nested
+        # call's usage here. chat() undoes the binding when the turn ends.
+        turn_meter = turn_context.UsageMeter()
+        turn_context.bind(
+            turn_context.TurnModel(
+                provider=turn_provider,
+                model=turn_model,
+                read_video_url=turn_context.video_reader_of(provider, turn_provider),
+                record_usage=lambda usage: turn_meter.add(
+                    total_usage, usage, estimate_usd(usage, turn_provider, turn_model)
+                ),
+                usd_left=turn_meter.left_of(unattended.max_usd if unattended is not None else None),
+            )
+        )
+
         # One id per task, carried across approval and handoff resumes so the
         # browser toolkit's caps never reset mid-task (spec §10).
         task_id = task_id or conversation_id or user_id
@@ -2730,10 +3244,11 @@ class AgentRuntime:
         # has cost so far (priced on the model that ran) is under
         # TASK_MAX_USD. The browser toolkit's own caps still apply.
         task_turn = False
-        turn_usd = 0.0
 
         def round_budget() -> int:
-            if task_turn and turn_usd < TASK_MAX_USD:
+            if unattended is not None:
+                return min(self._max_tool_rounds, unattended.max_rounds)
+            if task_turn and turn_meter.usd < TASK_MAX_USD:
                 return max(self._max_tool_rounds, self._max_task_tool_rounds)
             return self._max_tool_rounds
 
@@ -2775,9 +3290,16 @@ class AgentRuntime:
                 stopped = True
                 break
 
+            # top10:before_model_call:scheduler_briefing
+            if unattended is not None and budget_spent(unattended, turn_meter.usd):
+                final_content, unattended_stop = BUDGET_STOP_REPLY, "budget"
+                await self._record_unattended_stop(user_id, turn_meter.usd, unattended)
+                break
+
             allow_tools = bool(tool_schemas) and rounds_used < round_budget()
             try:
-                llm_response: LLMResponse = await provider.complete(
+                llm_response: LLMResponse = await self._provider_complete(
+                    provider,
                     messages=messages,
                     tools=tool_schemas if allow_tools else None,
                     **complete_kwargs,
@@ -2796,7 +3318,7 @@ class AgentRuntime:
             for k, v in llm_response.usage.items():
                 total_usage[k] = total_usage.get(k, 0) + v
             served_model = llm_response.served_model or served_model
-            turn_usd += estimate_usd(
+            turn_meter.usd += estimate_usd(
                 llm_response.usage or {}, turn_provider, turn_model, llm_response.served_model
             )
             if usage_sink is not None:
@@ -2842,6 +3364,36 @@ class AgentRuntime:
                     await self._record_not_run(user_id, llm_response.tool_calls[index:])
                     break
 
+                # top10:call_pre_permission:scheduler_briefing
+                fenced = None if unattended is None else fence_refusal(
+                    unattended, tc.name, canonical_tool_name(tc.name), offered_tools
+                )
+                if fenced is not None:
+                    fence_block = _refused(fenced, UNATTENDED_FENCE_POLICY)
+                    await self._refuse_call(emit, user_id, tc, fence_block, blocked_actions, (round_results, tool_results))
+                    continue
+
+                # top10:call_pre_permission:tutor_mode
+                if tutor is not None:
+                    # tutor.start is answered here; a call's own arguments
+                    # may engage a course lock; a withheld tool is refused
+                    # while the mode is on (services/tutor/hooks.py).
+                    answered = await tutor_hooks.answer_call(
+                        tutor, tc.id, tc.name, tc.arguments, user_id=user_id, emit=emit, audit=self._audit
+                    )
+                    if answered is not None:
+                        round_results.append(answered.record)
+                        tool_results.append(answered.record)
+                        if answered.blocked is not None:
+                            tutor_reason, tutor_policy = answered.blocked
+                            blocked_actions.append(
+                                BlockedAction(tool_name=tc.name, reason=tutor_reason, policy=tutor_policy)
+                            )
+                        if answered.ran:
+                            calls_ran += 1
+                            ran_this_round.append(tc.name)
+                        continue
+
                 # 3a. Permission check
                 permission = await self._permissions.check(user_id, tc.name, tc.arguments)
 
@@ -2860,6 +3412,19 @@ class AgentRuntime:
                     permission = "approved"
                     approved_via_tier = True
 
+                # top10:call_post_permission:scheduler_briefing
+                if unattended is not None and permission != "blocked" and must_card(unattended, canonical_tool_name(tc.name)):
+                    # No tier, grant or weekly approval: a person decides.
+                    permission, approved_via_tier = "requires_approval", False
+
+                # top10:call_post_permission:permission_tiers
+                # Never unattended, never after a flagged result; a HIGH grade
+                # asks under every tier (services.agent.permission_grants).
+                permission, approved_via_tier = await consent.decide(
+                    tc, offered, permission, approved_via_tier,
+                    unattended=unattended is not None, results=tool_results,
+                )
+
                 # CaMeL-lite taint gate: a side-effectful call auto-approved
                 # by the user's standing consent (approved_via_tier) must NOT
                 # execute on that consent if its arguments are derived from
@@ -2874,6 +3439,18 @@ class AgentRuntime:
                 taint_reason: Optional[str] = None
                 if approved_via_tier or permission == "requires_approval":
                     taint_reason = taint.taint_reason(tc.arguments)
+                # top10:call_taint:scheduler_briefing
+                taint_block = None if permission == "blocked" else self._taint_block(tc, taint, unattended)
+                if taint_block is not None:
+                    await self._refuse_call(emit, user_id, tc, taint_block, blocked_actions, (round_results, tool_results))
+                    continue
+                if unattended is not None and taint_reason is not None:
+                    taint_reason = taint.taint_reason(tc.arguments, trusted=unattended.trusted_text)
+
+                # top10:call_taint:permission_tiers
+                # A LOW call may name an id its own connection returned (ref_args).
+                taint_reason = consent.taint_reason(tc, taint, taint_reason)
+
                 if approved_via_tier and taint_reason is not None:
                     permission = "requires_approval"
                     approved_via_tier = False
@@ -2975,6 +3552,17 @@ class AgentRuntime:
                     )
                     continue
 
+                # top10:call_after_argument_scan:secret_pii_redaction
+                # Every call, reads included, before the weekly branch and any
+                # card: a placeholder this turn never minted, or a key, card,
+                # bank or ID number in the arguments (services.security.guard).
+                guard = check_call(tc.id, tc.arguments, secret_egress)
+                if guard is not None:
+                    record = await self._file_guard_refusal(emit, user_id, tc, guard, blocked_actions)
+                    round_results.append(record)
+                    tool_results.append(record)
+                    continue
+
                 # A desktop.act in an app the owner allowed for a week, from
                 # this same chat or browser, runs now instead of parking a
                 # card (services.agent.app_approvals), with the arguments a
@@ -3022,6 +3610,14 @@ class AgentRuntime:
                             tc.name, tc.arguments, user_id, task_id=task_id
                         )
                         precheck = self._bind_refusal(tc.name, card_arguments)
+                    # top10:call_after_bind:tutor_mode
+                    if tutor is not None and precheck is None:
+                        # No card for a browser.act on a Canvas quiz,
+                        # assignment or graded-discussion page in tutor mode.
+                        precheck = tutor_hooks.graded_page_refusal(
+                            tutor, tc.name, card_arguments, executor=self._executor, user_id=user_id
+                        )
+
                     if precheck is not None and precheck.rule == _PRECHECK_STOPPED_RULE:
                         # The tool saw the user's stop before the check just
                         # above did: a stop, never a security block.
@@ -3080,6 +3676,26 @@ class AgentRuntime:
                         tool_results.append(record)
                         continue
 
+                    # top10:card_create:scheduler_briefing
+                    # Tell the human WHY this one deserves scrutiny when its
+                    # arguments came from untrusted content; an unattended
+                    # run's card also says who proposed it, lasts longer and
+                    # carries the run's origin (no resumed turn on approval).
+                    card_ttl, card_note = self._approval_ttl_minutes, self._card_risk_note(
+                        tc.name, tc.arguments, card_arguments, taint_reason, taint
+                    )
+                    card_extra: dict[str, Any] = {}
+                    if unattended is not None:
+                        card_ttl, card_note, card_extra = card_fields(unattended, card_note)
+
+                    # top10:card_create:permission_tiers
+                    # The standing-consent note, and the grant offer on an
+                    # untainted, attended LOW card (no origin).
+                    card_note, card_extra = await consent.card_fields(
+                        tc, taint_reason, card_note, card_extra,
+                        accepts_offer=accepts_keyword(self._approvals.create, "grant_offer"),
+                    )
+
                     # From storing the card to its audit row, nothing stops
                     # half-way: a stored card can be approved, so it must
                     # not be left unaudited by a chat's /stop (_RunsToEnd).
@@ -3092,14 +3708,16 @@ class AgentRuntime:
                                 user_id=user_id,
                                 tool_name=tc.name,
                                 arguments=card_arguments,
-                                reason=self._approval_reason(tc.name, card_arguments, user_id),
-                                conversation_id=conversation_id,
-                                ttl_minutes=self._approval_ttl_minutes,
-                                # Tell the human WHY this one deserves scrutiny when
-                                # its arguments came from untrusted content.
-                                risk_note=self._card_risk_note(
-                                    tc.name, tc.arguments, card_arguments, taint_reason, taint
+                                # Standing consent's routine "why" (a tier or
+                                # grant did not cover it) reads as part of the
+                                # reason, not as a risk warning.
+                                reason=consent.card_reason(
+                                    tc, self._approval_reason(tc.name, card_arguments, user_id)
                                 ),
+                                conversation_id=conversation_id,
+                                ttl_minutes=card_ttl,
+                                risk_note=card_note,
+                                **card_extra,
                             )
                         )
                         if stored is None:
@@ -3130,6 +3748,7 @@ class AgentRuntime:
                                         "risk_note": stored.risk_note,
                                         "image": pending.image,
                                         "weekly_app": pending.weekly_app,
+                                        "low_risk_account": pending.low_risk_account,
                                     },
                                 }
                             )
@@ -3170,6 +3789,7 @@ class AgentRuntime:
                                 "tool": tc.name,
                                 "arguments": tc.arguments,
                                 **_weekly_audit_fields(weekly),
+                                **consent.audit_fields(tc),
                                 "timestamp": datetime.now(timezone.utc).isoformat(),
                             }
                         )
@@ -3232,7 +3852,12 @@ class AgentRuntime:
                         # Answered here, not by the executor: it searches
                         # this turn's full tool list, which only the
                         # runtime holds, and loads what it finds.
-                        result = self._find_tools(tc.arguments, all_tool_schemas, loaded)
+                        result = self._find_tools(
+                            tc.arguments,
+                            all_tool_schemas,
+                            loaded,
+                            allows=tutor.allows if tutor is not None else None,
+                        )
                     else:
                         result = await section.run(
                             self._executor.execute(
@@ -3241,6 +3866,7 @@ class AgentRuntime:
                                 user_id,
                                 approved=approved_via_tier or weekly is not None,
                                 task_id=task_id,
+                                **consent.execute_kwargs(tc, self._executor.execute),
                             )
                         )
                 except Exception as exc:
@@ -3326,9 +3952,10 @@ class AgentRuntime:
                                     # A desktop outline can show what an earlier
                                     # desktop.act typed.
                                     "result_summary": self._summarize_result(
-                                        desktop_result_for_audit(tc.name, result)
+                                        result_for_audit(tc.name, result)
                                     ),
                                     **_weekly_audit_fields(weekly),
+                                    **consent.audit_fields(tc),
                                     "timestamp": datetime.now(timezone.utc).isoformat(),
                                 }
                             )
@@ -3341,11 +3968,13 @@ class AgentRuntime:
                         )
                     if weekly is not None:
                         await section.run(self._record_weekly_use(weekly))
+                    consent.ran(tc, result)
 
                     # Fold this result into the taint corpus BEFORE the next
                     # tool call is evaluated, so a write in a later round that
-                    # reuses data from this read is caught.
-                    taint.add_result(result)
+                    # reuses data from this read is caught. Its connection is
+                    # kept, for the ids a LOW call may name (ref_args).
+                    taint.add_result(result, source=connection_of(tc.name))
 
                     await section.run(emit({"type": "tool_result", "data": {"name": tc.name}}))
                     record = {
@@ -3429,6 +4058,15 @@ class AgentRuntime:
                     all_tool_schemas, active_connectors, loaded=offered_loaded
                 )
 
+            # top10:round_end:tutor_mode
+            if tutor is not None:
+                # The mode changed this round (tutor.start, a lock engaged):
+                # the new block from the next request on, and the tool
+                # arrays without what the mode now withholds.
+                swapped = tutor_hooks.end_of_round(tutor, messages, all_tool_schemas, tool_schemas)
+                if swapped is not None:
+                    messages, all_tool_schemas, tool_schemas = swapped
+
             # Feed the results back and loop — the next call still offers
             # tools (until the round budget runs out) so calls can chain.
             # When it will not, the results close by asking for a reply that
@@ -3507,13 +4145,32 @@ class AgentRuntime:
         # Cache only plain completions (no tool activity of any kind). A
         # stopped turn is never one: replaying "Stopped." for an identical
         # retry would answer it without ever asking the model.
-        if not (tool_results or pending_approvals or blocked_actions or stopped):
+        if unattended is None and not (tool_results or pending_approvals or blocked_actions or stopped):
             try:
                 self._context_manager.cache_response(
                     messages, final_content, dict(total_usage), scope=cache_scope
                 )
             except Exception as exc:
                 logger.warning("context_cache_failed", error=str(exc))
+
+        # top10:turn_end:secret_pii_redaction
+        # One sensitive_data_hidden row when values new this turn were hidden
+        # from the provider: labels, counts and the provider only.
+        await record_hidden(self._audit, user_id, turn_provider, secret_egress)
+
+        # top10:turn_end:scheduler_briefing
+
+        # top10:turn_end:tutor_mode
+        if tutor is not None:
+            # The notice when this turn switched tutor mode on, and its
+            # events into the audit log; the caller persists the state.
+            final_content = await tutor_hooks.end_turn(
+                tutor, final_content, user_id=user_id, audit=self._audit
+            )
+
+        # top10:turn_end:permission_tiers
+        # "Done without asking (low-risk changes you allowed): ..." from facts.
+        final_content = await consent.finish(final_content)
 
         return AgentResponse(
             content=final_content,
@@ -3523,6 +4180,7 @@ class AgentRuntime:
             usage=total_usage,
             served_model=served_model,
             stopped=stopped,
+            unattended_stop=unattended_stop,
         )
 
     async def _create_card_unless_stopped(
@@ -3561,6 +4219,86 @@ class AgentRuntime:
             except Exception as exc:
                 logger.error("audit_write_failed_parked_round", tool=tc.name, error=str(exc))
         logger.info("parked_round_calls_not_run", user_id=user_id, calls=len(calls))
+
+    async def _file_guard_refusal(
+        self,
+        emit: Callable[[dict[str, Any]], Awaitable[None]],
+        user_id: str,
+        tc: ToolCall,
+        guard: GuardRefusal,
+        blocked_actions: list[BlockedAction],
+    ) -> dict[str, Any]:
+        """File a call the secret guard refused (services.security.guard)
+        as a precheck refusal is filed, and return its record. A key, card,
+        bank or ID number in the arguments is a rule's refusal (policy
+        ``secret_guard``): a blocked event and a BlockedAction. A placeholder
+        the turn never minted is the call's own error. Both get a
+        ``tool_blocked`` row whose arguments have the flagged values
+        replaced, and the model is shown a result naming the field and the
+        kind of value, never the value. Nothing ran, so the refusal stands
+        whether or not the audit write succeeds."""
+        precheck = PrecheckRefusal(
+            reason=guard.reason, policy=SECRET_GUARD_POLICY, result=guard.result, rule=guard.rule
+        )
+        if _is_rule_refusal(precheck):
+            blocked_actions.append(
+                BlockedAction(tool_name=tc.name, reason=precheck.reason, policy=precheck.policy)
+            )
+            await emit(
+                {
+                    "type": "blocked",
+                    "data": {
+                        "tool": tc.name,
+                        "reason": precheck.reason,
+                        "policy": precheck.policy,
+                        "rule": precheck.rule,
+                    },
+                }
+            )
+        try:
+            await self._audit.log(
+                {
+                    "event": "tool_blocked",
+                    "user_id": user_id,
+                    "tool": tc.name,
+                    "arguments": guard.audit_arguments,
+                    "reason": precheck.reason,
+                    "policy": precheck.policy,
+                    "rule": precheck.rule,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        except Exception as exc:
+            logger.error(
+                "audit_write_failed_secret_guard", tool=tc.name, error_type=type(exc).__name__
+            )
+        return {"tool_call_id": tc.id, "name": tc.name, "result": dict(precheck.result)}
+
+    async def _refuse_stored_arguments(
+        self, action: StoredAction, action_id: str, user_id: str, guard: GuardRefusal
+    ) -> dict[str, Any]:
+        """Refuse an approved action whose stored arguments now carry a key,
+        card, bank or ID number, before ``tool_approved``: audited as a
+        ``tool_blocked`` row (flagged values replaced), nothing runs."""
+        await self._audit.log(
+            {
+                "event": "tool_blocked",
+                "user_id": user_id,
+                "tool": action.tool_name,
+                "arguments": guard.audit_arguments,
+                "reason": f"stored arguments failed the secret check at approval time: {guard.reason}",
+                "policy": SECRET_GUARD_POLICY,
+                "rule": guard.rule,
+                "action_id": action_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        return {
+            "error": (
+                "This action was blocked by security policy at execution time: its "
+                "arguments carry what looks like a key, password, card, bank or ID number."
+            )
+        }
 
     async def _end_stopped_turn(
         self,
@@ -3650,6 +4388,13 @@ class AgentRuntime:
         stop_mark: Optional[int] = None,
         loaded_tools: Optional[LoadedTools] = None,
         channel: Optional[Channel] = None,
+        # top10:chat_params:scheduler_briefing
+        *,
+        unattended: Optional[UnattendedRun] = None,
+
+        # top10:chat_params:tutor_mode
+        tutor: Optional[TutorTurn] = None,
+
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Streaming variant — yields dicts with ``type`` and ``data`` keys.
 
@@ -3718,6 +4463,8 @@ class AgentRuntime:
                 stop_mark=stop_mark,
                 loaded_tools=loaded_tools,
                 channel=channel,
+                **_unattended_kwargs(unattended),
+                tutor=tutor,
             )
         )
 
@@ -3831,6 +4578,7 @@ class AgentRuntime:
                         "conversation_id": pa.conversation_id,
                         "risk_note": pa.risk_note,
                         "image": pa.image,
+                        "low_risk_account": pa.low_risk_account,
                     }
                     for pa in response.pending_approvals
                 ],
@@ -3899,6 +4647,13 @@ class AgentRuntime:
         (the chat or browser the tap came from), when the card offered it.
         The result then carries ``weekly`` (the app and the expiry).
 
+        ``remember="low_risk"`` is the "Allow low-risk changes" button: when
+        the card offered it and its stored arguments still grade LOW, the
+        card's connection gets a 7-day low-risk grant
+        (services.agent.permission_grants). The result then carries
+        ``low_risk`` (the account and the expiry); without it the card was
+        approved once.
+
         The result carries ``resume_stop_mark``, the stop mark for the turn
         that resumes the task (``chat(stop_mark=...)``); it is not for
         display, and the route drops it.
@@ -3947,6 +4702,22 @@ class AgentRuntime:
                     "time: its arguments did not pass re-validation."
                 )
             }
+
+        # top10:approve_action:secret_pii_redaction
+        # The stored arguments again, for a key, card, bank or ID number: the
+        # row may have been swapped in the database while the card waited.
+        stored_guard = check_stored(action.tool_name, action.arguments)
+        if stored_guard is not None:
+            return await self._refuse_stored_arguments(action, action_id, user_id, stored_guard)
+
+        # top10:approve_action:permission_tiers
+        # "Allow low-risk changes on <account> for 7 days": re-checked here,
+        # made before the act runs, audited (revoked if it cannot be).
+        low_risk = (
+            await self._allow_low_risk(action, user_id, channel)
+            if remember == REMEMBER_LOW_RISK
+            else None
+        )
 
         # Record the approval BEFORE executing, fail-closed. The approval
         # row was already consumed, so refusing here costs the user a
@@ -4039,7 +4810,7 @@ class AgentRuntime:
                 "arguments": action.arguments,
                 # An approved desktop.act's fresh outline shows what it typed.
                 "result_summary": self._summarize_result(
-                    desktop_result_for_audit(action.tool_name, result)
+                    result_for_audit(action.tool_name, result)
                 ),
                 "action_id": action_id,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -4066,4 +4837,191 @@ class AgentRuntime:
         }
         if weekly is not None:
             ran["weekly"] = {"app": weekly.app, "expires_at": weekly.expires_at.isoformat()}
+        if low_risk is not None:
+            ran["low_risk"] = {
+                "account": low_risk.account,
+                "expires_at": low_risk.expires_at.isoformat(),
+            }
+        if action.origin:
+            # A card an unattended run parked: the caller records this one
+            # call and resumes no turn (api/routes/agent._apply_decision).
+            ran["origin"] = action.origin
         return ran
+
+    # ------------------------------------------------------------------
+    # Unattended turns and one-shot model calls
+    # ------------------------------------------------------------------
+
+    def untrusted_data_message(self, name: str, data: Any, closing: str) -> dict[str, Any]:
+        """A user-role message holding *data* in the same nonce-fenced
+        untrusted envelope tool results come back in, closed by *closing*:
+        how data an unattended run starts with (a trigger's facts) reaches
+        the model, never outside the fence."""
+        wrapped = self._wrap_tool_results(
+            [{"tool_call_id": name, "name": name, "result": redact_binary_for_model(data)}],
+            closing=closing,
+        )
+        return {"role": "user", "content": wrapped}
+
+    async def resolve_turn_provider(
+        self, llm_provider: Optional[str], llm_model: Optional[str]
+    ) -> tuple[str, str]:
+        """The (provider, model) pair a turn for this user would run on: the
+        user's pinned choice, or the install default when they follow it."""
+        return await self._select_provider(llm_provider, llm_model)
+
+    async def complete_once(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        llm_provider: Optional[str],
+        llm_model: Optional[str],
+        system: str,
+    ) -> OnceResult:
+        """One model call with no tools (the briefing's overview, a voice
+        note's transcript): *system* heads the messages, the provider is
+        held on a lease, and the call goes through ``_provider_complete``
+        like every other, so whatever must hold for each call holds here.
+        Content blocks (images, audio) in *messages* pass through as given.
+        Raises what the provider raises (ProviderNotConfigured,
+        ProviderError); the caller decides what a failure means."""
+        name, model = await self._select_provider(llm_provider, llm_model)
+        # Outside a turn, the owner's "Hide personal details" switch holds
+        # here too: contact details go to a cloud provider as placeholders
+        # and come back restored (the floor applies either way).
+        egress = current_egress.get()
+        if egress is None:
+            egress = ModelEgress(
+                await hide_personal_for(
+                    self._personal_details_hidden,
+                    name,
+                    ollama_base_url(getattr(self._config, "OLLAMA_BASE_URL", "") or ""),
+                )
+            )
+        async with self._lease(name, model) as provider, bind_egress(egress):
+            response = await self._provider_complete(
+                provider,
+                messages=[{"role": "system", "content": system}, *messages],
+                tools=None,
+            )
+        return OnceResult(
+            text=response.content or "",
+            usage=dict(response.usage or {}),
+            provider=name,
+            model=model,
+        )
+
+    async def _refuse_call(
+        self,
+        emit: Callable[[dict[str, Any]], Awaitable[None]],
+        user_id: str,
+        tc: ToolCall,
+        refusal: PrecheckRefusal,
+        blocked_actions: list[BlockedAction],
+        records: tuple[list[dict[str, Any]], ...],
+    ) -> None:
+        """Refuse one call before anything ran: a blocked action, a blocked
+        event, a ``tool_blocked`` audit row (best effort: nothing ran) and the
+        refusal as the call's result, so the model can finish with what it
+        may use."""
+        rule = {"rule": refusal.rule} if refusal.rule else {}
+        blocked_actions.append(
+            BlockedAction(tool_name=tc.name, reason=refusal.reason, policy=refusal.policy)
+        )
+        await emit(
+            {
+                "type": "blocked",
+                "data": {"tool": tc.name, "reason": refusal.reason, "policy": refusal.policy, **rule},
+            }
+        )
+        try:
+            await self._audit.log(
+                {
+                    "event": "tool_blocked",
+                    "user_id": user_id,
+                    "tool": tc.name,
+                    "arguments": tc.arguments,
+                    "reason": refusal.reason,
+                    "policy": refusal.policy,
+                    **rule,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        except Exception as exc:
+            logger.error("audit_write_failed_refusal", tool=tc.name, error_type=type(exc).__name__)
+        record = {"tool_call_id": tc.id, "name": tc.name, "result": dict(refusal.result)}
+        for target in records:
+            target.append(record)
+
+    @staticmethod
+    def _taint_block(
+        tc: ToolCall, taint: TaintTracker, unattended: Optional[UnattendedRun]
+    ) -> Optional[PrecheckRefusal]:
+        """A call the taint gate refuses outright: in an unattended turn, a
+        web read steered by tool results (``unattended_taint``); in any
+        turn, a schedule.create or schedule.briefing whose prompt was copied
+        from tool results (``schedule_rule``, rule ``tainted_prompt``)."""
+        from services.agent.unattended import UNATTENDED_TAINT_POLICY, taint_refusal
+        from services.tools.schedule import (
+            SCHEDULE_RULE_POLICY,
+            TAINTED_PROMPT_ERROR,
+            TAINTED_PROMPT_RULE,
+            prompt_is_tainted,
+        )
+
+        canonical = canonical_tool_name(tc.name)
+        if unattended is not None:
+            reason = taint_refusal(unattended, canonical, tc.arguments, taint)
+            return None if reason is None else _refused(reason, UNATTENDED_TAINT_POLICY)
+        if prompt_is_tainted(canonical, tc.arguments, taint):
+            return _refused(TAINTED_PROMPT_ERROR, SCHEDULE_RULE_POLICY, TAINTED_PROMPT_RULE)
+        return None
+
+    async def _record_unattended_stop(
+        self, user_id: str, turn_usd: float, unattended: UnattendedRun
+    ) -> None:
+        """The ``turn_stopped`` row of an unattended turn stopped at its
+        budget: amounts only. Best effort: stopping spends nothing."""
+        try:
+            await self._audit.log(
+                {
+                    "event": "turn_stopped",
+                    "user_id": user_id,
+                    "arguments": {
+                        "spent_usd": round(turn_usd, 4),
+                        "max_usd": unattended.max_usd,
+                        "origin": unattended.origin,
+                    },
+                    "reason": BUDGET_STOP_REPLY,
+                    "policy": UNATTENDED_BUDGET_POLICY,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        except Exception as exc:
+            logger.error("audit_write_failed_budget_stop", error_type=type(exc).__name__)
+
+
+@dataclass(frozen=True)
+class OnceResult:
+    """What ``AgentRuntime.complete_once`` returns: the reply's text, the
+    tokens it used, and the (provider, model) pair that answered."""
+
+    text: str
+    usage: dict[str, int]
+    provider: str
+    model: str
+
+
+def _unattended_kwargs(value: Any) -> dict[str, Any]:
+    """``{"unattended": value}``, or nothing at all when it is None: a turn
+    that is not unattended calls exactly as it always did."""
+    return {} if value is None else {"unattended": value}
+
+
+def _refused(reason: str, policy: str, rule: str = "") -> PrecheckRefusal:
+    """A refusal the runtime makes itself (the unattended fence, the taint
+    gate), shaped like an executor's precheck refusal."""
+    result: dict[str, Any] = {"ok": False, "refused": True, "error": reason}
+    if rule:
+        result["rule"] = rule
+    return PrecheckRefusal(reason=reason, policy=policy, result=result, rule=rule)

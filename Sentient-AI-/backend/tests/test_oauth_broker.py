@@ -1701,3 +1701,45 @@ def test_configure_logging_installs_the_filter_once():
     configure_logging()
     filters = [f for f in logging.getLogger("uvicorn.access").filters if isinstance(f, OAuthCallbackQueryFilter)]
     assert len(filters) == 1
+
+
+@pytest.mark.asyncio
+async def test_reconnect_takes_back_the_rows_low_risk_grants(session_factory, configured, provider, clock):
+    """New credentials are new consent: a reconnect ends the connection's
+    low-risk grants (permission tiers), in the same transaction, audited."""
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import select
+
+    from models.audit import AuditLog
+    from models.permission_grant import PermissionGrantRow
+
+    user, _ = await make_user(session_factory)
+    existing = await _add_connector(session_factory, user.id)
+    now = datetime.now(timezone.utc)
+    async with session_factory() as s:
+        s.add(
+            PermissionGrantRow(
+                user_id=user.id,
+                connector_id=existing,
+                kind="low_risk",
+                granted_at=now,
+                expires_at=now + timedelta(days=7),
+            )
+        )
+        await s.commit()
+    provider.on("/token", reply(200, token_body()))
+    _, q = await _start(session_factory, user.id, connector_id=existing)
+    assert await _callback(session_factory, q["state"]) is True
+    async with session_factory() as s:
+        [grant] = (await s.execute(select(PermissionGrantRow))).scalars().all()
+        chains = [
+            r.reasoning_chain or {}
+            for r in (await s.execute(select(AuditLog).where(AuditLog.user_id == user.id))).scalars()
+        ]
+    assert grant.revoked_at is not None
+    [revoked] = [c for c in chains if c.get("event") == "permission_grant_revoked"]
+    assert revoked["count"] == 1 and revoked["reason"] == "credentials replaced"
+    from services.audit import _sanitize
+
+    assert revoked["connector_id"] == _sanitize(str(existing))

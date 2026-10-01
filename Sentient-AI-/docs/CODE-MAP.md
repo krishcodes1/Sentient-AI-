@@ -91,6 +91,7 @@ the chat gets what ran and why it stopped, in plain words
 - `tool_registry.py` — connector/tool catalog, capability gating (`_capabilities_of`: the claiming capability plus `_REQUIRED_CAPABILITIES`, so `browser.checkout` needs `purchases` and `browser_control`), `ConnectorToolExecutor` (dispatch to built-in toolkits, connectors, MCP; `FINANCIAL_BUILTINS` names the one financial action ever dispatched, `browser.checkout`; the approval hooks `describe_approval` / `precheck_approval` / `approval_arguments` / `approval_arguments_async` / `approval_image` route `desktop.act`, `browser.act` and `browser.checkout` to their toolkits).
 - `approvals.py` — `ApprovalStore` implementations (in-memory + DB-backed `PendingAction` rows), single-use/expiry semantics.
 - `context_manager.py` — token estimation, per-model context windows, message summarization/compression, offered-tool-set selection, turn-replay cache.
+- `audit_facts.py` — `keep_facts`/`FactRules`: what a `tool_executed` audit row keeps of a result by allowlist (numbers, flags, named ids and Crawler's own words; any other list counted). `runtime.result_for_audit` uses it with each skill's rules for `schedule.*`, `study.*` and `triggers.*` results.
 
 ## Built-in tools (`backend/services/tools/`)
 
@@ -194,6 +195,15 @@ Migrations (`backend/alembic/versions/`), oldest first:
 - `0010_vault_items.py` — the `vault_items` table and `installation.capability_settings` (guarded like 0008/0009).
 - `0011_page_watches.py` — the `page_watches` table; revises 0009, beside 0010 and the connectors migrations 0011 to 0014, because databases already ran it there.
 - `0015_merge_page_watches.py` — no schema change: joins `0014_slack_channel_links` and `0011_page_watches` into the one head.
+- `0017_scheduled_tasks.py` … `0024_media_transcripts.py` — one linear chain on `0016_merge_app_approvals`, one file per top10 skill that adds schema (`backend/alembic/README.md`, "Reserved revisions"); every file is filled, each guarded so an adopted table or column is left alone:
+  - `0017_scheduled_tasks.py` — `scheduled_tasks` and `automation_runs` (the unattended ledger), plus `users.timezone`, `conversations.origin` and `pending_actions.origin`.
+  - `0018_user_files.py` — `user_files` (encrypted uploads, unique per user and sha256).
+  - `0019_tutor_mode.py` — `conversations.tutor_state` and `tutor_locks`.
+  - `0020_knowledge_base.py` — `kb_collections`, `kb_documents`, `kb_chunks`, `kb_postings` and `kb_embeddings`.
+  - `0021_study.py` — `study_decks`, `study_items`, `study_reviews`, `study_quiz_attempts` and `study_settings`.
+  - `0022_event_triggers.py` — `event_triggers` and `trigger_events`.
+  - `0023_permission_grants.py` — `permission_grants` and `pending_actions.grant_offer` (and the `low_risk` label of Postgres's `permission_tier` enum).
+  - `0024_media_transcripts.py` — `media_transcripts`.
 
 `backend/alembic/env.py` — reads `DATABASE_URL` from `core.config.settings` (no second credential copy); `backend/alembic/README.md` explains the adoption logic for pre-Alembic deployments.
 
@@ -203,6 +213,10 @@ Migrations (`backend/alembic/versions/`), oldest first:
 account export · admin role/tier · agent-loop security · vision/image turns · approval arg re-scanning · approval flow (DB+memory stores, concurrency) · auth-event audit trail · audit event→status mapping · HMAC audit hashing · audit service chaining · audit stats endpoint · auth hardening (XFF, lockout) · capabilities HTTP API · capabilities registry invariants · capability report logic · capability gating at both call sites · concurrency/failure modes · connector behavior (Canvas/Google/Robinhood) · connector route policy · context manager budgets/windows · conversation lifecycle routes · conversation search · desktop screenshot tool · executor security (credentials, scopes) · installation service · MCP integration · MCP client protocol · MCP DNS pinning (rebinding) · persistent memory CRUD · memory search · message usage/attachments · legacy-DB migration adoption · migration schema drift · network policy (SSRF per connector) · Ollama streaming errors · production-hardening config checks · prompt-guard false positives · prompt-guard normalization evasion · prompt-injection red-team suite · provider layer (Anthropic/OpenAI-compatible) · query-efficiency regressions · reminder tools · reminder CRUD/sweeper · resume-after-approval · route-level security · lazy provider resolution · security-middleware ordering · session refresh · Settings/account validation · setup wizard API · SSRF address policy · stream resilience/audit ordering · SSE streaming · built-in system tools (install allowlist) · taint tracking · Telegram approval channel · Telegram decisions answered at once and run off the poll loop (`test_telegram_decisions.py`) · Telegram progress lines (`test_telegram_progress.py`) · Telegram cost line, linked account only and `/stop` (`test_telegram_cost_safety.py`) · the turn resumed after an approved desktop action reaches the chat, or says why it could not (`test_telegram_desktop_resume.py`) · stop requests and the runtime's stop boundaries (`test_agent_cancel.py`, `test_runtime_stop.py`) · desktop acts refused before the card and cards tied to their screen (`test_computer_precheck.py`) · desktop latest-observation policy (`test_desktop_observation_policy.py`) · current provider model families (`test_provider_model_families.py`) · web chat screenshots shown live and never stored (`test_web_chat_images.py`) · Telegram manager lifecycle · tool registry/executor · token usage accounting · per-user LLM follows install default · audit-log verifier CLI · built-in web tools · app wiring (`test_wiring.py`).
 
 Purchases (2026-09-25): the vault (`test_vault_crypto.py`, `test_vault_keys.py`, `test_vault_service.py`, `test_vault_api.py`), the platform secret stores with a recorded `security` argv and a fake DPAPI shim (`test_platform.py`), `browser.act` and the page memory (`test_browser_act.py`), the act switch, the picture on every act card, its money warning and the read-tier click (`test_browser_act_card.py`), the risk note absent on a real-looking host (`test_purchase_card_text.py`), the decision path's confirmation pictures for the web and Telegram (`test_resume_after_approval.py`), the fake site's checkout pages and TLS harness (`test_fakesite_checkout.py`), the checkout parts (`test_checkout_amounts.py`, `test_checkout_merchant.py`, `test_checkout_facts.py`, `test_checkout_ledger.py`) and toolkit (`test_checkout_toolkit.py`), the capability and its caps (`test_purchases_capability.py`), the permission/registry/runtime/Telegram wiring on fakes (`test_purchases_wiring.py`, `test_telegram_purchase_card.py`), and the whole chain through the runtime on the real executor, toolkits, vault, ledger and audit log against the fake shop over TLS (`test_purchase_flow.py`: one card, Approve pays from the vault with the number reaching nothing the model sees, Deny fills nothing, cap / http / wrong or look-alike merchant / changed page / switch off refused). `tests/fixtures/purchase_notice.txt` is the notice the frontend copies.
+
+Top10 wave 0 (`test_integration_seams.py`): the reserved migration chain, `TurnContext`, the one model call (`AgentRuntime._provider_complete`) and the provider-first order in `chat()`, Gemini's `_post_with_retries`, the `default_provider` report fact, the Telegram command/button tables and `/help` text, the Slack keyword handlers, and every `top10:` anchor in its place (removed with the anchors by the cleanup PR).
+
+Top10 wave 1 integration (`test_top10_wave1_integration.py`): where the merged skills meet: `complete_once` honours "Hide personal details from the AI provider" like a chat turn (placeholders out, real values back, the floor either way, a gate error hides), the unattended runner hands the run's conversation's tutor mode to the runtime and keeps a change it made, and "/tutor on" sent with an uploaded file is a normal turn rather than a command; ids every skill writes (UUIDs, commit shas) are never taken for a card or bank account number by the secret detector.
 
 ## Frontend pages (`frontend/src/pages/`)
 
@@ -222,7 +236,7 @@ Purchases (2026-09-25): the vault (`test_vault_crypto.py`, `test_vault_keys.py`,
 
 - `Brand.tsx` — logo/wordmark variants.
 - `CapabilityList.tsx` — renders capability switches (on/blocked-with-fix/blocked-until-installed/off) for Setup and Settings; with an `onSettingsChange` handler (Settings only) it renders `CapabilitySettings` under a switch.
-- `CapabilitySettings.tsx` — the `purchases` row's "Per purchase (USD)" / "Per day (USD)" fields (`min=1 max=10000`, the server's bounds), saved on blur or Enter through `PUT /capabilities/purchases/settings`.
+- `CapabilitySettings.tsx` — the settings under a switch, saved on blur or Enter through `PUT /capabilities/{key}/settings` within the server's bounds (whole numbers 1 to 10,000): `purchases`' "Per purchase (USD)" / "Per day (USD)", `scheduled_tasks`' per-run and per-24-hours budgets (entered in dollars, stored in cents) and runs per 24 hours, `video_transcripts`' minutes per request and per day and days kept, and `knowledge_base`'s per-person limits.
 - `ChatComposer.tsx` — message input: text, image attach/paste/drag.
 - `ConfirmDialog.tsx` — branded async `window.confirm()` replacement, focus-trapped.
 - `ErrorBoundary.tsx` — top-level React error boundary.
@@ -283,3 +297,121 @@ Purchases (2026-09-25): `CapabilitySettings.test.tsx`, `PaymentCardSettings.test
 - `docs/testing/headless-mac-full-test.md` — the full live test on the headless test Mac (native install, wizard, Telegram, macOS grants, every agent flow, and section 5.2 for a purchase that stops at the approval card); `docs/testing/computer-control-headless-mac.md` is the low-level computer-control smoke test.
 - `backend/alembic/README.md` — migration workflow + pre-Alembic adoption.
 - `backend/services/capabilities/README.md` — how to add a capability (five steps, referenced above).
+
+<!-- top10:secret_pii_redaction -->
+## Secret and personal-data protection (`backend/services/security/`)
+
+- `secrets.py` — `RULES`, the one format table (keys, tokens, cards, IBAN, SSN/ITIN, stated IDs, contact details), `find()`, `looks_like_credential()`; findings carry labels and offsets, never values.
+- `policies.py` — the named policies: MEMORY, AUDIT, LOGS, CHANNEL, TOOL_ARGS, MODEL_FLOOR, MODEL_PERSONAL, INDEX.
+- `redact.py` — `contains`, `redact_text`, `redact_obj`, `argument_findings`, the structlog processor and `SecretLogFilter` (fail closed).
+- `pseudonyms.py` — the per-turn `PseudonymVault` (`[[EMAIL_1@uni.edu]]`, `[[PHONE_1]]`, ...).
+- `egress.py` — `ModelEgress` at `AgentRuntime._provider_complete` (the floor, and placeholders for cloud providers), `current_egress`, `is_local_provider`, `redact_for_model`, `redact_for_embedding`.
+- `guard.py` — the per-call secret guard the runtime runs for every tool call and in `approve_action`, and the `sensitive_data_hidden` audit row.
+- `channels.py` — Telegram and Slack masking, footer and inbound warning.
+- `backend/services/capabilities/hide_personal_details.py` — the owner's "Hide personal details from the AI provider" switch (on by default).
+
+<!-- top10:file_extraction -->
+### Documents (file_extraction)
+
+One sandboxed reader for every document source: web-chat uploads, Telegram documents and photos, Slack DM files, Drive/OneDrive files, Gmail/Outlook attachments, Canvas course files, and PDF/Office links opened by `web.fetch_page` / `web.research`. Spec: `docs/superpowers/specs/2026-09-30-file-extraction-design.md`.
+
+- `backend/services/workers.py` — the shared isolated-child runner: `safe_child_env` (PATH, SYSTEMROOT, TEMP/TMP/TMPDIR, LANG, LC_ALL, HOME only), `run_worker` (no shell, deadline, cancel, per-line and total stdout caps, NDJSON `on_line`; a threaded `Popen` runner when the event loop cannot start subprocesses; a cancelled run waits up to `REAP_S` for its killed child before the caller cleans up), `WorkerSlots` / `WorkerBusy`.
+- `backend/services/files/` — import-free package: `limits.py` (every cap and the UPLOAD / CONNECTOR / WEB_PAGE / WEB_RESEARCH presets), `detect.py` (type from magic bytes; OLE, HEIC, archives refused; `is_document_type`), `sections.py` (`Section`, `Extraction`, `ExtractionRefused`; NFC, invisible/bidi stripped and counted, 3000/4000 splitting), `sandbox.py` (one fresh `python -I worker/main.py` per file, 2 slots, output caps, partial on deadline, working directories left over for an hour swept; `InProcessSandbox` for tests), `documents.py` (`extract`, `read_document`, `limit_notes`: which pages a PDF past the 300-page cap was read to), `registry.py` (opened documents, `tmp_` ids, 30 min, per user), `store.py` (`UserFileStore`: uploads' sections AES-GCM encrypted in `user_files`, dedupe by sha256, 100 files / 200 MB / 30 an hour, 30-day expiry after last read), `window.py` (shown-length windows, `next_start`), `intake.py` (`FileIntake`, `InboundFile`: switch check, store, `file_uploaded` / `file_upload_refused` audit rows with codes only), `prompting.py` (display and prompt names, `attachment_note`), `messages.py` (user sentences per refusal code), `facts.py` (what audit rows and stored transcripts keep: counts, never text or names), `context.py` (`DocumentContext` bound by the executor around web and connector calls; the switch is read lazily).
+- `backend/services/files/worker/` — runs only in the child: `main.py` (limits, sockets disabled, header then bytes on stdin), `limits.py` (RLIMIT_AS / CPU / FSIZE on POSIX, a ctypes Job Object on Windows; **the one deliberate exception to "services/platform holds all OS branches"**: the worker must not import the app), `protocol.py` (NDJSON lines), `parsers/` (`pdf.py` pypdf, `ooxml.py` docx/pptx with zip limits and defusedxml, `xlsx.py` openpyxl read-only data-only, `text.py`, `image.py` Pillow with the 40 MP cap). Imports nothing from core, sqlalchemy, structlog or services.agent.
+- `backend/services/tools/files.py` — `FilesToolkit`: `files.read` (sections as a list, windows, `next_start`, `page`), `files.list` (metadata only), `files.forget` (DELETE, a card every time; precheck refuses foreign ids under `files_rule`); owns the sandbox, registry and store the process shares (`app.state.files`, `app.state.file_intake`).
+- `backend/services/tools/text_budget.py` — `shown_length` / `clip_as_shown`, moved out of `web.py`.
+- `backend/services/capabilities/file_reading.py` — "Read files and documents" (on, low risk): claims the three files.* tools and gates, at call time, web and connector documents, `POST /api/files` and channel intake.
+- `backend/services/connectors/documents.py` — `read_connector_document` for Drive, Gmail, OneDrive, Outlook and Canvas (switch first, 20 MB cap, CONNECTOR preset); Canvas adds `list_files` / `get_file_text` (courses.read; InstFS/S3 redirect hosts, GET only, no token).
+- `backend/services/notifications/telegram_files.py` — `download_telegram_file` (getFile, strict `file_path`, streamed under a cap; the token-bearing URL is never logged). `telegram.py` gains `media_routes` / `file_caption_routes` and album gathering; `slack.py` admits `file_share` only.
+- `backend/api/routes/files.py` — `POST /api/files` (raw streamed body, `X-File-Name`), `GET /api/files`, `GET/DELETE /api/files/{id}`. `agent.py`: `SendMessageRequest.file_ids`, `_history_from_rows` (attachment notes), channel `files=` / `images=`, files.* stored as facts.
+- `backend/models/user_file.py` + `alembic/versions/0018_user_files.py` — the `user_files` table.
+- `frontend/src/components/ChatComposer.tsx` + `fileChips.ts` — documents uploaded on pick, shown as chips; `Chat.tsx` renders file chips from `Message.attachments`.
+- `docker/Dockerfile.frontend` — `location /api/files` with `client_max_body_size 21m` and `proxy_request_buffering off`.
+
+<!-- top10:scheduler_briefing -->
+### Scheduled tasks and the daily briefing (top10 `scheduler_briefing`)
+
+- `backend/models/scheduled_task.py` — `scheduled_tasks` (prompt, briefing and nudge tasks) and `automation_runs` (one row per run or skipped occurrence; its unique (task, occurrence) index is the no-double-run guard). Migration `0017_scheduled_tasks` also adds `users.timezone`, `conversations.origin`, `pending_actions.origin`.
+- `backend/services/scheduler/` — `recurrence.py` (once/daily/weekdays/weekly/monthly at a local HH:MM, DST rules), `timezones.py` (IANA checks, the `X-Crawler-Timezone` capture), `renderers.py` (nudge renderers features register), `briefing.py` (the briefing's gated, audited reads and its text), `commands.py` (Telegram `/schedules` `/briefing` `/timezone` and the Slack keywords), `audit_facts.py` (what a `schedule.*` audit row keeps: ids, status, schedule and tool names, never a prompt, topic or label).
+- `backend/services/agent/unattended.py` — the contract for a turn nobody watches (`UnattendedRun`: reads, card-only writes, budget, rounds, card TTL and note, seeds); `runtime.py` applies it at its per-call anchors, and adds `untrusted_data_message`, `resolve_turn_provider` and `complete_once`.
+- `backend/services/automation/` — `fence.py` (which tools an unattended run may be given), `ledger.py` (`automation_runs`, the rolling 24-hour budget), `runner.py` (request/outcome/protocol), `turns.py` (the runner, wired by `api/routes/agent.build_unattended_runner` onto `app.state.unattended_runner`), `delivery.py` (the chat messages), `conversations.py`.
+- `backend/services/notifications/sweeper.py` — `SweepLoop`, `claim`, `backoff_minutes`, `capability_gate`: the one poll-loop design (page watch runs on it). `schedules.py` — `ScheduleService`, the schedule sweeper (also the `NudgeScheduler`: `upsert_nudge` / `cancel_nudge`).
+- `backend/services/tools/schedule.py` — the `schedule.*` toolkit and its card hooks; `backend/services/capabilities/scheduled_tasks.py` — the switch and the shared budgets.
+- `backend/api/routes/schedules.py` — `/api/schedules` (list, create, pause/resume, delete, run now, the saved time zone).
+
+<!-- top10:tutor_mode -->
+
+## Tutor mode (`backend/services/tutor/`)
+- `state.py` — `TutorState` (the `conversations.tutor_state` JSON: the person's switch and the engaged course lock; malformed reads as off), `TutorTurn` (effective state, the block, `allows`, lock engagement from the message or a call's arguments, `tutor.start`, audit events, the notice) and `merge_for_persist` (sticky lock, newest switch wins; no FOR UPDATE).
+- `locks.py` — `CourseLock` matching (codes across separators on word boundaries, names, aliases, Canvas `course_id`, `/courses/<id>/` URLs; never tool results), create-time validation (`validate_lock`) and the label sanitiser.
+- `prompt.py` — the three fixed `<tutor_mode>` blocks and the reply notices; `policy.py` — the withheld tools and `graded_work_page`; `commands.py` — the `/tutor` grammar and fixed replies per channel.
+- `service.py` — `load_tutor_turn`, `persist_tutor_state`, `apply_command`, the owner's lock CRUD with audit rows, the approval guard and the export; `hooks.py` — the runtime call-outs (block, per-call gate, graded-page refusal, round swap, notice).
+- Wiring: `api/routes/agent.py` (`TurnContext.tutor`, the `/tutor` intercept in `send_message`/`stream_message`, GET/PUT `/conversations/{id}/tutor`, `build_tutor_applier`, the `_decide_and_record` guard), `api/routes/tutor.py` (owner-only lock routes and the Canvas course picker), `services/notifications/telegram.py` and `slack.py` (`.tutor`), `models/tutor_lock.py`, migration `0019_tutor_mode`, capability `services/capabilities/tutor_mode.py`, and `frontend/src/components/TutorLocks.tsx` (Settings ▸ Permissions, owner only).
+- Tests: `backend/tests/test_tutor_*.py`, `frontend/src/components/TutorLocks.test.tsx`.
+
+<!-- top10:knowledge_base -->
+### Knowledge base (top10 `knowledge_base`)
+
+- `backend/models/knowledge.py` — `kb_collections`, `kb_documents`, `kb_chunks` (passages with locators; `withheld` for PromptGuard-flagged ones), `kb_postings` (the BM25 inverted index), `kb_embeddings` (float32 vectors). Migration `0020_knowledge_base`.
+- `backend/services/knowledge/` — `limits.py` (settings and caps), `text.py` (tokenizer), `chunking.py` (passages and locators), `ranking.py` (BM25, RRF, per-document cap), `vectors.py` (packing, scoring, cache), `screen.py` (redaction and withholding), `sources.py` (URL fetch through the egress guard, connector results, uploads, notes), `store.py` (`KnowledgeService`, every query scoped to the user), `embeddings.py` (backend rule, `EmbeddingSource`), `embedder.py` (`KnowledgeEmbedService` on `SweepLoop`), `facts.py` (audit summaries), `export.py` (account export), `channels.py` (Telegram `/kb`).
+- `backend/services/tools/knowledge.py` — the `knowledge.*` toolkit and its card hooks (`precheck`, `bind` with the reserved `_knowledge` key, `describe`); the executor wires it (`ConnectorToolExecutor._knowledge_builtin`), main.py adds the settings and the embedding source.
+- `backend/services/capabilities/knowledge_base.py`, `knowledge_semantic.py` — the two switches; `ReportContext.embedding_backend` feeds the second.
+- `backend/services/agent/providers.py` — `LLMProvider.embed` / `supports_embeddings` (Gemini, OpenAI, Ollama).
+
+<!-- top10:flashcards_quizzes -->
+### Flashcards and practice quizzes (top10 `flashcards_quizzes`)
+
+- `backend/models/study.py` + `alembic/versions/0021_study.py` — `study_decks`, `study_items` (each item's SM-2 state; unique per-deck fingerprint), `study_reviews`, `study_quiz_attempts`, `study_settings` (review limits and the nudge's `scheduled_tasks` id).
+- `backend/services/study/` — `srs.py` (SM-2 and interval previews), `items.py` (validation and screening: invisible characters, NUL, PromptGuard, key/card/ID formats, the 3500-character render rule, fingerprints), `render.py` (`Screen`/`Button`, `channel_safe` defanging), `engine.py` (`StudyEngine`: decks, the due queue, conditional-UPDATE grading, quizzes, progress, settings), `channel.py` (`StudyChannel`: the model-free Telegram/Slack flow and its 30-minute cursors), `telegram.py` and `slack.py` (their registration in the channels' dispatch tables; `send_document`), `export.py` (Anki TSV, CSV injection guard, `ExportTokens`, the `study_export` audit row), `nudges.py` (the `study_due` renderer), `prompt.py` (the `<study>` block), `audit_facts.py` (what a `study.*` audit row keeps: ids, counts, grades and scores, never card text, a deck title or an export link).
+- `backend/services/tools/study.py` — `StudyToolkit`: the nine `study.*` actions and the delete card's hooks (`precheck`, `bind` adding `_deck`, `describe`); `STUDY_RULE_POLICY`.
+- `backend/services/capabilities/study.py` — "Flashcards and practice quizzes" (off, low risk, claims `study.`).
+- `backend/api/routes/study.py` — `GET /api/study/export?t=` (one-time link) and `GET /api/study/decks/{id}/export` (signed in).
+- `core/logging_config.py` strips the export link's query from access logs; `docker/Dockerfile.frontend` logs `/api/study/export` without it; `services/security/secrets.py` knows the `cse_` token.
+
+<!-- top10:event_triggers -->
+### App-event triggers (top10 `event_triggers`)
+
+- `backend/models/event_trigger.py` — `event_triggers` (the rule, pinned to one connector row, its cursor and run counters) and `trigger_events` (queued items; the unique (trigger, key) index is the dedupe guard). Migration `0022_event_triggers`.
+- `backend/services/triggers/` — `sources.py` (the sources, their filters and intervals, the Gmail query, the adapters that poll through `executor.execute` on the slugged tool name, `run_check` with the baseline and the seen ring), `facts.py` (capped facts and every message: notify lines, the stop and limit notices, a run's result with foreign URLs defanged), `commands.py` (Telegram `/triggers` and its `tgp:`/`tgr:` buttons, the Slack keywords), `audit_facts.py` (what a `triggers.*` audit row keeps: ids, status and counts, never a prompt, a filter, an account or what a fire saw).
+- `backend/services/tools/triggers.py` — the `triggers.*` toolkit and its card hooks (precheck, the async bind that pins `_account`, the card sentence) and the owner's own pause/resume/delete.
+- `backend/services/notifications/event_triggers.py` — `TriggerService`: detect (claims, 45 s checks, back-off, the stop after five failures), act (notify, or one run through `app.state.unattended_runner` with caps and the fallback notice), housekeeping, and `enqueue_page_change` (the page-watch hook).
+- `backend/services/connectors/canvas_activity.py` — shaping for `canvas.get_announcements` and `canvas.get_recent_grades`.
+- `backend/services/capabilities/event_triggers.py`, `trigger_runs.py` — the two switches; `backend/api/routes/triggers.py` — `/api/triggers` (list, pause/resume, delete).
+- Tests: `backend/tests/test_trigger_*.py`, `test_event_triggers_capability.py`, `tests/connectors/test_canvas_activity.py`.
+
+<!-- top10:permission_tiers -->
+### Risk grades, the low-risk tier and grants (top10 `permission_tiers`)
+
+- `backend/services/agent/risk.py` — the LOW / MEDIUM / HIGH grade of a connector call (`grade_spec`, `grade_tool`), the escalate-only rule builders connectors use in `ToolSpec.risk_check`, registry validation of the declarations, `LOW_RISK_MAX_PER_TURN`, the "Done without asking" line.
+- `backend/services/agent/permission_grants.py` — `PermissionGrant` and its stores (in memory; `permission_grants` table), `GRANT_TTL`, `StandingConsent` (one turn's decisions at the runtime's anchors: tiers, grants, the cap, the tripwire, ref_args, the grant offer), revocation and audit helpers for routes and the OAuth broker.
+- `backend/models/permission_grant.py` — `permission_grants`; migration `0023_permission_grants` also adds `pending_actions.grant_offer` and the Postgres `low_risk` label.
+- `backend/services/capabilities/low_risk_actions.py` — "Make low-risk changes without asking" (on by default).
+- `backend/api/routes/permission_grants.py` — `GET` / `DELETE /api/agent/permission-grants`.
+- `backend/services/notifications/grant_commands.py` — Telegram `/grants` (`rvg:`) and Slack `grants` / `revoke grants`; the card button is `apl:` (Telegram) and `crawler_approve_low_risk` (Slack).
+- Connector specs declare `risk="low"`, `risk_check`, `ref_args` and `low_risk_note` (`services/connectors/definition.py`); `GET /api/connectors/types` lists each connector's `low_risk` actions.
+- Frontend: `components/LowRiskGrantButton.tsx` (Chat and Dashboard cards), `components/PermissionGrants.tsx` (Settings ▸ Permissions), the tier option on the Connectors page.
+
+<!-- top10:voice_notes -->
+### Voice notes (voice_notes)
+
+Telegram voice notes and audio files become text, a silent "🎤 Heard: “…”" echo, and then a normal chat turn. No model-facing tool, no migration, no frontend change.
+
+- `backend/services/tools/transcribe.py` — the limits (20 MB, 10 minutes, 20000 characters, 14 MB inline for a provider), `sniff_audio_type` (Ogg Opus/Vorbis, MP3, WAV, FLAC, M4A, WebM magic bytes; must match the declared family), `local_engine_installed`, the pinned model (`SPEECH_MODEL_REVISION` / `SPEECH_MODEL_SHA256`, `speech_model_dir()`), `VoiceQuota` (10 notes per 10 minutes, 3600 audio seconds a day, in memory), `LocalWhisperEngine` (one worker at a time, three waiting, deadline 60 s + length, killed on cancel, `safe_child_env` + `HF_HUB_OFFLINE=1`) and `ProviderAudioEngine` (one audio block through `AgentRuntime.complete_once` with the fixed speech-to-text instruction; `[no speech]`).
+- `backend/services/tools/transcribe_worker.py` — the child process: stdlib, av, numpy and faster_whisper only; forced demuxer, 16 kHz mono, stops past `--max-seconds`; one JSON line on stdout, never the transcript on stderr.
+- `backend/services/notifications/voice.py` — `VoiceNoteService`: `precheck` (switches and engine rule, declared size, length, format, quota; fail closed), `transcribe` (sniff, engine, trust: own note = typed text, forwarded notes and audio files PromptGuard-scanned then fenced or withheld), `voice_note_transcribed` / `voice_note_refused` audit rows (facts and the audio's sha256, never the text); `voice_notes_for(app, ...)` keeps one per process on `app.state.voice_notes`.
+- `backend/services/agent/shared_content.py` — `fence_untrusted` (`<shared_content_{nonce}>`, nonce and invisible characters neutralised), `untrusted_spans` (an unclosed fence runs to the end), `untrusted_spans_in`, `outside_fences`. The runtime seeds each turn's `TaintTracker` with the spans (`top10:turn_start:voice_notes`).
+- `backend/services/agent/providers.py` — `AUDIO_BLOCK`, `has_audio`, `supports_audio`, `_reject_audio` (Anthropic, OpenAI-compatible, Ollama raise instead of dropping audio), Gemini `inlineData` audio, `provider_hears_audio`.
+- `backend/services/capabilities/voice_notes.py`, `voice_notes_cloud.py` — the two switches (tools=()); `ReportContext.speech_local_installed` / `default_provider_audio`.
+- `backend/services/tools/system.py` — `ALLOWLIST["speech_to_text"]` (native only; binary-only pip of faster-whisper, then the pinned, hash-checked model download).
+- `backend/services/notifications/telegram.py` — `media_routes` voice / audio / video_note → `_route_voice_message` / `_run_voice`; `_run_turn_locked` shared by typed and voice turns (passes `attachments=` / `usage_seed=` when the applier takes them). `slack.py` answers audio clips with a text reply. `api/routes/agent.py`: the applier's `attachments` (stored on the user message) and `usage_seed` (folded into the turn's usage, also on a replay-cache hit).
+- `docker/Dockerfile.backend` — optional `WITH_SPEECH_TO_TEXT=1` build arg (compose passes it).
+
+<!-- top10:video_transcripts -->
+### Video and podcast transcripts (top10 `video_transcripts`)
+
+- `backend/services/tools/video/` — `toolkit.py` (`VideoToolkit`: `video.transcript` and `video.list`, argument checks, source routing, the 16000-character answer with `next_start` and `find`, the 45 s publisher deadline, the YouTube host rule on every hop (a link that redirects to a YouTube video is not followed but read on the provider path), one saved transcript per asked language, a note when only the first part of a long transcript was kept), `sources.py` (link classification, YouTube ids and `t=`, look-alikes, playlists and channels refused, `display_url`, `url_key`, `YOUTUBE_ALLOWED_PATHS`), `captions.py` (VTT/SRT/SBV/TTML/JSON/HTML/text parsers, rolling-caption collapse, passages of 700 characters and 90 s; plain text whose "times" do not run forward, such as chapter:verse numbers, is read as untimed), `podcast.py` (feeds through defusedxml, episode choice, `<podcast:transcript>` preference, the iTunes lookup), `page.py` (HTMLParser discovery of tracks, YouTube embeds, feeds and players), `provider_video.py` (oEmbed preflight, caps, cost estimate, the fixed reader instruction and schema, output validation, the `video_provider_read` audit row), `store.py` (`TranscriptStore`), `facts.py` (what the audit keeps).
+- `backend/services/agent/turn_context.py` — `TurnModel` (the turn's provider, model, Gemini video reader and usage recorder) bound by `AgentRuntime._run_turn` and undone by `chat()`; `UsageMeter` is the turn's spend.
+- `backend/services/agent/providers.py` — `GeminiProvider.read_video_url` (canonical watch URLs only, through `_post_with_retries`).
+- `backend/services/notifications/transcripts.py` — `TranscriptJanitor` on `SweepLoop` (expiry and the 200-row cap).
+- `backend/services/capabilities/video_transcripts.py` — the switch and `VIDEO_SETTINGS_DEFAULTS`; `InstallationService.video_limits()` reads them.
+- `backend/models/media_transcript.py` + `alembic/versions/0024_media_transcripts.py` — the `media_transcripts` table (exported with the account).

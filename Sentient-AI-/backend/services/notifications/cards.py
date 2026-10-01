@@ -24,6 +24,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
+from services.security.policies import CHANNEL
+from services.security.redact import redact_obj
+
 # Hex characters of the sha256 shown on a card: 64 bits, enough to tell two
 # calls apart at a glance while staying readable.
 DIGEST_HEX_CHARS = 16
@@ -159,6 +162,35 @@ def turn_notes(outcome: dict[str, Any], *, where: str, pending_hint: str) -> str
             str(name) for name in outcome["blocked"]
         )
     return notes
+
+
+# Most low-risk notes a grant line lists (permission tiers).
+_GRANT_LINE_NOTES = 4
+
+
+def low_risk_account(action: Any) -> str | None:
+    """The account a card's grant offer names (StoredAction.grant_offer,
+    written by the runtime), or None when the card offers no grant."""
+    offer = getattr(action, "grant_offer", None)
+    if not isinstance(offer, dict) or offer.get("kind") != "low_risk":
+        return None
+    account = offer.get("account")
+    return account if isinstance(account, str) and account.strip() else None
+
+
+def low_risk_line(account: str, notes: list[str], *, how: str) -> str:
+    """What a card that offers a low-risk grant says about it: the account,
+    up to four of its connector's low-risk notes, what still asks, and *how*
+    to list and revoke grants in this chat."""
+    head = f"Or allow low-risk changes on {account} for 7 days"
+    if notes:
+        more = len(notes) > _GRANT_LINE_NOTES
+        head += ": " + "; ".join(notes[:_GRANT_LINE_NOTES]) + ("…" if more else ".")
+    else:
+        head += "."
+    return (
+        f"{head} Sends, deletes, sharing and anything other people see still ask. {how}"
+    )
 
 
 def waiting_cards_note(waiting: int, *, pending_hint: str) -> str:
@@ -342,9 +374,12 @@ def layout_card(
     _check_limit(max_chars)
     if max_parts < 2:
         raise ValueError(f"max_parts must be at least 2, got {max_parts}")
+    # The digest is of the real arguments, so it matches the web card's; the
+    # chat shows them with any key, card, bank or ID number masked (policy
+    # CHANNEL): the chat app keeps its own copy of every message.
     digest = arguments_digest(arguments)
     label = f"Approval {digest} (Tool: {tool_name})"
-    rendered = render_arguments(arguments)
+    rendered = render_arguments(redact_obj(arguments, CHANNEL))
     args_block = ["Arguments:", rendered] if rendered else []
     single = [*head_lines, *([""] + args_block if args_block else []), "", digest_line(arguments)]
     if length("\n".join(single)) <= max_chars:

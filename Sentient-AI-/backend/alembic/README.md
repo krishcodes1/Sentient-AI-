@@ -130,6 +130,28 @@ To take page watch out again, undo the merge and then that line only:
 `alembic downgrade 0014_slack_channel_links`, then
 `alembic downgrade 0011_page_watches@-1`.
 
+## Reserved revisions (0017 to 0024)
+
+`0017_scheduled_tasks` to `0024_media_transcripts` form one linear chain on
+`0016_merge_app_approvals`, reserved for the top10 skills that add schema
+(each file names its skill); each skill's builder filled its own file's
+`upgrade()`/`downgrade()` (docs/CODE-MAP.md lists what each adds). The ids were fixed up front
+so parallel branches never pick the same parent: fill only your own file,
+never change a `down_revision`, and add no revision or merge revision
+inside the chain. `tests/test_integration_seams.py` pins it. The next new
+migration after the chain revises `0024_media_transcripts`.
+
+`0023_permission_grants` (permission tiers) creates `permission_grants`
+(7-day low-risk grants, cascading with their user and their connector) and
+the nullable JSON column `pending_actions.grant_offer`, and on Postgres adds
+the `low_risk` label to the `permission_tier` enum (`ALTER TYPE ... ADD VALUE
+IF NOT EXISTS 'low_risk' AFTER 'auto_approve'`, in an autocommit block; SQLite
+needs nothing, the label fits the VARCHAR(12)). Its downgrade maps every
+`low_risk` tier, on connector rows and account defaults, to `user_confirm`
+(the stricter neighbour) and drops the column and the table. **Postgres
+cannot drop an enum label, so `low_risk` stays in the type after a
+downgrade**; no row uses it, and upgrading again is a no-op for the type.
+
 ## Writing a new migration
 
 ```bash

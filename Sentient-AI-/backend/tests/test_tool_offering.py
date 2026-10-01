@@ -324,10 +324,13 @@ def test_build_tools_marks_starters():
 @pytest.mark.asyncio
 async def test_a_large_connector_does_not_push_out_enabled_builtins():
     """GitHub alone is over the cap: the browser, desktop and installer
-    tools the owner switched on must still be offered."""
+    tools the owner switched on must still be offered. (With every skill on
+    as well, each skill's entry point goes first and extras such as
+    desktop.screenshot may give way: tests/test_offered_tools.py.)"""
     from services.agent.tool_registry import CONNECTOR_CATALOG
 
-    tools = build_tools([ConnectorSpec("github")], enabled_capabilities=ALL_CAPABILITIES)
+    skills = {"scheduled_tasks", "study", "event_triggers", "knowledge_base", "video_transcripts"}
+    tools = build_tools([ConnectorSpec("github")], enabled_capabilities=ALL_CAPABILITIES - skills)
     assert len(tools) > MAX_OFFERED_TOOLS
     provider = ScriptedProvider([LLMResponse(content="ok")])
     await _runtime(provider).chat(
@@ -774,12 +777,12 @@ def wide_tool_set(monkeypatch):
     real = agent_routes._build_tools_and_memory
 
     async def wider(*args, **kwargs):
-        tools, memory, permissions = await real(*args, **kwargs)
+        built = await real(*args, **kwargs)
         extra = [
             Tool(f"acme.widget_{i:02d}", f"Operate acme widget number {i}", {}, "acme")
             for i in range(30)
         ]
-        return tools + extra, memory, permissions
+        return built._replace(tools=built.tools + extra)
 
     monkeypatch.setattr(agent_routes, "_build_tools_and_memory", wider)
 

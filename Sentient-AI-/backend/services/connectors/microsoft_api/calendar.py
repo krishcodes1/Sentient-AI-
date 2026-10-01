@@ -20,6 +20,7 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from services.agent import risk
 from services.agent.permissions import ActionCategory
 
 from ..base import ConnectorError, UserConfirmationRequired, path_segment
@@ -199,6 +200,13 @@ CALENDAR_ACTIONS: tuple[ToolSpec, ...] = (
             calendar_id={"type": "string", "description": "Calendar id (default: main calendar)"},
         ),
         required_scope="calendar.write",
+        risk="low",
+        # Attendees get an invitation; another calendar may be shared.
+        risk_check=risk.all_of(
+            risk.when_given("attendees", "high", "it invites other people"),
+            risk.when_given("calendar_id", "medium", "it writes to a calendar that may be shared"),
+        ),
+        low_risk_note="add private events with no guests to your main calendar",
     ),
     ToolSpec(
         "update_event",
@@ -226,6 +234,8 @@ CALENDAR_ACTIONS: tuple[ToolSpec, ...] = (
             send_response={"type": "boolean", "description": "Notify the organizer (default true)"},
         ),
         required_scope="calendar.write",
+        # The answer goes to the organizer: it speaks for the user.
+        always_confirm=True,
     ),
     ToolSpec(
         "delete_event",

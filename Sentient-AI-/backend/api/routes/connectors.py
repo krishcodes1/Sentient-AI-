@@ -45,6 +45,7 @@ from models.connector import (
 from models.slack_link import SlackChannelLink
 from models.user import User
 from services.agent.tool_registry import connector_scopes, default_read_scopes
+from services.agent.permission_grants import on_connector_updated
 from services.audit import append_auth_event
 from services.auth import get_current_user
 from services.connectors import oauth as oauth_broker
@@ -531,6 +532,10 @@ async def update_connector(
     if update_data.get("granted_scopes") is not None:
         _validate_scopes(type_key, update_data["granted_scopes"])
 
+    # For permission tiers (below): what the change is measured against.
+    old_tier, old_scopes = connector.permission_tier, list(connector.granted_scopes or [])
+    credentials_changed = "credentials" in update_data
+
     if "credentials" in update_data:
         credentials = update_data.pop("credentials") or {}
         # The same gate POST applies. Without it an edit could store a
@@ -549,6 +554,18 @@ async def update_connector(
         setattr(connector, field, value)
 
     await db.flush()
+    # A tier change is audited; new credentials or a new scope take back the
+    # connection's low-risk grants (services.agent.permission_grants).
+    await on_connector_updated(
+        db,
+        user_id=current_user.id,
+        connector=connector,
+        connector_type=type_key,
+        old_tier=old_tier,
+        old_scopes=old_scopes,
+        credentials_changed=credentials_changed,
+        endpoint=f"/api/connectors/{connector_id}",
+    )
     await db.refresh(connector)
     _forget_mcp_state(connector)
     await _reconcile_slack_channels(request, db, type_key)

@@ -210,6 +210,25 @@ def test_user_owned_rows_cascade_on_delete(migrated):
         "oauth_states",
         "pending_actions",
         "slack_channel_links",
+        "scheduled_tasks",
+        "automation_runs",
+        "user_files",
+        # top10:knowledge_base
+        "kb_collections",
+        "kb_documents",
+        "kb_chunks",
+        "kb_postings",
+        "kb_embeddings",
+        # top10:flashcards_quizzes
+        "study_decks",
+        "study_items",
+        "study_reviews",
+        "study_quiz_attempts",
+        "study_settings",
+        "media_transcripts",
+        "event_triggers",
+        "trigger_events",
+        "permission_grants",
     ):
         cascades = {
             fk[3]
@@ -600,3 +619,69 @@ def test_postgres_enum_types_match_the_models():
         except Exception:
             # A leaked scratch database is noise in CI, not a test failure.
             pass
+
+
+# ---------------------------------------------------------------------------
+# 0023_permission_grants (permission tiers)
+# ---------------------------------------------------------------------------
+
+
+def test_permission_grants_cascade_with_their_connector(migrated):
+    """A grant dies with its connection (and its user), and is found by
+    (user, connector, kind) through one index."""
+    table = migrated["permission_grants"]
+    assert (("connector_id",), "connector_configs", ("id",), "CASCADE") in table["foreign_keys"]
+    assert (("user_id",), "users", ("id",), "CASCADE") in table["foreign_keys"]
+    assert table["indexes"]["ix_permission_grants_lookup"] == (
+        ("user_id", "connector_id", "kind"),
+        False,
+    )
+    assert "grant_offer" in migrated["pending_actions"]["columns"]
+
+
+def test_0023_downgrade_maps_low_risk_tiers_to_user_confirm(tmp_path):
+    """Nothing that asked before a downgrade stops asking after it: every
+    low_risk tier (a connection's or an account's) becomes user_confirm, and
+    the table and column go."""
+    db_path = tmp_path / "tiers.db"
+    config = _alembic_config(f"sqlite+aiosqlite:///{db_path}")
+    command.upgrade(config, "0023_permission_grants")
+
+    user_id, connector_id = uuid.uuid4().hex, uuid.uuid4().hex
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                sa.text(
+                    "INSERT INTO users (id, email, hashed_password, is_active, "
+                    "default_permission_tier, created_at, updated_at) VALUES "
+                    "(:id, 'tiers@example.com', 'x', 1, 'low_risk', "
+                    "'2026-01-01 00:00:00', '2026-01-01 00:00:00')"
+                ),
+                {"id": user_id},
+            )
+            conn.execute(
+                sa.text(
+                    "INSERT INTO connector_configs (id, user_id, connector_type, display_name, "
+                    "is_active, auth_method, encrypted_credentials, granted_scopes, "
+                    "permission_tier, rate_limit_per_minute, created_at, updated_at) VALUES "
+                    "(:id, :user, 'github', 'GH', 1, 'bearer_token', x'00', '[]', 'low_risk', 30, "
+                    "'2026-01-01 00:00:00', '2026-01-01 00:00:00')"
+                ),
+                {"id": connector_id, "user": user_id},
+            )
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, "0022_event_triggers")
+
+    engine = sa.create_engine(f"sqlite:///{db_path}")
+    try:
+        with engine.connect() as conn:
+            assert conn.execute(sa.text("SELECT default_permission_tier FROM users")).scalar_one() == "user_confirm"
+            assert conn.execute(sa.text("SELECT permission_tier FROM connector_configs")).scalar_one() == "user_confirm"
+        inspector = sa.inspect(engine)
+        assert "permission_grants" not in inspector.get_table_names()
+        assert "grant_offer" not in {c["name"] for c in inspector.get_columns("pending_actions")}
+    finally:
+        engine.dispose()
