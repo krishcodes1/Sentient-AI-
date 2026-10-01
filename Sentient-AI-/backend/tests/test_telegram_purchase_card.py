@@ -15,6 +15,7 @@ real request code runs without any network; no card number ever appears here.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -126,6 +127,15 @@ def _keyboard_of(multipart: bytes) -> dict:
     return json.loads(multipart[start:end].decode("utf-8"))
 
 
+def _without_boundary(multipart: bytes) -> bytes:
+    """A multipart body less its boundary. httpx draws the boundary for each
+    upload as 32 random hex characters, which can hold the card's last4 by
+    chance, so the last4 is looked for only in the rest."""
+    boundary = multipart.split(b"\r\n", 1)[0]
+    assert re.fullmatch(rb"--[0-9a-f]{32}", boundary), boundary
+    return multipart.replace(boundary, b"")
+
+
 # ── the card ─────────────────────────────────────────────────────────────
 
 
@@ -142,7 +152,36 @@ async def test_purchase_card_is_a_photo_with_the_caption_and_keyboard(session_fa
     buttons = _keyboard_of(photo)["inline_keyboard"][0]
     assert buttons[0]["callback_data"] == "apv:a1" and buttons[1]["callback_data"] == "dny:a1"
     assert b'name="chat_id"\r\n\r\n901' in photo
-    assert b"image/jpeg" in photo and b"4242" not in photo.replace(b"Visa \xc2\xb7\xc2\xb7\xc2\xb7\xc2\xb74242", b"")
+    assert b"image/jpeg" in photo
+    assert b"4242" not in _without_boundary(photo).replace(
+        b"Visa \xc2\xb7\xc2\xb7\xc2\xb7\xc2\xb74242", b""
+    )
+    await service._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_boundary_that_happens_to_hold_the_last4_is_no_leak(
+    session_factory, fake_api, monkeypatch
+):
+    # httpx draws a new boundary for each upload, and about one run in 2,300
+    # it holds "4242", this card's last4: the check looked in the whole body
+    # and failed with no card data shown.
+    from httpx._multipart import MultipartStream
+
+    real_init = MultipartStream.__init__
+
+    def pinned(self, data, files, boundary=None):
+        real_init(self, data, files, boundary or b"9f4242a0b1c2d3e4f5a6b7c8d9e0f1a2")
+
+    monkeypatch.setattr(MultipartStream, "__init__", pinned)
+    user = await _link(session_factory, "tg-buy-boundary@example.com", 911)
+    service = _service(session_factory)
+    await service.notify_pending(_action(str(user.id)))
+    [photo] = fake_api.photos
+    assert photo.startswith(b"--9f4242")
+    assert b"4242" not in _without_boundary(photo).replace(
+        b"Visa \xc2\xb7\xc2\xb7\xc2\xb7\xc2\xb74242", b""
+    )
     await service._client.aclose()
 
 

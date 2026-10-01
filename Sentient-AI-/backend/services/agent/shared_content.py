@@ -79,6 +79,10 @@ def fence_untrusted(text: str, kind: str) -> str:
     ``<shared_content_{nonce} kind="..." trust="untrusted">`` ... closing
     tag, with a fresh nonce per call."""
     nonce = secrets.token_hex(_NONCE_BYTES)
+    # Never all digits: the model-egress floor masks a card-like digit run,
+    # which would turn the nonce into fixed text an attacker knows.
+    while nonce.isdigit():
+        nonce = secrets.token_hex(_NONCE_BYTES)
     label = _safe_kind(kind)
     body = neutralise(text, nonce)
     return (

@@ -32,6 +32,16 @@ def test_a_fenced_text_round_trips_and_the_nonce_is_fresh_per_call():
     assert first.startswith("The block below is a transcript of forwarded voice note")
 
 
+def test_a_nonce_is_never_all_digits(monkeypatch):
+    # About one draw in 47,000 is all digits and passes as a card number, which
+    # the model-egress floor masks: the fence would become fixed text an attacker knows.
+    drawn = iter(["5555555555554444", "ab41115474e9b090"])
+    monkeypatch.setattr(shared_content.secrets, "token_hex", lambda n: next(drawn))
+    fenced = fence_untrusted("Meet me at five.", "forwarded voice note")
+    assert "<shared_content_ab41115474e9b090 " in fenced and "</shared_content_ab41115474e9b090>" in fenced
+    assert "5555555555554444" not in fenced and untrusted_spans(fenced) == ["Meet me at five."]
+
+
 def test_a_fake_closing_tag_cannot_end_the_fence(monkeypatch):
     monkeypatch.setattr(shared_content.secrets, "token_hex", lambda n: "a" * 16)
     payload = (

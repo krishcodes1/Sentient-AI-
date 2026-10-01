@@ -2202,6 +2202,10 @@ class AgentRuntime:
         browser one; ``closing`` replaces the closing line outright.
         """
         boundary = secrets.token_hex(8)
+        # Never all digits: the model-egress floor masks a card-like digit
+        # run, which would turn the token into fixed text an attacker knows.
+        while boundary.isdigit():
+            boundary = secrets.token_hex(8)
         blocks: list[str] = []
         for tr in tool_results:
             model_view = redact_binary_for_model(tr.get("result"))

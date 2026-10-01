@@ -17,16 +17,21 @@ provider records exactly what it was sent; nothing calls a real model.
 from __future__ import annotations
 
 import json
+import re
+from datetime import datetime
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from core.config import settings
+from services.agent import runtime as runtime_module
 from services.agent.approvals import InMemoryApprovalStore
 from services.agent.providers import LLMResponse, ToolCall
 from services.agent.runtime import SECURITY_SYSTEM_PROMPT, AgentRuntime
 from services.agent.tool_registry import ConnectorSpec, RuntimePermissionAdapter, build_tools
 from services.security import egress as egress_module
+from services.security import guard as guard_module
 from services.security.egress import (
     PRIVACY_SYSTEM_PROMPT,
     ModelEgress,
@@ -146,6 +151,22 @@ def _system(provider: ScriptedProvider, index: int = 0) -> str:
     return provider.calls[index][0]["content"]
 
 
+# A tool result is fenced by a boundary of 16 random hex digits drawn per
+# call, and an audit row's timestamp has microseconds. Either can hold "4111",
+# the card's first digits, by chance, so those digits are looked for only once
+# the random value is taken out.
+_BOUNDARY = re.compile(r"<tool_result_([0-9a-f]{16}) ")
+
+
+def _without_boundary(sent: str) -> str:
+    [boundary] = set(_BOUNDARY.findall(sent))
+    return sent.replace(boundary, "<boundary>")
+
+
+def _without_timestamp(row: dict[str, Any]) -> str:
+    return json.dumps({k: v for k, v in row.items() if k != "timestamp"}, default=str)
+
+
 # ── the floor, for every provider ────────────────────────────────────────
 
 
@@ -168,11 +189,50 @@ async def test_a_token_in_a_tool_result_and_a_card_in_the_message_never_reach_th
     )
     assert response.content == "Found the deploy email."
     sent = provider.sent()
-    assert TOKEN not in sent and CARD not in sent and "4111" not in sent
+    assert TOKEN not in sent and CARD not in sent and "4111" not in _without_boundary(sent)
     assert "[hidden by Crawler: card number]" in sent
     assert "[hidden by Crawler: GitHub token]" in sent
     # The executor and the transcript still hold the real result.
     assert executor.calls and TOKEN in str(response.tool_calls)
+
+
+@pytest.mark.asyncio
+async def test_a_boundary_that_happens_to_hold_the_card_digits_is_no_leak(monkeypatch):
+    # About one run in 5,000 draws a boundary holding "4111": the check looked
+    # in the whole request and failed with no card data sent. Pinned for the
+    # runtime only; other code keeps the real secrets module.
+    pinned = SimpleNamespace(token_hex=lambda nbytes: "ab41115474e9b090")
+    monkeypatch.setattr(runtime_module, "secrets", pinned)
+    provider = ScriptedProvider(
+        [_call("google_workspace.search_emails", query="deploy"), LLMResponse(content="ok")]
+    )
+    runtime, *_ = _runtime(provider, hide=False)
+    await runtime.chat(
+        messages=[{"role": "user", "content": f"My card {CARD} was charged"}],
+        tools=GOOGLE_TOOLS,
+        user_id=USER,
+    )
+    sent = provider.sent()
+    assert "<tool_result_ab41115474e9b090 " in sent
+    assert CARD not in sent and "4111" not in _without_boundary(sent)
+
+
+@pytest.mark.asyncio
+async def test_a_boundary_is_never_all_digits(monkeypatch):
+    # About one draw in 47,000 is all digits and passes as a card number, which
+    # the egress floor masks: the fence would become fixed text an attacker knows.
+    drawn = iter(["5555555555554444", "ab41115474e9b090"])
+    monkeypatch.setattr(runtime_module, "secrets", SimpleNamespace(token_hex=lambda nbytes: next(drawn)))
+    provider = ScriptedProvider(
+        [_call("google_workspace.search_emails", query="deploy"), LLMResponse(content="ok")]
+    )
+    runtime, *_ = _runtime(provider, hide=False)
+    await runtime.chat(
+        messages=[{"role": "user", "content": "Find the deploy email"}], tools=GOOGLE_TOOLS, user_id=USER
+    )
+    sent = provider.sent()
+    assert "<tool_result_ab41115474e9b090 " in sent and "</tool_result_ab41115474e9b090>" in sent
+    assert "5555555555554444" not in sent and "tool_result_[hidden" not in sent
 
 
 @pytest.mark.asyncio
@@ -447,8 +507,11 @@ async def test_exactly_one_sensitive_data_hidden_row_with_counts_only():
     assert hidden == {"card number": 1, "GitHub token": 1, "email": 1}
     assert row["arguments"]["provider"] == "gemini"
     dumped = json.dumps(row, default=str)
-    for value in (TOKEN, CARD, EMAIL, "4111"):
+    for value in (TOKEN, CARD, EMAIL):
         assert value not in dumped
+    assert "4111" not in _without_timestamp(row)
+    # The timestamp left out above holds a time and nothing else.
+    assert datetime.fromisoformat(row["timestamp"]).isoformat() == row["timestamp"]
 
     # The next turn re-sends that history: nothing new, no row.
     provider2 = ScriptedProvider([LLMResponse(content="you're welcome")])
@@ -460,6 +523,22 @@ async def test_exactly_one_sensitive_data_hidden_row_with_counts_only():
     )
     assert len(audit.rows("sensitive_data_hidden")) == 1
     assert CARD not in provider2.sent() and EMAIL not in provider2.sent()
+
+
+@pytest.mark.asyncio
+async def test_a_timestamp_that_happens_to_hold_the_card_digits_is_no_leak(monkeypatch):
+    # About one run in 3,300 stamps the row at microseconds holding "4111":
+    # the check looked in the whole row and failed with no card data in it.
+    pinned = SimpleNamespace(now=lambda tz: datetime(2026, 10, 1, 16, 10, 0, 411100, tzinfo=tz))
+    monkeypatch.setattr(guard_module, "datetime", pinned)
+    provider = ScriptedProvider([LLMResponse(content="ok")])
+    runtime, _executor, audit, _ = _runtime(provider)
+    await runtime.chat(
+        messages=[{"role": "user", "content": f"card {CARD}"}], tools=[], user_id=USER
+    )
+    [row] = audit.rows("sensitive_data_hidden")
+    assert row["timestamp"] == "2026-10-01T16:10:00.411100+00:00"
+    assert CARD not in json.dumps(row) and "4111" not in _without_timestamp(row)
 
 
 def test_the_event_is_filed_as_approved():

@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime
+from types import SimpleNamespace
+from typing import Any
 
 import httpx
 import pytest
@@ -16,6 +19,7 @@ from sqlalchemy import select
 
 from models.audit import AuditLog
 from models.user import User
+from services.vault import service as vault_module
 from services.vault.keys import DevFileKeyProvider, DisabledKeyProvider
 from services.vault.service import VaultService
 from tests.conftest import auth_headers, make_user
@@ -24,6 +28,13 @@ NUMBER = "4242 4242 4242 4242"
 DIGITS = "4242424242424242"
 CVC = "123"
 CARD = {"label": "Blue Visa", "number": NUMBER, "exp_month": 12, "exp_year": 2099, "cvc": CVC, "name": "Krish Q"}
+# Fields a random value fills. The CVC is three digits, which an id or a
+# timestamp can hold by chance, so it is looked for only in the others.
+_RANDOM_FIELDS = frozenset({"id", "created_at", "last_used_at"})
+
+
+def _card_text(fields: dict[str, Any]) -> str:
+    return str({k: v for k, v in fields.items() if k not in _RANDOM_FIELDS})
 
 
 @pytest_asyncio.fixture
@@ -160,7 +171,8 @@ async def test_store_card_returns_the_masked_view_only(local_client, vault, owne
     assert body["kind"] == "card" and body["label"] == "Blue Visa"
     assert body["masked"] == "Visa ····4242" and body["brand"] == "Visa" and body["last4"] == "4242"
     assert body["last_used_at"] is None and body["origins"] == []
-    assert DIGITS not in resp.text and NUMBER not in resp.text and CVC not in resp.text
+    assert uuid.UUID(body["id"]) and datetime.fromisoformat(body["created_at"])
+    assert DIGITS not in resp.text and NUMBER not in resp.text and CVC not in _card_text(body)
     assert "Krish" not in resp.text
 
     listed = await local_client.get("/api/vault/items", headers=headers)
@@ -277,7 +289,35 @@ async def test_delete_item(local_client, vault, owner, session_factory):
     rows = await _audit_rows(session_factory, uid)
     assert [r.action for r in rows] == ["vault_card_stored", "vault_item_deleted"]
     assert rows[1].request_data == {"kind": "card", "label": "Blue Visa", "masked": "Visa ····4242"}
-    assert all(DIGITS not in _row_text(r) and CVC not in _row_text(r) for r in rows)
+    # The delete row's endpoint carries the random item id, which can hold
+    # the CVC's three digits by chance, so the id is taken out first.
+    assert rows[1].endpoint == f"/api/vault/items/{stored['id']}"
+    assert all(DIGITS not in _row_text(r) for r in rows)
+    assert all(CVC not in _row_text(r).replace(stored["id"], "") for r in rows)
+
+
+@pytest.mark.asyncio
+async def test_an_id_or_a_time_that_happens_to_hold_the_cvc_digits_is_no_leak(
+    local_client, vault, owner, session_factory, monkeypatch
+):
+    # "123" is this file's CVC. A CI run of the service tests drew the item
+    # id 123be183-..., and created_at runs to the microsecond, so either can
+    # hold it with no card data shown. Only the vault module's ids and clock
+    # are pinned.
+    item_id = uuid.UUID("123be183-d9fa-4c0a-ade7-47a9b13b8c4d")
+    monkeypatch.setattr(vault_module, "uuid", SimpleNamespace(UUID=uuid.UUID, uuid4=lambda: item_id))
+    now = datetime(2026, 9, 28, 12, 0, 0, 123456)
+    monkeypatch.setattr(vault_module, "datetime", SimpleNamespace(now=lambda tz: now.replace(tzinfo=tz)))
+    uid, headers = owner
+    resp = await local_client.put("/api/vault/card", json=CARD, headers=headers)
+    body = resp.json()
+    assert body["id"].startswith(CVC) and CVC in body["created_at"]
+    assert CVC not in _card_text(body) and DIGITS not in resp.text
+
+    assert (await local_client.delete(f"/api/vault/items/{body['id']}", headers=headers)).status_code == 204
+    rows = await _audit_rows(session_factory, uid)
+    assert CVC in rows[1].endpoint
+    assert all(CVC not in _row_text(r).replace(body["id"], "") for r in rows)
 
 
 @pytest.mark.asyncio

@@ -77,7 +77,7 @@ class UnattendedTurnRunner:
         self._build_context = build_context
         self._usage_columns = usage_columns
         self._settings = settings
-        self._ledger = ledger or AutomationLedger(session_factory)
+        self._ledger = ledger or AutomationLedger(session_factory, clock=clock)
         self._slots = asyncio.Semaphore(max_concurrent)
         self._clock = clock
 
