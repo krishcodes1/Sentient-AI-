@@ -21,7 +21,7 @@ httpcore>=1.0.0,<2.0.0
 websockets>=15.0,<18.0
 redis>=5.0.0,<6.0.0
 anthropic>=0.40.0,<1.0.0
-openai>=1.10.0,<2.0.0
+openai>=3.19.2,<4.0.0
 structlog>=24.1.0,<25.0.0
 python-dotenv>=1.0.0,<2.0.0
 # Headless Chromium for web.screenshot (flight/product pages the model
