@@ -21,6 +21,8 @@ from typing import Iterable
 
 from models.memory import Memory
 from services.agent.prompt_guard import PromptGuard, ThreatLevel
+from services.security.policies import MEMORY
+from services.security.redact import DETECTOR_ERROR_LABEL, first_finding
 
 # One shared, stateless scanner.
 _GUARD = PromptGuard()
@@ -50,12 +52,30 @@ class MemoryRejected(ValueError):
     """Raised when memory content fails the injection screen."""
 
 
+class MemorySecretRejected(MemoryRejected):
+    """Raised when memory content holds (or may hold) a password, key,
+    token, card, bank or ID number (policy MEMORY). The Memory API answers
+    422; memory.remember reports its own secret refusal."""
+
+
+SECRET_REJECTED_MESSAGE = (
+    "This looks like a password, key, token, card, bank or ID number. Crawler never "
+    "saves secrets to memory, because memories are sent with every future "
+    "conversation; nothing was saved."
+)
+SECRET_UNCHECKED_MESSAGE = (
+    "Crawler could not check this memory for secrets; nothing was saved."
+)
+
+
 def screen_memory_content(content: str) -> str:
     """Validate and normalize a memory before it is stored.
 
-    Rejects empty content and content that trips the injection scanner at
-    MEDIUM or higher — a saved memory is replayed into every future system
-    prompt, so it must be clean. Returns the trimmed content on success.
+    Rejects empty content, content that trips the injection scanner at
+    MEDIUM or higher, and content holding a password, key, token, card,
+    bank or ID number (``MemorySecretRejected``) — a saved memory is
+    replayed into every future system prompt, so it must be clean. Returns
+    the trimmed content on success.
     """
     text = (content or "").strip()
     if not text:
@@ -71,6 +91,11 @@ def screen_memory_content(content: str) -> str:
             "This memory looks like it contains instructions or injection "
             f"content ({patterns}) and was not saved. Memories are stored as "
             "trusted context, so they must be plain facts."
+        )
+    secret = first_finding(text, MEMORY)
+    if secret is not None:
+        raise MemorySecretRejected(
+            SECRET_UNCHECKED_MESSAGE if secret.label == DETECTOR_ERROR_LABEL else SECRET_REJECTED_MESSAGE
         )
     return text
 
@@ -136,6 +161,7 @@ __all__ = [
     "MAX_MEMORY_CHARS",
     "MAX_SEARCH_CHARS",
     "MemoryRejected",
+    "MemorySecretRejected",
     "build_search_pattern",
     "screen_memory_content",
     "render_memory_block",

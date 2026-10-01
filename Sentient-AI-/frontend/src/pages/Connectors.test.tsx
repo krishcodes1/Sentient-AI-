@@ -30,6 +30,8 @@ vi.mock("@/services/api", () => {
     deleteConnector: vi.fn(),
     getConnectorTypes: vi.fn(),
     getConnectors: vi.fn(),
+    // The account default the tier select compares against (permission tiers).
+    getMe: vi.fn(async () => ({ default_permission_tier: "user_confirm" })),
     getOAuthStatus: vi.fn(),
     getSlackLinkStatus: vi.fn(),
     startDeviceOAuth: vi.fn(),
@@ -47,6 +49,7 @@ import {
   createSlackLink,
   getConnectorTypes,
   getConnectors,
+  getMe,
   getOAuthStatus,
   getSlackLinkStatus,
   startDeviceOAuth,
@@ -1203,5 +1206,60 @@ describe("connectorCatalog helpers", () => {
     expect(connectorIcon("no-such-icon")).toBe(Plug);
     expect(connectorIcon("constructor")).toBe(Plug);
     expect(connectorIcon(undefined)).toBe(Plug);
+  });
+});
+
+describe("Allow low-risk changes (permission tiers)", () => {
+  const LOW_GITHUB = entry({
+    ...GITHUB,
+    low_risk: [{ action: "mark_notification_read", note: "mark GitHub notifications read" }],
+  });
+
+  it("offers the tier and says what it covers for this connector", async () => {
+    vi.mocked(getMe).mockResolvedValue({ default_permission_tier: "low_risk" } as never);
+    const { user } = setup([LOW_GITHUB]);
+    const dialog = await openConnect(user, "GitHub");
+    const policy = within(dialog).getByLabelText("Approval policy");
+    expect(within(policy).getByRole("option", { name: "Allow low-risk changes" })).toBeInTheDocument();
+
+    await user.selectOptions(policy, "low_risk");
+
+    expect(
+      within(dialog).getByText(
+        "Low-risk here: mark GitHub notifications read. Sends, deletes, sharing and anything other people see still ask.",
+      ),
+    ).toBeInTheDocument();
+    expect(within(dialog).queryByText(/Capped by your account setting/)).not.toBeInTheDocument();
+  });
+
+  it("says when the account default caps the tier chosen here", async () => {
+    vi.mocked(getMe).mockResolvedValue({ default_permission_tier: "user_confirm" } as never);
+    const { user } = setup([LOW_GITHUB]);
+    const dialog = await openConnect(user, "GitHub");
+
+    await user.selectOptions(within(dialog).getByLabelText("Approval policy"), "low_risk");
+
+    expect(
+      await within(dialog).findByText("Capped by your account setting (User Confirm) in Settings."),
+    ).toBeInTheDocument();
+  });
+
+  it("says a connector with no low-risk actions still asks for every change", async () => {
+    vi.mocked(getMe).mockResolvedValue({ default_permission_tier: "auto_approve" } as never);
+    const { user } = setup([CANVAS]);
+    const dialog = await openConnect(user, "Canvas LMS");
+
+    await user.selectOptions(within(dialog).getByLabelText("Approval policy"), "low_risk");
+
+    expect(
+      within(dialog).getByText("This connector has no low-risk actions: every change still asks."),
+    ).toBeInTheDocument();
+  });
+
+  it("labels a row on the tier", async () => {
+    setup([LOW_GITHUB], [row({ id: "g1", connector_type: "github", display_name: "Work GitHub", permission_tier: "low_risk" })]);
+
+    const card = await screen.findByRole("article", { name: "Work GitHub" });
+    expect(within(card).getByText("Allow low-risk changes")).toBeInTheDocument();
   });
 });

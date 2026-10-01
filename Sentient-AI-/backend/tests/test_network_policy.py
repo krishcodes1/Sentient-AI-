@@ -102,6 +102,9 @@ def test_canvas_policy_allows_api_and_token_endpoint_only(no_dns):
         "https://school.instructure.com/api/v1/courses",
         # OAuth code exchange + refresh endpoint used by the connector.
         "https://school.instructure.com/login/oauth2/token",
+        # A course file's download address (canvas.get_file_text;
+        # top10:file_extraction).
+        "https://school.instructure.com/files/1/download",
     ):
         result = check_network_policy(url, "canvas")
         assert result.safe, f"{url} blocked: {result.reason}"
@@ -110,7 +113,7 @@ def test_canvas_policy_allows_api_and_token_endpoint_only(no_dns):
         # Interactive login surfaces stay blocked.
         "https://school.instructure.com/login/oauth2/auth",
         "https://school.instructure.com/login/session",
-        "https://school.instructure.com/files/1/download",
+        "https://school.instructure.com/courses/1/files",
         # Token path on a foreign host.
         "https://evil.example.com/login/oauth2/token",
     ):
@@ -126,6 +129,7 @@ def test_canvas_policy_allows_the_configured_self_hosted_host(no_dns):
     for url in (
         "https://canvas.myschool.edu/api/v1/courses",
         "https://canvas.myschool.edu/login/oauth2/token",
+        "https://canvas.myschool.edu/files/1/download",
     ):
         result = check_network_policy(url, "canvas", extra_hosts=configured)
         assert result.safe, f"{url} blocked: {result.reason}"
@@ -134,7 +138,7 @@ def test_canvas_policy_allows_the_configured_self_hosted_host(no_dns):
         # Same host, outside the API surface: a configured host does not
         # widen which paths are reachable.
         "https://canvas.myschool.edu/login/oauth2/auth",
-        "https://canvas.myschool.edu/files/1/download",
+        "https://canvas.myschool.edu/courses/1/files",
         # A sibling host is not implied by the configured one.
         "https://mail.myschool.edu/api/v1/courses",
         "https://evil.example.com/api/v1/courses",

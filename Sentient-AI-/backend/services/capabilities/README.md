@@ -172,6 +172,21 @@ built-in call that reaches it, and the checks in step 2 and step 5 leave
 these types out of the executor comparison. Prefer a toolkit: add a
 runtime built-in only when the call truly needs the turn's state.
 
+### A runtime built-in claimed by a capability
+
+`tools.find` is always on (`ALWAYS_ON_TOOLS`), but a runtime built-in can
+also be claimed by a capability like any toolkit tool: `tutor.start` is
+claimed by `tutor_mode` (`tools=("tutor.",)`). The offer and the permission
+adapter gate it as usual (off: not offered, refused as `capability_off`).
+Because the runtime answers it itself, the runtime answers it only when
+the capability is on: the caller builds the turn's state object
+(`TurnContext.tutor`) only then, and a turn without one sends the call
+down the ordinary path, where the adapter refuses it. Give the family its
+catalog entry, `BUILTIN_CONNECTOR_TYPES`, `_BUILTIN_STANCE` and policy
+rows, add it to `RUNTIME_BUILTIN_TYPES` (reassigned under your anchor:
+`RUNTIME_BUILTIN_TYPES = RUNTIME_BUILTIN_TYPES | {"tutor"}`), and give it
+no `_builtins` entry.
+
 ## Channels: capabilities with no tools
 
 A chat channel (`telegram`, `slack` for Slack DMs) is a capability with
@@ -187,3 +202,60 @@ stops, so the cached report follows. A channel capability never claims its
 connector's tools: the `slack.*` workspace tools stay governed by the Slack
 connector's own permissions, so the `slack` capability must not claim
 `slack.`.
+
+## Policy switches (tools=())
+
+A policy switch is a capability with `tools=()` that is not a channel: it
+changes how Crawler treats data, not what it can do.
+`hide_personal_details` ("Hide personal details from the AI provider", on by
+default, always available) is one. It gates no tool, so nothing is refused
+when it is off; instead the runtime reads it once per turn through a hook
+main.py wires to `installation.enabled_keys()` (`AgentRuntime(personal_details_hidden=...)`,
+the same pattern as the page watcher's switch), treats a gate error as on,
+and ignores it for a turn on an Ollama on this computer. Its `when_denied`
+doubles as the `<permissions>` line the model reads while it is off. A
+protection that must never be switched off (the model floor that hides keys,
+passwords, card, bank and ID numbers) is not a capability at all: it lives in
+`services/security` and has no switch.
+
+`low_risk_actions` ("Make low-risk changes without asking", on by default) is
+another policy switch: it gates standing consent for LOW actions (the "Allow
+low-risk changes" tier and 7-day grants from a card) for the whole install,
+read by `RuntimePermissionAdapter.low_risk_enabled` and by the executor's
+backstop through the owner's report. It loosens nothing by itself.
+
+## A capability that gates an argument
+
+Some switches decide what a tool may be asked to do rather than whether it
+is offered. `trigger_runs` ("Run a task when something happens in my apps",
+off by default, high risk) has `tools=()` and `requires=("event_triggers",)`:
+the `triggers.*` family belongs to `event_triggers`, and `trigger_runs`
+gates only the argument `mode="run_task"`. Because no tool carries it, the
+offer and the permission adapter cannot enforce it, so the toolkit does:
+its `precheck` (read by the executor's `precheck_approval`) refuses
+`run_task` before any card while the switch is off, with its `when_denied`
+as the reason, filed under the toolkit's own policy (`trigger_rule`), and
+the background job that acts on the argument (the trigger sweeper) re-reads
+the switch before every run and falls back to the harmless behaviour while
+it is off (the plain notice, saying task runs are off). Declare such a
+switch with `requires=` on the capability whose tools it qualifies, so the
+Permissions page shows it blocked, with the plain reason, until that one is
+on.
+
+## Input features with no tools
+
+An input feature changes what a channel accepts, not what the agent can do,
+so it is a capability with `tools=()` that is read where the input arrives.
+`voice_notes` ("Voice notes, transcribed on this computer") and
+`voice_notes_cloud` ("Voice notes, transcribed by your AI provider") are two:
+`services/notifications/voice.py` reads both per Telegram voice note from
+`InstallationService.capability_statuses` (a read error refuses the note,
+fail closed) and picks the engine: the local one whenever `voice_notes` is
+on, never falling back to the cloud; otherwise the provider when
+`voice_notes_cloud` is on and the account's own provider hears audio;
+otherwise a plain refusal naming the switch or the provider. Their
+availability reads environment facts (`speech_local_installed`,
+`default_provider_audio`), and `voice_notes` names its `install`
+(`speech_to_text`), so the Permissions page shows the Install button and
+the `<permissions>` block may offer `system.install_capability`. Nothing is
+offered to the model: no fetched content can ask for audio to be processed.

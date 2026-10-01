@@ -222,7 +222,10 @@ async def test_get_attachment_text_downloads_by_the_fresh_attachment_id():
 @pytest.mark.parametrize(
     "part,message",
     [
-        ({"partId": "1", "mimeType": "application/pdf", "filename": "a.pdf", "body": {"attachmentId": "x"}}, "not text"),
+        ({"partId": "1", "mimeType": "image/png", "filename": "a.png", "body": {"attachmentId": "x"}}, "not text"),
+        # top10:file_extraction: a PDF takes the document path, which needs
+        # the document context; without it nothing is downloaded.
+        ({"partId": "1", "mimeType": "application/pdf", "filename": "a.pdf", "body": {"attachmentId": "x"}}, "Read files and documents"),
         ({"partId": "1", "mimeType": "text/plain", "filename": "big.txt", "body": {"attachmentId": "x", "size": 10**8}}, "too large"),
         ({"partId": "1", "mimeType": "text/plain", "filename": "bin.txt", "body": {"data": _b64(b"ab\x00cd")}}, "binary"),
         ({"partId": "1", "mimeType": "text/plain", "filename": "none.txt", "body": {}}, "no content"),

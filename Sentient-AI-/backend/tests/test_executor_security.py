@@ -254,11 +254,12 @@ async def test_llm_cannot_smuggle_user_confirmed(session_factory, fake_factory):
 
     assert result["ok"] is False
     assert result.get("requires_approval") is True
-    # The connector saw the action exactly once, without confirmation.
-    fake = FakeConnector.instances[0]
-    assert fake.executed == [
-        ("submit_assignment", {"course_id": "1", "assignment_id": "2", "submission_data": {}})
-    ]
+    # Handing in work always confirms (permission tiers), so the executor
+    # refuses it before any connector is built: the smuggled flag changes
+    # nothing and nothing is sent.
+    assert FakeConnector.instances == [] or all(
+        fake.executed == [] for fake in FakeConnector.instances
+    )
 
 
 @pytest.mark.asyncio

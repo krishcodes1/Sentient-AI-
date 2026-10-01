@@ -114,9 +114,10 @@ def test_actions_match_the_spec_table():
 
 def test_always_confirm_and_starters():
     always = {spec.action for spec in ACTIONS if spec.always_confirm}
+    # respond_to_invite answers the organizer: always-confirm (permission tiers).
     assert always == {
         "send_mail", "reply", "forward", "delete_message", "delete_event",
-        "create_share_link", "delete_file", "delete_task",
+        "create_share_link", "delete_file", "delete_task", "respond_to_invite",
     }
     assert all(s.always_confirm for s in ACTIONS if s.category == ActionCategory.DELETE)
     starters = [s for s in ACTIONS if s.starter]

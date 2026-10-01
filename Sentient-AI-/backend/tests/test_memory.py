@@ -217,3 +217,39 @@ async def test_runtime_injects_memory_into_provider_call():
     system_msg = provider.calls[0][0]
     assert system_msg["role"] == "system"
     assert "Building SentientAI" in system_msg["content"]
+
+
+# ---------------------------------------------------------------------------
+# Secrets are refused by the REST route too (services/security, policy MEMORY)
+# ---------------------------------------------------------------------------
+
+_GITHUB_TOKEN = "ghp_" + "FAKE" * 9
+
+
+def test_screen_rejects_secrets_with_their_own_error():
+    from services.memory import MemorySecretRejected
+
+    for content in (f"My token is {_GITHUB_TOKEN}", "My SSN is 123-45-6789", "PIN: 4821"):
+        with pytest.raises(MemorySecretRejected):
+            screen_memory_content(content)
+    assert screen_memory_content("My phone is +1 212 555 0100") == "My phone is +1 212 555 0100"
+
+
+@pytest.mark.asyncio
+async def test_memory_routes_refuse_a_key_with_422_and_store_nothing(client: httpx.AsyncClient):
+    headers = await _auth(client, "mem-secret-route@example.com")
+    created = await client.post(
+        "/api/memories/", json={"content": f"GitHub token {_GITHUB_TOKEN}"}, headers=headers
+    )
+    assert created.status_code == 422
+    assert "never saves secrets" in created.text and _GITHUB_TOKEN not in created.text
+    assert (await client.get("/api/memories/", headers=headers)).json() == []
+
+    kept = await client.post("/api/memories/", json={"content": "Prefers tea"}, headers=headers)
+    mem_id = kept.json()["id"]
+    edited = await client.patch(
+        f"/api/memories/{mem_id}", json={"content": "My SSN is 123-45-6789"}, headers=headers
+    )
+    assert edited.status_code == 422
+    [row] = (await client.get("/api/memories/", headers=headers)).json()
+    assert row["content"] == "Prefers tea"

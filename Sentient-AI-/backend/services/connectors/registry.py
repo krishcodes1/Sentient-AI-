@@ -22,6 +22,7 @@ from typing import Any, Iterable, Mapping, Optional
 from urllib.parse import urlparse
 
 from core.network_security import DEFAULT_POLICIES, NetworkPolicy, match_host_pattern
+from services.agent import risk as risk_grading
 from services.agent.permissions import (
     ActionCategory,
     PermissionTier,
@@ -80,6 +81,35 @@ RESERVED_KEYS: frozenset[str] = frozenset(
         "memory",
         "mcp",
         "custom",
+        # top10:secret_pii_redaction
+
+        # top10:file_extraction
+        "files",
+
+        # top10:scheduler_briefing
+        "schedule",
+
+        # top10:tutor_mode
+        "tutor",
+
+        # top10:knowledge_base
+        "knowledge",
+
+        # top10:flashcards_quizzes
+        "study",
+
+        # top10:event_triggers
+        "triggers",
+        # The page-watch built-in's family, missing until now.
+        "watch",
+
+        # top10:permission_tiers
+
+        # top10:voice_notes
+
+        # top10:video_transcripts
+        "video",
+
     }
 )
 
@@ -247,6 +277,8 @@ def _action_problems(d: ConnectorDefinition) -> list[str]:
             )
         if spec.category == ActionCategory.DELETE and not spec.always_confirm:
             problems.append(f"action '{name}' is a DELETE and must set always_confirm")
+        # risk='low', risk_check, ref_args and low_risk_note (permission tiers).
+        problems.extend(risk_grading.spec_problems(spec))
         if spec.starter:
             starters += 1
             if spec.category != ActionCategory.READ:
@@ -660,6 +692,7 @@ def connector_types_payload() -> list[dict[str, Any]]:
             "write": [{"scope", "category": "write"|"execute"|"delete",
                        "always_confirm": bool, "actions": [...]}],
           },
+          "low_risk": [{"action", "note"}],   # LOW-eligible actions
         }
 
     A scope's ``category`` is the most dangerous category among the actions
@@ -695,6 +728,9 @@ def connector_types_payload() -> list[dict[str, Any]]:
                 "notes": d.auth.notes,
             },
             "scopes": _scope_payload(d),
+            # What "Allow low-risk changes" lets this connector do without a
+            # card: [{"action", "note"}] (services/agent/risk.py).
+            "low_risk": risk_grading.low_risk_notes(d.actions),
         }
         for d in REGISTRY
     ]

@@ -71,6 +71,20 @@ A bad definition stops the app at import with a list of every problem.
     `always_confirm`: it then gets an approval card under every tier.
   - Mark 2 to 4 everyday reads `starter=True` (at most 4, READ only).
   - No parameter is named `url`, `action` or `user_confirmed`.
+  - **Risk grades** (permission tiers, `services/agent/risk.py`). Reads grade
+    LOW; deletes, runs, payments and `always_confirm` actions HIGH; every
+    other WRITE MEDIUM unless it declares `risk="low"`: a small, undoable
+    change to the owner's own account that nobody else sees (a draft, a
+    star, a private event). `risk="low"` is refused on anything but a WRITE
+    without `always_confirm`, and needs a `low_risk_note` of at most 80
+    characters ("star or label emails") that the Connectors page and the
+    grant card show. `risk_check` reads the arguments and may only escalate
+    (`risk.when_given`, `risk.unless_value`, `risk.when_value`,
+    `risk.all_of`): guests on an event are HIGH, a parent folder MEDIUM. A
+    check that raises grades the call HIGH. `ref_args` names the arguments
+    that carry an object id (`message_id`); only a LOW action may declare
+    them, and each must be a schema property. The set of LOW actions is
+    pinned by `tests/test_risk_grading.py`: adding one is a reviewed change.
 - **Dispatch parity.** Every non-FINANCIAL action is a public coroutine on the
   connector class, and `_ACTIONS` (or a legacy `_ACTION_MAP`) lists exactly
   those names. The coroutine's keyword parameters equal the schema

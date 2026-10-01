@@ -800,8 +800,11 @@ def test_the_canvas_policy_admits_the_new_reads(no_dns):
     for path in ("/api/v1/planner/items", "/api/v1/users/self/missing_submissions"):
         assert check_network_policy(f"https://school.instructure.com{path}", "canvas").safe, path
     policy = DEFAULT_POLICIES["canvas"]
-    # The login page and the rest of the site stay out.
-    assert not any(p.startswith(("/login/oauth2/auth", "/files")) for p in policy.instance_paths)
+    # The login page and the rest of the site stay out. /files/ (a course
+    # file's download address, canvas.get_file_text) is the one addition
+    # (top10:file_extraction).
+    assert not any(p.startswith("/login/oauth2/auth") for p in policy.instance_paths)
+    assert [p for p in policy.instance_paths if p.startswith("/files")] == ["/files/"]
 
 
 @pytest.mark.asyncio
@@ -829,7 +832,7 @@ def test_the_policy_still_blocks_everything_else(no_dns):
         "https://school.instructure.com/login/oauth2/auth",
         "https://school.instructure.com/planner/items",
         "https://school.instructure.com/users/self/missing_submissions",
-        "https://school.instructure.com/files/1/download",
+        "https://school.instructure.com/courses/1/files",
         "https://evil.example.com/api/v1/planner/items",
         "https://school.instructure.com.evil.com/api/v1/planner/items",
         "https://evil.example.com/api/v1/users/self/missing_submissions",

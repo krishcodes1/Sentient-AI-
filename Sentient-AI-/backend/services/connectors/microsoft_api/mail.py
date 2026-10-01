@@ -16,13 +16,16 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from services.agent import risk
 from services.agent.permissions import ActionCategory
 
 from ..base import ConnectorError, UserConfirmationRequired, path_segment
 from ..definition import ToolSpec, _schema
+from ..documents import is_document_type, read_connector_document
 from ..shaping import clamp_limit
 from .common import (
     MAX_LONG_TEXT,
+    ME,
     PREFER_TEXT_BODY,
     GraphBase,
     address_of,
@@ -100,7 +103,9 @@ MAIL_ACTIONS: tuple[ToolSpec, ...] = (
     ),
     ToolSpec(
         "get_attachment_text",
-        "Read a text attachment (txt, csv, json, md, html...) of an Outlook message. Binary files are refused.",
+        "Read an attachment of an Outlook message: text (txt, csv, json, md, html...) as "
+        "text; PDF, Word, PowerPoint and Excel as sections with a doc_id (continue those "
+        "with files.read). Other binary files are refused.",
         ActionCategory.READ,
         _schema(
             message_id=_MESSAGE_ID,
@@ -164,6 +169,8 @@ MAIL_ACTIONS: tuple[ToolSpec, ...] = (
             cc={**_ADDRESSES, "description": "Cc email addresses"},
         ),
         required_scope="mail.write",
+        risk="low",
+        low_risk_note="save email drafts (nothing is sent)",
     ),
     ToolSpec(
         "move_message",
@@ -174,6 +181,15 @@ MAIL_ACTIONS: tuple[ToolSpec, ...] = (
             destination_folder={"type": "string", "description": "Folder id or well-known name", "required": True},
         ),
         required_scope="mail.write",
+        # MEDIUM (archiving can hide an alert); Deleted Items and Junk are a
+        # side-door delete.
+        risk_check=risk.when_value(
+            "destination_folder",
+            lambda folder: isinstance(folder, str)
+            and folder.strip().lower().startswith(("deleteditems", "junkemail", "recoverableitems")),
+            "high",
+            "it moves mail to Deleted Items or Junk",
+        ),
     ),
     ToolSpec(
         "flag_message",
@@ -184,6 +200,9 @@ MAIL_ACTIONS: tuple[ToolSpec, ...] = (
             status={"type": "string", "enum": list(_FLAG_STATES), "description": "Default flagged"},
         ),
         required_scope="mail.write",
+        risk="low",
+        ref_args=("message_id",),
+        low_risk_note="flag emails for follow-up",
     ),
     ToolSpec(
         "delete_message",
@@ -314,6 +333,23 @@ class MailActions(GraphBase):
         kind = meta.get("@odata.type")
         if kind is not None and kind != _FILE_ATTACHMENT:
             raise ConnectorError("That attachment is an attached item or link, not a file; it cannot be read as text.")
+        if is_document_type(info["content_type"], info["name"]):
+            # top10:file_extraction: a PDF or Office attachment is read as
+            # sections (its size checked first); files.read continues.
+            document = await read_connector_document(
+                download=lambda cap: self._request_bytes("GET", f"{ME}{path}/$value", max_bytes=cap),
+                name=info["name"] or aid,
+                mime=info["content_type"],
+                source="outlook",
+                size=info["size"],
+            )
+            return {
+                "message_id": mid,
+                "attachment_id": aid,
+                "content_type": info["content_type"],
+                "size": info["size"],
+                **document,
+            }
         if not is_text_like(info["name"], info["content_type"]):
             raise ConnectorError(
                 f"Attachment '{info['name'] or aid}' is not a text file "

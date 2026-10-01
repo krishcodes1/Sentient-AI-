@@ -50,6 +50,7 @@ import {
   deleteConnector,
   getConnectorTypes,
   getConnectors,
+  getMe,
   getOAuthStatus,
   getSlackLinkStatus,
   startDeviceOAuth,
@@ -83,6 +84,7 @@ import {
   hasScopes,
   isFormComplete,
   isPastDeadline,
+  lowRiskNotes,
   methodLabel,
   orderedSelection,
   pollDelayMs,
@@ -105,6 +107,7 @@ import {
 
 const tierLabels: Record<string, { label: string; color: string }> = {
   auto_approve: { label: "Auto Approve", color: "var(--accent-success)" },
+  low_risk: { label: "Allow low-risk changes", color: "var(--accent-success)" },
   user_confirm: { label: "User Confirm", color: "var(--accent-warning)" },
   admin_only: { label: "Admin Only", color: "var(--accent-primary)" },
   hard_blocked: { label: "Hard Blocked", color: "var(--accent-danger)" },
@@ -112,6 +115,7 @@ const tierLabels: Record<string, { label: string; color: string }> = {
 
 const TIER_OPTIONS: { value: PermissionTier; label: string }[] = [
   { value: "user_confirm", label: "User Confirm (recommended)" },
+  { value: "low_risk", label: "Allow low-risk changes" },
   { value: "auto_approve", label: "Auto Approve" },
   { value: "admin_only", label: "Admin Only" },
 ];
@@ -481,18 +485,76 @@ function CredentialFields({
   );
 }
 
+// The stricter of a connection's tier and the account default wins (backend
+// tool_registry._TIER_STRICTNESS), so a looser connection tier is capped.
+const TIER_STRICTNESS: Record<string, number> = {
+  auto_approve: 0,
+  low_risk: 1,
+  user_confirm: 2,
+  admin_only: 3,
+  hard_blocked: 4,
+};
+
+/** The signed-in account's default tier (Settings), or null until known. */
+function useAccountTier(): PermissionTier | null {
+  const [tier, setTier] = useState<PermissionTier | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    Promise.resolve()
+      .then(() => getMe())
+      .then((me) => {
+        if (!cancelled && me?.default_permission_tier) setTier(me.default_permission_tier);
+      })
+      .catch(() => {
+        // Without it the "capped" line is left out; nothing else depends on it.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  return tier;
+}
+
+/** Under the tier select: what "Allow low-risk changes" covers for this connector, and when the
+ *  account default caps the chosen tier. */
+function TierHelp({ tier, lowRisk }: { tier: PermissionTier; lowRisk: string[] }) {
+  const accountTier = useAccountTier();
+  const capped =
+    accountTier !== null &&
+    (TIER_STRICTNESS[accountTier] ?? 2) > (TIER_STRICTNESS[tier] ?? 2);
+  if (tier !== "low_risk" && !capped) return null;
+  return (
+    <div className="sm:col-span-2 -mt-2 space-y-1">
+      {tier === "low_risk" && (
+        <p className="text-xs" style={{ color: "var(--text-muted)" }}>
+          {lowRisk.length > 0
+            ? `Low-risk here: ${lowRisk.join("; ")}. Sends, deletes, sharing and anything other people see still ask.`
+            : "This connector has no low-risk actions: every change still asks."}
+        </p>
+      )}
+      {capped && accountTier && (
+        <p className="text-xs" style={{ color: "var(--accent-warning)" }}>
+          Capped by your account setting ({tierLabels[accountTier]?.label ?? accountTier}) in Settings.
+        </p>
+      )}
+    </div>
+  );
+}
+
 function TierAndRate({
   tier,
   onTier,
   rate,
   onRate,
   tierOptions = TIER_OPTIONS,
+  lowRisk = [],
 }: {
   tier: PermissionTier;
   onTier: (t: PermissionTier) => void;
   rate: number;
   onRate: (n: number) => void;
   tierOptions?: { value: PermissionTier; label: string }[];
+  lowRisk?: string[];
 }) {
   const tierId = useId();
   const rateId = useId();
@@ -531,6 +593,7 @@ function TierAndRate({
           style={inputStyle}
         />
       </div>
+      <TierHelp tier={tier} lowRisk={lowRisk} />
     </div>
   );
 }
@@ -1148,6 +1211,7 @@ function ConnectModal({
                   onTier={setPermissionTier}
                   rate={rateLimit}
                   onRate={setRateLimit}
+                  lowRisk={lowRiskNotes(entry)}
                 />
                 <p className="text-xs -mt-2" style={{ color: "var(--text-muted)" }}>
                   Sensitive actions (sending messages, deleting anything, anything financial-adjacent)
@@ -1497,6 +1561,7 @@ function EditConnectorModal({
             rate={rateLimit}
             onRate={setRateLimit}
             tierOptions={tierOptions}
+            lowRisk={lowRiskNotes(entry)}
           />
 
           {credentialFields.length > 0 && (

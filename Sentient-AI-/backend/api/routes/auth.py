@@ -58,8 +58,10 @@ _bearer_scheme = HTTPBearer()
 # tests can shrink it and actually exercise the multi-page path.
 _EXPORT_BATCH_SIZE = 500
 
+# low_risk: "Allow low-risk changes" (permission tiers), between auto_approve
+# and user_confirm.
 PermissionTierLiteral = Literal[
-    "auto_approve", "user_confirm", "admin_only", "hard_blocked"
+    "auto_approve", "low_risk", "user_confirm", "admin_only", "hard_blocked"
 ]
 
 
@@ -610,7 +612,22 @@ async def update_settings(
     become NULL, because a model means nothing without the provider it was
     picked for. A pinned provider must end up with a model.
     """
-    if body.default_permission_tier is not None:
+    if (
+        body.default_permission_tier is not None
+        and body.default_permission_tier != current_user.default_permission_tier
+    ):
+        from services.agent.permission_grants import EVENT_ACCOUNT_TIER, audit_tier_changed
+
+        # Audited in the same transaction: a tier change the log cannot
+        # record does not happen.
+        await audit_tier_changed(
+            db,
+            user_id=current_user.id,
+            event=EVENT_ACCOUNT_TIER,
+            endpoint="/api/auth/settings",
+            old=current_user.default_permission_tier,
+            new=body.default_permission_tier,
+        )
         current_user.default_permission_tier = body.default_permission_tier
     if body.rate_limit is not None:
         current_user.rate_limit = body.rate_limit
@@ -773,6 +790,8 @@ async def export_account(
                 "title": conv.title,
                 "created_at": conv.created_at,
                 "updated_at": conv.updated_at,
+                # Tutor mode's stored state (services/tutor/state.py), or null.
+                "tutor_state": conv.tutor_state,
             }
             yield ("" if idx == 0 else ",") + _json(head)[:-1] + ',"messages":['
             offset = 0
@@ -839,6 +858,217 @@ async def export_account(
                 "is_active": c.is_active,
                 "created_at": c.created_at,
                 # credentials intentionally omitted — see the docstring
+            },
+        ):
+            yield chunk
+        yield ","
+
+        # Sections the top10 skills add go here, each followed by its own
+        # ","; the audit chain stays last.
+        # top10:secret_pii_redaction
+
+        # top10:file_extraction
+        # Uploaded files: metadata only. The extracted text stays in the
+        # encrypted store (the content column is deferred, never loaded
+        # here) and the original bytes were never kept.
+        from models.user_file import UserFile
+
+        async for chunk in _stream_table(
+            UserFile,
+            UserFile.created_at,
+            "files",
+            lambda f: {
+                "name": f.name,
+                "kind": f.kind,
+                "pages": f.pages,
+                "chars": f.chars,
+                "source": f.source,
+                "created_at": f.created_at,
+                "expires_at": f.expires_at,
+            },
+        ):
+            yield chunk
+        yield ","
+
+        # top10:scheduler_briefing
+        from models.scheduled_task import ScheduledTask
+
+        # The tasks themselves (their run history is operational, not the
+        # user's content, and is left out).
+        async for chunk in _stream_table(
+            ScheduledTask,
+            ScheduledTask.created_at,
+            "scheduled_tasks",
+            lambda t: {
+                "kind": t.kind,
+                "label": t.label,
+                "prompt": t.prompt,
+                "options": t.options,
+                "recurrence": t.recurrence,
+                "timezone": t.timezone,
+                "channels": t.channels,
+                "status": t.status,
+                "created_at": t.created_at,
+                "last_run_at": t.last_run_at,
+            },
+        ):
+            yield chunk
+        yield ","
+
+        # top10:tutor_mode
+        # The owner's tutor locks that apply to this account (its own and the
+        # every-account ones), read-only: services/tutor/service.export_locks.
+        from services.tutor.service import export_locks
+
+        yield '"tutor_locks":' + _json(await export_locks(db, current_user.id)) + ","
+
+        # top10:knowledge_base
+        # The knowledge base: collections, then documents with their passages'
+        # text (the keyword postings and the vectors are derived and left out).
+        from services.knowledge.export import export_sections
+
+        async for chunk in export_sections(db, current_user.id):
+            yield chunk
+        yield ","
+
+        # top10:flashcards_quizzes
+        # Flashcard decks, their items (with each item's review schedule),
+        # practice quizzes and graded reviews: the user's own study data.
+        from models.study import StudyDeck, StudyItem, StudyQuizAttempt, StudyReview
+
+        study_sections = (
+            (
+                StudyDeck,
+                StudyDeck.created_at,
+                "study_decks",
+                lambda d: {
+                    "id": str(d.id),
+                    "title": d.title,
+                    "course": d.course,
+                    "source_kind": d.source_kind,
+                    "source_ref": d.source_ref,
+                    "in_reviews": d.in_reviews,
+                    "created_at": d.created_at,
+                    "last_studied_at": d.last_studied_at,
+                },
+            ),
+            (
+                StudyItem,
+                StudyItem.created_at,
+                "study_items",
+                lambda i: {
+                    "id": str(i.id),
+                    "deck_id": str(i.deck_id),
+                    "kind": i.kind,
+                    "front": i.front,
+                    "back": i.back,
+                    "choices": i.choices,
+                    "answer_index": i.answer_index,
+                    "explanation": i.explanation,
+                    "choice_notes": i.choice_notes,
+                    "tags": i.tags,
+                    "difficulty": i.difficulty,
+                    "source_note": i.source_note,
+                    "suspended": i.suspended,
+                    "ease": i.ease,
+                    "interval_days": i.interval_days,
+                    "repetitions": i.repetitions,
+                    "lapses": i.lapses,
+                    "due_at": i.due_at,
+                    "created_at": i.created_at,
+                },
+            ),
+            (
+                StudyQuizAttempt,
+                StudyQuizAttempt.started_at,
+                "study_quiz_attempts",
+                lambda q: {
+                    "deck_id": str(q.deck_id),
+                    "channel": q.channel,
+                    "item_ids": q.item_ids,
+                    "answers": q.answers,
+                    "total": q.total,
+                    "correct": q.correct,
+                    "status": q.status,
+                    "started_at": q.started_at,
+                    "finished_at": q.finished_at,
+                },
+            ),
+            (
+                StudyReview,
+                StudyReview.reviewed_at,
+                "study_reviews",
+                lambda r: {
+                    "item_id": str(r.item_id),
+                    "deck_id": str(r.deck_id),
+                    "reviewed_at": r.reviewed_at,
+                    "rating": r.rating,
+                    "mode": r.mode,
+                    "channel": r.channel,
+                    "interval_after_days": r.interval_after_days,
+                },
+            ),
+        )
+        for study_model, study_order, study_label, study_row in study_sections:
+            async for chunk in _stream_table(study_model, study_order, study_label, study_row):
+                yield chunk
+            yield ","
+
+        # top10:event_triggers
+        from models.event_trigger import EventTrigger
+
+        # The rules themselves (their queued items are third-party content
+        # kept for at most a week and left out, as is the check cursor).
+        async for chunk in _stream_table(
+            EventTrigger,
+            EventTrigger.created_at,
+            "event_triggers",
+            lambda t: {
+                "label": t.label,
+                "source": t.source,
+                "filters": t.filters,
+                "mode": t.mode,
+                "prompt": t.prompt,
+                "allow_writes": t.allow_writes,
+                "interval_minutes": t.interval_minutes,
+                "max_runs_per_day": t.max_runs_per_day,
+                "status": t.status,
+                "created_at": t.created_at,
+                "last_fired_at": t.last_fired_at,
+            },
+        ):
+            yield chunk
+        yield ","
+
+        # top10:permission_tiers
+
+        # top10:voice_notes
+
+        # top10:video_transcripts
+        # Cached video and podcast transcripts: what was read, the passages
+        # and the covered windows (the provider seconds billed are
+        # operational and left out).
+        from models.media_transcript import MediaTranscript
+
+        async for chunk in _stream_table(
+            MediaTranscript,
+            MediaTranscript.created_at,
+            "media_transcripts",
+            lambda t: {
+                "kind": t.kind,
+                "method": t.method,
+                "detail": t.detail,
+                "url": t.display_url,
+                "title": t.title,
+                "author": t.author,
+                "language": t.language,
+                "duration_s": t.duration_s,
+                "engine": t.engine,
+                "covered": t.covered,
+                "segments": t.segments,
+                "created_at": t.created_at,
+                "last_used_at": t.last_used_at,
+                "expires_at": t.expires_at,
             },
         ):
             yield chunk

@@ -573,3 +573,14 @@ def test_browser_control_blocked_offers_the_bundled_install():
         capabilities.report({"browser_control": True}, ctx(playwright_installed=True, browser_channel="", browser_installed=False))
     )["browser_control"]
     assert status.effective == "blocked" and status.install == "browser" and status.install_size_hint
+
+
+# top10:knowledge_base
+def test_report_context_carries_the_embedding_backend_with_a_safe_default():
+    plain = ReportContext(in_container=False, platform="darwin", telegram_configured=False, browser_installed=False)
+    assert plain.embedding_backend == ""
+    blocked = by_key(capabilities.report({"knowledge_semantic": True}, plain, use_cache=False))["knowledge_semantic"]
+    assert blocked.effective == "blocked" and "KB_EMBEDDINGS=ollama" in blocked.reason
+    ready = ctx(embedding_backend="ollama")
+    on = by_key(capabilities.report({"knowledge_semantic": True}, ready, use_cache=False))["knowledge_semantic"]
+    assert on.effective == "on"

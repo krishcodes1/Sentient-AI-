@@ -44,6 +44,9 @@ services:
       context: ../backend
       dockerfile: ../docker/Dockerfile.backend
       target: dev
+      # Optional local speech-to-text for voice notes (~250 MB; top10:voice_notes).
+      args:
+        WITH_SPEECH_TO_TEXT: ${WITH_SPEECH_TO_TEXT:-0}
     restart: unless-stopped
     ports:
       - "8000:8000"

@@ -19,6 +19,7 @@ from __future__ import annotations
 import re
 from typing import Any, Optional
 
+from services.agent import risk
 from services.agent.permissions import ActionCategory
 from services.connectors.base import ConnectorError, path_segment
 from services.connectors.definition import ToolSpec, _schema
@@ -96,6 +97,9 @@ ACTIVITY_ACTIONS: tuple[ToolSpec, ...] = (
             thread_id={"type": "string", "description": "Notification thread id", "required": True},
         ),
         required_scope="notifications.write",
+        risk="low",
+        ref_args=("thread_id",),
+        low_risk_note="mark GitHub notifications read",
     ),
     ToolSpec(
         "create_release",
@@ -140,6 +144,10 @@ ACTIVITY_ACTIONS: tuple[ToolSpec, ...] = (
             public={"type": "boolean", "description": "Default false (secret gist)"},
         ),
         required_scope="gists.write",
+        # A public gist is published to everyone.
+        risk_check=risk.when_value(
+            "public", lambda value: value is not False, "high", "it publishes a public gist"
+        ),
     ),
 )
 

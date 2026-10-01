@@ -733,7 +733,10 @@ async def test_get_file_text_redirect_to_an_off_list_host_is_refused(no_dns):
     ("meta", "message"),
     [
         (_FOLDER, "is a folder"),
-        ({**_FILE, "name": "deck.pptx", "file": {"mimeType": "application/vnd.ms-powerpoint"}}, "not a plain-text file"),
+        ({**_FILE, "name": "deck.ppt", "file": {"mimeType": "application/vnd.ms-powerpoint"}}, "not a plain-text file"),
+        # top10:file_extraction: a .pptx takes the document path, which
+        # needs the document context; without it nothing is downloaded.
+        ({**_FILE, "name": "deck.pptx", "file": {"mimeType": "application/vnd.ms-powerpoint"}}, "Read files and documents"),
         ({**_FILE, "size": 9_000_000}, "too large"),
     ],
 )
@@ -927,6 +930,36 @@ async def test_todo_write_requests():
     }
     assert body_of(seen[1]) == {"dueDateTime": {"dateTime": "2026-10-06T00:00:00", "timeZone": "UTC"}}
     assert body_of(seen[2]) == {"status": "completed"}
+
+
+@pytest.mark.asyncio
+async def test_a_task_without_a_list_goes_to_the_default_list():
+    lists = {
+        "value": [
+            {"id": "shared1", "displayName": "Flat chores", "isOwner": False, "wellknownListName": "none"},
+            {"id": "tasks1", "displayName": "Tasks", "isOwner": True, "wellknownListName": "defaultList"},
+        ]
+    }
+    connector, seen = make_connector(
+        lambda r: httpx.Response(200, json=lists if r.url.path.endswith("/lists") else _TASK)
+    )
+    with pytest.raises(UserConfirmationRequired) as exc:
+        await connector.create_task(title="Call Bob")
+    assert "your default To Do list" in exc.value.details and seen == []
+    await connector.create_task(title="Call Bob", user_confirmed=True)
+    assert [(r.method, r.url.raw_path) for r in seen] == [
+        ("GET", b"/v1.0/me/todo/lists"),
+        ("POST", b"/v1.0/me/todo/lists/tasks1/tasks"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_no_default_list_is_an_error_not_a_guess():
+    lists = {"value": [{"id": "shared1", "displayName": "Flat chores", "wellknownListName": "none"}]}
+    connector, seen = make_connector(ok(lists))
+    with pytest.raises(ConnectorError, match="default To Do list was not found"):
+        await connector.create_task(title="Call Bob", user_confirmed=True)
+    assert [r.method for r in seen] == ["GET"]
 
 
 @pytest.mark.asyncio

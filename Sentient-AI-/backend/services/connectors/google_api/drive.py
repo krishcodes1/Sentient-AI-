@@ -19,9 +19,11 @@ import re
 import secrets
 from typing import Any, Optional
 
+from services.agent import risk
 from services.agent.permissions import ActionCategory
 from services.connectors.base import ConnectorError, UserConfirmationRequired, path_segment
 from services.connectors.definition import ToolSpec, _schema
+from services.connectors.documents import is_document_type, read_connector_document
 from services.connectors.shaping import clamp_limit, collect_pages
 
 from .client import (
@@ -89,7 +91,9 @@ DRIVE_ACTIONS: tuple[ToolSpec, ...] = (
     ToolSpec(
         "get_file_text",
         "Read a Drive file as plain text: Google Docs and Slides as text, Sheets as CSV "
-        "(first sheet), text files as they are. Binary files are refused.",
+        "(first sheet), text files as they are (continue with offset). PDF, Word, "
+        "PowerPoint and Excel files come back as sections with a doc_id; continue those "
+        "with files.read. Other binary files are refused.",
         ActionCategory.READ,
         _schema(
             file_id=_FILE_ID,
@@ -100,9 +104,17 @@ DRIVE_ACTIONS: tuple[ToolSpec, ...] = (
     ),
     ToolSpec(
         "list_folder",
-        "List the files in a Drive folder (default: My Drive root), folders first.",
+        "List the files in a Drive folder (default: My Drive root), folders first, or "
+        "newest first with newest_first.",
         ActionCategory.READ,
-        _schema(folder_id={"type": "string", "description": "Folder id or root"}, limit=_LIMIT),
+        _schema(
+            folder_id={"type": "string", "description": "Folder id or root"},
+            limit=_LIMIT,
+            newest_first={
+                "type": "boolean",
+                "description": "Newest files first instead of folders first (default false)",
+            },
+        ),
         policy_key="google_drive",
         required_scope="drive.read",
     ),
@@ -118,6 +130,12 @@ DRIVE_ACTIONS: tuple[ToolSpec, ...] = (
         ),
         policy_key="google_drive",
         required_scope="drive.write",
+        risk="low",
+        # A folder may be shared with other people; the root is the owner's.
+        risk_check=risk.unless_value(
+            "folder_id", ("root",), "medium", "it writes into a folder that may be shared"
+        ),
+        low_risk_note="save new text files at the top of your Drive",
     ),
     ToolSpec(
         "create_folder",
@@ -129,6 +147,11 @@ DRIVE_ACTIONS: tuple[ToolSpec, ...] = (
         ),
         policy_key="google_drive",
         required_scope="drive.write",
+        risk="low",
+        risk_check=risk.unless_value(
+            "parent_id", ("root",), "medium", "it writes into a folder that may be shared"
+        ),
+        low_risk_note="make new folders at the top of your Drive",
     ),
     ToolSpec(
         "move_file",
@@ -242,10 +265,15 @@ class DriveActions(GoogleBase):
         order = None if words else "modifiedTime desc"
         return await self._list_files(" and ".join(clauses), clamp_limit(limit), order)
 
-    async def list_folder(self, folder_id: Optional[str] = None, limit: Any = None) -> list[dict[str, Any]]:
+    async def list_folder(
+        self, folder_id: Optional[str] = None, limit: Any = None, newest_first: Any = None
+    ) -> list[dict[str, Any]]:
         folder = _drive_id(folder_id, "folder_id") if folder_id else "root"
+        # Newest first lets a caller see new files in a folder with more
+        # than one page of items (the file triggers, services/triggers).
+        order = "createdTime desc" if optional_bool(newest_first, "newest_first", False) else "folder,name"
         q = f"{_quote(folder)} in parents and trashed = false"
-        return await self._list_files(q, clamp_limit(limit), "folder,name")
+        return await self._list_files(q, clamp_limit(limit), order)
 
     async def get_file_text(self, file_id: str, offset: Any = None) -> dict[str, Any]:
         """A file's text: two requests (metadata to pick the route, then the
@@ -267,6 +295,20 @@ class DriveActions(GoogleBase):
             raise ConnectorError(f"'{name}' is a folder; use list_folder to see what is inside.")
         elif mime.startswith("application/vnd.google-apps."):
             raise ConnectorError(f"'{name}' is a {mime} file, which cannot be read as text.")
+        elif is_document_type(mime, name):
+            # top10:file_extraction: PDF and Office files are read as
+            # sections (up to MAX_DOCUMENT_BYTES); files.read continues.
+            size = scalar(meta.get("size"))
+            document = await read_connector_document(
+                download=lambda cap: self._request_bytes(
+                    "GET", self._file_url(fid), max_bytes=cap, params={"alt": "media", **_COMMON}
+                ),
+                name=name,
+                mime=mime,
+                source="google_drive",
+                size=int(size) if size and size.isdigit() else None,
+            )
+            return {"id": fid, "mime_type": mime, **document}
         elif is_text_like(mime, name):
             response = await self._call(
                 "GET",
@@ -280,7 +322,7 @@ class DriveActions(GoogleBase):
         else:
             raise ConnectorError(
                 f"'{name}' is {mime or 'an unknown type'}, a binary file; only Google Docs, "
-                "Sheets, Slides and text files can be read."
+                "Sheets, Slides, PDF, Word, PowerPoint, Excel and text files can be read."
             )
         window = text_window(decode_text(data, response.charset_encoding), start, FILE_TEXT_CHARS, action="get_file_text")
         if download_cut and not window["truncated"]:

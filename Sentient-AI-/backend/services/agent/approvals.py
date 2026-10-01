@@ -53,6 +53,13 @@ class StoredAction:
     # Populated when the arguments were derived from untrusted tool data;
     # rendered as a warning on the approval card.
     risk_note: Optional[str] = None
+    # The unattended job that parked this card ("schedule:<id>"), or None.
+    # Approving such a card runs the one call and never resumes a turn.
+    origin: Optional[str] = None
+    # {"kind": "low_risk", "connector_id", "account"} when the card may offer
+    # "Allow low-risk changes on <account> for 7 days" (permission tiers),
+    # set by the runtime only; None otherwise.
+    grant_offer: Optional[dict[str, Any]] = None
 
 
 class ApprovalStore(Protocol):
@@ -66,6 +73,8 @@ class ApprovalStore(Protocol):
         conversation_id: Optional[str] = None,
         ttl_minutes: int = DEFAULT_TTL_MINUTES,
         risk_note: Optional[str] = None,
+        origin: Optional[str] = None,
+        grant_offer: Optional[dict[str, Any]] = None,
     ) -> StoredAction: ...
 
     async def list_pending(self, user_id: str) -> list[StoredAction]: ...
@@ -84,6 +93,12 @@ def _as_utc(dt: datetime) -> datetime:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt
+
+
+def _grant_offer_of(value: Any) -> Optional[dict[str, Any]]:
+    """A stored grant offer as the runtime wrote it (a dict), or None for
+    anything else (NULL, a corrupted row)."""
+    return dict(value) if isinstance(value, dict) and value else None
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +130,8 @@ class InMemoryApprovalStore:
         conversation_id: Optional[str] = None,
         ttl_minutes: int = DEFAULT_TTL_MINUTES,
         risk_note: Optional[str] = None,
+        origin: Optional[str] = None,
+        grant_offer: Optional[dict[str, Any]] = None,
     ) -> StoredAction:
         now = _utcnow()
         expires = now + timedelta(minutes=ttl_minutes)
@@ -128,6 +145,8 @@ class InMemoryApprovalStore:
             expires_at=expires.isoformat(),
             conversation_id=conversation_id,
             risk_note=risk_note,
+            origin=origin,
+            grant_offer=dict(grant_offer) if grant_offer else None,
         )
         self._records[action.action_id] = _MemRecord(action=action, expires=expires)
         return action
@@ -189,6 +208,8 @@ class DbApprovalStore:
             expires_at=_as_utc(row.expires_at).isoformat(),
             conversation_id=str(row.conversation_id) if row.conversation_id else None,
             risk_note=getattr(row, "risk_note", None),
+            origin=getattr(row, "origin", None),
+            grant_offer=_grant_offer_of(getattr(row, "grant_offer", None)),
         )
 
     async def create(
@@ -201,6 +222,8 @@ class DbApprovalStore:
         conversation_id: Optional[str] = None,
         ttl_minutes: int = DEFAULT_TTL_MINUTES,
         risk_note: Optional[str] = None,
+        origin: Optional[str] = None,
+        grant_offer: Optional[dict[str, Any]] = None,
     ) -> StoredAction:
         from models.pending_action import PendingAction
 
@@ -212,6 +235,8 @@ class DbApprovalStore:
             arguments=dict(arguments),
             reason=reason,
             risk_note=risk_note,
+            origin=origin,
+            grant_offer=dict(grant_offer) if grant_offer else None,
             created_at=now,
             expires_at=now + timedelta(minutes=ttl_minutes),
         )

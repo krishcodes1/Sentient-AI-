@@ -78,6 +78,21 @@ class Conversation(Base):
         JSON,
         nullable=True,
     )
+    # Which unattended job writes into this conversation
+    # ("schedule:<task id>", "trigger:<trigger id>"), or NULL for a chat the
+    # user started. Such a conversation's runs get fresh history each time.
+    origin: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    # Tutor mode for this conversation (services/tutor/state.py TutorState):
+    # {"v": 1, "user_on", "user_set_at", "lock": {...} | null}. NULL means
+    # off; any malformed value reads as off. Written only by a turn or a
+    # command that changed it, merged over what is stored (no row lock).
+    tutor_state: Mapped[Optional[Dict]] = mapped_column(
+        JSON,
+        nullable=True,
+    )
 
     # Relationships
     user: Mapped["User"] = relationship(  # noqa: F821

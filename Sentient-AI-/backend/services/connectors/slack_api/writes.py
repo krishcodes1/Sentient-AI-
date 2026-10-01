@@ -147,6 +147,8 @@ WRITE_ACTIONS: tuple[ToolSpec, ...] = (
             },
         ),
         required_scope="channels.write",
+        # Other people are added and told: it speaks for the user.
+        always_confirm=True,
     ),
     ToolSpec(
         "schedule_message",

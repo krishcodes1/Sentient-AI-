@@ -179,6 +179,39 @@ ACTIONS: tuple[ToolSpec, ...] = (
         ),
         required_scope="submissions.read",
     ),
+    # Read by the app-event triggers (services/triggers) and offered to the
+    # model: compact rows shaped in canvas_activity. Announcements need only
+    # courses.read, so existing Canvas rows keep working.
+    ToolSpec(
+        "get_announcements",
+        "Recent announcements in the user's current Canvas courses (or one course), "
+        "newest first: course, title, when, author, the text (plain, up to 1500 "
+        "characters) and a link.",
+        ActionCategory.READ,
+        _schema(
+            days={"type": "integer", "description": "Days back to cover (default 7, at most 30)"},
+            course_id={
+                "type": "string",
+                "description": "Only this course: numeric id from canvas.get_courses (optional)",
+            },
+        ),
+        required_scope="courses.read",
+    ),
+    ToolSpec(
+        "get_recent_grades",
+        "The user's own submissions graded in the last N days across current Canvas "
+        "courses (or one course): assignment, course, when graded, score, grade and "
+        "points possible.",
+        ActionCategory.READ,
+        _schema(
+            days={"type": "integer", "description": "Days back to cover (default 7, at most 30)"},
+            course_id={
+                "type": "string",
+                "description": "Only this course: numeric id from canvas.get_courses (optional)",
+            },
+        ),
+        required_scope="grades.read",
+    ),
     ToolSpec(
         "submit_assignment",
         "Submit work to a Canvas assignment.",
@@ -189,6 +222,40 @@ ACTIONS: tuple[ToolSpec, ...] = (
             submission_data={"type": "object", "required": True},
         ),
         required_scope="submissions.write",
+        # Handing in work cannot be taken back and speaks for the student.
+        always_confirm=True,
+    ),
+    # top10:file_extraction: course files, read with the courses.read scope
+    # existing rows already hold (no re-grant). list_files falls back to the
+    # modules' File items when the course hides its Files page from
+    # students; get_file_text reads a file in the sandboxed document reader
+    # and returns sections plus a doc_id that files.read continues.
+    ToolSpec(
+        "list_files",
+        "List a Canvas course's files, newest first (id, name, type, size, updated, "
+        "locked). Read one with canvas.get_file_text. When the course hides its Files "
+        "page, the files linked from its modules are listed instead (source 'modules').",
+        ActionCategory.READ,
+        _schema(
+            course_id={"type": "string", "description": "Numeric Canvas course id from canvas.get_courses (not the course code)", "required": True},
+            search={"type": "string", "description": "Words in the file name (2-100 characters), optional"},
+            limit={"type": "integer", "description": "How many (1-50, default 20)"},
+        ),
+        required_scope="courses.read",
+        # Not a starter: Canvas already declares the registry's maximum of
+        # four (courses, assignments, upcoming, calendar); tools.find
+        # reaches it.
+    ),
+    ToolSpec(
+        "get_file_text",
+        "Read a Canvas course file (PDF, Word, PowerPoint, Excel, text) as labelled "
+        "sections with a doc_id; continue with files.read(doc_id, start=next_start). "
+        "Locked files and files over 20 MB are refused.",
+        ActionCategory.READ,
+        _schema(
+            file_id={"type": "string", "description": "Numeric Canvas file id from canvas.list_files", "required": True},
+        ),
+        required_scope="courses.read",
     ),
 )
 
@@ -196,8 +263,15 @@ ACTIONS: tuple[ToolSpec, ...] = (
 # code-exchange and refresh endpoint. The interactive /login/oauth2/auth
 # page is browser-side and stays blocked. Shared by the hosted
 # (*.instructure.com) and self-hosted cases, so a self-hosted instance is
-# never reachable at paths the hosted one is not.
-_CANVAS_PATHS: tuple[str, ...] = ("/api/v1/", "/login/oauth2/token")
+# never reachable at paths the hosted one is not. /files/ is a course
+# file's download address (canvas.get_file_text; top10:file_extraction),
+# which answers with a redirect to Canvas's file storage (redirect_hosts).
+_CANVAS_PATHS: tuple[str, ...] = ("/api/v1/", "/login/oauth2/token", "/files/")
+
+# top10:file_extraction: course-file limits and shapes.
+_FILES_DEFAULT = 20
+_FILES_MAX = 50
+_FILE_ID_RE_CHARS = frozenset("0123456789")
 
 
 class CanvasConnector(BaseConnector):
@@ -228,6 +302,11 @@ class CanvasConnector(BaseConnector):
         "get_upcoming": "get_upcoming",
         "get_submissions": "get_submissions",
         "submit_assignment": "submit_assignment",
+        # top10:file_extraction
+        "list_files": "list_files",
+        "get_file_text": "get_file_text",
+        "get_announcements": "get_announcements",
+        "get_recent_grades": "get_recent_grades",
     }
 
     def __init__(
@@ -457,6 +536,13 @@ class CanvasConnector(BaseConnector):
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._access_token}"}
 
+    def _auth_headers(self) -> dict[str, str]:
+        """The bearer token for the base helpers (``_request_bytes``, used
+        by get_file_text's download): named here, it also counts as a
+        credential for the network policy (never sent to a redirect host)
+        and is scrubbed from error codes (top10:file_extraction)."""
+        return self._headers() if self._access_token else {}
+
     # Pagination safety cap. Canvas paginates every list endpoint via the
     # RFC 5988 ``Link`` header; following rel="next" unboundedly would let a
     # pathological account (or a hostile server) hold a tool call open
@@ -669,6 +755,60 @@ class CanvasConnector(BaseConnector):
         )
         return upcoming.summarize(planner, missing, window=window, base_url=self._base_url)
 
+    async def get_announcements(self, days: Any = None, course_id: Any = None) -> dict[str, Any]:
+        """Announcements posted in the last *days* days in the user's current
+        courses (at most 20, from get_courses) or in *course_id*: one GET
+        of /announcements with a context code per course. The arguments are
+        checked before any request; shaping and caps live in
+        ``canvas_activity``."""
+        from . import canvas_activity as activity
+
+        wanted = activity.parse_course_id(course_id)
+        span, start = activity.since(days)
+        names = activity.course_names(await self.get_courses())
+        codes = [wanted] if wanted is not None else list(names)[: activity.MAX_COURSES]
+        if not codes:
+            return activity.announcements([], names=names, base_url=self._base_url, days=span)
+        resp = await self._get_with_refresh(
+            f"{self._base_url}/api/v1/announcements",
+            params={
+                "context_codes[]": [f"course_{code}" for code in codes],
+                "start_date": activity.iso(start),
+                "per_page": activity.PER_PAGE,
+            },
+        )
+        return activity.announcements(resp.json(), names=names, base_url=self._base_url, days=span)
+
+    async def get_recent_grades(self, days: Any = None, course_id: Any = None) -> dict[str, Any]:
+        """The user's own submissions graded in the last *days* days, in
+        their current courses (at most 12) or in *course_id*: one
+        /students/submissions read per course with ``graded_since`` (a
+        student sees only their own). A course the account may not open
+        (403, 404) is skipped rather than failing the rest."""
+        from . import canvas_activity as activity
+
+        wanted = activity.parse_course_id(course_id)
+        span, start = activity.since(days)
+        names = activity.course_names(await self.get_courses())
+        ids = [wanted] if wanted is not None else list(names)[: activity.MAX_GRADE_COURSES]
+        rows: list[dict[str, Any]] = []
+        for course in ids:
+            try:
+                raw = await self._api_get(
+                    f"/courses/{path_segment(course)}/students/submissions",
+                    params={
+                        "graded_since": activity.iso(start),
+                        "include[]": "assignment",
+                        "per_page": activity.PER_PAGE,
+                    },
+                )
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in (403, 404):
+                    continue
+                raise
+            rows.extend(activity.grade_rows(course, names.get(course, ""), raw, base_url=self._base_url))
+        return activity.grades(rows, days=span, courses=len(ids))
+
     async def get_submissions(
         self, course_id: int | str, assignment_id: int | str
     ) -> list[dict[str, Any]]:
@@ -705,6 +845,139 @@ class CanvasConnector(BaseConnector):
             f"{path_segment(assignment_id)}/submissions",
             json_body={"submission": submission_data},
         )
+
+    # -- Course files (top10:file_extraction) --------------------------------
+
+    @staticmethod
+    def _numeric_id(value: Any, field: str) -> str:
+        text = str(value).strip() if isinstance(value, (str, int)) and not isinstance(value, bool) else ""
+        if not text or len(text) > 20 or not set(text) <= _FILE_ID_RE_CHARS:
+            raise ConnectorError(f"'{field}' must be a numeric Canvas id.")
+        return text
+
+    @staticmethod
+    def _shape_file(raw: dict[str, Any]) -> dict[str, Any]:
+        shaped: dict[str, Any] = {
+            "id": raw.get("id"),
+            "name": str(raw.get("display_name") or raw.get("filename") or "")[:200],
+            "content_type": str(raw.get("content-type") or "")[:100] or None,
+            "size": raw.get("size") if isinstance(raw.get("size"), int) else None,
+            "updated_at": raw.get("updated_at"),
+            "folder_id": raw.get("folder_id"),
+        }
+        if raw.get("locked_for_user") or raw.get("locked"):
+            shaped["locked"] = True
+        if raw.get("hidden") or raw.get("hidden_for_user"):
+            shaped["hidden"] = True
+        return {k: v for k, v in shaped.items() if v is not None}
+
+    async def list_files(
+        self, course_id: Any, search: Any = None, limit: Any = None
+    ) -> dict[str, Any]:
+        """A course's files, newest first. A course that hides its Files page
+        from students answers 401/403 there; the File items of its modules
+        are listed instead (``source: "modules"``)."""
+        cid = self._numeric_id(course_id, "course_id")
+        try:
+            top = max(1, min(int(limit), _FILES_MAX)) if limit is not None else _FILES_DEFAULT
+        except (TypeError, ValueError):
+            raise ConnectorError("'limit' must be a whole number from 1 to 50.") from None
+        params: dict[str, Any] = {"sort": "updated_at", "order": "desc", "per_page": top}
+        if search is not None:
+            words = " ".join(str(search).split())
+            if not 2 <= len(words) <= 100:
+                raise ConnectorError("'search' must be 2 to 100 characters.")
+            params["search_term"] = words
+        try:
+            resp = await self._get_with_refresh(
+                f"{self._base_url}/api/v1/courses/{path_segment(cid)}/files", params=params
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code not in (401, 403):
+                raise
+            return await self._files_from_modules(cid, top, params.get("search_term"))
+        raw = resp.json()
+        if not isinstance(raw, list):
+            raise ConnectorError("Malformed response from Canvas LMS")
+        files = [self._shape_file(f) for f in raw if isinstance(f, dict)][:top]
+        return {
+            "course_id": cid,
+            "source": "files",
+            "files": files,
+            "count": len(files),
+            "hint": "Read one with canvas.get_file_text(file_id).",
+        }
+
+    async def _files_from_modules(
+        self, cid: str, top: int, search: Optional[str]
+    ) -> dict[str, Any]:
+        modules = await self._api_get(
+            f"/courses/{path_segment(cid)}/modules", params={"include[]": "items", "per_page": 50}
+        )
+        files: list[dict[str, Any]] = []
+        needle = (search or "").lower()
+        for module in modules if isinstance(modules, list) else []:
+            if not isinstance(module, dict):
+                continue
+            for item in module.get("items") or []:
+                if not isinstance(item, dict) or item.get("type") != "File":
+                    continue
+                title = str(item.get("title") or "")[:200]
+                if needle and needle not in title.lower():
+                    continue
+                if item.get("content_id") is None:
+                    continue
+                files.append({"id": item.get("content_id"), "name": title, "module": str(module.get("name") or "")[:100]})
+                if len(files) >= top:
+                    break
+            if len(files) >= top:
+                break
+        return {
+            "course_id": cid,
+            "source": "modules",
+            "files": files,
+            "count": len(files),
+            "hint": (
+                "This course hides its Files page; these are the files its modules link to. "
+                "Read one with canvas.get_file_text(file_id)."
+            ),
+        }
+
+    async def get_file_text(self, file_id: Any) -> dict[str, Any]:
+        """One course file read as a document. Refused before any download
+        when it is locked for the user, larger than 20 MB, or its download
+        address is not this Canvas's own /files/ path; the download then
+        follows Canvas's redirect to its file storage (redirect_hosts: GET
+        only, never with the token)."""
+        from .documents import MAX_DOCUMENT_BYTES, read_connector_document
+
+        fid = self._numeric_id(file_id, "file_id")
+        meta = await self._api_get(f"/files/{path_segment(fid)}")
+        if not isinstance(meta, dict):
+            raise ConnectorError("Malformed response from Canvas LMS")
+        name = str(meta.get("display_name") or meta.get("filename") or f"file-{fid}")[:200]
+        if meta.get("locked_for_user"):
+            raise ConnectorError("This file is locked for you on Canvas, so it cannot be read.")
+        size = meta.get("size")
+        if isinstance(size, int) and size > MAX_DOCUMENT_BYTES:
+            from services.files import messages as file_messages
+
+            raise ConnectorError(file_messages.too_large(size, MAX_DOCUMENT_BYTES))
+        url = meta.get("url")
+        if not isinstance(url, str) or not url.startswith(f"{self._base_url}/files/"):
+            raise ConnectorError(
+                "Canvas did not give a download address on this Canvas instance, so the "
+                "file was not downloaded."
+            )
+        mime = str(meta.get("content-type") or "")[:100] or None
+        document = await read_connector_document(
+            download=lambda cap: self._request_bytes("GET", url, max_bytes=cap, follow_redirects=True),
+            name=name,
+            mime=mime,
+            source="canvas",
+            size=size if isinstance(size, int) else None,
+        )
+        return {"file_id": fid, "content_type": mime, "size": size, **document}
 
     # -- execute dispatch ----------------------------------------------------
 
@@ -784,6 +1057,13 @@ DEFINITION = ConnectorDefinition(
         # (validate_credentials allows http:// base URLs).
         https_only=False,
         instance_paths=_CANVAS_PATHS,
+        # A course file's /files/ address redirects to Canvas's file storage
+        # (InstFS, or S3 on older instances): GET only, never with our
+        # Authorization header (top10:file_extraction).
+        redirect_hosts={
+            "*.inscloudgate.net": ("/files/",),
+            "instructure-uploads*.s3.amazonaws.com": ("/",),
+        },
     ),
     actions=ACTIONS,
     connector_class=CanvasConnector,

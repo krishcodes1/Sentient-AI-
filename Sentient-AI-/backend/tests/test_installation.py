@@ -17,6 +17,7 @@ import base64
 import contextlib
 import json
 import os
+import re
 import uuid
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from alembic.config import Config
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+import services.audit as audit_module
 import services.installation as installation_module
 from core.config import PROVIDER_KEY_FIELDS, settings
 from models.audit import AuditLog, AuditStatus
@@ -40,6 +42,12 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 # their own, so a leak into an audit row cannot be hidden by redaction.
 LLM_SECRET = "anthropic-secret-VALUE-0001"
 BOT_SECRET = "987654:telegram-secret-VALUE-0002"
+# Audit columns a random value fills. The bot id in BOT_SECRET is six
+# digits, which an id, a hash or a timestamp can hold by chance, so it is
+# looked for only in the others.
+_RANDOM_COLUMNS = frozenset(
+    {"id", "user_id", "timestamp", "integrity_hash", "previous_hash", "request_id"}
+)
 
 
 @pytest.fixture(autouse=True)
@@ -71,6 +79,11 @@ async def _row(session_factory) -> Installation:
 async def _audit_rows(session_factory) -> list[AuditLog]:
     async with session_factory() as s:
         return list((await s.execute(select(AuditLog).order_by(AuditLog.seq))).scalars())
+
+
+def _audit_text(row: AuditLog) -> str:
+    columns = {c.name: getattr(row, c.name) for c in AuditLog.__table__.columns}
+    return json.dumps({k: v for k, v in columns.items() if k not in _RANDOM_COLUMNS}, default=str)
 
 
 def _other_encryption_key() -> str:
@@ -334,7 +347,32 @@ async def test_no_audit_row_carries_a_secret(session_factory):
         )
         assert LLM_SECRET not in dumped
         assert BOT_SECRET not in dumped
-        assert "987654" not in dumped
+        assert "987654" not in _audit_text(row)
+        # The text columns left out hold only a request uuid and the hash
+        # chain; the others are typed ids and the clock.
+        assert str(uuid.UUID(row.request_id)) == row.request_id
+        assert re.fullmatch(r"[0-9a-f]{64}", row.integrity_hash)
+    assert [r.previous_hash for r in rows] == [None, *(r.integrity_hash for r in rows[:-1])]
+
+
+@pytest.mark.asyncio
+async def test_a_request_id_that_happens_to_hold_the_bot_id_is_no_leak(
+    session_factory, monkeypatch
+):
+    # Each audit row draws a random request id, and "987654" is the bot id
+    # in BOT_SECRET. The check looked in the whole row, ids and hashes
+    # included, so about one run in 43,000 could fail with no secret shown.
+    from types import SimpleNamespace
+
+    drawn = uuid.UUID("987654e1-3c2a-4f0b-9d8e-5a6b7c8d9e0f")
+    # Only the audit service's draw is pinned, not every uuid4 in the process.
+    monkeypatch.setattr(audit_module, "uuid", SimpleNamespace(UUID=uuid.UUID, uuid4=lambda: drawn))
+    svc = InstallationService(session_factory)
+    user, _ = await make_user(session_factory, "o@example.com")
+    await svc.set_telegram_token(BOT_SECRET, actor_id=user.id)
+    [row] = await _audit_rows(session_factory)
+    assert row.request_id.startswith("987654")
+    assert "987654" not in _audit_text(row)
 
 
 @pytest.mark.asyncio

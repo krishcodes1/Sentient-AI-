@@ -17,12 +17,20 @@ base class.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping, Optional
 
 from services.agent.permissions import ActionCategory, PermissionTier
 
 if TYPE_CHECKING:
     from services.connectors.base import BaseConnector
+
+
+# An action's argument check (``ToolSpec.risk_check``): given the call's
+# arguments, ``(level, reason)`` to escalate its risk grade ("medium" or
+# "high", with a fixed reason that never quotes an argument), or None. It
+# can only raise the grade (services/agent/risk.py); a check that raises
+# grades the call HIGH.
+RiskCheck = Callable[[Mapping[str, Any]], Optional[tuple[str, str]]]
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +58,23 @@ class ToolSpec:
 
     ``starter`` marks an everyday read that is offered to the model up
     front; every other action is reachable through ``tools.find``.
+
+    Risk grading (services/agent/risk.py; permission tiers):
+
+    - ``risk="low"`` opts a WRITE into the LOW grade: a small, undoable
+      change to the owner's own account that nobody else sees (a draft, a
+      star, a private event). Only a WRITE without ``always_confirm`` may
+      declare it, and it needs ``low_risk_note``. Every other WRITE is
+      MEDIUM; reads are LOW; deletes, runs, payments and always-confirm
+      actions are HIGH.
+    - ``risk_check`` reads the arguments and can only escalate the grade
+      (TRASH on a Gmail label change, guests on an event). One that raises
+      grades the call HIGH.
+    - ``ref_args`` names the arguments that carry an object id (a message
+      id). On a LOW call, an id the same connection returned this turn is
+      not treated as copied from untrusted content.
+    - ``low_risk_note`` says in a few words what the LOW action does, for
+      the tier's help text and the grant card (at most 80 characters).
     """
 
     action: str
@@ -60,6 +85,10 @@ class ToolSpec:
     required_scope: Optional[str] = None
     always_confirm: bool = False
     starter: bool = False
+    risk: Optional[str] = None
+    risk_check: Optional[RiskCheck] = None
+    ref_args: tuple[str, ...] = ()
+    low_risk_note: str = ""
 
 
 def _schema(**props: dict[str, Any]) -> dict[str, Any]:

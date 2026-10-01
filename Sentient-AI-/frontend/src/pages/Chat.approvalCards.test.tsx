@@ -26,6 +26,9 @@ vi.mock("@/services/api", async (importOriginal) => ({
   getPendingApprovals: vi.fn(async () => []),
   stopAgent: vi.fn(),
   streamMessage: vi.fn(),
+  // top10:file_extraction
+  uploadFile: vi.fn(),
+  deleteFile: vi.fn(),
   updateConversation: vi.fn(),
 }));
 

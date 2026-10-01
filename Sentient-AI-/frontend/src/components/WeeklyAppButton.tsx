@@ -15,11 +15,12 @@ import { formatAllowedUntil } from "@/components/appApprovalFormat";
 import type { ApprovalDecisionResponse, PendingApproval } from "@/types";
 
 /**
- * What an approval card's buttons decide: approve or deny, plus "week" from the weekly button.
- * Cards and pages hand it on as rest arguments down to decideApproval(actionId, ...decision), so
- * Approve and Deny make the same call they always did and only the weekly button adds `remember`.
+ * What an approval card's buttons decide: approve or deny, plus "week" from the weekly button or
+ * "low_risk" from the low-risk button (LowRiskGrantButton). Cards and pages hand it on as rest
+ * arguments down to decideApproval(actionId, ...decision), so Approve and Deny make the same call
+ * they always did and only those two buttons add `remember`.
  */
-export type ApprovalDecision = [approved: boolean, remember?: "week"];
+export type ApprovalDecision = [approved: boolean, remember?: "week" | "low_risk"];
 
 /** A decision response's `weekly`: the app the weekly button allowed, and until when. */
 export type WeeklyGrant = NonNullable<ApprovalDecisionResponse["weekly"]>;

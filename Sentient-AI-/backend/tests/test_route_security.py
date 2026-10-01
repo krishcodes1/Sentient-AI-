@@ -13,6 +13,7 @@ audit-write endpoint.
 
 from __future__ import annotations
 
+import re
 import uuid
 
 import pytest
@@ -49,7 +50,117 @@ PROTECTED_ROUTES = [
     ("GET", "/api/audit/"),
     ("GET", f"/api/audit/{SOME_ID}"),
     ("GET", f"/api/audit/{SOME_ID}/verify"),
+    # top10:flashcards_quizzes: the signed-in deck download (the one-time
+    # link route answers 404 to anything but a live token instead).
+    ("GET", f"/api/study/decks/{SOME_ID}/export"),
+    # top10:scheduler_briefing: scheduled tasks create and run unattended
+    # agent turns.
+    ("GET", "/api/schedules"),
+    ("POST", "/api/schedules"),
+    ("PATCH", f"/api/schedules/{SOME_ID}"),
+    ("DELETE", f"/api/schedules/{SOME_ID}"),
+    ("POST", f"/api/schedules/{SOME_ID}/run"),
+    ("GET", "/api/schedules/timezone"),
+    ("PUT", "/api/schedules/timezone"),
+    # top10:event_triggers
+    ("GET", "/api/triggers"),
+    ("PATCH", f"/api/triggers/{SOME_ID}"),
+    ("DELETE", f"/api/triggers/{SOME_ID}"),
 ]
+
+# The /api routes that answer without a signed-in user, each on purpose.
+# Every other /api route must refuse a caller with no credentials (the walk
+# below), so a new route that forgets Depends(get_current_user) fails here.
+PUBLIC_ROUTES: set[tuple[str, str]] = {
+    ("GET", "/api/health"),
+    # Signing in and (when the owner opened it) registering.
+    ("POST", "/api/auth/register"),
+    ("POST", "/api/auth/login"),
+    # The provider sends the browser back here; the flow's state is checked.
+    ("GET", "/api/oauth/callback/{provider}"),
+    # The first-run wizard: its status, and the owner step (409 as soon as
+    # any account exists).
+    ("GET", "/api/setup/status"),
+    ("POST", "/api/setup/owner"),
+    # top10:flashcards_quizzes: the one-time deck download link; anything
+    # but a live token is a 404.
+    ("GET", "/api/study/export"),
+}
+
+
+def _api_routes() -> list[tuple[str, str]]:
+    """(method, path) of every /api route the app serves, included routers
+    and all (FastAPI 0.14x keeps an included router as one entry)."""
+    from fastapi.routing import APIRoute
+
+    from main import app
+
+    found: list[tuple[str, str]] = []
+
+    def walk(routes, prefix: str) -> None:
+        for route in routes:
+            if isinstance(route, APIRoute):
+                for method in sorted(route.methods - {"HEAD", "OPTIONS"}):
+                    found.append((method, prefix + route.path))
+            elif hasattr(route, "original_router"):
+                walk(route.original_router.routes, prefix + route.include_context.prefix)
+
+    walk(app.routes, "")
+    return [(m, p) for m, p in found if p.startswith("/api/")]
+
+
+def _concrete(path: str) -> str:
+    return re.sub(r"\{[^}]+\}", SOME_ID, path)
+
+
+def test_the_route_walk_sees_the_whole_api():
+    from main import app
+
+    routes = set(_api_routes())
+    # Everything the OpenAPI schema lists is walked (and more: routes left
+    # out of the schema, such as the one-time study download).
+    documented = {
+        (method.upper(), path)
+        for path, operations in app.openapi()["paths"].items()
+        for method in operations
+        if path.startswith("/api/")
+    }
+    assert documented <= routes, documented - routes
+    assert ("GET", "/api/schedules") in routes and ("GET", "/api/health") in routes
+
+
+async def _anonymous_request(method: str, path: str) -> int:
+    """One request with no credentials from a peer of its own (so the
+    per-IP rate limit never answers 429 in place of the route)."""
+    import httpx
+
+    from main import app
+
+    h = uuid.uuid4().hex
+    peer = f"2001:db8::{h[0:4]}:{h[4:8]}:{h[8:12]}:{h[12:16]}"
+    transport = httpx.ASGITransport(app=app, client=(peer, 54321))
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver", headers={"X-Forwarded-For": peer}
+    ) as anonymous:
+        return (await anonymous.request(method, path, json={})).status_code
+
+
+@pytest.mark.asyncio
+async def test_every_api_route_refuses_a_caller_without_credentials(client):
+    # ``client`` wires the test database into the app for these requests.
+    allowed = []
+    for method, path in _api_routes():
+        if (method, path) in PUBLIC_ROUTES:
+            continue
+        status = await _anonymous_request(method, _concrete(path))
+        if status not in (401, 403):
+            allowed.append(f"{method} {path} -> {status}")
+    assert allowed == [], "\n".join(allowed)
+
+
+def test_every_public_route_exists():
+    routes = set(_api_routes())
+    assert PUBLIC_ROUTES <= routes, PUBLIC_ROUTES - routes
 
 
 @pytest.mark.asyncio

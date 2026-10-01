@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import date
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -14,6 +15,7 @@ import structlog
 from sqlalchemy import select, update
 
 from models.vault_item import VaultItem
+from services.vault import crypto as crypto_module
 from services.vault import service as vault_module
 from services.vault.keys import DevFileKeyProvider, DisabledKeyProvider, VaultUnavailable
 from services.vault.service import (
@@ -100,9 +102,25 @@ async def test_the_row_holds_no_plaintext(session_factory, vault):
     user = await _owner(session_factory)
     await vault.put_card(user, **CARD)
     (row,) = await _rows(session_factory)
-    assert DIGITS.encode() not in row.blob and b"Krish" not in row.blob and CVC.encode() not in row.blob
+    # The blob is random bytes, which can hold "123" by chance, so the CVC is
+    # looked for as an unsealed card would hold it: "cvc":"123", the compact
+    # json put_card writes.
+    assert DIGITS.encode() not in row.blob and b"Krish" not in row.blob and f'"cvc":"{CVC}"'.encode() not in row.blob
     assert DIGITS not in repr(row)
     assert row.masked == "Visa ····4242" and row.origins == []
+
+
+@pytest.mark.asyncio
+async def test_a_nonce_that_happens_to_hold_the_cvc_digits_is_no_leak(session_factory, vault, monkeypatch):
+    # The blob opens with a random 12-byte nonce, which can hold "123" by
+    # chance. Only the vault crypto module's draw is pinned; the key stays random.
+    monkeypatch.setattr(crypto_module, "os", SimpleNamespace(urandom=lambda n: (CVC.encode() + bytes(n))[:n]))
+    user = await _owner(session_factory)
+    await vault.put_card(user, **CARD)
+    (row,) = await _rows(session_factory)
+    assert row.blob.startswith(CVC.encode())
+    assert DIGITS.encode() not in row.blob and f'"cvc":"{CVC}"'.encode() not in row.blob
+    assert (await vault.open_card(user, purpose="checkout")).cvc == CVC
 
 
 @pytest.mark.asyncio

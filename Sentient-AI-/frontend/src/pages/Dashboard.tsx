@@ -54,6 +54,10 @@ import WeeklyAppButton, {
   type ApprovalDecision,
   type WeeklyGrant,
 } from "@/components/WeeklyAppButton";
+import LowRiskGrantButton, {
+  LowRiskAllowedNote,
+  type LowRiskGrant,
+} from "@/components/LowRiskGrantButton";
 import { screenshotAlt } from "@/components/toolScreenshots";
 import UsagePanel from "@/components/UsagePanel";
 import { formatCost, formatTokens } from "@/components/usageFormat";
@@ -229,6 +233,11 @@ function ApprovalRow({
         disabled={pending || expired}
         onAllow={() => void decide(true, "week")}
       />
+      <LowRiskGrantButton
+        approval={approval}
+        disabled={pending || expired}
+        onAllow={() => void decide(true, "low_risk")}
+      />
       {error && (
         <p role="alert" className="text-xs mt-2" style={{ color: "var(--accent-danger)" }}>
           {error}
@@ -331,6 +340,8 @@ export default function Dashboard() {
   const [decisionImages, setDecisionImages] = useState<TurnImage[]>([]);
   // The app the last decision allowed for a week (its weekly button).
   const [weeklyAllowed, setWeeklyAllowed] = useState<WeeklyGrant | null>(null);
+  // The account the last decision allowed low-risk changes on (its low-risk button).
+  const [lowRiskAllowed, setLowRiskAllowed] = useState<LowRiskGrant | null>(null);
   const [usage, setUsage] = useState<UsageSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -409,6 +420,7 @@ export default function Dashboard() {
     setApprovals((prev) => prev.filter((a) => a.action_id !== actionId));
     setDecisionImages(decided.images ?? []);
     setWeeklyAllowed(decided.weekly ?? null);
+    setLowRiskAllowed(decided.low_risk ?? null);
     // Refresh stats and the feed so the decided action shows up immediately.
     void load(true);
   };
@@ -554,6 +566,7 @@ export default function Dashboard() {
       )}
 
       {weeklyAllowed && <WeeklyAllowedNote weekly={weeklyAllowed} />}
+      {lowRiskAllowed && <LowRiskAllowedNote grant={lowRiskAllowed} />}
 
       {/* What the last approved action showed (a checkout's confirmation
           page). Only a base64 raster data URL reaches an <img>: the server

@@ -31,6 +31,14 @@ Taint is detected on high-signal *redirection / exfiltration indicators* —
 email addresses, URLs/hosts, and long verbatim strings — rather than on
 incidental word overlap, so a model-drafted email body does not trip the
 gate just because it quotes a word from the source message.
+
+Provenance (permission tiers): a result added with ``source=`` (the tool's
+connection, e.g. ``google_workspace`` or ``google_workspace__1a2b3c4d``) also
+records the object ids it returned in ``id`` and ``*_id`` fields. A low-risk
+call may then name one of those ids in its ``ref_args`` (a message id to
+star) without that id counting as copied from untrusted content, but only an
+id the SAME connection returned: the same string seen in a web page, or
+returned by another account, is still taint.
 """
 
 from __future__ import annotations
@@ -123,9 +131,16 @@ class TaintTracker:
         self._corpus_parts: list[str] = []
         self._normalized_corpus: str = ""
         self._indicators: set[str] = set()
+        # source -> the object ids its results returned (``_collect_ids``).
+        self._object_ids: dict[str, set[str]] = {}
 
-    def add_result(self, payload: Any) -> None:
-        """Record an (untrusted) tool result as tainted source material."""
+    def add_result(self, payload: Any, source: str | None = None) -> None:
+        """Record an (untrusted) tool result as tainted source material.
+        With ``source`` (the connection that returned it), the object ids
+        it carries in ``id`` and ``*_id`` fields are remembered for that
+        source (see ``taint_reason``'s ``ref_args``)."""
+        if source:
+            _collect_ids(payload, self._object_ids.setdefault(source, set()))
         text = payload if isinstance(payload, str) else _stringify(payload)
         if not text:
             return
@@ -133,7 +148,21 @@ class TaintTracker:
         self._normalized_corpus = _normalize(" ".join(self._corpus_parts))
         self._indicators |= extract_indicators(text)
 
-    def taint_reason(self, arguments: Any) -> str | None:
+    def returned_id(self, source: str, value: Any) -> bool:
+        """Whether *source* returned *value* as an object id this turn."""
+        if isinstance(value, int) and not isinstance(value, bool):
+            value = str(value)
+        return isinstance(value, str) and value in self._object_ids.get(source, ())
+
+    def taint_reason(
+        self,
+        arguments: Any,
+        *,
+        trusted: str = "",
+        indicators_only: bool = False,
+        ref_args: tuple[str, ...] = (),
+        source: str | None = None,
+    ) -> str | None:
         """Return a human-readable reason if *arguments* are derived from
         untrusted data, else ``None``.
 
@@ -142,22 +171,45 @@ class TaintTracker:
            untrusted corpus (redirection / exfiltration target).
         2. An argument contains a long verbatim run copied from the corpus
            (opaque identifier or smuggled instruction fragment).
+
+        ``trusted`` is text the owner wrote and approved (a scheduled task's
+        prompt): an indicator that also appears in it, or a verbatim run it
+        contains, is the owner's own and not taint. ``indicators_only``
+        checks signal 1 alone (a search query built from a course title is
+        not refused for quoting it).
+
+        ``ref_args`` with ``source``: the named top-level arguments are left
+        out of the check when their value is an object id *source* itself
+        returned this turn (``add_result(..., source=)``). The caller passes
+        them only for a LOW call (services/agent/risk.py).
         """
         if not self._indicators and not self._normalized_corpus:
             return None
+        if ref_args and source and isinstance(arguments, dict):
+            arguments = {
+                key: value
+                for key, value in arguments.items()
+                if not (key in ref_args and self.returned_id(source, value))
+            }
 
+        trusted_indicators = extract_indicators(trusted) if trusted else set()
+        trusted_norm = _normalize(trusted) if trusted else ""
         for raw in _iter_arg_strings(arguments):
             if not raw:
                 continue
             arg_indicators = extract_indicators(raw)
-            overlap = arg_indicators & self._indicators
+            overlap = (arg_indicators & self._indicators) - trusted_indicators
             if overlap:
                 sample = sorted(overlap)[0]
                 return (
                     f"argument references '{sample}', which came from an "
                     "untrusted tool result"
                 )
+            if indicators_only:
+                continue
             norm = _normalize(raw)
+            if trusted_norm and norm in trusted_norm:
+                continue
             if len(norm) >= _MIN_VERBATIM_LEN and norm in self._normalized_corpus:
                 snippet = norm[:40] + ("…" if len(norm) > 40 else "")
                 return (
@@ -168,6 +220,32 @@ class TaintTracker:
 
     def is_tainted(self, arguments: Any) -> bool:
         return self.taint_reason(arguments) is not None
+
+
+# How deep ``_collect_ids`` looks into a result, and how many ids it keeps
+# per source: a result is bounded already, this only keeps a hostile one
+# from costing more than it is worth.
+_ID_DEPTH = 8
+_MAX_IDS_PER_SOURCE = 5000
+
+
+def _collect_ids(payload: Any, into: set[str], depth: int = 0) -> None:
+    """Add the string (or integer) values of every ``id`` and ``*_id`` key
+    in *payload* to *into*."""
+    if depth > _ID_DEPTH or len(into) >= _MAX_IDS_PER_SOURCE:
+        return
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if isinstance(key, str) and (key == "id" or key.endswith("_id")):
+                if isinstance(value, str) and value.strip():
+                    into.add(value)
+                elif isinstance(value, int) and not isinstance(value, bool):
+                    into.add(str(value))
+            if isinstance(value, (dict, list, tuple)):
+                _collect_ids(value, into, depth + 1)
+    elif isinstance(payload, (list, tuple)):
+        for value in payload:
+            _collect_ids(value, into, depth + 1)
 
 
 def _stringify(payload: Any) -> str:
