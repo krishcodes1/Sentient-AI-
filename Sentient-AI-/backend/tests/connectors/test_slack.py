@@ -130,6 +130,8 @@ def test_action_names_categories_and_confirm_flags_match_the_spec():
     assert {n for n, s in by_name.items() if s.category == ActionCategory.READ} == reads
     assert {n for n, s in by_name.items() if s.category == ActionCategory.WRITE} == writes
     assert {n for n, s in by_name.items() if s.category == ActionCategory.DELETE} == deletes
+    # invite_to_channel adds and tells other people: always-confirm
+    # (permission tiers).
     assert {n for n, s in by_name.items() if s.always_confirm} == {
         "post_message",
         "reply_in_thread",
@@ -137,6 +139,7 @@ def test_action_names_categories_and_confirm_flags_match_the_spec():
         "schedule_message",
         "delete_message",
         "archive_channel",
+        "invite_to_channel",
     }
     starters = {n for n, s in by_name.items() if s.starter}
     assert starters <= reads and 2 <= len(starters) <= 4
@@ -151,7 +154,9 @@ def test_definition_auth_network_and_presentation():
     assert DEFINITION.auth.optional_credentials == ("app_token", "user_token")
     net = DEFINITION.network
     assert net.https_only is True
-    assert dict(net.hosts) == {"slack.com": ("/api/",), "files.slack.com": ("/upload/v1/",)}
+    # top10:file_extraction: /files-pri/ is where a file shared in a DM is
+    # downloaded from with the bot token.
+    assert dict(net.hosts) == {"slack.com": ("/api/",), "files.slack.com": ("/upload/v1/", "/files-pri/")}
     assert net.ws_hosts == ("wss-primary.slack.com", "wss-backup.slack.com", "wss.slack.com")
 
 
@@ -1170,6 +1175,8 @@ def no_dns(monkeypatch):
         ("GET", "https://slack.com/api/conversations.list"),
         ("POST", "https://slack.com/api/chat.postMessage"),
         ("POST", "https://files.slack.com/upload/v1/ABCtest"),
+        # top10:file_extraction: a DM file's bot-token download.
+        ("GET", "https://files.slack.com/files-pri/T1-F1/secret.txt"),
     ],
 )
 async def test_policy_allows_the_declared_hosts_and_paths(no_dns, method, url):
@@ -1184,7 +1191,7 @@ async def test_policy_allows_the_declared_hosts_and_paths(no_dns, method, url):
     [
         "https://evil.example.com/api/chat.postMessage",
         "https://slack.com/oauth/v2/authorize",
-        "https://files.slack.com/files-pri/T1-F1/secret.txt",
+        "https://files.slack.com/files-tmb/T1-F1/thumb.png",
         "http://slack.com/api/auth.test",
         "https://slack.com:8443/api/auth.test",
         "https://slack.com/api/%2e%2e/admin",

@@ -6,8 +6,9 @@ trusted context, so the agent may add one only through the approval card, and
 this toolkit refuses what must never be stored, both before the card is made
 (``precheck``) and again once it is approved (``execute``): text the Memory
 API's own check rejects (``screen_memory_content``: empty, over 500 characters,
-injection-shaped), anything that looks like a password, key, token or card
-number (``looks_like_secret``), text the approval card could not show whole, a
+injection-shaped), anything that looks like a password, key, token, card, bank
+or ID number (policy MEMORY of services/security), text the approval card could
+not show whole, a
 save for a user who switched memory off, and one past the number of memories
 the prompt shows.
 
@@ -41,7 +42,6 @@ wrong and tell the user.
 from __future__ import annotations
 
 import json
-import re
 import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional
@@ -52,8 +52,15 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from models.memory import Memory, MemoryCategory, MemorySource
 from models.user import User
-from services.audit import contains_sensitive_value
-from services.memory import MAX_MEMORIES_IN_PROMPT, MemoryRejected, screen_memory_content
+from services.memory import (
+    MAX_MEMORIES_IN_PROMPT,
+    SECRET_REJECTED_MESSAGE,
+    MemoryRejected,
+    MemorySecretRejected,
+    screen_memory_content,
+)
+from services.security.policies import MEMORY
+from services.security.redact import contains
 
 logger = structlog.get_logger(__name__)
 
@@ -71,41 +78,20 @@ _ARGUMENTS = frozenset({"content", "category"})
 _REASON_CHARS = 300
 _CARD_ARGUMENT_CHARS = 690
 
-# What memory.remember refuses as a secret, on top of the audit log's own
-# redaction patterns (``contains_sensitive_value``: JWTs, a few key formats,
-# an unbroken 13-19 digit run): the key and token formats people paste
-# most, card numbers written in groups, and a password, PIN or token
-# stated outright. A memory is sent with every future prompt, so a false
-# refusal (the model asks the user to reword) costs far less than a stored
-# secret.
-_SECRET_RE = re.compile(
-    r"\bsk-[A-Za-z0-9_-]{20,}"  # OpenAI (sk-proj-...) and Anthropic (sk-ant-...)
-    r"|\bgithub_pat_[A-Za-z0-9_]{20,}"  # GitHub fine-grained tokens
-    r"|\bgh[pousr]_[A-Za-z0-9]{30,}"  # GitHub classic tokens
-    r"|\bglpat-[A-Za-z0-9_-]{20,}"  # GitLab
-    r"|\bAIza[0-9A-Za-z_-]{35}"  # Google API keys
-    r"|\bya29\.[0-9A-Za-z_-]{20,}"  # Google OAuth access tokens
-    r"|\bxox[abposr]-[A-Za-z0-9-]{10,}"  # Slack
-    r"|\b\d{8,10}:[A-Za-z0-9_-]{35}"  # Telegram bot tokens
-    r"|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"  # AWS access keys
-    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
-    # A card number in groups: 4-4-4-(1 to 7) digits, or Amex's 4-6-5.
-    r"|(?<!\d)\d{4}(?:[ -]\d{4}){2}[ -]\d{1,7}(?!\d)"
-    r"|(?<!\d)\d{4}[ -]\d{6}[ -]\d{4,5}(?!\d)"
-    # A secret stated outright: "my password is ...", "PIN: 4821".
-    r"|(?i:\b(?:password|passcode|passphrase|passwd|pin(?:\s+code)?|cvv|cvc|"
-    r"security\s+code|api[\s_-]?key|secret[\s_-]?key|client[\s_-]?secret|"
-    r"private[\s_-]?key|(?:access|auth|bearer|bot|refresh|api)?[\s_-]?token|"
-    r"recovery\s+(?:code|phrase)|seed\s+phrase)"
-    r"\s*(?:is|was|=|:)\s*\S)"
-)
+# What memory.remember refuses as a secret is policy MEMORY of the shared
+# detector (services/security): every key and token format, card numbers
+# (any 13-19 digit run, or written in groups), bank and ID numbers, and a
+# password, PIN or token stated outright. A memory is sent with every future
+# prompt, so a false refusal (the model asks the user to reword) costs far
+# less than a stored secret. Contact details are allowed: a phone number is
+# an ordinary fact about the user.
 
 
 def looks_like_secret(text: str) -> bool:
-    """True when *text* holds what memory.remember must never store: a
-    value the audit log would redact, a common key or token format, a card
-    number in groups, or a password, PIN or token stated outright."""
-    return contains_sensitive_value(text) or _SECRET_RE.search(text) is not None
+    """True when *text* holds what memory.remember must never store: a key
+    or token, a card, bank or ID number, or a password, PIN or token stated
+    outright (policy MEMORY). A detector error counts as True."""
+    return contains(text, MEMORY)
 
 
 MEMORY_OFF_ERROR = (
@@ -119,8 +105,8 @@ MEMORY_FULL_ERROR = (
     "in Crawler AI, then ask again."
 )
 SECRET_ERROR = (
-    "This looks like a password, key, token or card number. Crawler never "
-    "saves secrets to memory, because memories are sent with every future "
+    "This looks like a password, key, token, card, bank or ID number. Crawler "
+    "never saves secrets to memory, because memories are sent with every future "
     "conversation; nothing was saved."
 )
 CARD_TOO_LONG_ERROR = (
@@ -187,12 +173,15 @@ def _proposal(params: Mapping[str, Any]) -> tuple[Optional[_Proposal], Optional[
         return None, _error("'content' must not contain null bytes.", "invalid_arguments")
     try:
         # The REST route's check: trims, refuses empty and over-long text,
-        # and refuses anything the injection scanner flags.
+        # anything the injection scanner flags, and secrets (policy MEMORY).
         text = screen_memory_content(content)
+    except MemorySecretRejected as exc:
+        # Its own wording for a secret; the screen's for a memory the
+        # detector could not check (refused all the same).
+        said = SECRET_ERROR if str(exc) == SECRET_REJECTED_MESSAGE else str(exc)
+        return None, _error(said, "secret")
     except MemoryRejected as exc:
         return None, _error(str(exc), "memory_screen")
-    if looks_like_secret(text):
-        return None, _error(SECRET_ERROR, "secret")
     kind = MemoryCategory(category.strip().lower())
     problem = _card_problem(text, kind)
     if problem is not None:

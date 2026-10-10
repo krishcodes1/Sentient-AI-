@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from services.agent import risk
 from services.agent.permissions import ActionCategory
 
 from ..base import ConnectorError, UserConfirmationRequired, path_segment
@@ -39,6 +40,13 @@ _IMPORTANCE = ("low", "normal", "high")
 _STATUS_FILTERS = ("open", "completed", "all")
 
 _LIST_ID = {"type": "string", "description": "Task list id from list_task_lists", "required": True}
+_NEW_TASK_LIST_ID = {
+    "type": "string",
+    "description": "Task list id from list_task_lists (default: your default To Do list)",
+}
+# The default list ("Tasks") is the one To Do marks with this name.
+_DEFAULT_LIST = "defaultList"
+_LIST_SCAN = 50
 _TASK_ID = {"type": "string", "description": "Task id from list_tasks", "required": True}
 _LIMIT = {"type": "integer", "description": "How many (default 10, max 50)"}
 
@@ -63,16 +71,23 @@ TODO_ACTIONS: tuple[ToolSpec, ...] = (
     ),
     ToolSpec(
         "create_task",
-        "Add a task to a Microsoft To Do list.",
+        "Add a task to a Microsoft To Do list (default: the user's default list).",
         ActionCategory.WRITE,
         _schema(
-            list_id=_LIST_ID,
+            list_id=_NEW_TASK_LIST_ID,
             title={"type": "string", "required": True},
             note={"type": "string", "description": "Optional plain-text note"},
             due_date={"type": "string", "description": "Optional due date, YYYY-MM-DD"},
             importance={"type": "string", "enum": list(_IMPORTANCE)},
         ),
         required_scope="tasks.write",
+        risk="low",
+        # To Do lists can be shared with other people: a named list asks
+        # first, like a calendar or a Drive folder (standing consent never
+        # covers writing where others may read it).
+        risk_check=risk.when_given("list_id", "medium", "it writes to a list that may be shared"),
+        ref_args=("list_id",),
+        low_risk_note="add tasks to your default To Do list",
     ),
     ToolSpec(
         "update_task",
@@ -94,6 +109,9 @@ TODO_ACTIONS: tuple[ToolSpec, ...] = (
         ActionCategory.WRITE,
         _schema(list_id=_LIST_ID, task_id=_TASK_ID),
         required_scope="tasks.write",
+        risk="low",
+        ref_args=("list_id", "task_id"),
+        low_risk_note="mark To Do tasks done",
     ),
     ToolSpec(
         "delete_task",
@@ -184,23 +202,35 @@ class TodoActions(GraphBase):
         items = await self._graph_list(_task_path(lid), params, limit=top)
         return [_task_summary(item) for item in items]
 
+    async def _default_list_id(self) -> str:
+        """The id of the user's default To Do list (To Do's "Tasks")."""
+        items = await self._graph_list("/todo/lists", {}, limit=_LIST_SCAN)
+        for item in items:
+            list_id = text_of(item.get("id"))
+            if text_of(item.get("wellknownListName"), 64) == _DEFAULT_LIST and list_id:
+                return list_id
+        raise ConnectorError("Your default To Do list was not found. Name a list from list_task_lists.")
+
     async def create_task(
         self,
-        list_id: Any,
-        title: Any,
+        list_id: Any = None,
+        title: Any = None,
         note: Any = None,
         due_date: Any = None,
         importance: Any = None,
         *,
         user_confirmed: bool = False,
     ) -> dict[str, Any]:
-        lid = require_id(list_id, "list_id")
+        lid = require_id(list_id, "list_id") if list_id not in (None, "") else None
         fields = _task_fields(title, note, due_date, importance, creating=True)
         if not user_confirmed:
+            where = f"To Do list {lid}" if lid else "your default To Do list"
             raise UserConfirmationRequired(
                 action="create_task",
-                details=f"Add the task '{fields['title']}' to To Do list {lid}.",
+                details=f"Add the task '{fields['title']}' to {where}.",
             )
+        if lid is None:
+            lid = await self._default_list_id()
         created = await self._graph_object("POST", _task_path(lid), json=fields)
         return _task_summary(created)
 

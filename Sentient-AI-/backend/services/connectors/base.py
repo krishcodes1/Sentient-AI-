@@ -36,6 +36,7 @@ from core.http_pinning import (
     pin_for_request,
     pin_key,
 )
+from services.security.secrets import looks_like_credential
 
 logger = structlog.get_logger(__name__)
 
@@ -258,12 +259,9 @@ NON_CREDENTIAL_HEADERS = frozenset(
 # spaces. Free text never is (a vendor error body can quote the request,
 # including a token).
 _VENDOR_CODE_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
-# Codes shaped like a credential are dropped even when they match above.
-_TOKEN_LIKE_RE = re.compile(
-    r"^(xox[a-z]-|xapp-|gh[opusr]_|github_pat_|secret_|ntn_|ya29\.|1//|"
-    r"gocspx-|sk-|bearer|eyj)",
-    re.IGNORECASE,
-)
+# Codes shaped like a credential are dropped even when they match above
+# (services.security.secrets.looks_like_credential: a credential prefix, or
+# any credential the shared detector finds).
 
 _STATUS_HINTS: dict[int, str] = {
     403: "missing permission or scope",
@@ -318,7 +316,7 @@ def _vendor_error_code(
         if (
             isinstance(candidate, str)
             and _VENDOR_CODE_RE.fullmatch(candidate)
-            and not _TOKEN_LIKE_RE.match(candidate)
+            and not looks_like_credential(candidate)
             and not _overlaps_secret(candidate, secrets)
         ):
             return candidate

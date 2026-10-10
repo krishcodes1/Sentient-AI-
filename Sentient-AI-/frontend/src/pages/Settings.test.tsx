@@ -45,6 +45,14 @@ vi.mock("@/services/api", () => {
     // Permissions ▸ Apps allowed for a week: none unless a test says so.
     listAppApprovals: vi.fn(async () => []),
     revokeAppApproval: vi.fn(),
+    // Permissions ▸ Tutor locks (owner only): none, tutor mode on, no Canvas.
+    listTutorLocks: vi.fn(async () => ({ enabled: true, locks: [] })),
+    createTutorLock: vi.fn(),
+    deleteTutorLock: vi.fn(),
+    listTutorCanvasCourses: vi.fn(async () => ({ available: false, courses: [] })),
+    // Permissions ▸ Accounts allowed low-risk changes: none unless a test says so.
+    listPermissionGrants: vi.fn(async () => []),
+    revokePermissionGrant: vi.fn(),
     // Owner-only Payment card section: an install with a vault and no card.
     getVaultItems: vi.fn(async () => ({ items: [], available: true, reason: "" })),
     saveVaultCard: vi.fn(),
@@ -86,6 +94,8 @@ import {
   getTelegramStatus,
   getVaultItems,
   listAppApprovals,
+  listPermissionGrants,
+  listTutorLocks,
   logout,
   removeTelegramToken,
   saveProvider,
@@ -626,6 +636,81 @@ describe("Settings apps allowed for a week", () => {
     const region = await screen.findByRole("region", { name: "Apps allowed for a week" });
     expect(await within(region).findByText("Calendar")).toBeInTheDocument();
     expect(within(region).getByRole("button", { name: "Revoke Calendar (this browser)" })).toBeEnabled();
+    const permissions = screen.getByRole("heading", { name: "Permissions" }).closest("section");
+    expect(permissions).toContainElement(region);
+  });
+});
+
+describe("Settings tutor locks", () => {
+  afterEach(() => {
+    vi.mocked(getMe).mockReset();
+    vi.mocked(listTutorLocks).mockClear();
+  });
+
+  it("shows the owner the Tutor locks inside Permissions", async () => {
+    vi.mocked(getMe).mockResolvedValue(user({ is_admin: true }));
+    render(<Settings />);
+
+    const region = await screen.findByRole("region", { name: "Tutor locks" });
+    expect(await within(region).findByText(/No tutor locks/)).toBeInTheDocument();
+    const permissions = screen.getByRole("heading", { name: "Permissions" }).closest("section");
+    expect(permissions).toContainElement(region);
+    expect(listTutorLocks).toHaveBeenCalled();
+  });
+
+  it("never shows them, or asks for them, for an account that is not the owner", async () => {
+    vi.mocked(getMe).mockResolvedValue(user({ is_admin: false }));
+    render(<Settings />);
+
+    await waitFor(() => expect(screen.getByLabelText("Name")).toHaveValue("Me"));
+    expect(screen.queryByRole("region", { name: "Tutor locks" })).not.toBeInTheDocument();
+    expect(listTutorLocks).not.toHaveBeenCalled();
+  });
+});
+
+describe("Settings permission tiers", () => {
+  afterEach(() => {
+    vi.mocked(getMe).mockReset();
+  });
+
+  it("offers Allow low-risk changes and says plainly what each tier does", async () => {
+    vi.mocked(getMe).mockResolvedValue(user({ default_permission_tier: "auto_approve" }));
+    render(<Settings />);
+
+    const select = await screen.findByLabelText("Default Permission Tier");
+    await waitFor(() => expect(select).toHaveValue("auto_approve"));
+    expect(
+      screen.getByText(/^Changes run without asking, except sends, deletes, sharing and other high-risk actions\./),
+    ).toBeInTheDocument();
+    fireEvent.change(select, { target: { value: "low_risk" } });
+    expect(screen.getByText(/^Only low-risk changes run without asking\./)).toBeInTheDocument();
+    // An account tier alone does not loosen a connection that is stricter.
+    expect(screen.getByText(/the stricter one wins, so a connection left on User Confirm keeps asking\./)).toBeInTheDocument();
+    fireEvent.change(select, { target: { value: "user_confirm" } });
+    expect(screen.getByText(/^Every change needs your approval; reads run without asking\./)).toBeInTheDocument();
+  });
+
+  it("lists low-risk grants inside Permissions, with Revoke, for an account that is not the owner too", async () => {
+    vi.mocked(getMe).mockResolvedValue(user({ is_admin: false }));
+    vi.mocked(listPermissionGrants).mockResolvedValue([
+      {
+        id: "g1",
+        connector_id: "c1",
+        account: "School Gmail",
+        connector_type: "google_workspace",
+        kind: "low_risk",
+        granted_from: "telegram",
+        granted_at: "2026-09-30T15:14:00Z",
+        expires_at: "2026-10-07T15:14:00Z",
+        last_used_at: null,
+        uses: 0,
+      },
+    ]);
+    render(<Settings />);
+
+    const region = await screen.findByRole("region", { name: "Accounts allowed low-risk changes" });
+    expect(await within(region).findByText("School Gmail")).toBeInTheDocument();
+    expect(within(region).getByRole("button", { name: "Revoke low-risk changes on School Gmail" })).toBeEnabled();
     const permissions = screen.getByRole("heading", { name: "Permissions" }).closest("section");
     expect(permissions).toContainElement(region);
   });

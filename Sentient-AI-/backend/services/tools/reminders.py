@@ -150,15 +150,46 @@ class ReminderToolkit:
     # -- Actions -------------------------------------------------------------
 
     async def now(self, user_id: str) -> dict[str, Any]:
-        """The current time, in UTC and in the server's local zone with offset."""
+        """The current time, in UTC and in the server's local zone with
+        offset, plus the user's own local time when their time zone is
+        saved (``users.timezone``; a container's server zone is UTC)."""
         local = datetime.now().astimezone()
-        return {
+        result: dict[str, Any] = {
             "ok": True,
             "now_utc": local.astimezone(timezone.utc).isoformat(timespec="seconds"),
             "now_local": local.isoformat(timespec="seconds"),
             "timezone": local.tzname() or "UTC",
             "weekday": local.strftime("%A"),
         }
+        zone_name = await self._user_zone(user_id)
+        if zone_name:
+            from services.scheduler.timezones import parse_zone
+
+            zone, _error = parse_zone(zone_name)
+            if zone is not None:
+                mine = local.astimezone(zone)
+                result["user_timezone"] = zone_name
+                result["now_user_local"] = mine.isoformat(timespec="seconds")
+                result["user_weekday"] = mine.strftime("%A")
+        return result
+
+    async def _user_zone(self, user_id: str) -> Optional[str]:
+        """The user's saved time zone, or None (no database, no zone, or a
+        read that failed: the clock still answers)."""
+        owner = self._owner(user_id)
+        if self._session_factory is None or owner is None:
+            return None
+        from models.user import User
+
+        try:
+            async with self._session_factory() as session:
+                value = (
+                    await session.execute(select(User.timezone).where(User.id == owner))
+                ).scalar_one_or_none()
+        except Exception as exc:  # noqa: BLE001 - the clock must still answer
+            logger.warning("reminders_now_zone_unreadable", error_type=type(exc).__name__)
+            return None
+        return value if isinstance(value, str) and value else None
 
     async def create(
         self,

@@ -60,7 +60,8 @@ EXPECTED: dict[str, tuple[ActionCategory, bool]] = {
     "create_draft": (W, False), "send_draft": (W, True), "modify_labels": (W, False),
     "trash_message": (D, True),
     "get_events": (R, False), "check_availability": (R, False), "list_calendars": (R, False),
-    "create_event": (W, False), "update_event": (W, False), "respond_to_invite": (W, False),
+    # respond_to_invite answers the organizer: always-confirm (permission tiers).
+    "create_event": (W, False), "update_event": (W, False), "respond_to_invite": (W, True),
     "delete_event": (D, True),
     "search_files": (R, False), "get_file_text": (R, False), "list_folder": (R, False),
     "upload_file": (W, False), "create_folder": (W, False), "move_file": (W, False),

@@ -17,6 +17,7 @@ import type {
   PendingApproval,
   ApprovalDecisionResponse,
   AppApproval,
+  PermissionGrant,
   Connector,
   ConnectorHealthEntry,
   ConnectorTestResult,
@@ -40,6 +41,7 @@ import type {
   Message,
   ToolCall,
   TurnImage,
+  UploadedFile,
   BlockedAction,
   UsageSummary,
   CapabilityStatus,
@@ -227,6 +229,7 @@ async function request<T>(
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...deviceHeader(),
+    ...timezoneHeader(),
     ...((options.headers as Record<string, string>) || {}),
   };
 
@@ -386,22 +389,26 @@ export async function deleteConversation(conversationId: string): Promise<void> 
  * that has not shipped image support yet sees exactly the request it saw
  * before — only a turn that actually carries an image can be rejected by it.
  */
-function turnBody(content: string, images?: string[]): string {
-  return JSON.stringify(
-    images && images.length > 0 ? { content, images } : { content },
-  );
+function turnBody(content: string, images?: string[], fileIds?: string[]): string {
+  return JSON.stringify({
+    content,
+    ...(images && images.length > 0 ? { images } : {}),
+    // Uploaded documents ride along by id (top10:file_extraction).
+    ...(fileIds && fileIds.length > 0 ? { file_ids: fileIds } : {}),
+  });
 }
 
 export async function sendMessage(
   conversationId: string,
   content: string,
-  images?: string[]
+  images?: string[],
+  fileIds?: string[],
 ): Promise<AgentTurnResponse> {
   return request<AgentTurnResponse>(
     `/agent/conversations/${conversationId}/messages`,
     {
       method: "POST",
-      body: turnBody(content, images),
+      body: turnBody(content, images, fileIds),
     }
   );
 }
@@ -440,6 +447,7 @@ export async function streamMessage(
   handlers: StreamHandlers,
   signal?: AbortSignal,
   images?: string[],
+  fileIds?: string[],
 ): Promise<void> {
   // An agent turn can run for minutes; renewing first means a long one
   // cannot start on a token that lapses halfway through.
@@ -452,9 +460,10 @@ export async function streamMessage(
       headers: {
         "Content-Type": "application/json",
         ...deviceHeader(),
+        ...timezoneHeader(),
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
-      body: turnBody(content, images),
+      body: turnBody(content, images, fileIds),
       signal,
     },
   );
@@ -574,13 +583,15 @@ export async function getPendingApprovals(): Promise<PendingApproval[]> {
 /**
  * Approve or deny a parked tool call. `remember: "week"` comes from a card's
  * "Allow {app} for 7 days" button: it approves this act and allows the app
- * for 7 days, for requests from this browser. Without it the body is
- * `{approved}` alone, exactly as before the weekly button existed.
+ * for 7 days, for requests from this browser. `remember: "low_risk"` comes
+ * from "Allow low-risk changes on {account} for 7 days": it approves this
+ * change and lets that account make low-risk changes without asking for 7
+ * days. Without either the body is `{approved}` alone, exactly as before.
  */
 export async function decideApproval(
   actionId: string,
   approved: boolean,
-  remember?: "week"
+  remember?: "week" | "low_risk"
 ): Promise<ApprovalDecisionResponse> {
   return request<ApprovalDecisionResponse>(`/agent/approvals/${actionId}`, {
     method: "POST",
@@ -1087,3 +1098,123 @@ export async function completeSetup(body: { allow_registration: boolean }): Prom
 export async function clearStoredSecrets(): Promise<void> {
   await request<void>("/setup/secrets", { method: "DELETE" });
 }
+
+// top10:secret_pii_redaction
+
+// top10:file_extraction
+/**
+ * Uploads one document for the chat as soon as it is picked: the raw file
+ * as the request body (never base64 in JSON), its type in Content-Type and
+ * its name, URL-encoded, in X-File-Name. The server reads it right away and
+ * answers what it found (pages, scanned pages it could not read) or why it
+ * could not read it (an ApiError whose message is ready to show).
+ */
+export async function uploadFile(file: File, signal?: AbortSignal): Promise<UploadedFile> {
+  await ensureFreshToken();
+  const token = localStorage.getItem("auth_token");
+  const response = await fetch(`${API_BASE}/files`, {
+    method: "POST",
+    headers: {
+      "Content-Type": file.type || "application/octet-stream",
+      "X-File-Name": encodeURIComponent(file.name || "file"),
+      ...deviceHeader(),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: file,
+    signal,
+  });
+  if (!response.ok) {
+    const errorBody = await response.json().catch(() => ({}));
+    if (response.status === 401) handleUnauthorized();
+    throw new ApiError(
+      errorDetailToMessage(errorBody.detail, `Upload failed: ${response.statusText}`),
+      response.status,
+    );
+  }
+  return response.json();
+}
+
+/** Forgets an uploaded document (its stored text); 404 when it is gone. */
+export async function deleteFile(fileId: string): Promise<void> {
+  await request<void>(`/files/${encodeURIComponent(fileId)}`, { method: "DELETE" });
+}
+
+// top10:scheduler_briefing
+/**
+ * The browser's IANA time zone as `X-Crawler-Timezone` (none where the runtime cannot say). Sent
+ * with every request, so a chat message lets the server save the user's zone when it is new or
+ * changed (after checking it is a real zone): scheduled tasks and the model's clock then use the
+ * user's own local time even when the server runs in UTC.
+ */
+function timezoneHeader(): Record<string, string> {
+  const zone = browserTimeZone();
+  return zone ? { "X-Crawler-Timezone": zone } : {};
+}
+
+// top10:tutor_mode
+import type {
+  ConversationTutor,
+  TutorCanvasCourses,
+  TutorLock,
+  TutorLockCreate,
+  TutorLockList,
+} from "@/types";
+
+/** Every tutor lock on this Crawler, and whether tutor mode is on at all. Owner only (403). */
+export async function listTutorLocks(): Promise<TutorLockList> {
+  return request<TutorLockList>("/tutor/locks");
+}
+
+/** Create a tutor lock. A rule refusing it is a 422 whose message says why. Owner only. */
+export async function createTutorLock(body: TutorLockCreate): Promise<TutorLock> {
+  return request<TutorLock>("/tutor/locks", { method: "POST", body: JSON.stringify(body) });
+}
+
+/** Remove a tutor lock: the chats it held go back to each person's own switch. Owner only. */
+export async function deleteTutorLock(id: string): Promise<void> {
+  return request<void>(`/tutor/locks/${id}`, { method: "DELETE" });
+}
+
+/** The owner's own Canvas courses for the lock form; `available` is false without Canvas. */
+export async function listTutorCanvasCourses(): Promise<TutorCanvasCourses> {
+  return request<TutorCanvasCourses>("/tutor/canvas-courses");
+}
+
+/** One conversation's tutor mode. */
+export async function getConversationTutor(conversationId: string): Promise<ConversationTutor> {
+  return request<ConversationTutor>(`/agent/conversations/${conversationId}/tutor`);
+}
+
+/** Switch tutor mode on or off for a conversation, as /tutor on and /tutor off do. */
+export async function setConversationTutor(
+  conversationId: string,
+  on: boolean,
+): Promise<ConversationTutor> {
+  return request<ConversationTutor>(`/agent/conversations/${conversationId}/tutor`, {
+    method: "PUT",
+    body: JSON.stringify({ on }),
+  });
+}
+
+// top10:knowledge_base
+
+// top10:flashcards_quizzes
+
+// top10:event_triggers
+
+// top10:permission_tiers
+/** Settings ▸ Permissions ▸ Accounts allowed low-risk changes: this account's live low-risk
+ *  grants, soonest to expire first. */
+export async function listPermissionGrants(): Promise<PermissionGrant[]> {
+  return request<PermissionGrant[]>("/agent/permission-grants");
+}
+
+/** End a low-risk grant now; that account's next change gets a card again. 404 when it is not
+ *  this account's or no longer live. */
+export async function revokePermissionGrant(id: string): Promise<void> {
+  return request<void>(`/agent/permission-grants/${id}`, { method: "DELETE" });
+}
+
+// top10:voice_notes
+
+// top10:video_transcripts

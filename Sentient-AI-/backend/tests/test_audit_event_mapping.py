@@ -74,3 +74,17 @@ def test_success_events_are_recorded_as_approved():
 def test_refusal_events_are_recorded_as_blocked():
     for event in ("tool_blocked", "tool_denied", "tool_expired", "input_blocked"):
         assert _EVENT_STATUS[event] is AuditStatus.blocked
+
+
+def test_permission_tier_events_are_recorded_as_approved():
+    """A grant made or taken back, and a tier changed, are the owner's own
+    decisions (services.agent.permission_grants): recorded, not refused."""
+    from services.agent import permission_grants
+
+    for event in (
+        permission_grants.EVENT_GRANTED,
+        permission_grants.EVENT_REVOKED,
+        permission_grants.EVENT_CONNECTOR_TIER,
+        permission_grants.EVENT_ACCOUNT_TIER,
+    ):
+        assert _EVENT_STATUS[event] is AuditStatus.approved, event

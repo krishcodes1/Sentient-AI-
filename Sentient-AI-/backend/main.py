@@ -75,6 +75,7 @@ from services.notifications.slack import SlackChannel
 from services.notifications.slack_manager import SlackManager
 from services.notifications.telegram import NotifyingApprovalStore, TelegramService
 from services.notifications.telegram_manager import TelegramManager
+from services.notifications.voice import voice_notes_for  # top10:voice_notes
 from services.tools.system import SystemToolkit
 from services.platform import current as current_platform
 from services.tools.browser import guard as browser_guard
@@ -125,10 +126,65 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     page_watch_service: PageWatchService = app.state.page_watches
     await page_watch_service.start()
 
+    # top10:secret_pii_redaction
+
+    # top10:file_extraction
+    # Uploads whose 30 days since their last read have passed are purged
+    # once at startup (and lazily per user on every upload, list and read).
+    try:
+        await app.state.file_intake.store.purge_expired()
+    except Exception as exc:  # a purge must never keep the API down
+        logger.warning("user_files_purge_failed", error_type=type(exc).__name__)
+
+    # top10:scheduler_briefing
+    await app.state.schedules.start()
+
+    # top10:tutor_mode
+
+    # top10:knowledge_base
+    # The meaning-index sweeper; it sends nothing while its switch is off.
+    await app.state.knowledge_embedder.start()
+
+    # top10:flashcards_quizzes
+
+    # top10:event_triggers
+    await app.state.triggers.start()
+
+    # top10:permission_tiers
+
+    # top10:voice_notes
+
+    # top10:video_transcripts
+    await app.state.transcript_janitor.start()
+
     yield
     logger.info("shutting_down_crawler_ai")
     await reminder_service.stop()
     await page_watch_service.stop()
+    # top10:video_transcripts
+    await app.state.transcript_janitor.stop()
+
+    # top10:voice_notes
+
+    # top10:permission_tiers
+
+    # top10:event_triggers
+    await app.state.triggers.stop()
+
+    # top10:flashcards_quizzes
+
+    # top10:knowledge_base
+    await app.state.knowledge_embedder.stop()
+
+    # top10:tutor_mode
+
+    # top10:scheduler_briefing
+    await app.state.schedules.stop()
+
+    # top10:file_extraction
+
+    # top10:secret_pii_redaction
+
     await app.state.telegram_manager.stop()
     await app.state.slack_manager.stop()
     # Release every provider's HTTP client (cached, and retired but still
@@ -158,6 +214,12 @@ def _wire_telegram(
     in memory), so the photo card works only in the process that made it."""
     service.decide = agent.build_decision_applier(app, session_factory)
     service.chat = agent.build_chat_applier(app, session_factory)
+    # /tutor on|off|status (services/tutor): no model call, outside the turn lock.
+    service.tutor = agent.build_tutor_applier(app, session_factory, channel="telegram")
+    # top10:voice_notes: voice notes go through the process's one
+    # VoiceNoteService (made here on the first start, which comes before
+    # the end of wire_services).
+    service.voice = voice_notes_for(app, session_factory)
     executor = getattr(app.state, "tool_executor", None)
     if executor is not None:
         service.approval_image = lambda action: executor.approval_image(
@@ -277,6 +339,8 @@ def _wire_slack(
     turns write into the user's "Slack" conversation."""
     channel.decide = agent.build_decision_applier(app, session_factory)
     channel.chat = agent.build_chat_applier(app, session_factory, channel="slack")
+    # "tutor on|off|status" in the DM (services/tutor).
+    channel.tutor = agent.build_tutor_applier(app, session_factory, channel="slack")
 
 
 def fan_out_notify(
@@ -534,6 +598,196 @@ async def wire_services(
         enabled=_page_watch_enabled,
     )
 
+    # top10:secret_pii_redaction
+    # "Hide personal details from the AI provider": the runtime reads it once
+    # per turn (a gate error counts as hide; a local Ollama turn ignores it).
+    async def _personal_details_hidden() -> bool:
+        return "hide_personal_details" in await installation.enabled_keys()
+
+    app.state.agent_runtime.use_personal_details_gate(_personal_details_hidden)
+
+    # top10:file_extraction
+    # Documents: the executor built the files toolkit (the parser sandbox,
+    # the opened-document registry and the encrypted upload store). The
+    # upload route, the chat paths and the channels share them through the
+    # intake, which reads "Read files and documents" through the executor's
+    # capability gate and writes file_uploaded / file_upload_refused rows.
+    from services.files.intake import FileIntake
+
+    app.state.files = tool_executor.files_toolkit
+    app.state.file_intake = FileIntake(
+        tool_executor.files_toolkit.store,
+        gate=tool_executor.file_reading_refusal,
+        audit=RuntimeAuditLogger(session_factory=session_factory).log,
+    )
+
+    # top10:scheduler_briefing
+    # Scheduled tasks and the daily briefing: the unattended runner (fenced
+    # agent turns), the toolkit the REST routes and chat commands share, and
+    # the sweeper, which re-reads each kind's switch before every claim and
+    # run and sends results only to the user's own linked chats.
+    from services.notifications.schedules import ScheduleService
+    from services.scheduler import commands as schedule_commands
+    from services.scheduler.briefing import BriefingReader
+    from services.tools.schedule import ScheduleToolkit
+
+    app.state.unattended_runner = agent.build_unattended_runner(app, session_factory)
+    app.state.schedule_toolkit = ScheduleToolkit(session_factory)
+    app.state.schedules = ScheduleService(
+        session_factory,
+        runner=app.state.unattended_runner,
+        senders={"telegram": telegram_manager.send_text, "slack": slack_manager.send_text},
+        enabled_keys=installation.enabled_keys,
+        briefing_reader=BriefingReader(
+            permissions=RuntimePermissionAdapter(capability_gate=installation.capability_statuses),
+            executor=tool_executor,
+            audit=RuntimeAuditLogger(session_factory=session_factory),
+        ),
+        runtime=lambda: getattr(app.state, "agent_runtime", None),
+    )
+    schedule_commands.configure(
+        schedule_commands.ScheduleBackend(
+            toolkit=app.state.schedule_toolkit,
+            service=app.state.schedules,
+            session_factory=session_factory,
+        )
+    )
+
+    # top10:tutor_mode
+
+    # top10:knowledge_base
+    # The knowledge base: the executor built its toolkit (connector sources
+    # run through the executor itself, uploads through the files toolkit).
+    # Here it gets the owner's limits and the embedding source (the
+    # install-wide provider, or Ollama); the meaning-index sweeper re-reads
+    # knowledge_semantic before every sweep; Telegram's "/kb <collection>"
+    # caption saves a file while knowledge_base is on.
+    from services.knowledge import channels as knowledge_channels
+    from services.knowledge.embedder import KnowledgeEmbedService
+    from services.knowledge.embeddings import EmbeddingSource
+    from services.notifications.sweeper import capability_gate
+
+    knowledge = tool_executor.knowledge_toolkit
+    knowledge_embeddings = EmbeddingSource(installation)
+
+    async def _knowledge_settings() -> dict[str, Any]:
+        return await installation.capability_settings("knowledge_base")
+
+    knowledge.use_settings(_knowledge_settings)
+    knowledge.use_embeddings(knowledge_embeddings)
+    app.state.knowledge = knowledge
+    app.state.knowledge_embedder = KnowledgeEmbedService(
+        session_factory,
+        source=knowledge_embeddings,
+        enabled=capability_gate(installation, "knowledge_semantic"),
+        settings=_knowledge_settings,
+        vector_cache=knowledge.service.vector_cache,
+    )
+    knowledge_channels.configure(
+        knowledge_channels.TelegramBackend(
+            toolkit=knowledge,
+            enabled=capability_gate(installation, "knowledge_base"),
+            audit=RuntimeAuditLogger(session_factory=session_factory).log,
+        )
+    )
+
+    # top10:flashcards_quizzes
+    # Flashcards: the executor built the study toolkit. Its daily "cards are
+    # due" reminder is a nudge on the schedule service (the study_due
+    # renderer registers on import), the one-time download links are shared
+    # with the export route, and the model-free Telegram and Slack reviews
+    # re-read the owner's study switch for every command.
+    from services.agent.tool_registry import study_toolkit_of
+    from services.study import channel as study_channel
+    from services.study import nudges as _study_nudges  # noqa: F401 - registers study_due
+
+    study_toolkit = study_toolkit_of(tool_executor)
+    study_toolkit.use_nudges(app.state.schedules)
+    app.state.study_exports = study_toolkit.exports
+
+    async def _study_enabled() -> bool:
+        return "study" in await installation.enabled_keys()
+
+    study_channel.configure(
+        study_channel.StudyChannel(
+            study_toolkit.engine, enabled=_study_enabled, session_factory=session_factory
+        )
+    )
+
+    # top10:event_triggers
+    # App-event triggers: the toolkit the executor built (told whether the
+    # unattended runner is wired, so run_task is refused before a card when
+    # it is not), the chat commands' backend, and the sweeper, which re-reads
+    # both switches before every check and run, reads apps only through the
+    # executor, runs tasks only through the one unattended runner, and
+    # messages only the user's own linked chats. Page-watch changes reach the
+    # page.changed triggers through the watch sweeper's hook.
+    from services.notifications.event_triggers import TriggerService
+    from services.triggers import commands as trigger_commands
+
+    trigger_toolkit = tool_executor.triggers_toolkit
+    trigger_toolkit.set_runner_available(
+        lambda: getattr(app.state, "unattended_runner", None) is not None
+    )
+    app.state.trigger_toolkit = trigger_toolkit
+
+    async def _triggers_enabled() -> bool:
+        return "event_triggers" in await installation.enabled_keys()
+
+    async def _trigger_runs_enabled() -> bool:
+        return "trigger_runs" in await installation.enabled_keys()
+
+    app.state.triggers = TriggerService(
+        session_factory,
+        executor=tool_executor,
+        send=fan_out_send(
+            {"telegram": telegram_manager.send_text, "slack": slack_manager.send_text}
+        ),
+        enabled=_triggers_enabled,
+        runs_enabled=_trigger_runs_enabled,
+        runner=getattr(app.state, "unattended_runner", None),
+    )
+    app.state.page_watches.on_change = app.state.triggers.enqueue_page_change
+    trigger_commands.configure(
+        trigger_commands.TriggerBackend(toolkit=trigger_toolkit, session_factory=session_factory)
+    )
+
+    # top10:permission_tiers
+    # Low-risk grants ("Allow low-risk changes on <account> for 7 days"): one
+    # store for the runtime (decisions, cards, approvals) and the executor's
+    # standing-consent backstop.
+    from services.agent.permission_grants import DbPermissionGrantStore
+
+    permission_grants = DbPermissionGrantStore(session_factory=session_factory)
+    app.state.agent_runtime.use_permission_grants(permission_grants)
+    tool_executor.use_permission_grants(permission_grants)
+
+    # top10:voice_notes
+    # Telegram voice notes: one VoiceNoteService per process (the local
+    # worker slot and the per-user quota live on it), reading the owner's
+    # two voice switches through the capability gate per note.
+    voice_notes_for(app, session_factory)
+
+    # top10:video_transcripts
+    # Video and podcast transcripts: the executor built the toolkit (its
+    # transcript cache shares the app's session factory). The owner's limits
+    # (minutes per call and per day, days kept) and the audit log that gets
+    # video_provider_read rows are wired in here, and the janitor purges
+    # expired transcripts every 6 hours whether or not the switch is on.
+    from services.notifications.transcripts import TranscriptJanitor
+
+    tool_executor.video_toolkit.use(
+        settings=installation,
+        audit=RuntimeAuditLogger(session_factory=session_factory).log,
+    )
+
+    async def _keep_transcripts_days() -> int:
+        return (await installation.video_limits())["keep_transcripts_days"]
+
+    app.state.transcript_janitor = TranscriptJanitor(
+        tool_executor.video_toolkit.store, keep_days=_keep_transcripts_days
+    )
+
 
 _is_production = settings.ENVIRONMENT == "production"
 
@@ -573,8 +827,9 @@ app.add_middleware(
     # Enumerate exactly what the SPA uses; wildcards + credentials is a
     # combination browsers reject and an unnecessarily wide surface anyway.
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    # DEVICE_HEADER: the browser's device id, for weekly app approvals.
-    allow_headers=["Authorization", "Content-Type", "X-Request-ID", DEVICE_HEADER],
+    # DEVICE_HEADER: the browser's device id, for weekly app approvals;
+    # X-Crawler-Timezone: the browser's IANA zone, for scheduled tasks.
+    allow_headers=["Authorization", "Content-Type", "X-Request-ID", DEVICE_HEADER, "X-Crawler-Timezone"],
 )
 
 # ── Routers ───────────────────────────────────────────────────────────────────
@@ -592,6 +847,43 @@ app.include_router(capabilities.router, prefix="/api")
 app.include_router(setup.router, prefix="/api")
 app.include_router(vault.router, prefix="/api")  # vault
 app.include_router(app_approvals.router, prefix="/api")
+# top10:secret_pii_redaction
+
+# top10:file_extraction
+from api.routes import files as files_routes
+
+app.include_router(files_routes.router, prefix="/api")
+
+# top10:scheduler_briefing
+from api.routes import schedules as schedules_routes
+
+app.include_router(schedules_routes.router, prefix="/api")
+
+# top10:tutor_mode
+from api.routes import tutor as tutor_routes  # noqa: E402
+
+app.include_router(tutor_routes.router, prefix="/api")
+
+# top10:knowledge_base
+
+# top10:flashcards_quizzes
+from api.routes import study as study_routes
+
+app.include_router(study_routes.router, prefix="/api")
+
+# top10:event_triggers
+from api.routes import triggers as triggers_routes  # noqa: E402
+
+app.include_router(triggers_routes.router, prefix="/api")
+
+# top10:permission_tiers
+from api.routes import permission_grants as permission_grants_routes
+
+app.include_router(permission_grants_routes.router, prefix="/api")
+
+# top10:voice_notes
+
+# top10:video_transcripts
 
 
 @app.get("/")

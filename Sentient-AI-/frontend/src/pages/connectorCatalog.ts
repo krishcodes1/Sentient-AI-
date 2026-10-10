@@ -73,7 +73,15 @@ export const MCP_ENTRY: ConnectorTypeInfo = {
       "MCP servers are third-party tools. Every tool call they expose requires your explicit approval, and tools that look financial are blocked entirely.",
   },
   scopes: { read: [], write: [] },
+  // Every MCP tool call asks: nothing there is ever low-risk.
+  low_risk: [],
 };
+
+/** What "Allow low-risk changes" lets a connector do without asking, as its notes ("star or
+ *  label emails"); empty for one with no low-risk actions (or a server that predates them). */
+export function lowRiskNotes(entry: ConnectorTypeInfo | undefined): string[] {
+  return (entry?.low_risk ?? []).map((item) => item.note);
+}
 
 /** The entries the page offers: every creatable catalog entry, then MCP. */
 export function catalogEntries(types: readonly ConnectorTypeInfo[]): ConnectorTypeInfo[] {

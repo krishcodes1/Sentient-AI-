@@ -18,7 +18,7 @@ and hands build_chat_applier / build_decision_applier to the Telegram bot.
 """
 
 from __future__ import annotations
-from typing import Any, Dict, List, Literal, Optional, Union, get_args
+from typing import Any, Dict, List, Literal, NamedTuple, Optional, Sequence, Union, get_args
 
 import asyncio
 import base64
@@ -29,6 +29,7 @@ import re
 import time
 import uuid
 from collections import OrderedDict, deque
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -66,6 +67,11 @@ from services.agent.runtime import (
     tool_call_facts,
 )
 from services.agent.tool_registry import ConnectorSpec, build_tools, effective_tier, resolve_tool
+from services.files.intake import InboundFile  # top10:file_extraction
+from services.scheduler.timezones import TIMEZONE_HEADER, remember_zone
+from services.tutor import service as tutor_service
+from services.tutor.commands import parse_tutor_command
+from services.tutor.state import TutorTurn
 
 logger = structlog.get_logger(__name__)
 
@@ -281,6 +287,8 @@ ImageMediaType = Literal["image/png", "image/jpeg", "image/webp", "image/gif"]
 ALLOWED_IMAGE_TYPES = get_args(ImageMediaType)
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 MAX_IMAGES_PER_MESSAGE = 4
+# top10:file_extraction: uploaded files one message may carry.
+MAX_FILES_PER_MESSAGE = 5
 
 # data:<media type>;base64,<payload> — the form a browser's FileReader
 # produces, accepted so the client does not have to split it apart.
@@ -365,9 +373,14 @@ class SendMessageRequest(BaseModel):
     images: list[ImageAttachment] = Field(
         default_factory=list, max_length=MAX_IMAGES_PER_MESSAGE
     )
+    # top10:file_extraction: ids of files this user uploaded (POST
+    # /api/files); each must be theirs (422 otherwise). The message keeps
+    # their metadata; the model is told about them by a note in history and
+    # reads them with files.read.
+    file_ids: list[uuid.UUID] = Field(default_factory=list, max_length=MAX_FILES_PER_MESSAGE)
 
     def is_empty(self) -> bool:
-        return not self.content.strip() and not self.images
+        return not self.content.strip() and not self.images and not self.file_ids
 
 
 class MessageResponse(BaseModel):
@@ -450,6 +463,10 @@ class PendingApprovalOut(BaseModel):
     # None when the card offers only Approve and Deny
     # (services.agent.app_approvals).
     weekly_app: Optional[str] = None
+    # The account the card's "Allow low-risk changes" button allows for 7
+    # days ("School Gmail"), or None when the card offers no grant
+    # (services.agent.permission_grants).
+    low_risk_account: Optional[str] = None
 
 
 class BlockedActionOut(BaseModel):
@@ -476,12 +493,19 @@ class ApprovalDecisionRequest(BaseModel):
     # "week": the card's "Allow for 7 days" button. Also allows the card's
     # app for a week for requests from this browser (the X-Crawler-Device
     # header); without the header, or on a card that offers no week, the
-    # card is approved once.
-    remember: Optional[Literal["week"]] = None
+    # card is approved once. "low_risk": the card's "Allow low-risk changes
+    # on <account> for 7 days" button; on a card that offers no grant, or
+    # when the action no longer grades LOW, the card is approved once.
+    remember: Optional[Literal["week", "low_risk"]] = None
 
 
 class WeeklyApprovalOut(BaseModel):
     app: str
+    expires_at: str
+
+
+class LowRiskGrantOut(BaseModel):
+    account: str
     expires_at: str
 
 
@@ -491,7 +515,8 @@ class ApprovalDecisionResponse(BaseModel):
     view only, as a turn's ``images`` are; ``message_id`` is the transcript
     row that records the decision, which they belong under (its saved
     tool call keeps the placeholder, spec §9). ``weekly`` is the app the
-    decision allowed for a week, and until when."""
+    decision allowed for a week, and until when; ``low_risk`` the account
+    it allowed low-risk changes on for 7 days, and until when."""
 
     action_id: str
     approved: bool
@@ -499,6 +524,7 @@ class ApprovalDecisionResponse(BaseModel):
     images: list[TurnImageOut] = []
     message_id: Optional[str] = None
     weekly: Optional[WeeklyApprovalOut] = None
+    low_risk: Optional[LowRiskGrantOut] = None
 
 
 # ---------------------------------------------------------------------------
@@ -526,18 +552,42 @@ async def _capability_view(installation: Any) -> tuple[frozenset[str], str]:
     return enabled, render_permissions_block(statuses)
 
 
+class TurnContext(NamedTuple):
+    """What one turn is built with, from _build_tools_and_memory: the
+    offered tools, the memory block and the ``<permissions>`` block.
+
+    Callers read it by attribute, so a field added later (always with a
+    default) changes no call site."""
+
+    tools: list
+    memory_block: Optional[str]
+    permissions_text: str
+    # The conversation's tutor mode (services/tutor), when the turn runs in
+    # a conversation and the tutor_mode capability is on; the caller hands
+    # it to runtime.chat(tutor=...) and persists it after the turn.
+    tutor: Optional[TutorTurn] = None
+
+
 async def _build_tools_and_memory(
     mcp_catalog: Any,
     current_user: User,
     db: AsyncSession,
     installation: Any = None,
-) -> tuple[list, Optional[str], str]:
+    *,
+    conversation: Optional[Conversation] = None,
+    tutor_channel: str = "web",
+) -> TurnContext:
     """Build the runtime tool list (connector + MCP tools), the memory
     block and the permissions block for a user. Shared by the blocking and
     streaming send paths so both offer exactly the same tools and context.
     Takes the MCP catalog and installation service directly (not a
     Request) so out-of-band callers — the Telegram approval poller — can
     run the same pipeline without an HTTP request.
+
+    ``conversation`` is the one the turn runs in, when the caller has it:
+    its tutor mode is loaded into ``TurnContext.tutor`` (from the same
+    capability report as the tools), with ``tutor_channel`` ("web",
+    "telegram" or "slack") naming the off command its replies mention.
     """
     conn_result = await db.execute(
         select(ConnectorConfig).where(
@@ -611,7 +661,16 @@ async def _build_tools_and_memory(
         )
         memory_block = render_memory_block(list(mem_result.scalars().all()))
 
-    return tools, memory_block, permissions_text
+    tutor = await tutor_service.load_tutor_turn(
+        db,
+        current_user,
+        conversation,
+        enabled=tutor_service.CAPABILITY_KEY in enabled_capabilities,
+        channel=tutor_channel,
+    )
+    return TurnContext(
+        tools=tools, memory_block=memory_block, permissions_text=permissions_text, tutor=tutor
+    )
 
 
 async def _get_owned_conversation(
@@ -669,6 +728,151 @@ def _attach_images(
             ),
         ],
     }
+
+
+# -- Attached files (top10:file_extraction) -----------------------------------
+
+
+def _file_notes(attachments: Any) -> str:
+    """The attachment notes for a user message's stored file entries, one
+    line each ("[Attached file: 'x.pdf' (PDF, 12 pages) - file_id ...]")."""
+    if not isinstance(attachments, list):
+        return ""
+    from services.files.prompting import attachment_note
+
+    return "\n".join(
+        attachment_note(entry)
+        for entry in attachments
+        if isinstance(entry, dict) and entry.get("kind") == "file"
+    )
+
+
+def _history_from_rows(rows: list[Any], *, skip_id: Any = None) -> list[dict[str, Any]]:
+    """A turn's history from Message rows: role and content, with a user
+    message's attachment notes added to its content (the file's text never
+    is: the model reads it with files.read). *skip_id* leaves one row out
+    (the decision row a resumed turn replaces)."""
+    history: list[dict[str, Any]] = []
+    for row in rows:
+        if skip_id is not None and row.id == skip_id:
+            continue
+        content = row.content
+        if row.role == MessageRole.user:
+            notes = _file_notes(getattr(row, "attachments", None))
+            if notes:
+                content = f"{content}\n\n{notes}" if content else notes
+        history.append({"role": row.role.value, "content": content})
+    return history
+
+
+async def _file_attachments(request: Request, user: User, file_ids: list[uuid.UUID]) -> list[dict[str, Any]]:
+    """The attachment entries for a web message's ``file_ids``, in order;
+    422 when one is not this user's upload (or has expired)."""
+    if not file_ids:
+        return []
+    intake = getattr(request.app.state, "file_intake", None)
+    if intake is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Attached files are not available in this process.",
+        )
+    entries: list[dict[str, Any]] = []
+    seen: set[uuid.UUID] = set()
+    for file_id in file_ids:
+        if file_id in seen:
+            continue
+        seen.add(file_id)
+        info = await intake.store.get_info(str(user.id), file_id)
+        if info is None:
+            raise HTTPException(
+                status_code=422,
+                detail="An attached file was not found: it expired, was forgotten or is not yours.",
+            )
+        entries.append(info.attachment())
+    return entries
+
+
+async def _channel_attachments(
+    app: Any,
+    user_id: str,
+    files: Optional[Sequence[Any]],
+    images: Optional[list[Any]],
+) -> tuple[list[dict[str, Any]], Optional[dict[str, Any]]]:
+    """The attachment entries for a channel message (its files read and
+    stored through the intake, its photos' metadata), or the outcome that
+    ends the turn: "I couldn't read <name>: <reason>" for the first file
+    that could not be read (nothing else is sent and no model is called)."""
+    entries: list[dict[str, Any]] = []
+    if files:
+        intake = getattr(app.state, "file_intake", None)
+        if intake is None:
+            return [], {"error": "Reading files is not set up in this process."}
+        result = await intake.ingest(user_id, list(files)[:MAX_FILES_PER_MESSAGE])
+        if result.errors:
+            first = result.errors[0]
+            return [], {
+                "error": f"I couldn't read {first.name}: {first.message}",
+                "file_error": first.code,
+            }
+        entries.extend(info.attachment() for info in result.files)
+    for image in (images or [])[:MAX_IMAGES_PER_MESSAGE]:
+        try:
+            validated = image if isinstance(image, ImageAttachment) else ImageAttachment.model_validate(image)
+        except ValueError:
+            return [], {"error": "That photo can't be used: it is too large or not a supported image."}
+        entries.append(validated.metadata())
+    return entries, None
+
+
+# -- Channel metadata and usage seeds (top10:voice_notes) ----------------------
+
+# At most this many entries a channel may attach itself, and the value types
+# an entry may hold: metadata only (a voice note's engine, length, digest),
+# never bytes or nested data, so nothing large or binary reaches the row.
+_MAX_CHANNEL_ENTRIES = 5
+_MAX_ENTRY_KEYS = 20
+_USAGE_KEYS = frozenset({"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"})
+
+
+def _channel_metadata(entries: Optional[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """The metadata entries a channel attached, kept to plain facts: dicts
+    with a string ``kind``, short string keys and scalar values, no ``data``
+    key (audio and images are never stored), at most five."""
+    kept: list[dict[str, Any]] = []
+    for entry in entries or []:
+        if not isinstance(entry, dict) or not isinstance(entry.get("kind"), str):
+            continue
+        clean: dict[str, Any] = {}
+        for key, value in list(entry.items())[:_MAX_ENTRY_KEYS]:
+            if not isinstance(key, str) or key == "data" or len(key) > 40:
+                continue
+            if value is None or isinstance(value, (bool, int, float)):
+                clean[key] = value
+            elif isinstance(value, str):
+                clean[key] = value[:200]
+        kept.append(clean)
+        if len(kept) >= _MAX_CHANNEL_ENTRIES:
+            break
+    return kept
+
+
+def _seed_usage(seed: Optional[dict[str, int]]) -> dict[str, int]:
+    """A usage seed as TurnUsage sums it: the known token counters, whole
+    and not negative."""
+    return {
+        key: int(value)
+        for key, value in (seed or {}).items()
+        if key in _USAGE_KEYS and isinstance(value, int) and not isinstance(value, bool) and value >= 0
+    }
+
+
+def _stored_tool_calls(tool_calls: Any) -> Any:
+    """A turn's tool calls as a Message row keeps them: images replaced by
+    their placeholder (spec §9) and files.* results as facts only (the
+    text stays in the encrypted store)."""
+    from services.files.facts import stored_tool_calls
+
+    return stored_tool_calls(redact_binary_for_model(tool_calls))
 
 
 def _usage_columns(
@@ -908,6 +1112,27 @@ async def send_message(
     stop_mark = agent_cancel.mark(str(current_user.id))
 
     conversation = await _get_owned_conversation(conversation_id, current_user, db)
+    file_entries = await _file_attachments(request, current_user, body.file_ids)
+
+    # A whole-message /tutor command (services/tutor) is applied here and
+    # answered with fixed text: no model call.
+    # A message with images or files attached is a normal turn.
+    tutor_command = (
+        None if body.images or body.file_ids else parse_tutor_command(body.content, slash_required=True)
+    )
+    if tutor_command is not None:
+        tutor_user_row, tutor_reply_row = await _record_tutor_command(
+            db,
+            current_user,
+            conversation,
+            tutor_command,
+            body.content.strip(),
+            getattr(request.app.state, "installation", None),
+        )
+        return AgentTurnResponse(
+            user_message=MessageResponse.model_validate(tutor_user_row),
+            assistant_message=MessageResponse.model_validate(tutor_reply_row),
+        )
 
     # 1. Persist the user message. Only attachment METADATA is stored; see
     #    models.conversation.Message.attachments for why the bytes are not.
@@ -915,7 +1140,7 @@ async def send_message(
         conversation_id=conversation.id,
         role=MessageRole.user,
         content=body.content.strip(),
-        attachments=[image.metadata() for image in body.images] or None,
+        attachments=[image.metadata() for image in body.images] + file_entries or None,
     )
     db.add(user_message)
     await db.flush()
@@ -928,7 +1153,7 @@ async def send_message(
         .order_by(Message.created_at)
     )
     rows = list(history_result.scalars().all())
-    history = [{"role": m.role.value, "content": m.content} for m in rows]
+    history = _history_from_rows(rows)
     task_id = _task_id_of(rows)
     _attach_images(history, body.images)
 
@@ -936,15 +1161,18 @@ async def send_message(
     #    runtime's permission adapter and executor (injected at startup)
     #    handle tiering, approval, and dispatch. A user with no connectors
     #    gets an empty list and simply chats with the LLM.
-    tools, memory_block, permissions_text = await _build_tools_and_memory(
+    turn_context = await _build_tools_and_memory(
         getattr(request.app.state, "mcp_catalog", None),
         current_user,
         db,
         getattr(request.app.state, "installation", None),
+        conversation=conversation,
     )
     # The tools this conversation loaded through tools.find (already on the
     # row read above: no extra query). The turn updates it in place.
     loaded_tools = LoadedTools.from_stored(conversation.loaded_tools)
+    # The browser's zone, for scheduled tasks and reminders.now.
+    remember_zone(current_user, request.headers.get(TIMEZONE_HEADER))
 
     # Release the pooled connection before the LLM turn: committing ends
     # the transaction, so the minutes a slow provider can take are not
@@ -956,17 +1184,18 @@ async def send_message(
     try:
         agent_response = await runtime.chat(
             messages=history,
-            tools=tools,
+            tools=turn_context.tools,
             user_id=str(current_user.id),
             conversation_id=str(conversation.id),
             llm_provider=current_user.llm_provider,
             llm_model=current_user.llm_model,
-            memory_block=memory_block,
-            permissions_text=permissions_text,
+            memory_block=turn_context.memory_block,
+            permissions_text=turn_context.permissions_text,
             task_id=task_id,
             stop_mark=stop_mark,
             loaded_tools=loaded_tools,
             channel=web_channel(request),
+            tutor=turn_context.tutor,
         )
     except ProviderNotConfigured as exc:
         # Not an upstream failure: no key for the provider this turn needs.
@@ -996,7 +1225,7 @@ async def send_message(
         role=MessageRole.assistant,
         content=agent_response.content,
         # Image data is delivered, never stored (spec §9): the row keeps the placeholder the model saw.
-        tool_calls=redact_binary_for_model(agent_response.tool_calls) or None,
+        tool_calls=_stored_tool_calls(agent_response.tool_calls) or None,
         **_usage_columns(
             agent_response.usage, agent_response.provider, agent_response.model
         ),
@@ -1006,6 +1235,8 @@ async def send_message(
     if loaded_tools.changed:
         # Rides the updated_at UPDATE above: no statement of its own.
         conversation.loaded_tools = loaded_tools.names
+    # Merged over what is stored now: a /tutor sent while the turn ran stays.
+    await tutor_service.persist_tutor_state(db, conversation, turn_context.tutor)
     await db.flush()
     await db.refresh(assistant_message)
 
@@ -1033,6 +1264,7 @@ async def send_message(
                 risk_note=pa.risk_note,
                 image=pa.image,
                 weekly_app=pa.weekly_app,
+                low_risk_account=pa.low_risk_account,
             )
             for pa in agent_response.pending_approvals
         ],
@@ -1067,13 +1299,15 @@ async def _persist_assistant_detached(
     llm_provider: Optional[str] = None,
     llm_model: Optional[str] = None,
     loaded_tools: Optional[LoadedTools] = None,
+    tutor: Optional[TutorTurn] = None,
 ) -> None:
     """Persist an assistant turn outside any request session.
 
     Used when the SSE consumer disconnected before the turn was saved: the
     turn's side effects (tools that executed) already happened, so the
     transcript must record them — otherwise the rebuilt history would show
-    no reply and the model would repeat the side effect on retry.
+    no reply and the model would repeat the side effect on retry. A tutor
+    mode change the turn made (``tutor``) is merged in with it.
     """
     try:
         async with _detached_session_factory() as session:
@@ -1082,7 +1316,7 @@ async def _persist_assistant_detached(
                     conversation_id=conversation_id,
                     role=MessageRole.assistant,
                     content=content,
-                    tool_calls=redact_binary_for_model(tool_calls) or None,
+                    tool_calls=_stored_tool_calls(tool_calls) or None,
                     **_usage_columns(usage, llm_provider, llm_model),
                 )
             )
@@ -1091,6 +1325,7 @@ async def _persist_assistant_detached(
                 conversation.updated_at = datetime.now(timezone.utc)
                 if loaded_tools is not None and loaded_tools.changed:
                     conversation.loaded_tools = loaded_tools.names
+                await tutor_service.persist_tutor_state(session, conversation, tutor)
             await session.commit()
         logger.info(
             "assistant_turn_persisted_after_disconnect",
@@ -1144,12 +1379,35 @@ async def stream_message(
     stop_mark = agent_cancel.mark(str(current_user.id))
 
     conversation = await _get_owned_conversation(conversation_id, current_user, db)
+    file_entries = await _file_attachments(request, current_user, body.file_ids)
+
+    # /tutor on|off|status: applied here and answered over the same frames a
+    # turn uses, with no model call (see send_message).
+    # A message with images or files attached is a normal turn.
+    tutor_command = (
+        None if body.images or body.file_ids else parse_tutor_command(body.content, slash_required=True)
+    )
+    if tutor_command is not None:
+        tutor_user_row, tutor_reply_row = await _record_tutor_command(
+            db,
+            current_user,
+            conversation,
+            tutor_command,
+            body.content.strip(),
+            getattr(request.app.state, "installation", None),
+        )
+        await db.commit()
+        return StreamingResponse(
+            _tutor_command_frames(tutor_user_row, tutor_reply_row),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+        )
 
     user_message = Message(
         conversation_id=conversation.id,
         role=MessageRole.user,
         content=body.content.strip(),
-        attachments=[image.metadata() for image in body.images] or None,
+        attachments=[image.metadata() for image in body.images] + file_entries or None,
     )
     db.add(user_message)
     await db.flush()
@@ -1162,23 +1420,28 @@ async def stream_message(
         .order_by(Message.created_at)
     )
     rows = list(history_result.scalars().all())
-    history = [{"role": m.role.value, "content": m.content} for m in rows]
+    history = _history_from_rows(rows)
     task_id = _task_id_of(rows)
     _attach_images(history, body.images)
     installation = getattr(request.app.state, "installation", None)
-    tools, memory_block, permissions_text = await _build_tools_and_memory(
+    turn_context = await _build_tools_and_memory(
         getattr(request.app.state, "mcp_catalog", None),
         current_user,
         db,
         installation,
+        conversation=conversation,
     )
     # Updated in place by the turn (tools.find); saved with the reply below.
     loaded_tools = LoadedTools.from_stored(conversation.loaded_tools)
+    # Likewise tutor mode (services/tutor), merged in when it is saved.
+    tutor = turn_context.tutor
     conv_id = conversation.id
     user_provider = current_user.llm_provider
     user_model = current_user.llm_model
     user_id_str = str(current_user.id)
     channel = web_channel(request)
+    # The browser's zone, for scheduled tasks and reminders.now.
+    remember_zone(current_user, request.headers.get(TIMEZONE_HEADER))
 
     # Release the pooled connection for the duration of the stream: the
     # session object stays usable (persistence below reacquires briefly),
@@ -1197,6 +1460,7 @@ async def stream_message(
             response.provider,
             response.model,
             loaded_tools,
+            tutor,
         )
 
     async def event_stream():
@@ -1215,18 +1479,19 @@ async def stream_message(
             try:
                 async for event in runtime.stream_chat(
                     messages=history,
-                    tools=tools,
+                    tools=turn_context.tools,
                     user_id=user_id_str,
                     conversation_id=str(conv_id),
                     llm_provider=user_provider,
                     llm_model=user_model,
-                    memory_block=memory_block,
+                    memory_block=turn_context.memory_block,
                     on_orphaned=_persist_orphaned,
-                    permissions_text=permissions_text,
+                    permissions_text=turn_context.permissions_text,
                     task_id=task_id,
                     stop_mark=stop_mark,
                     loaded_tools=loaded_tools,
                     channel=channel,
+                    tutor=tutor,
                 ):
                     etype = event.get("type", "message")
                     data = event.get("data", {})
@@ -1290,13 +1555,14 @@ async def stream_message(
                     conversation_id=conv_id,
                     role=MessageRole.assistant,
                     content=final_content,
-                    tool_calls=redact_binary_for_model(tool_calls_payload) or None,
+                    tool_calls=_stored_tool_calls(tool_calls_payload) or None,
                     **_usage_columns(usage_payload, turn_provider, turn_model),
                 )
                 db.add(assistant)
                 conversation.updated_at = datetime.now(timezone.utc)
                 if loaded_tools.changed:
                     conversation.loaded_tools = loaded_tools.names
+                await tutor_service.persist_tutor_state(db, conversation, tutor)
                 await db.flush()
                 await db.refresh(assistant)
                 assistant_out = MessageResponse.model_validate(assistant).model_dump()
@@ -1335,6 +1601,7 @@ async def stream_message(
                         turn_provider,
                         turn_model,
                         loaded_tools,
+                        tutor,
                     )
                 )
 
@@ -1347,6 +1614,142 @@ async def stream_message(
             "Connection": "keep-alive",
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Tutor mode (services/tutor): /tutor typed in a web chat, the web toggle,
+# and the chat channels' applier. Commands never call the model.
+# ---------------------------------------------------------------------------
+
+
+async def _tutor_enabled(installation: Any) -> bool:
+    """Whether the owner's tutor_mode switch is on now, from the same
+    capability report every turn's tools come from."""
+    enabled, _permissions_text = await _capability_view(installation)
+    return tutor_service.CAPABILITY_KEY in enabled
+
+
+def _tutor_when_denied() -> str:
+    return capability_registry.get(tutor_service.CAPABILITY_KEY).when_denied
+
+
+async def _record_tutor_command(
+    db: AsyncSession,
+    user: User,
+    conversation: Conversation,
+    command: str,
+    content: str,
+    installation: Any,
+    *,
+    channel: str = "web",
+) -> tuple[Message, Message]:
+    """Apply a /tutor command to *conversation* and write both rows: the
+    person's message and a platform-written reply (no provider, model or
+    token columns: no model was called). The caller commits."""
+    user_row = Message(conversation_id=conversation.id, role=MessageRole.user, content=content)
+    db.add(user_row)
+    await db.flush()
+    outcome = await tutor_service.apply_command(
+        db,
+        user,
+        conversation,
+        command,
+        enabled=await _tutor_enabled(installation),
+        channel=channel,
+        when_denied=_tutor_when_denied(),
+    )
+    reply_row = Message(
+        conversation_id=conversation.id, role=MessageRole.assistant, content=outcome.reply
+    )
+    db.add(reply_row)
+    conversation.updated_at = datetime.now(timezone.utc)
+    await db.flush()
+    await db.refresh(user_row)
+    await db.refresh(reply_row)
+    return user_row, reply_row
+
+
+async def _tutor_command_frames(user_row: Message, reply_row: Message) -> AsyncIterator[str]:
+    """The SSE frames a /tutor command answers with: the ones a turn sends
+    (user_message, content_delta, done, saved), so the web needs nothing new."""
+    yield _sse("user_message", {"user_message": MessageResponse.model_validate(user_row).model_dump()})
+    yield _sse("content_delta", {"text": reply_row.content})
+    yield _sse("done", {"content": reply_row.content, "tool_calls": [], "usage": {}})
+    yield _sse("saved", {"assistant_message": MessageResponse.model_validate(reply_row).model_dump()})
+
+
+class TutorStateOut(BaseModel):
+    """One conversation's tutor mode, as the web shows it."""
+
+    # The owner's tutor_mode switch; everything below is "off" without it.
+    enabled: bool
+    # "off" | "on" | "locked"
+    mode: str
+    # The person's own switch (a lock holds the chat whatever it says).
+    user_on: bool
+    # "course" | "account" while an owner lock holds the chat.
+    lock_scope: Optional[str] = None
+    # The lock's label ("MATH 221", "this account") while locked.
+    locked_by: Optional[str] = None
+    off_command: str
+
+
+class TutorStateUpdate(BaseModel):
+    on: bool
+
+
+class TutorStateUpdateOut(TutorStateOut):
+    # The same fixed reply a /tutor command gets.
+    message: str
+
+
+@router.get("/conversations/{conversation_id}/tutor", response_model=TutorStateOut)
+async def get_conversation_tutor(
+    conversation_id: uuid.UUID,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> TutorStateOut:
+    """One of the user's conversations' tutor mode (404 for anyone else's)."""
+    conversation = await _get_owned_conversation(conversation_id, current_user, db)
+    turn = await tutor_service.load_tutor_turn(
+        db,
+        current_user,
+        conversation,
+        enabled=await _tutor_enabled(getattr(request.app.state, "installation", None)),
+        channel="web",
+    )
+    return TutorStateOut(**tutor_service.view_of(turn).as_dict())
+
+
+@router.put("/conversations/{conversation_id}/tutor", response_model=TutorStateUpdateOut)
+async def set_conversation_tutor(
+    conversation_id: uuid.UUID,
+    body: TutorStateUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> TutorStateUpdateOut:
+    """Switch tutor mode on or off for one of the user's conversations, as
+    /tutor on and /tutor off do (audited, via "ui"). An owner lock still
+    holds the chat after "off"; the answer says so. 409 with the
+    capability's sentence while the owner's switch is off."""
+    conversation = await _get_owned_conversation(conversation_id, current_user, db)
+    enabled = await _tutor_enabled(getattr(request.app.state, "installation", None))
+    if not enabled:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=_tutor_when_denied())
+    outcome = await tutor_service.apply_command(
+        db,
+        current_user,
+        conversation,
+        "on" if body.on else "off",
+        enabled=True,
+        channel="web",
+        when_denied=_tutor_when_denied(),
+        via="ui",
+    )
+    await db.flush()
+    return TutorStateUpdateOut(**outcome.view.as_dict(), message=outcome.reply)
 
 
 @router.get("/approvals", response_model=list[PendingApprovalOut])
@@ -1367,6 +1770,7 @@ async def list_pending_approvals(
             risk_note=p.risk_note,
             image=p.image,
             weekly_app=p.weekly_app,
+            low_risk_account=p.low_risk_account,
         )
         for p in pending
     ]
@@ -1395,7 +1799,7 @@ async def _recent_messages(
     history never needs."""
     rows = (
         await db.execute(
-            select(Message.id, Message.role, Message.content)
+            select(Message.id, Message.role, Message.content, Message.attachments)
             .where(Message.conversation_id == conversation_id)
             .order_by(Message.created_at.desc())
             .limit(limit)
@@ -1414,7 +1818,7 @@ def _unfinished_turn_message(
         conversation_id=conversation_id,
         role=MessageRole.assistant,
         content=content,
-        tool_calls=redact_binary_for_model(turn.tool_calls) or None,
+        tool_calls=_stored_tool_calls(turn.tool_calls) or None,
         **_usage_columns(turn.usage, turn.provider, turn.model),
     )
 
@@ -1571,11 +1975,7 @@ async def _resume_after_approval(
     """
     rows = await _recent_messages(db, conversation.id)
     if approved is not None:
-        history = [
-            {"role": r.role.value, "content": r.content}
-            for r in rows
-            if r.id != approved.row_id
-        ]
+        history = _history_from_rows(rows, skip_id=approved.row_id)
         # The model is told a picture reached the person only when the
         # channel forwards one (_channel_image: the web chat and Telegram
         # deliver the same set, from _apply_decision).
@@ -1591,16 +1991,26 @@ async def _resume_after_approval(
             }
         )
     else:
-        history = [{"role": r.role.value, "content": r.content} for r in rows]
+        history = _history_from_rows(rows)
     if not history:
         return None
     # The decision row is an assistant message, so this is still the user
     # message that started the task: the resume keeps its caps.
     task_id = _task_id_of(rows)
 
-    tools, memory_block, permissions_text = await _build_tools_and_memory(
-        mcp_catalog, current_user, db, installation
+    turn_context = await _build_tools_and_memory(
+        mcp_catalog,
+        current_user,
+        db,
+        installation,
+        conversation=conversation,
+        tutor_channel=_tutor_channel_of(conversation),
     )
+    if turn_context.tutor is not None:
+        # The newest user-role message here is the approved call's result
+        # (or the message the paused turn already read): tool output never
+        # engages a tutor lock.
+        turn_context.tutor.text_engages = False
     loaded_tools = LoadedTools.from_stored(conversation.loaded_tools)
     # Return the pooled connection before the (potentially minutes-long)
     # resumed turn; everything written so far — the decision message — is
@@ -1610,19 +2020,20 @@ async def _resume_after_approval(
     try:
         agent_response = await runtime.chat(
             messages=history,
-            tools=tools,
+            tools=turn_context.tools,
             user_id=str(current_user.id),
             conversation_id=str(conversation.id),
             llm_provider=current_user.llm_provider,
             llm_model=current_user.llm_model,
-            memory_block=memory_block,
-            permissions_text=permissions_text,
+            memory_block=turn_context.memory_block,
+            permissions_text=turn_context.permissions_text,
             task_id=task_id,
             usage_sink=turn,
             stop_mark=stop_mark,
             event_sink=on_event,
             loaded_tools=loaded_tools,
             channel=channel,
+            tutor=turn_context.tutor,
         )
     except asyncio.CancelledError:
         # Stopped from a chat channel mid-turn: keep the calls already
@@ -1634,13 +2045,14 @@ async def _resume_after_approval(
         # Written with the caller's flush (it bumps updated_at in the same
         # UPDATE) or the session's final commit.
         conversation.loaded_tools = loaded_tools.names
+    await tutor_service.persist_tutor_state(db, conversation, turn_context.tutor)
     if not (agent_response.content or "").strip():
         return None
     message = Message(
         conversation_id=conversation.id,
         role=MessageRole.assistant,
         content=agent_response.content,
-        tool_calls=redact_binary_for_model(agent_response.tool_calls) or None,
+        tool_calls=_stored_tool_calls(agent_response.tool_calls) or None,
         **_usage_columns(
             agent_response.usage, agent_response.provider, agent_response.model
         ),
@@ -1747,11 +2159,23 @@ async def _apply_decision(
     task_id = await _parked_task_id(db, current_user, action_id) if approved else None
     result, conversation, recorded = await _finish_even_if_cancelled(
         _decide_and_record(
-            db, runtime, current_user, action_id, approved, task_id, remember, channel
+            db,
+            runtime,
+            current_user,
+            action_id,
+            approved,
+            task_id,
+            remember,
+            channel,
+            installation=installation,
         )
     )
     # For the resumed turn only; never shown to the user.
     resume_stop_mark = result.pop("resume_stop_mark", None)
+    if approved and "error" not in result and result.get("origin"):
+        # A card an unattended run parked: its one call ran and is recorded;
+        # no model turn resumes (services.agent.unattended).
+        return await _finish_origin_card(db, result, conversation)
     if "error" in result or conversation is None or not approved:
         return result
 
@@ -1843,6 +2267,29 @@ async def _apply_decision(
     return result
 
 
+async def _finish_origin_card(
+    db: AsyncSession, result: Dict[str, Any], conversation: Optional[Conversation]
+) -> Dict[str, Any]:
+    """Close an approved card that an unattended run parked: one line,
+    "Done: <tool> ran.", in the run's conversation and as the channel's
+    reply. Nothing else runs: the scheduled turn that proposed the call is
+    over, and an approval unlocks that one call, not a new turn."""
+    tool = str(result.get("tool") or "the action")
+    outcome = result.get("result")
+    failed = isinstance(outcome, dict) and (
+        outcome.get("ok") is False or bool(outcome.get("error"))
+    )
+    line = f"Not done: {tool} reported an error." if failed else f"Done: {tool} ran."
+    if conversation is not None:
+        db.add(Message(conversation_id=conversation.id, role=MessageRole.assistant, content=line))
+        conversation.updated_at = datetime.now(timezone.utc)
+        await db.flush()
+    result.pop("origin", None)
+    result["assistant_reply"] = line
+    result["assistant_notes"] = {}
+    return result
+
+
 # The pause before a failed resumed turn is run again (see _apply_decision).
 RESUME_RETRY_DELAY_S = 2.0
 
@@ -1907,12 +2354,24 @@ async def _decide_and_record(
     task_id: Optional[str] = None,
     remember: Optional[str] = None,
     channel: Optional[Channel] = None,
+    installation: Any = None,
 ) -> tuple[Dict[str, Any], Optional[Conversation], Optional[Message]]:
     """Apply the decision (on approval: run the tool under ``task_id``'s
     caps, and with ``remember="week"`` allow its app for a week from
     ``channel``) and commit the transcript row that records it. Returns the
     runtime's result, the conversation the row went into and the row
-    itself (both None when there was none to write)."""
+    itself (both None when there was none to write).
+
+    A card for a tool tutor mode withholds (canvas.submit_assignment) is
+    never approved while its conversation is in tutor mode (a card made
+    before the mode came on): it is closed as denied, the refusal audited,
+    and the error says why."""
+    if approved:
+        tutor_refusal = await tutor_service.approval_refusal(
+            db, current_user, action_id, enabled=await _tutor_enabled(installation)
+        )
+        if tutor_refusal is not None:
+            return await _refuse_in_tutor_mode(db, runtime, current_user, action_id, tutor_refusal)
     # Release the pooled connection before the decision: an approval
     # executes the real tool (connector/MCP HTTP), which does not need it.
     await db.commit()
@@ -1960,6 +2419,52 @@ async def _decide_and_record(
     # Durable before anything that can be interrupted runs.
     await db.commit()
     return result, conversation, recorded
+
+
+async def _refuse_in_tutor_mode(
+    db: AsyncSession, runtime: AgentRuntime, current_user: User, action_id: str, reason: str
+) -> tuple[Dict[str, Any], Optional[Conversation], Optional[Message]]:
+    """Close a card tutor mode will not let through (the store's denial,
+    audited as tool_denied), file the refusal under policy tutor_mode, note
+    it in the card's conversation, and answer the refusal as the error."""
+    await db.commit()
+    denied = await runtime.deny_action(action_id, str(current_user.id))
+    if "error" in denied:
+        return denied, None, None
+    tool_name = str(denied.get("tool", ""))
+    try:
+        await tutor_service.audit_approval_refusal(db, current_user, action_id, tool_name, reason)
+        conv_uuid = uuid.UUID(str(denied.get("conversation_id")))
+        conversation = (
+            await db.execute(
+                select(Conversation).where(
+                    Conversation.id == conv_uuid, Conversation.user_id == current_user.id
+                )
+            )
+        ).scalar_one_or_none()
+        if conversation is not None:
+            db.add(
+                Message(
+                    conversation_id=conversation.id,
+                    role=MessageRole.assistant,
+                    content=f"[Refused] The pending action '{tool_name}' was not executed. {reason}",
+                )
+            )
+            conversation.updated_at = datetime.now(timezone.utc)
+        await db.commit()
+    except (ValueError, TypeError):
+        await db.commit()
+    return {"error": reason}, None, None
+
+
+def _tutor_channel_of(conversation: Any) -> str:
+    """The channel a conversation's tutor replies are written for: the chat
+    channel whose thread it is (CHANNEL_CONVERSATION_TITLES), else the web."""
+    title = getattr(conversation, "title", None)
+    return next(
+        (name for name, channel_title in CHANNEL_CONVERSATION_TITLES.items() if channel_title == title),
+        "web",
+    )
 
 
 async def _finish_even_if_cancelled(coro: Any) -> Any:
@@ -2074,9 +2579,38 @@ def build_decision_applier(app: Any, session_factory: Any = async_session):
             **outcome,
             # The app the tap allowed for a week, for the card's own line.
             **({"weekly": result["weekly"]} if result.get("weekly") else {}),
+            # The account the tap allowed low-risk changes on, and until when.
+            **({"low_risk": result["low_risk"]} if result.get("low_risk") else {}),
         }
 
     return apply
+
+
+def build_unattended_runner(app: Any, session_factory: Any = async_session):
+    """The runner for turns nobody is watching (scheduled tasks; event
+    triggers in wave 2), hung on ``app.state.unattended_runner``: the same
+    tools, permissions block and usage columns as a chat turn, with no MCP
+    tools (no catalog), no memory block, a fresh history, no channel and
+    the unattended fence (services/automation/turns.py)."""
+    from services.automation.turns import UnattendedTurnRunner
+
+    installation = getattr(app.state, "installation", None)
+
+    async def build_context(user: User, db: AsyncSession, conversation: Conversation) -> TurnContext:
+        return await _build_tools_and_memory(None, user, db, installation, conversation=conversation)
+
+    async def settings_source() -> dict[str, Any]:
+        if installation is None:
+            return {}
+        return await installation.capability_settings("scheduled_tasks")
+
+    return UnattendedTurnRunner(
+        runtime=lambda: getattr(app.state, "agent_runtime", None),
+        session_factory=session_factory,
+        build_context=build_context,
+        usage_columns=_usage_columns,
+        settings=settings_source,
+    )
 
 
 # Title of the conversation an out-of-band channel (Telegram) writes into.
@@ -2160,6 +2694,10 @@ def _channel_image(name: str, result: Any) -> Optional[str]:
     from services.mcp.integration import is_mcp_tool
 
     if is_mcp_tool(name) or resolve_tool(name) is None or not isinstance(result, dict):
+        return None
+    # top10:file_extraction: a files.* image (a scanned page shown to the
+    # model) is never forwarded to the chat as a screenshot.
+    if name.startswith("files."):
         return None
     # A browser screenshot's ``user_image`` is the person's copy (masked,
     # never shown to the model); a handoff nests it under ``needs_human``;
@@ -2263,6 +2801,8 @@ def build_chat_applier(
     if channel not in CHANNEL_CONVERSATION_TITLES:
         raise ValueError(f"Unknown chat channel: {channel!r}")
     conversation_title = CHANNEL_CONVERSATION_TITLES[channel]
+    # The inner callback's own ``channel`` is the app_approvals Channel.
+    tutor_channel = channel
 
     async def chat(
         user_id: str,
@@ -2272,6 +2812,14 @@ def build_chat_applier(
         stop_mark: Optional[int] = None,
         on_event: Optional[EventSink] = None,
         channel: Optional[Channel] = None,
+        files: Optional[Sequence[InboundFile]] = None,
+        images: Optional[list[ImageAttachment]] = None,
+        # top10:voice_notes: metadata entries the channel made itself (a
+        # voice note's engine, length and digest; never audio), kept on the
+        # user message, and tokens already spent on this message (its
+        # transcription), counted into the turn's usage.
+        attachments: Optional[list[dict[str, Any]]] = None,
+        usage_seed: Optional[dict[str, int]] = None,
     ) -> Dict[str, Any]:
         # Accepted: a stop from here on ends this turn, setup included.
         if stop_mark is None:
@@ -2280,7 +2828,23 @@ def build_chat_applier(
         if runtime is None:
             return {"error": "The assistant is not available right now."}
         content = (text or "").strip()
-        if not content:
+        # top10:voice_notes: the channel's own entries, kept to plain facts.
+        channel_entries = _channel_metadata(attachments)
+        # top10:file_extraction: a channel's files and photos. Files are read
+        # and stored first (the intake checks "Read files and documents");
+        # one that cannot be read ends the turn with its reason and no model
+        # call. Photos ride along like the web chat's images (dicts are
+        # validated into ImageAttachment).
+        attachments, file_error = await _channel_attachments(app, user_id, files, images)
+        if file_error is not None:
+            return file_error
+        # top10:voice_notes: stored after the files' and photos' entries.
+        attachments = [*attachments, *channel_entries]
+        turn_images = [
+            image if isinstance(image, ImageAttachment) else ImageAttachment.model_validate(image)
+            for image in images or []
+        ][:MAX_IMAGES_PER_MESSAGE]
+        if not content and not attachments:
             return {"error": "Message content cannot be empty."}
         mcp_catalog = getattr(app.state, "mcp_catalog", None)
         installation = getattr(app.state, "installation", None)
@@ -2322,6 +2886,7 @@ def build_chat_applier(
                     conversation_id=conversation.id,
                     role=MessageRole.user,
                     content=content,
+                    attachments=attachments or None,
                 )
             )
             await db.flush()
@@ -2329,10 +2894,16 @@ def build_chat_applier(
             # back only its recent tail; the newest user message, which names
             # the task, is always in it.
             rows = await _recent_messages(db, conversation.id)
-            history = [{"role": r.role.value, "content": r.content} for r in rows]
+            history = _history_from_rows(rows)
+            _attach_images(history, turn_images)
             task_id = _task_id_of(rows)
-            tools, memory_block, permissions_text = await _build_tools_and_memory(
-                mcp_catalog, user, db, installation
+            turn_context = await _build_tools_and_memory(
+                mcp_catalog,
+                user,
+                db,
+                installation,
+                conversation=conversation,
+                tutor_channel=tutor_channel,
             )
             loaded_tools = LoadedTools.from_stored(conversation.loaded_tools)
             conversation_id = conversation.id
@@ -2344,8 +2915,9 @@ def build_chat_applier(
 
         # Filled in while the turn runs: a turn stopped from the chat (task
         # cancelled) or failing after some model calls still records the
-        # tokens those calls billed.
-        turn = TurnUsage()
+        # tokens those calls billed. top10:voice_notes: seeded with what the
+        # message already cost (a voice note's transcription).
+        turn = TurnUsage(usage=_seed_usage(usage_seed))
 
         async def record_unfinished(content: str) -> None:
             async with session_factory() as db:
@@ -2355,19 +2927,20 @@ def build_chat_applier(
         try:
             agent_response = await runtime.chat(
                 messages=history,
-                tools=tools,
+                tools=turn_context.tools,
                 user_id=user_id,
                 conversation_id=str(conversation_id),
                 llm_provider=provider,
                 llm_model=model,
-                memory_block=memory_block,
-                permissions_text=permissions_text,
+                memory_block=turn_context.memory_block,
+                permissions_text=turn_context.permissions_text,
                 task_id=task_id,
                 usage_sink=turn,
                 stop_mark=stop_mark,
                 event_sink=on_event,
                 loaded_tools=loaded_tools,
                 channel=channel,
+                tutor=turn_context.tutor,
             )
         except asyncio.CancelledError:
             # /stop: the reply will never come. Close the turn in the
@@ -2415,9 +2988,11 @@ def build_chat_applier(
                     conversation_id=conversation.id,
                     role=MessageRole.assistant,
                     content=agent_response.content,
-                    tool_calls=redact_binary_for_model(agent_response.tool_calls) or None,
+                    tool_calls=_stored_tool_calls(agent_response.tool_calls) or None,
                     **_usage_columns(
-                        agent_response.usage,
+                        # top10:voice_notes: a replay-cache hit answers no
+                        # usage, but a seeded turn still spent its seed.
+                        agent_response.usage or turn.usage,
                         agent_response.provider,
                         agent_response.model,
                     ),
@@ -2426,6 +3001,8 @@ def build_chat_applier(
             conversation.updated_at = datetime.now(timezone.utc)
             if loaded_tools.changed:
                 conversation.loaded_tools = loaded_tools.names
+            # Merged over a /tutor sent while the turn ran (never lost).
+            await tutor_service.persist_tutor_state(db, conversation, turn_context.tutor)
             await db.commit()
 
         # Images a tool captured (web.screenshot, desktop.screenshot,
@@ -2448,13 +3025,91 @@ def build_chat_applier(
             "blocked": [ba.tool_name for ba in agent_response.blocked_actions],
             # This turn's own calls only (every round of its tool loop), and
             # the model that ran it: what a per-reply cost line prices.
-            "usage": dict(agent_response.usage),
+            "usage": dict(agent_response.usage or turn.usage),
             "provider": agent_response.provider,
             "model": agent_response.model,
             "served_model": agent_response.served_model,
         }
 
+    # top10:file_extraction: a channel asks this before it downloads a file,
+    # so nothing is fetched while "Read files and documents" is off (None:
+    # files may be read; otherwise the sentence to reply with).
+    async def file_gate() -> Optional[str]:
+        intake = getattr(app.state, "file_intake", None)
+        if intake is None:
+            return "Reading files is not set up in this process."
+        refusal: Optional[str] = await intake.refusal()
+        return refusal
+
+    setattr(chat, "file_gate", file_gate)  # noqa: B010 - a documented seam on the callback
     return chat
+
+
+def build_tutor_applier(
+    app: Any, session_factory: Any = async_session, *, channel: str = "telegram"
+):
+    """Async callback for a tutor command from a chat channel:
+    (user_id, command, new_conversation=False, text=None) -> {"reply": str}
+    or {"error": str}. *command* is "on", "off" or "status", already parsed
+    by the channel (services.tutor.commands) from a message of the linked
+    account.
+
+    It applies the command to the channel's conversation (the one
+    build_chat_applier writes into; a fresh one when the chat asked for
+    /new first, so the next message continues there) and writes the
+    message (*text*, else "/tutor <command>") and the fixed reply into it.
+    No model call. It runs outside the channel's turn lock: a turn running
+    meanwhile merges its own state over this when it saves, so neither
+    write is lost. Owner locks are never changed from here."""
+    if channel not in CHANNEL_CONVERSATION_TITLES:
+        raise ValueError(f"Unknown chat channel: {channel!r}")
+    conversation_title = CHANNEL_CONVERSATION_TITLES[channel]
+
+    async def apply(
+        user_id: str,
+        command: str,
+        *,
+        new_conversation: bool = False,
+        text: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        if command not in ("on", "off", "status"):
+            return {"error": "Unknown tutor command."}
+        try:
+            user_uuid = uuid.UUID(str(user_id))
+        except ValueError:
+            return {"error": "Unknown account."}
+        installation = getattr(app.state, "installation", None)
+        async with session_factory() as db:
+            user = (await db.execute(select(User).where(User.id == user_uuid))).scalar_one_or_none()
+            if user is None or not user.is_active:
+                return {"error": "Unknown account."}
+            conversation = None
+            if not new_conversation:
+                conversation = (
+                    await db.execute(
+                        select(Conversation)
+                        .where(
+                            Conversation.user_id == user.id,
+                            Conversation.title == conversation_title,
+                        )
+                        .order_by(Conversation.updated_at.desc())
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+            if conversation is None:
+                conversation = Conversation(user_id=user.id, title=conversation_title)
+                db.add(conversation)
+                await db.flush()
+            content = (text or "").strip() or f"/tutor {command}"
+            _user_row, reply_row = await _record_tutor_command(
+                db, user, conversation, command, content, installation, channel=channel
+            )
+            reply = reply_row.content
+            conversation_id = str(conversation.id)
+            await db.commit()
+        return {"reply": reply, "conversation_id": conversation_id}
+
+    return apply
 
 
 @router.post("/approvals/{action_id}", response_model=ApprovalDecisionResponse)
@@ -2497,6 +3152,7 @@ async def decide_approval(
     images = result.pop("decision_images", None) or []
     message_id = result.pop("decision_message_id", None)
     weekly = result.pop("weekly", None)
+    low_risk = result.pop("low_risk", None)
     # The pictures travel once, checked, in ``images``; the result keeps
     # the placeholder, as the transcript row and the model's view do.
     if "result" in result:
@@ -2509,6 +3165,7 @@ async def decide_approval(
         images=[TurnImageOut(**image) for image in images],
         message_id=message_id,
         weekly=WeeklyApprovalOut(**weekly) if weekly else None,
+        low_risk=LowRiskGrantOut(**low_risk) if low_risk else None,
     )
 
 

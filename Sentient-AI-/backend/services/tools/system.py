@@ -95,6 +95,29 @@ class Installable:
     size_hint: str
     steps: tuple[tuple[str, ...], ...]
     detect: Callable[[], bool]
+    # top10:file_extraction. ``native_only``: refused in a container before
+    # any step runs (it installs something only a Mac or PC can use, such
+    # as the OS's own text recognition). ``platforms``: the sys.platform
+    # values it installs on ("win32", "darwin"); None means any.
+    native_only: bool = False
+    platforms: Optional[frozenset[str]] = None
+
+
+def _platform_refusal(name: str, capability: Installable) -> Optional[dict[str, Any]]:
+    """The refusal for installing *capability* here, or None when it may
+    run: a native-only entry in a container, or an entry whose platforms
+    do not include this one (top10:file_extraction)."""
+    from services.capabilities.env import in_container
+
+    if capability.native_only and in_container():
+        return _error(
+            f"'{name}' installs something only a Mac or PC can use; it cannot be "
+            "installed in the Docker container.",
+            name=name,
+        )
+    if capability.platforms is not None and sys.platform not in capability.platforms:
+        return _error(f"'{name}' is not available on this operating system.", name=name)
+    return None
 
 
 def playwright_installed() -> bool:
@@ -192,6 +215,82 @@ ALLOWLIST: dict[str, Installable] = {
         detect=browser_installed,
     ),
 }
+
+
+# top10:voice_notes. Local speech-to-text for Telegram voice notes: the
+# faster-whisper wheels (binary only), then a fixed snippet that downloads
+# the pinned Whisper base revision into the model directory and checks
+# model.bin against its pinned sha256 (a mismatch deletes it and fails the
+# step). Hugging Face telemetry and implicit token use are off inside the
+# snippet. Everything is fixed here at import; the model directory is
+# $CRAWLER_SPEECH_MODEL_DIR or <sys.prefix>/share/crawler-ai/speech/...
+def _fetch_speech_model_source(
+    target: str, repo: str, revision: str, sha256: str, patterns: tuple[str, ...]
+) -> str:
+    """The ``python -c`` source of the model download step."""
+    return "\n".join(
+        [
+            "import hashlib, os, sys",
+            "os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'",
+            "os.environ['HF_HUB_DISABLE_IMPLICIT_TOKEN'] = '1'",
+            "for name in ('HF_TOKEN', 'HUGGING_FACE_HUB_TOKEN'):",
+            "    os.environ.pop(name, None)",
+            "from huggingface_hub import snapshot_download",
+            f"target = {target!r}",
+            "os.makedirs(target, exist_ok=True)",
+            f"snapshot_download(repo_id={repo!r}, revision={revision!r}, local_dir=target, "
+            f"allow_patterns={list(patterns)!r}, token=False)",
+            "path = os.path.join(target, 'model.bin')",
+            "digest = hashlib.sha256()",
+            "with open(path, 'rb') as handle:",
+            "    for chunk in iter(lambda: handle.read(1 << 20), b''):",
+            "        digest.update(chunk)",
+            f"if digest.hexdigest() != {sha256!r}:",
+            "    os.remove(path)",
+            "    print('model.bin does not match the pinned sha256; it was removed.')",
+            "    sys.exit(1)",
+            "print('Speech model ready.')",
+        ]
+    )
+
+
+def _speech_to_text() -> Installable:
+    from services.tools import transcribe
+
+    return Installable(
+        description=(
+            "Speech-to-text on this computer for Telegram voice notes: faster-whisper "
+            "and the Whisper base model (a pinned revision, checked by its hash). "
+            "Recordings are transcribed here and never leave this computer."
+        ),
+        size_hint="~250 MB download",
+        steps=(
+            (
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--only-binary=:all:",
+                transcribe.FASTER_WHISPER_REQUIREMENT,
+            ),
+            (
+                sys.executable,
+                "-c",
+                _fetch_speech_model_source(
+                    transcribe.SPEECH_MODEL_DIR,
+                    transcribe.SPEECH_MODEL_REPO,
+                    transcribe.SPEECH_MODEL_REVISION,
+                    transcribe.SPEECH_MODEL_SHA256,
+                    transcribe.SPEECH_MODEL_PATTERNS,
+                ),
+            ),
+        ),
+        detect=transcribe.local_engine_installed,
+        native_only=True,
+    )
+
+
+ALLOWLIST["speech_to_text"] = _speech_to_text()
 
 
 def _error(message: str, **extra: Any) -> dict[str, Any]:
@@ -365,6 +464,10 @@ class SystemToolkit:
         if not isinstance(name, str) or name not in ALLOWLIST:
             return _error("Unknown capability", allowed=sorted(ALLOWLIST))
         capability = ALLOWLIST[name]
+        # top10:file_extraction: refused before any step where it cannot work.
+        refusal = _platform_refusal(name, capability)
+        if refusal is not None:
+            return refusal
 
         async with self._lock:
             if self._installed(name):

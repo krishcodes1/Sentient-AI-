@@ -1310,3 +1310,191 @@ async def test_pinned_dialer_error_never_quotes_the_url(monkeypatch):
     with pytest.raises(ConnectionError) as info:
         await slack_mod.pinned_ws_connect(SOCKET_URL, "wss-primary.slack.com", ["203.0.113.9"])
     assert TICKET not in str(info.value)
+
+
+# ── audio clips (top10:voice_notes) ──────────────────────────────────────
+
+
+def _audio_file(mimetype: str = "audio/webm") -> dict[str, Any]:
+    return {
+        "id": "F0AUDIO01",
+        "name": "audio_message.webm",
+        "mimetype": mimetype,
+        "size": 48213,
+        "url_private_download": "https://files.slack.com/files-pri/T0TEAM001-F0AUDIO01/download/audio_message.webm",
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_linked_senders_audio_clip_gets_the_text_reply_and_no_turn(linked):
+    await linked.deliver(dm_event("", extra={"subtype": "file_share", "files": [_audio_file()]}))
+    assert linked.chat_calls == []
+    assert [p["text"] for p in linked.api.posts()] == [slack_mod.SLACK_AUDIO_REPLY]
+    assert "voice notes work in Telegram" in slack_mod.SLACK_AUDIO_REPLY
+    # Nothing was fetched: only the reply went out.
+    assert [name for name, _, _ in linked.api.requests if name not in ("auth.test", "apps.connections.open")] == [
+        "chat.postMessage"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_audio_clip_without_a_download_address_still_gets_the_reply(linked):
+    clip = _audio_file("audio/mp4")
+    del clip["url_private_download"]
+    await linked.deliver(dm_event("", extra={"subtype": "file_share", "files": [clip]}))
+    assert [p["text"] for p in linked.api.posts()] == [slack_mod.SLACK_AUDIO_REPLY]
+    assert linked.chat_calls == []
+
+
+@pytest.mark.asyncio
+async def test_an_unlinked_senders_audio_clip_gets_nothing(linked):
+    await linked.deliver(
+        dm_event("", user=STRANGER, extra={"subtype": "file_share", "files": [_audio_file()]})
+    )
+    assert linked.chat_calls == [] and linked.api.posts() == []
+
+
+@pytest.mark.asyncio
+async def test_other_file_shares_and_subtypes_are_unchanged(linked):
+    document = dict(_audio_file("application/pdf"), name="notes.pdf")
+    await linked.deliver(dm_event("", extra={"subtype": "file_share", "files": [document]}))
+    posts = [p["text"] for p in linked.api.posts()]
+    assert slack_mod.SLACK_AUDIO_REPLY not in posts
+    await linked.deliver(dm_event("", extra={"subtype": "message_changed", "files": [_audio_file()]}))
+    assert slack_mod.SLACK_AUDIO_REPLY not in [p["text"] for p in linked.api.posts()]
+    assert linked.chat_calls == []
+
+
+# ── low-risk grants (permission tiers) ───────────────────────────────────
+
+
+async def park_low_risk(session_factory: Any, user_id: uuid.UUID, *, offer: bool = True) -> Any:
+    return await DbApprovalStore(session_factory=session_factory).create(
+        user_id=str(user_id),
+        tool_name="google_workspace.modify_labels",
+        arguments={"message_id": "m1", "add_label_ids": ["STARRED"]},
+        reason="Tool 'google_workspace.modify_labels' requires explicit user approval",
+        grant_offer={"kind": "low_risk", "connector_id": "c1", "account": "School Gmail"} if offer else None,
+    )
+
+
+def low_risk_press(action_id: str) -> dict[str, Any]:
+    frame = press(action_id, approve=True)
+    frame["payload"]["actions"][0]["action_id"] = slack_mod.ACTION_APPROVE_LOW_RISK
+    return frame
+
+
+@pytest.mark.asyncio
+async def test_a_card_that_offers_a_grant_has_a_third_button_and_says_what_it_allows(linked):
+    action = await park_low_risk(linked.session_factory, linked.user_id)
+    assert await linked.channel.notify_pending(action) is True
+    section, buttons = linked.api.posts()[-1]["blocks"]
+    assert [e["action_id"] for e in buttons["elements"]] == [
+        slack_mod.ACTION_APPROVE,
+        slack_mod.ACTION_DENY,
+        slack_mod.ACTION_APPROVE_LOW_RISK,
+    ]
+    third = buttons["elements"][2]
+    assert third["value"] == action.action_id
+    assert third["text"]["text"] == "Allow low-risk on School Gmail · 7 days"
+    body = section["text"]["text"]
+    assert "Or allow low-risk changes on School Gmail for 7 days: " in body
+    assert 'Send "grants" to list them, or "revoke grants" to turn them all off.' in body
+    plain = await park_low_risk(linked.session_factory, linked.user_id, offer=False)
+    assert await linked.channel.notify_pending(plain) is True
+    _section, plain_buttons = linked.api.posts()[-1]["blocks"]
+    assert len(plain_buttons["elements"]) == 2
+
+
+def test_the_low_risk_button_is_an_approval_that_remembers(harness):
+    harness.channel.team_id = TEAM
+    frame = low_risk_press("0f0f0f0f-1111-4111-8111-111111111111")
+    pressed = harness.channel.authorize_press(frame["payload"])
+    assert pressed is not None and pressed.approved is True and pressed.remember == "low_risk"
+    plain = harness.channel.authorize_press(
+        press("0f0f0f0f-1111-4111-8111-111111111111", approve=True)["payload"]
+    )
+    assert plain is not None and plain.remember is None
+
+
+class LowRiskRuntime(DecisionRuntime):
+    """DecisionRuntime that also takes remember= and grants on low_risk."""
+
+    def __init__(self, session_factory: Any, *, grants: bool = True) -> None:
+        super().__init__(session_factory)
+        self.remembered: list[Any] = []
+        self.grants = grants
+
+    async def approve_action(  # type: ignore[override]
+        self, action_id: str, user_id: str, task_id: Any = None, remember: Any = None, channel: Any = None
+    ) -> dict[str, Any]:
+        self.remembered.append(remember)
+        result = await self._decide(action_id, user_id, True)
+        if remember == "low_risk" and self.grants and "error" not in result:
+            result["low_risk"] = {"account": "School Gmail", "expires_at": "2026-10-07T12:00:00+00:00"}
+        return result
+
+
+def wire_low_risk(harness: Harness, *, grants: bool = True) -> LowRiskRuntime:
+    from api.routes.agent import build_decision_applier
+
+    runtime = LowRiskRuntime(harness.session_factory, grants=grants)
+    app = SimpleNamespace(
+        state=SimpleNamespace(agent_runtime=runtime, mcp_catalog=None, installation=None)
+    )
+    harness.channel.decide = build_decision_applier(app, harness.session_factory)
+    return runtime
+
+
+@pytest.mark.asyncio
+async def test_pressing_allow_low_risk_decides_with_remember_and_freezes_with_the_date(linked):
+    runtime = wire_low_risk(linked)
+    action = await park_low_risk(linked.session_factory, linked.user_id)
+    await linked.deliver(low_risk_press(action.action_id))
+    assert runtime.remembered == ["low_risk"]
+    (update,) = linked.api.calls("chat.update")
+    verdict = update["blocks"][-1]["elements"][0]["text"]
+    assert verdict.startswith("✅ Approved · low-risk allowed until ")
+
+
+@pytest.mark.asyncio
+async def test_a_low_risk_press_that_made_no_grant_says_approved_once(linked):
+    wire_low_risk(linked, grants=False)
+    action = await park_low_risk(linked.session_factory, linked.user_id)
+    await linked.deliver(low_risk_press(action.action_id))
+    (update,) = linked.api.calls("chat.update")
+    assert update["blocks"][-1]["elements"][0]["text"] == "✅ Approved (approved once) from Slack."
+
+
+@pytest.mark.asyncio
+async def test_grants_and_revoke_grants_keywords(linked):
+    from sqlalchemy import select
+
+    from models.audit import AuditLog
+    from services.agent.permission_grants import DbPermissionGrantStore
+    from services.notifications.grant_commands import NO_GRANTS_TEXT
+
+    store = DbPermissionGrantStore(linked.session_factory)
+    connector_id = str(linked.connector_id)  # the Slack connector row itself is the user's
+    grant = await store.allow(user_id=str(linked.user_id), connector_id=connector_id)
+    assert grant is not None
+    await linked.deliver(dm_event("grants"))
+    listing = linked.api.posts()[-1]["text"]
+    assert "until" in listing and 'Send "revoke grants" to turn them all off.' in listing
+    await linked.deliver(dm_event("Revoke  Grants"))
+    assert "Revoked low-risk changes on 1 account" in linked.api.posts()[-1]["text"]
+    await linked.deliver(dm_event("grants"))
+    assert linked.api.posts()[-1]["text"] == NO_GRANTS_TEXT
+    await linked.deliver(dm_event("revoke grants"))
+    assert linked.api.posts()[-1]["text"] == NO_GRANTS_TEXT
+    # Neither keyword reached the chat.
+    assert linked.chat_calls == []
+    assert await store.list_live(str(linked.user_id)) == []
+    async with linked.session_factory() as session:
+        rows = (
+            (await session.execute(select(AuditLog).where(AuditLog.user_id == linked.user_id)))
+            .scalars()
+            .all()
+        )
+    [revoked] = [r.reasoning_chain for r in rows if (r.reasoning_chain or {}).get("event") == "permission_grant_revoked"]
+    assert revoked["revoked_from"] == "slack" and revoked["count"] == 1

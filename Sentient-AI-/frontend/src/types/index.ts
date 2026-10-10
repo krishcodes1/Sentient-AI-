@@ -56,6 +56,8 @@ export interface MemoryFilters {
 
 export type PermissionTier =
   | "auto_approve"
+  // "Allow low-risk changes": only actions graded LOW run without asking.
+  | "low_risk"
   | "user_confirm"
   | "admin_only"
   | "hard_blocked";
@@ -245,6 +247,9 @@ export interface PendingApproval {
    *  offering "Allow Calendar for 7 days" beside Approve / Deny. Null or
    *  absent: the card has no weekly option. */
   weekly_app?: string | null;
+  /** The account a card for a low-risk change can be allowed on for 7 days ("School Gmail"),
+   *  offering "Allow low-risk changes on School Gmail for 7 days". Null or absent: no offer. */
+  low_risk_account?: string | null;
 }
 
 /**
@@ -292,6 +297,9 @@ export interface ApprovalDecisionResponse {
   /** The app the weekly button allowed, and until when. Null when the act
    *  was approved once only (no `remember`, or no usable device header). */
   weekly?: { app: string; expires_at: string } | null;
+  /** The account the low-risk button allowed, and until when. Null when the card was approved
+   *  once only (no `remember`, or the action no longer graded low-risk). */
+  low_risk?: { account: string; expires_at: string } | null;
 }
 
 /**
@@ -545,6 +553,9 @@ export interface ConnectorTypeInfo {
   creatable: boolean;
   auth: ConnectorAuthInfo;
   scopes: { read: ConnectorScopeInfo[]; write: ConnectorScopeInfo[] };
+  /** What "Allow low-risk changes" lets this connector do without asking (absent from servers
+   *  that predate permission tiers). */
+  low_risk?: ConnectorLowRiskAction[];
 }
 
 /** The connector a sign-in creates, or (with connector_id) reconnects. The
@@ -600,3 +611,146 @@ export interface SlackLinkStatus {
    * Absent from servers that predate the field. */
   has_app_token?: boolean;
 }
+
+// top10:secret_pii_redaction
+
+// top10:file_extraction
+/** A document attached to a user turn, as `Message.attachments` stores it
+ *  (metadata only; the text stays on the server, encrypted). */
+export interface FileAttachment {
+  kind: "file";
+  file_id: string;
+  name: string;
+  media_type: string;
+  /** pdf, docx, pptx, xlsx, csv, text, markdown, html, json or image. */
+  doc_kind: string;
+  pages: number | null;
+  chars: number;
+  size_bytes: number;
+  scanned_pages_unread?: number[];
+}
+
+/** What POST /api/files answers for an uploaded document. */
+export interface UploadedFile {
+  id: string;
+  name: string;
+  kind: string;
+  media_type: string;
+  size_bytes: number;
+  pages: number | null;
+  sections: number;
+  chars: number;
+  scanned_pages_unread: number[];
+  truncated: boolean;
+  warnings: string[];
+  source: string;
+  created_at: string;
+  expires_at: string;
+  /** The same file was already stored: the existing upload came back. */
+  deduped?: boolean;
+}
+
+// Merged into Message above: a user turn's stored attachments (image
+// metadata entries and file entries) and, client-side, the files a failed
+// turn resends on Retry.
+export interface Message {
+  attachments?: Array<FileAttachment | { kind?: string; [key: string]: unknown }> | null;
+  retry_files?: FileAttachment[];
+}
+
+// top10:scheduler_briefing
+
+// top10:tutor_mode
+/** One owner lock that forces tutor mode on (Settings ▸ Permissions ▸ Tutor locks). */
+export interface TutorLock {
+  id: string;
+  scope: "course" | "account";
+  /** null: it applies to every account on this Crawler. */
+  user_id: string | null;
+  /** "every account", or the account's email. */
+  applies_to: string;
+  /** What replies and notices call it ("MATH 221", "every account"). */
+  label: string;
+  canvas_course_id: string | null;
+  course_code: string | null;
+  course_name: string | null;
+  aliases: string[];
+  created_at: string;
+}
+
+export interface TutorLockList {
+  /** The "Tutor mode" switch: while it is off, locks do nothing. */
+  enabled: boolean;
+  locks: TutorLock[];
+}
+
+export interface TutorLockCreate {
+  scope: "course" | "account";
+  applies_to: "all" | "me" | "email";
+  email?: string;
+  canvas_course_id?: string;
+  course_code?: string;
+  course_name?: string;
+  aliases?: string[];
+}
+
+/** One of the owner's own Canvas courses, for the lock form's picker. */
+export interface TutorCanvasCourse {
+  id: string;
+  name: string;
+  course_code: string;
+}
+
+export interface TutorCanvasCourses {
+  /** false: no working Canvas connector, so the course is typed instead. */
+  available: boolean;
+  courses: TutorCanvasCourse[];
+}
+
+/** One conversation's tutor mode (GET/PUT /agent/conversations/{id}/tutor). */
+export interface ConversationTutor {
+  enabled: boolean;
+  mode: "off" | "on" | "locked";
+  user_on: boolean;
+  lock_scope: "course" | "account" | null;
+  locked_by: string | null;
+  off_command: string;
+  /** Only on a PUT: the same reply a /tutor command gets. */
+  message?: string;
+}
+
+// top10:knowledge_base
+
+// top10:flashcards_quizzes
+
+// top10:event_triggers
+
+// top10:permission_tiers
+/** One action "Allow low-risk changes" covers, with its short note ("star or label emails"). */
+export interface ConnectorLowRiskAction {
+  action: string;
+  note: string;
+}
+
+/**
+ * GET /agent/permission-grants: a connection whose low-risk changes run without a card until
+ * `expires_at`, allowed from an approval card's "Allow low-risk changes" button. Not tied to a
+ * browser or chat: it holds for every request on this account.
+ */
+export interface PermissionGrant {
+  id: string;
+  connector_id: string;
+  /** The connection's label ("School Gmail") and type ("google_workspace"). */
+  account: string;
+  connector_type: string;
+  kind: string;
+  granted_from: "web" | "telegram" | "slack" | null;
+  granted_at: string;
+  expires_at: string;
+  last_used_at: string | null;
+  uses: number;
+}
+
+// top10:voice_notes
+
+// top10:video_transcripts

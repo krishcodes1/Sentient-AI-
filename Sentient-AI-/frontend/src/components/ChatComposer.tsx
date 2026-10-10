@@ -1,10 +1,13 @@
 /**
- * The chat input form: an auto-growing textarea that sends on Enter, image attachments by button,
- * paste or drop, and a Stop button while a turn is streaming.
+ * The chat input form: an auto-growing textarea that sends on Enter, image and document
+ * attachments by button, paste or drop, and a Stop button while a turn is streaming.
  *
- * Why it exists: Attachment validation (image-only, size and count caps) and the Enter /
- * Shift+Enter / IME rules are self-contained here, so Chat.tsx only receives the final text and
- * data URLs.
+ * Why it exists: Attachment validation (types, size and count caps) and the Enter /
+ * Shift+Enter / IME rules are self-contained here, so Chat.tsx only receives the final text,
+ * image data URLs and the uploaded documents. Images keep the inline data-URL path; a document
+ * (PDF, Word, PowerPoint, Excel, CSV, text, Markdown, HTML, JSON) is uploaded the moment it is
+ * picked and shows as a chip that says what the server found ("x · 12 pages") or why it could
+ * not read it; only its id goes with the message.
  */
 
 import {
@@ -18,11 +21,35 @@ import {
   type FormEvent,
   type KeyboardEvent,
 } from "react";
-import { ImagePlus, Send, Square, X } from "lucide-react";
+import { FileText, Paperclip, Send, Square, X } from "lucide-react";
+import {
+  ACCEPT,
+  asAttachment,
+  fileChipLabel,
+  isDocument,
+  unreadableFileMessage,
+} from "@/components/fileChips";
+import { deleteFile, uploadFile } from "@/services/api";
+import type { FileAttachment } from "@/types";
 
 /** Attachments are inlined into the request body, so they stay small. */
 export const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 export const MAX_IMAGES = 4;
+/** Mirrors the server's upload cap (it stays the authority). */
+export const MAX_FILE_BYTES = 20 * 1024 * 1024;
+export const MAX_FILES = 5;
+
+/** One picked document: uploading, read (with what the server found), or refused. */
+interface FileChip {
+  id: string;
+  name: string;
+  status: "reading" | "ready" | "error";
+  message?: string;
+  file?: FileAttachment;
+  /** The server already had this file: removing the chip must not forget it. */
+  deduped?: boolean;
+  controller?: AbortController;
+}
 
 /** Past this the textarea scrolls instead of eating the thread. */
 const MAX_TEXTAREA_PX = 200;
@@ -54,15 +81,21 @@ export default function ChatComposer({
   disabled: boolean;
   sending: boolean;
   placeholder: string;
-  onSend: (content: string, images: string[]) => void;
+  /** `files` are the documents already uploaded and read (their ids go
+   *  with the message; the entries let the thread show them at once). */
+  onSend: (content: string, images: string[], files: FileAttachment[]) => void;
   onStop: () => void;
 }) {
   const [text, setText] = useState("");
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
+  const [chips, setChips] = useState<FileChip[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Chips removed while their upload was still running: a late success is
+  // forgotten on the server rather than left behind.
+  const removedRef = useRef<Set<string>>(new Set());
   const textareaId = useId();
 
   // Grow with the content up to a cap. Height is cleared first so the
@@ -75,15 +108,86 @@ export default function ChatComposer({
     el.style.height = `${Math.min(el.scrollHeight, MAX_TEXTAREA_PX)}px`;
   }, [text]);
 
+  const uploadDocument = useCallback((file: File) => {
+    const id = `${file.name}-${file.lastModified}-${Math.random().toString(36).slice(2)}`;
+    const name = file.name || "file";
+    if (file.size > MAX_FILE_BYTES) {
+      setChips((prev) => [
+        ...prev,
+        {
+          id,
+          name,
+          status: "error",
+          message: `${name} is larger than ${MAX_FILE_BYTES / (1024 * 1024)}MB.`,
+        },
+      ]);
+      return;
+    }
+    const controller = new AbortController();
+    setChips((prev) => [...prev, { id, name, status: "reading", controller }]);
+    uploadFile(file, controller.signal)
+      .then((uploaded) => {
+        if (removedRef.current.has(id)) {
+          if (!uploaded.deduped) void deleteFile(uploaded.id).catch(() => {});
+          return;
+        }
+        setChips((prev) =>
+          prev.map((chip) =>
+            chip.id === id
+              ? {
+                  id,
+                  name: uploaded.name,
+                  status: "ready",
+                  file: asAttachment(uploaded),
+                  deduped: Boolean(uploaded.deduped),
+                }
+              : chip,
+          ),
+        );
+      })
+      .catch((err: unknown) => {
+        if (controller.signal.aborted) return;
+        const message = err instanceof Error && err.message ? err.message : "The file could not be read.";
+        setChips((prev) =>
+          prev.map((chip) =>
+            chip.id === id ? { id, name, status: "error", message } : chip,
+          ),
+        );
+      });
+  }, []);
+
+  const removeChip = (chip: FileChip) => {
+    removedRef.current.add(chip.id);
+    chip.controller?.abort();
+    // A file the server already had (from an earlier message) is not
+    // forgotten just because this chip is removed.
+    if (chip.status === "ready" && chip.file && !chip.deduped) {
+      void deleteFile(chip.file.file_id).catch(() => {});
+    }
+    setChips((prev) => prev.filter((x) => x.id !== chip.id));
+  };
+
   const addFiles = useCallback(
     async (files: File[]) => {
+      const documents = files.filter((f) => !f.type.startsWith("image/") && isDocument(f));
+      const unreadable = files.filter((f) => !f.type.startsWith("image/") && !isDocument(f));
       const images = files.filter((f) => f.type.startsWith("image/"));
+      let rejected: string | null = null;
+      if (unreadable.length > 0) {
+        rejected = unreadableFileMessage(unreadable[0]);
+      }
+      if (documents.length > 0) {
+        const room = Math.max(0, MAX_FILES - chips.length);
+        if (documents.length > room) {
+          rejected = `Up to ${MAX_FILES} files per message.`;
+        }
+        documents.slice(0, room).forEach(uploadDocument);
+      }
       if (images.length === 0) {
-        if (files.length > 0) setAttachError("Only image files can be attached.");
+        setAttachError(rejected);
         return;
       }
       const accepted: ComposerAttachment[] = [];
-      let rejected: string | null = null;
       for (const file of images) {
         if (file.size > MAX_IMAGE_BYTES) {
           rejected = `${file.name || "That image"} is larger than ${
@@ -112,8 +216,11 @@ export default function ChatComposer({
       if (toAdd.length > 0) setAttachments((prev) => [...prev, ...toAdd]);
       setAttachError(rejected);
     },
-    [attachments.length],
+    [attachments.length, chips.length, uploadDocument],
   );
+
+  const readyFiles = chips.filter((c) => c.status === "ready" && c.file).map((c) => c.file!);
+  const reading = chips.some((c) => c.status === "reading");
 
   const handleDrop = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -131,14 +238,16 @@ export default function ChatComposer({
 
   const submit = () => {
     const content = text.trim();
-    if (sending || disabled) return;
-    if (!content && attachments.length === 0) return;
+    if (sending || disabled || reading) return;
+    if (!content && attachments.length === 0 && readyFiles.length === 0) return;
     onSend(
       content,
       attachments.map((a) => a.dataUrl),
+      readyFiles,
     );
     setText("");
     setAttachments([]);
+    setChips([]);
     setAttachError(null);
   };
 
@@ -157,7 +266,11 @@ export default function ChatComposer({
     submit();
   };
 
-  const canSend = !disabled && !sending && (text.trim() !== "" || attachments.length > 0);
+  const canSend =
+    !disabled &&
+    !sending &&
+    !reading &&
+    (text.trim() !== "" || attachments.length > 0 || readyFiles.length > 0);
 
   return (
     <form
@@ -210,6 +323,45 @@ export default function ChatComposer({
           </ul>
         )}
 
+        {chips.length > 0 && (
+          <ul className="flex flex-wrap gap-2 pt-1 pb-2" aria-label="Attached files">
+            {chips.map((chip) => {
+              const label =
+                chip.status === "reading"
+                  ? `Reading ${chip.name}…`
+                  : chip.status === "ready" && chip.file
+                    ? fileChipLabel(chip.file)
+                    : `Couldn't read: ${chip.message ?? chip.name}`;
+              return (
+                <li
+                  key={chip.id}
+                  className="inline-flex items-center gap-1.5 rounded-[8px] px-2 py-1 text-xs max-w-full"
+                  style={{
+                    border: `1px solid ${chip.status === "error" ? "var(--accent-danger)" : "var(--claw-border)"}`,
+                    color: chip.status === "error" ? "var(--accent-danger)" : "var(--text-secondary)",
+                    background: "var(--claw-panel)",
+                  }}
+                  aria-busy={chip.status === "reading"}
+                >
+                  <FileText className="w-3.5 h-3.5 shrink-0" aria-hidden />
+                  <span className="truncate" title={label}>
+                    {label}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => removeChip(chip)}
+                    aria-label={`Remove ${chip.name}`}
+                    className="shrink-0 inline-flex items-center justify-center rounded-full"
+                    style={{ width: 16, height: 16, color: "var(--text-muted)" }}
+                  >
+                    <X className="w-3 h-3" aria-hidden />
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+
         <div className="flex items-end gap-2">
           <label htmlFor={textareaId} className="sr-only">
             Message
@@ -235,10 +387,10 @@ export default function ChatComposer({
           <input
             ref={fileInputRef}
             type="file"
-            accept="image/*"
+            accept={ACCEPT}
             multiple
             tabIndex={-1}
-            aria-label="Image file"
+            aria-label="File to attach"
             className="sr-only"
             onChange={(e) => {
               void addFiles(Array.from(e.target.files ?? []));
@@ -249,13 +401,17 @@ export default function ChatComposer({
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
-            disabled={disabled || sending || attachments.length >= MAX_IMAGES}
-            aria-label="Attach image"
-            title="Attach image"
+            disabled={
+              disabled ||
+              sending ||
+              (attachments.length >= MAX_IMAGES && chips.length >= MAX_FILES)
+            }
+            aria-label="Attach a file"
+            title="Attach an image or a document (PDF, Word, PowerPoint, Excel, CSV, text)"
             className="shrink-0 inline-flex items-center justify-center rounded-[8px] disabled:opacity-40"
             style={{ width: 40, height: 40, color: "var(--text-muted)" }}
           >
-            <ImagePlus className="w-4 h-4" aria-hidden />
+            <Paperclip className="w-4 h-4" aria-hidden />
           </button>
 
           {sending ? (
@@ -306,8 +462,8 @@ export default function ChatComposer({
         </p>
       )}
       <p className="text-xs mt-2 hidden sm:block" style={{ color: "var(--text-muted)" }}>
-        Enter sends · Shift+Enter for a new line · drop or paste an image to
-        attach
+        Enter sends · Shift+Enter for a new line · drop or paste an image or a
+        document to attach
       </p>
     </form>
   );

@@ -100,6 +100,21 @@ class PendingAction(Base):
         DateTime(timezone=True),
         nullable=True,
     )
+    # Set on a card an unattended run parked ("schedule:<task id>",
+    # "trigger:<trigger id>"). Approving such a card runs that one call and
+    # records it; it never resumes a model turn (api/routes/agent.py).
+    origin: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    # Set when the card may offer "Allow low-risk changes on <account> for 7
+    # days" (permission tiers): {"kind": "low_risk", "connector_id",
+    # "account"}, written by the runtime, never by the model. Only an
+    # untainted, attended card for a LOW action carries it.
+    grant_offer: Mapped[Optional[Dict]] = mapped_column(
+        JSON,
+        nullable=True,
+    )
 
     def __repr__(self) -> str:
         return f"<PendingAction {self.id} tool={self.tool_name} status={self.status}>"

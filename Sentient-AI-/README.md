@@ -516,6 +516,11 @@ it already has.
 | `TOKEN_EXPIRE_MINUTES` | No | JWT lifetime (default 60) |
 | `SESSION_MAX_HOURS` | No | Ceiling on how long refreshing can extend one session, measured from login (default 12) |
 | `APPROVAL_TTL_MINUTES` | No | How long a pending tool approval stays actionable (default 15) |
+| `CRAWLER_TIMEZONE` | Recommended (Docker) | IANA time zone (e.g. `America/New_York`) that scheduled tasks and reminders use when neither the task nor the user has one. A container's clock is UTC; unset, the assistant asks the user for their time zone before scheduling. |
+| `KB_EMBEDDINGS` | No | How "Search saved documents by meaning" embeds passages: unset follows the install-wide provider (Gemini, OpenAI or Ollama), `ollama` uses Ollama on this computer whatever the provider, `off` never builds the meaning index (keyword search still works). |
+| `OLLAMA_EMBED_MODEL`, `GEMINI_EMBED_MODEL`, `OPENAI_EMBED_MODEL` | No | The embedding model per backend (defaults `nomic-embed-text`, `gemini-embedding-001`, `text-embedding-3-small`). |
+| `KB_EMBED_DIMS` | No | Numbers kept per vector, 8-3072 (default 256). Changing it re-embeds every saved document. |
+| `CRAWLER_SPEECH_MODEL_DIR` | No | Where the local voice-note speech model is kept once installed (default: inside the backend's Python environment). |
 | `CORS_ORIGINS` | No | Allowed browser origins (default localhost dev ports) |
 | `ALLOW_REGISTRATION` | No | Leave unset to manage open registration from the wizard/Settings (the switch on the Summary step, then in Settings — see [First run: the setup wizard](#first-run-the-setup-wizard) — which defaults to **closed**). Set `false` to lock it closed whatever that switch says. `true` opens nothing by itself; it only seeds the switch as open when an existing install is carried past the wizard on upgrade. The first account always comes from the wizard's owner step. |
 | `PASSWORD_MIN_LENGTH` | No | Minimum password length, floor 8 (default 8) |

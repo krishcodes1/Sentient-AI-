@@ -458,7 +458,7 @@ async def test_unregistered_row_is_never_offered_to_the_agent(session_factory):
     await _insert_row(session_factory, user.id, "custom")
 
     async with session_factory() as db:
-        tools, _memory, _permissions = await _build_tools_and_memory(None, user, db)
+        tools = (await _build_tools_and_memory(None, user, db)).tools
 
     names = {t.name for t in tools}
     assert "canvas.get_courses" in names
@@ -475,7 +475,8 @@ async def test_only_unregistered_rows_still_build_a_turn(session_factory):
     await _insert_row(session_factory, user.id, _RETIRED)
 
     async with session_factory() as db:
-        tools, _memory, permissions = await _build_tools_and_memory(None, user, db)
+        built = await _build_tools_and_memory(None, user, db)
+    tools, permissions = built.tools, built.permissions_text
 
     assert permissions.startswith("<permissions>")
     assert not any(t.connector_type == _RETIRED for t in tools)

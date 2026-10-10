@@ -343,9 +343,15 @@ jobs:
       # the browser-backed tests skip themselves through the `page`/`kit`
       # fixtures, and the platform suite runs the Windows layer for real.
       # The connector registry and connector suites are platform neutral:
-      # provider calls are mocked, and they need no database.
+      # provider calls are mocked, and they need no database. The document
+      # sandbox and its worker limits run real child processes and a real
+      # Windows job object here (top10:file_extraction). The schedule
+      # recurrence suite runs here because Windows reads its time zones
+      # from the tzdata package, not the OS (top10:scheduler_briefing). The
+      # transcribe suite starts and kills real speech-worker stand-ins
+      # (top10:voice_notes).
       - name: Unit tests
-        run: python -m pytest tests/test_platform.py tests/test_browser_snapshot.py tests/test_browser_session.py tests/test_browser_handoff.py tests/test_browser_guard.py tests/test_browser_runtime.py tests/test_capability_gating.py tests/test_capabilities_report.py tests/test_connector_registry.py tests/connectors/ -q -p no:cacheprovider
+        run: python -m pytest tests/test_platform.py tests/test_browser_snapshot.py tests/test_browser_session.py tests/test_browser_handoff.py tests/test_browser_guard.py tests/test_browser_runtime.py tests/test_capability_gating.py tests/test_capabilities_report.py tests/test_connector_registry.py tests/connectors/ tests/files/test_files_sandbox.py tests/files/test_files_worker_limits.py tests/test_schedule_recurrence.py tests/test_transcribe.py -q -p no:cacheprovider
 
       - name: Types
         run: python -m mypy services/platform services/tools/browser

@@ -227,8 +227,9 @@ class NetworkPolicy:
 # interactive /login/oauth2/auth page is browser-side and stays blocked.
 # Shared between the hosted (*.instructure.com) and self-hosted cases so
 # a self-hosted instance is never reachable at paths the hosted one is
-# not.
-_CANVAS_PATHS = ["/api/v1/", "/login/oauth2/token"]
+# not. /files/ is a course file's download address (canvas.get_file_text;
+# top10:file_extraction); the connector registry's policy says the same.
+_CANVAS_PATHS = ["/api/v1/", "/login/oauth2/token", "/files/"]
 
 # Default network policies per connector (deny-by-default)
 DEFAULT_POLICIES: dict[str, NetworkPolicy] = {

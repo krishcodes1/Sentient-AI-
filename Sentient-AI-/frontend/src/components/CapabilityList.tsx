@@ -135,10 +135,11 @@ function CapabilityRow({
         </button>
       </div>
 
-      {/* Only `purchases` has settings (its spending caps); the component
-          renders nothing for the other rows. Shown only where a save handler
-          exists: the setup wizard's step turns things on and off and leaves
-          the caps at their defaults. */}
+      {/* The rows with settings (purchases' caps, scheduled tasks' budgets,
+          video minutes, knowledge base limits) get their fields; the
+          component renders nothing for the other rows. Shown only where a
+          save handler exists: the setup wizard's step turns things on and
+          off and leaves the settings at their defaults. */}
       {onSettingsChange && (
         <CapabilitySettings
           item={item}

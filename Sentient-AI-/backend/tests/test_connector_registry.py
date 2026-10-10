@@ -775,14 +775,24 @@ def test_connector_catalog_entries_equal_the_old_catalog():
         old_names = [old[0] for old in expected]
         assert [n for n in by_name if n in old_names] == old_names, key
     # Canvas and Robinhood are not extended by the connectors plan; Canvas
-    # gained get_upcoming and grade_whatif since (the assistant tools).
+    # gained get_upcoming and grade_whatif since (the assistant tools), and
+    # get_announcements and get_recent_grades (the app-event triggers).
     assert [s.action for s in CONNECTOR_CATALOG["robinhood"]] == [
         o[0] for o in OLD_CATALOG["robinhood"]
     ]
     canvas_extra = {s.action for s in CONNECTOR_CATALOG["canvas"]} - {
         o[0] for o in OLD_CATALOG["canvas"]
     }
-    assert canvas_extra == {"get_upcoming", "grade_whatif"}
+    # top10:file_extraction added the course-file reads, top10:event_triggers
+    # the announcement and recent-grade reads.
+    assert canvas_extra == {
+        "get_upcoming",
+        "grade_whatif",
+        "list_files",
+        "get_file_text",
+        "get_announcements",
+        "get_recent_grades",
+    }
     for name, description in OLD_DESCRIPTIONS.items():
         key, action = name.split(".")
         assert next(s for s in CONNECTOR_CATALOG[key] if s.action == action).description == description
@@ -816,9 +826,12 @@ def test_always_confirm_and_starter_flags():
         for s in d.actions:
             if s.category == D:
                 assert s.always_confirm, f"{d.key}.{s.action}"
-    # Nothing in Canvas or Robinhood, nor Google's calendar write, needs it.
+    # Nothing in Canvas or Robinhood, nor Google's calendar write, needs it,
+    # except handing in work (permission tiers: it speaks for the student).
     for name, (confirm, _) in flags.items():
-        if name.split(".")[0] in ("canvas", "robinhood") or name == "google_workspace.create_event":
+        if name == "canvas.submit_assignment":
+            assert confirm, name
+        elif name.split(".")[0] in ("canvas", "robinhood") or name == "google_workspace.create_event":
             assert not confirm, name
     for d in registry.REGISTRY:
         starters = [s for s in d.actions if s.starter]
@@ -861,7 +874,8 @@ def test_registry_network_policies_are_armed_at_import():
     assert "/revoke" in google.allowed_paths["oauth2.googleapis.com"]
     assert google.https_only is True
     assert DEFAULT_POLICIES["canvas"].https_only is False
-    assert DEFAULT_POLICIES["canvas"].instance_paths == ["/api/v1/", "/login/oauth2/token"]
+    # /files/: a course file's download address (top10:file_extraction).
+    assert DEFAULT_POLICIES["canvas"].instance_paths == ["/api/v1/", "/login/oauth2/token", "/files/"]
     robinhood_paths = DEFAULT_POLICIES["robinhood"].allowed_paths["trading.robinhood.com"]
     assert not any("orders" in path for path in robinhood_paths)
 
@@ -1058,7 +1072,9 @@ def test_payload_shape():
     assert [entry["key"] for entry in payload] == [d.key for d in registry.REGISTRY]
     assert [entry["key"] for entry in payload][:3] == LEGACY_KEYS
     for entry in payload:
-        assert set(entry) == {"key", "label", "description", "icon", "docs_url", "creatable", "auth", "scopes"}
+        assert set(entry) == {
+            "key", "label", "description", "icon", "docs_url", "creatable", "auth", "scopes", "low_risk"
+        }
         assert entry["creatable"] is True
         assert set(entry["auth"]) == {
             "methods", "fields", "provider", "oauth_configured", "token_auth_method", "notes",
@@ -1385,3 +1401,80 @@ def test_readme_documents_the_registry_steps():
         assert needle in readme
     # House style: no em or en dashes (U+2014, U+2013).
     assert chr(0x2014) not in readme and chr(0x2013) not in readme
+
+
+# top10:knowledge_base
+def test_knowledge_is_a_reserved_key():
+    assert "knowledge" in registry.RESERVED_KEYS
+    _only(registry.validate_registry([dataclasses.replace(GOOD, key="knowledge")]), "reserved")
+
+
+# ---------------------------------------------------------------------------
+# Permission tiers: risk declarations (services/agent/risk.py)
+# ---------------------------------------------------------------------------
+
+
+async def _star_thing(self, thing_id, *, user_confirmed=False):
+    return {}
+
+
+_STAR = ToolSpec(
+    "star_thing",
+    "Star a thing.",
+    ActionCategory.WRITE,
+    _schema(thing_id={"type": "string", "required": True}),
+    required_scope="things.write",
+    risk="low",
+    ref_args=("thing_id",),
+    low_risk_note="star things",
+)
+
+
+def _starred(spec: ToolSpec) -> ConnectorDefinition:
+    return _with((_LIST, _DELETE, spec), {"star_thing": _star_thing})
+
+
+def test_a_low_risk_write_with_a_note_and_valid_ref_args_is_valid():
+    assert registry.validate_registry([_starred(_STAR)]) == []
+
+
+@pytest.mark.parametrize(
+    "changes,fragment",
+    [
+        ({"risk": "medium"}, "risk may only be 'low'"),
+        ({"always_confirm": True}, "an always_confirm action may not declare risk='low'"),
+        ({"low_risk_note": ""}, "risk='low' needs a low_risk_note"),
+        ({"low_risk_note": "x" * 81}, "low_risk_note is over 80 characters"),
+        ({"ref_args": ("thing",)}, "ref_arg 'thing' is not a parameter"),
+        ({"ref_args": ("thing_id", "thing_id")}, "ref_args name an argument twice"),
+    ],
+)
+def test_risk_declarations_are_validated(changes, fragment):
+    problems = registry.validate_registry([_starred(dataclasses.replace(_STAR, **changes))])
+    assert any(fragment in p for p in problems), problems
+
+
+def test_only_a_write_may_be_low_and_notes_and_refs_are_for_low_only():
+    read_low = dataclasses.replace(_LIST, risk="low", low_risk_note="list things")
+    problems = registry.validate_registry([_with((read_low, _DELETE))])
+    assert any("only a WRITE may declare risk='low'" in p for p in problems), problems
+    plain = dataclasses.replace(_STAR, risk=None, low_risk_note="", ref_args=("thing_id",))
+    _only(registry.validate_registry([_starred(plain)]), "ref_args are only for risk='low' actions")
+    noted = dataclasses.replace(_STAR, risk=None, low_risk_note="star things", ref_args=())
+    _only(registry.validate_registry([_starred(noted)]), "low_risk_note is only for risk='low'")
+
+
+@pytest.mark.parametrize(
+    "key,action",
+    [
+        ("canvas", "submit_assignment"),
+        ("google_workspace", "respond_to_invite"),
+        ("microsoft", "respond_to_invite"),
+        ("slack", "invite_to_channel"),
+    ],
+)
+def test_actions_that_speak_for_the_user_always_confirm(key, action):
+    definition = registry.get_definition(key)
+    assert definition is not None
+    spec = next(s for s in definition.actions if s.action == action)
+    assert spec.always_confirm is True

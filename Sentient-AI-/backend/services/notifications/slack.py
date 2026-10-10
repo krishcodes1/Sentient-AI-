@@ -58,6 +58,7 @@ from services.connectors.slack import SlackConnector
 from services.connectors.slack_api.client import API_BASE, TS_RE, USER_ID_RE, slack_error
 from services.notifications import cards
 from services.notifications.progress import TurnProgress, takes_keyword, takes_on_event
+from services.security import channels as secret_text
 
 logger = structlog.get_logger(__name__)
 
@@ -103,6 +104,11 @@ _SEEN_EVENTS = 512
 
 ACTION_APPROVE = "crawler_approve"
 ACTION_DENY = "crawler_deny"
+# The third button of a card that offers a low-risk grant: approve it and
+# allow low-risk changes on its account for 7 days (permission tiers).
+ACTION_APPROVE_LOW_RISK = "crawler_approve_low_risk"
+# The decision option that button carries (permission_grants.REMEMBER_LOW_RISK).
+_REMEMBER_LOW_RISK = "low_risk"
 
 _TEAM_ID_RE = re.compile(r"^[TE][A-Z0-9]{1,30}$")
 _DM_CHANNEL_RE = re.compile(r"^D[A-Z0-9]{1,30}$")
@@ -116,6 +122,9 @@ _WS_LOGGER.setLevel(logging.WARNING)
 
 DecideCallback = Callable[..., Awaitable[dict[str, Any]]]
 ChatCallback = Callable[..., Awaitable[dict[str, Any]]]
+# (user_id, command, new_conversation=..., text=...) -> {"reply": str} or
+# {"error": str}: api/routes/agent.build_tutor_applier.
+TutorCallback = Callable[..., Awaitable[dict[str, Any]]]
 
 
 class WebSocketLike(Protocol):
@@ -224,7 +233,22 @@ def _section(text: str) -> dict[str, Any]:
     return {"type": "section", "text": {"type": "plain_text", "text": text, "emoji": False}}
 
 
-def _decision_buttons(action_id: str) -> dict[str, Any]:
+def _decision_buttons(action_id: str, low_risk_account: Optional[str] = None) -> dict[str, Any]:
+    """Approve and Deny, plus "Allow low-risk on <account> · 7 days" when the
+    card offers a low-risk grant."""
+    extra: list[dict[str, Any]] = []
+    if low_risk_account:
+        label = " ".join("".join(c if c.isprintable() else " " for c in low_risk_account).split())
+        if len(label) > 24:
+            label = label[:23] + "…"
+        extra.append(
+            {
+                "type": "button",
+                "action_id": ACTION_APPROVE_LOW_RISK,
+                "text": {"type": "plain_text", "text": f"Allow low-risk on {label} · 7 days"},
+                "value": action_id,
+            }
+        )
     return {
         "type": "actions",
         "block_id": "crawler_decision",
@@ -243,6 +267,7 @@ def _decision_buttons(action_id: str) -> dict[str, Any]:
                 "style": "danger",
                 "value": action_id,
             },
+            *extra,
         ],
     }
 
@@ -335,11 +360,39 @@ async def _close_quietly(ws: WebSocketLike) -> None:
 
 
 @dataclass(frozen=True)
+class SlackFile:
+    """A file shared in a DM (top10:file_extraction): its Slack id, name,
+    declared type and size, and the bot-token download address, which is
+    accepted only on files.slack.com under /files-pri/."""
+
+    id: str
+    name: str
+    mimetype: str
+    size: Optional[int]
+    url: str = ""
+
+
+@dataclass(frozen=True)
 class InboundMessage:
     sender: str
     text: str
     channel: str
     event_key: str
+    # top10:file_extraction: the files of a ``file_share`` message.
+    files: tuple[SlackFile, ...] = ()
+    # top10:voice_notes: the ``file_share`` carries an audio clip (any file
+    # whose declared type is audio/*), whatever its download address.
+    audio: bool = False
+
+
+def _shares_audio(event: dict[str, Any]) -> bool:
+    """Whether a file_share event carries an audio file (top10:voice_notes).
+    Only the declared type is read; nothing is fetched."""
+    raw = event.get("files")
+    return any(
+        isinstance(item, dict) and str(item.get("mimetype") or "").lower().startswith("audio/")
+        for item in (raw if isinstance(raw, list) else [])
+    )
 
 
 @dataclass(frozen=True)
@@ -350,6 +403,85 @@ class ButtonPress:
     action_id: str
     approved: bool
     blocks: tuple[dict[str, Any], ...]
+    # "low_risk" for the "Allow low-risk" button (permission tiers).
+    remember: Optional[str] = None
+
+
+# A DM keyword handler in SlackChannel._text_handlers: given a linked
+# sender's message, the reply to run off the socket loop when the message is
+# its keyword, or None to let the next handler (and in the end the chat)
+# have it. Called on the socket loop, so it must not block.
+TextHandler = Callable[[InboundMessage], Optional[Awaitable[None]]]
+# A text handler's method name is "_keyword_<word>"; its reply task is named
+# "slack-<word>".
+_KEYWORD_HANDLER_PREFIX = "_keyword_"
+
+
+# top10:voice_notes: what a linked sender's audio clip gets instead of a turn.
+SLACK_AUDIO_REPLY = (
+    "🎤 I can't listen to Slack audio clips yet. Please type your message — voice "
+    "notes work in Telegram when the owner has turned them on."
+)
+
+_FILES_HOST = "files.slack.com"
+_FILES_PATH_PREFIX = "/files-pri/"
+_MAX_SHARED_FILES = 5
+
+
+def _shared_files(event: dict[str, Any]) -> tuple[SlackFile, ...]:
+    """The files of a file_share event that may be downloaded: at most
+    _MAX_SHARED_FILES, each with a url_private_download on files.slack.com
+    under /files-pri/ (anything else is left out, never fetched)."""
+    found: list[SlackFile] = []
+    raw = event.get("files")
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        url = item.get("url_private_download")
+        file_id = item.get("id")
+        if not isinstance(url, str) or not isinstance(file_id, str):
+            continue
+        try:
+            parts = urlsplit(url)
+        except ValueError:
+            continue
+        if parts.scheme != "https" or parts.hostname != _FILES_HOST or not parts.path.startswith(_FILES_PATH_PREFIX):
+            continue
+        size = item.get("size")
+        found.append(
+            SlackFile(
+                id=file_id[:64],
+                name=str(item.get("name") or item.get("title") or "file")[:255],
+                mimetype=str(item.get("mimetype") or "")[:100],
+                size=size if isinstance(size, int) and not isinstance(size, bool) else None,
+                url=url,
+            )
+        )
+        if len(found) >= _MAX_SHARED_FILES:
+            break
+    return tuple(found)
+
+
+async def _done() -> None:
+    """The empty reply of a text handler that started its work itself."""
+    return None
+
+
+def _as_coroutine(reply: Awaitable[None]) -> Coroutine[Any, Any, None]:
+    """*reply* as the coroutine SlackChannel._later runs (and closes,
+    unstarted, while the channel shuts down)."""
+    if isinstance(reply, Coroutine):
+        return reply
+
+    async def wait() -> None:
+        await reply
+
+    return wait()
+
+
+def _reply_task_name(handler: TextHandler) -> str:
+    name = str(getattr(handler, "__name__", "") or "text")
+    return "slack-" + name.removeprefix(_KEYWORD_HANDLER_PREFIX)
 
 
 class SlackChannel:
@@ -408,6 +540,63 @@ class SlackChannel:
         self._fresh = False
         self._seen: OrderedDict[str, None] = OrderedDict()
         self._dm_channels: dict[str, str] = {}
+        # A linked sender's message goes to the first of these that answers
+        # it (a keyword), else to the chat (_on_events_api).
+        self._text_handlers: list[TextHandler] = []
+        self._register_text_handlers()
+
+    def _register_text_handlers(self) -> None:
+        """Fill ``_text_handlers``, in the order they are tried."""
+        self._text_handlers.append(self._keyword_stop)
+        self._text_handlers.append(self._keyword_pending)
+        self._text_handlers.append(self._keyword_new)
+        # top10:secret_pii_redaction
+
+        # top10:file_extraction
+        self._text_handlers.append(self._keyword_files)
+
+        # top10:scheduler_briefing
+        from services.scheduler import commands as schedule_commands
+
+        schedule_commands.register_slack(self)
+
+        # top10:tutor_mode
+        # "tutor on|off|status" (services/tutor), applied by the tutor applier
+        # main.py wires; None until then.
+        self.tutor: Optional[TutorCallback] = None
+        self._text_handlers.append(self._keyword_tutor)
+
+        # top10:knowledge_base
+
+        # top10:flashcards_quizzes
+        from services.study import slack as study_slack
+
+        study_slack.register_slack(self)
+
+        # top10:event_triggers
+        from services.triggers import commands as trigger_commands
+
+        trigger_commands.register_slack(self)
+
+        # top10:permission_tiers
+        from services.notifications import grant_commands
+
+        grant_commands.register_slack(self)
+
+        # top10:voice_notes
+        # Ahead of the files handler: an audio clip gets a text reply and is
+        # never downloaded or read as a document.
+        files_at = next(
+            (
+                i
+                for i, handler in enumerate(self._text_handlers)
+                if getattr(handler, "__name__", "") == "_keyword_files"
+            ),
+            len(self._text_handlers),
+        )
+        self._text_handlers.insert(files_at, self._keyword_audio)
+
+        # top10:video_transcripts
 
     # ── lifecycle ────────────────────────────────────────────────────────
 
@@ -677,7 +866,12 @@ class SlackChannel:
             return None
         if event.get("channel_type") != "im":
             return None
-        if "subtype" in event or event.get("bot_id") or event.get("bot_profile"):
+        # top10:file_extraction: a person sharing a file in the DM
+        # ("file_share") is the one subtype admitted; every other subtype
+        # (edits, joins, bot messages ...) is still dropped.
+        if "subtype" in event and event.get("subtype") != "file_share":
+            return None
+        if event.get("bot_id") or event.get("bot_profile"):
             return None
         for key in ("team", "user_team", "source_team"):
             if key in event and event.get(key) != team:
@@ -690,15 +884,22 @@ class SlackChannel:
         channel = event.get("channel")
         if not (isinstance(channel, str) and _DM_CHANNEL_RE.fullmatch(channel)):
             return None
+        files = _shared_files(event) if event.get("subtype") == "file_share" else ()
+        # top10:voice_notes: an audio clip is admitted for its text reply.
+        audio = event.get("subtype") == "file_share" and _shares_audio(event)
         text = event.get("text")
+        if text is None and (files or audio):
+            text = ""
         if not isinstance(text, str):
             return None
         text = slack_unescape(text).strip()
-        if not text:
+        if not text and not files and not audio:
             return None
         event_id = payload.get("event_id")
         key = event_id if isinstance(event_id, str) and event_id else f"{channel}:{event.get('ts')}"
-        return InboundMessage(sender=sender, text=text, channel=channel, event_key=key)
+        return InboundMessage(
+            sender=sender, text=text, channel=channel, event_key=key, files=files, audio=audio
+        )
 
     def authorize_press(self, payload: Any) -> Optional[ButtonPress]:
         """An Approve or Deny press from this workspace, or None."""
@@ -730,7 +931,7 @@ class SlackChannel:
         if not isinstance(actions, list) or not actions or not isinstance(actions[0], dict):
             return None
         pressed = actions[0]
-        if pressed.get("action_id") not in (ACTION_APPROVE, ACTION_DENY):
+        if pressed.get("action_id") not in (ACTION_APPROVE, ACTION_DENY, ACTION_APPROVE_LOW_RISK):
             return None
         action_id = pressed.get("value")
         if not (isinstance(action_id, str) and _UUID_RE.fullmatch(action_id)):
@@ -746,8 +947,9 @@ class SlackChannel:
             channel=channel,
             message_ts=ts,
             action_id=action_id,
-            approved=pressed.get("action_id") == ACTION_APPROVE,
+            approved=pressed.get("action_id") in (ACTION_APPROVE, ACTION_APPROVE_LOW_RISK),
             blocks=blocks,
+            remember=_REMEMBER_LOW_RISK if pressed.get("action_id") == ACTION_APPROVE_LOW_RISK else None,
         )
 
     def _first_delivery(self, key: str) -> bool:
@@ -789,21 +991,180 @@ class SlackChannel:
             logger.info("slack_message_from_unlinked_user_ignored", connector_id=self.connector_id)
             return
         self._dm_channels[message.sender] = message.channel
-        keyword = message.text.lower()
-        if keyword == "stop":
-            self._later(self._handle_stop(message.channel), "slack-stop")
-        elif keyword == "pending":
-            self._later(self._handle_pending(message.channel), "slack-pending")
-        elif keyword == "new":
-            self._fresh = True
-            self._later(
-                self._post_text(
-                    message.channel, "Fresh start: your next message begins a new conversation."
-                ),
-                "slack-new",
+        for handler in self._text_handlers:
+            reply = handler(message)
+            if reply is not None:
+                self._later(_as_coroutine(reply), _reply_task_name(handler))
+                return
+        self._handle_chat(message.channel, message.text)
+
+    # ── DM keywords (_text_handlers) ─────────────────────────────────────
+
+    def _keyword_stop(self, message: InboundMessage) -> Optional[Awaitable[None]]:
+        if message.text.lower() != "stop":
+            return None
+        return self._handle_stop(message.channel)
+
+    def _keyword_pending(self, message: InboundMessage) -> Optional[Awaitable[None]]:
+        if message.text.lower() != "pending":
+            return None
+        return self._handle_pending(message.channel)
+
+    def _keyword_new(self, message: InboundMessage) -> Optional[Awaitable[None]]:
+        if message.text.lower() != "new":
+            return None
+        # Set now, not when the reply goes out: the next message may already
+        # be on its way.
+        self._fresh = True
+        return self._say_fresh_start(message.channel)
+
+    def _keyword_tutor(self, message: InboundMessage) -> Optional[Awaitable[None]]:
+        """The bare "tutor", "tutor on|off|status" (Slack's client keeps a
+        "/tutor" for itself); "tutor me in calc" goes to the chat."""
+        from services.tutor.commands import parse_tutor_command
+
+        command = parse_tutor_command(message.text, slash_required=False)
+        if command is None:
+            return None
+        # Consumed now, like "new": "new" then "tutor on" switches the
+        # fresh thread the next message continues.
+        fresh, self._fresh = self._fresh, False
+        return self._handle_tutor(message.channel, command, fresh)
+
+    async def _handle_tutor(self, channel: str, command: str, fresh: bool) -> None:
+        """Apply a tutor command (no model call; off the turn lock, so a turn
+        running meanwhile merges its own state over this one when it saves)."""
+        if self.tutor is None:
+            await self._post_text(channel, "Tutor mode is not available right now.")
+            return
+        try:
+            outcome = await self.tutor(
+                self.user_id, command, new_conversation=fresh, text=f"tutor {command}"
             )
-        else:
-            self._handle_chat(message.channel, message.text)
+        except Exception as exc:
+            logger.warning("slack_tutor_failed", error_type=type(exc).__name__)
+            outcome = {"error": "Tutor mode could not be changed right now."}
+        if outcome.get("error"):
+            if fresh:
+                self._fresh = True
+            await self._post_text(channel, f"⚠️ {outcome['error']}"[:TEXT_CHUNK])
+            return
+        await self._post_text(channel, str(outcome.get("reply") or "")[:TEXT_CHUNK])
+
+    async def _say_fresh_start(self, channel: str) -> None:
+        await self._post_text(channel, "Fresh start: your next message begins a new conversation.")
+
+    # ── audio clips (top10:voice_notes) ──────────────────────────────────
+
+    def _keyword_audio(self, message: InboundMessage) -> Optional[Awaitable[None]]:
+        """A DM sharing an audio clip gets a text reply: no download and no
+        turn (Slack audio is a follow-up; voice notes work in Telegram)."""
+        if not message.audio:
+            return None
+        return self._say_no_audio(message.channel)
+
+    async def _say_no_audio(self, channel: str) -> None:
+        await self._post_text(channel, SLACK_AUDIO_REPLY)
+
+    # ── shared files (top10:file_extraction) ─────────────────────────────
+
+    def _keyword_files(self, message: InboundMessage) -> Optional[Awaitable[None]]:
+        """A DM that shares files: its turn starts as tracked work (so
+        "stop" cancels the downloads too), and the handler's own reply is
+        empty."""
+        if not message.files:
+            return None
+        if self.chat is None:
+            logger.warning("slack_chat_unavailable", connector_id=self.connector_id)
+            return _done()
+        fresh, self._fresh = self._fresh, False
+        stop_mark = agent_cancel.mark(self.user_id)
+        self._track(
+            self._run_file_turn(message, fresh, stop_mark), f"slack-chat-{self.connector_id[:8]}"
+        )
+        return _done()
+
+    async def _run_file_turn(self, message: InboundMessage, fresh: bool, stop_mark: int) -> None:
+        """Check "Read files and documents", download the shared files with
+        the bot token (files.slack.com/files-pri/ only, through the Slack
+        connector's policy-checked client), then one chat turn with
+        ``files=``. A file that cannot be fetched or read ends the turn with
+        "⚠️ I couldn't read x: <reason>" and no model call."""
+        from services.files.intake import InboundFile
+        from services.files.limits import UPLOAD
+        from services.files.messages import too_large
+        from services.files.prompting import sanitize_display_name
+
+        channel = message.channel
+        started = False
+        try:
+            async with self._lock:
+                started = True
+                assert self.chat is not None
+                gate = getattr(self.chat, "file_gate", None)
+                refusal = await gate() if callable(gate) else None
+                if refusal is None and not takes_keyword(self.chat, "files"):
+                    refusal = "This app can't read files yet."
+                if refusal is not None:
+                    await self._post_text(channel, f"⚠️ {refusal}"[:TEXT_CHUNK])
+                    return
+                first = sanitize_display_name(message.files[0].name)
+                line = f"📄 Reading {first}…" if len(message.files) == 1 else f"📄 Reading {len(message.files)} files…"
+                await self._post_text(channel, line[:200])
+                files: list[Any] = []
+                for shared in message.files:
+                    name = sanitize_display_name(shared.name)
+                    if shared.size is not None and shared.size > UPLOAD.max_bytes:
+                        await self._post_text(
+                            channel, f"⚠️ I couldn't read {name}: {too_large(shared.size, UPLOAD.max_bytes)}"[:TEXT_CHUNK]
+                        )
+                        return
+                    try:
+                        body = await self._connector._request_bytes(
+                            "GET", shared.url, max_bytes=UPLOAD.max_bytes
+                        )
+                    except ConnectorError as exc:
+                        logger.warning("slack_file_download_failed", error_type=type(exc).__name__)
+                        await self._post_text(
+                            channel, f"⚠️ I couldn't read {name}: Slack did not hand the file over."[:TEXT_CHUNK]
+                        )
+                        return
+                    if body.truncated:
+                        await self._post_text(
+                            channel, f"⚠️ I couldn't read {name}: {too_large(None, UPLOAD.max_bytes)}"[:TEXT_CHUNK]
+                        )
+                        return
+                    files.append(
+                        InboundFile(name=name, media_type=shared.mimetype, data=body.content, source="slack")
+                    )
+                progress = self._progress(channel)
+                try:
+                    listen: dict[str, Any] = (
+                        {"on_event": progress.on_event} if takes_on_event(self.chat) else {}
+                    )
+                    if takes_keyword(self.chat, "stop_mark"):
+                        listen["stop_mark"] = stop_mark
+                    outcome = await self.chat(
+                        self.user_id, message.text, new_conversation=fresh, files=files, **listen
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.error(
+                        "slack_chat_failed", connector_id=self.connector_id, error_type=type(exc).__name__
+                    )
+                    outcome = {"error": "The assistant hit an unexpected error."}
+                finally:
+                    await progress.aclose()
+                if outcome.get("error"):
+                    await self._post_text(channel, f"⚠️ {outcome['error']}"[:TEXT_CHUNK])
+                    return
+                reply = _with_turn_notes(str(outcome.get("content") or "").strip(), outcome)
+                await self._send_reply(channel, reply or "(The assistant returned no text.)", outcome)
+        except asyncio.CancelledError:
+            if fresh and not started:
+                self._fresh = True
+            raise
 
     async def _link_sender(self, sender: str, text: str) -> bool:
         """Link *sender* to this connector if *text* is still the pending
@@ -863,6 +1224,11 @@ class SlackChannel:
         try:
             async with self._lock:
                 started = True
+                # A key, card or ID number in the person's own message: the
+                # model never sees it, but Slack keeps the message.
+                warning = secret_text.inbound_warning(text, app="Slack")
+                if warning is not None:
+                    await self._post_text(channel, warning)
                 progress = self._progress(channel)
                 try:
                     assert self.chat is not None
@@ -900,7 +1266,10 @@ class SlackChannel:
         return TurnProgress(lambda line: self._post_text(channel, line))
 
     async def _send_reply(self, channel: str, text: str, outcome: dict[str, Any]) -> None:
-        """Send *text* in Slack-sized, paced parts, the turn's usage line last."""
+        """Send *text* in Slack-sized, paced parts, the turn's usage line last.
+        The reply is masked whole before it is split (a value never straddles
+        two messages), with one footer when anything was hidden."""
+        text = secret_text.mask_reply(text, app="Slack", channel="slack")
         line = cards.usage_line(outcome)
         if line:
             text = f"{text}\n\n{line}"
@@ -974,6 +1343,8 @@ class SlackChannel:
             progress = self._progress(press.channel)
             if takes_on_event(self.decide):
                 listen = {"on_event": progress.on_event}
+            if press.remember and takes_keyword(self.decide, "remember"):
+                listen["remember"] = press.remember
         try:
             outcome = await self.decide(self.user_id, press.action_id, press.approved, **listen)
         except asyncio.CancelledError:
@@ -1000,6 +1371,11 @@ class SlackChannel:
             await self._post_text(press.channel, "⚠️ " + str(outcome["error"])[:180])
             return
         verdict = "✅ Approved" if press.approved else "❌ Denied"
+        low_risk = outcome.get("low_risk")
+        if isinstance(low_risk, dict) and low_risk.get("account"):
+            verdict += f" · low-risk allowed until {_day(low_risk.get('expires_at'))}"
+        elif press.approved and press.remember == _REMEMBER_LOW_RISK:
+            verdict += " (approved once)"
         await self._freeze_card(press, verdict)
         summary = outcome.get("summary")
         if summary:
@@ -1039,10 +1415,13 @@ class SlackChannel:
     ) -> Optional[dict[str, Any]]:
         """chat.postMessage through the connector's one choke point (link and
         media unfurling forced off). None on failure (logged, never raised):
-        a Slack outage degrades to no message, never breaks a flow."""
+        a Slack outage degrades to no message, never breaks a flow. Any key,
+        password, card, bank or ID number in the text and in every plain_text
+        block is masked first (services.security, policy CHANNEL)."""
+        text = secret_text.mask_text(text, channel="slack")[0]
         body: dict[str, Any] = {"channel": channel, "text": text}
         if blocks is not None:
-            body["blocks"] = blocks
+            body["blocks"] = secret_text.mask_blocks(blocks, channel="slack")
         try:
             return await self._connector._send_chat("chat.postMessage", body, "dm_message")
         except ConnectorError as exc:
@@ -1097,6 +1476,8 @@ class SlackChannel:
         channel = await self._linked_dm()
         if channel is None:
             return False
+        # Masked before it is cut, so a value is never cut in half.
+        text = secret_text.mask_text(text, channel="slack")[0]
         return await self._post_text(channel, text[:3500]) is not None
 
     async def notify_pending(self, action: Any) -> bool:
@@ -1118,6 +1499,8 @@ class SlackChannel:
             ]
             if getattr(action, "risk_note", None):
                 lines += ["", f"⚠️ {action.risk_note}"]
+            # A LOW action's card may offer "Allow low-risk on <account>".
+            low_risk_account = cards.low_risk_account(action)
             card = cards.layout_card(
                 lines,
                 cards.card_arguments(action.tool_name, action.arguments or {}),
@@ -1142,13 +1525,14 @@ class SlackChannel:
                         oversized=card.notice is not None,
                     )
                     return False
-                text = "\n".join(
-                    [*card.final_lines, "", f"Expires in {cards.expires_in_text(action.expires_at)}."]
-                )
+                closing = [*card.final_lines, "", f"Expires in {cards.expires_in_text(action.expires_at)}."]
+                if low_risk_account:
+                    closing += ["", _low_risk_line(action, low_risk_account)]
+                text = "\n".join(closing)
                 posted = await self._post(
                     channel,
                     slack_escape(f"Approval required: {action.tool_name}"),
-                    [_section(text), _decision_buttons(str(action.action_id))],
+                    [_section(text), _decision_buttons(str(action.action_id), low_risk_account)],
                 )
             return posted is not None
         except Exception as exc:  # a notification failure never breaks the flow
@@ -1156,6 +1540,29 @@ class SlackChannel:
                 "slack_notify_failed", connector_id=self.connector_id, error_type=type(exc).__name__
             )
             return False
+
+
+def _low_risk_line(action: Any, account: str) -> str:
+    """What a card that offers a low-risk grant says about it."""
+    from services.agent.risk import low_risk_notes_for_tool
+
+    return cards.low_risk_line(
+        account,
+        low_risk_notes_for_tool(action.tool_name),
+        how='Send "grants" to list them, or "revoke grants" to turn them all off.',
+    )
+
+
+def _day(when: Any) -> str:
+    """A date as the DM shows it ("Fri Oct 2"), in this computer's zone."""
+    try:
+        moment = when if isinstance(when, datetime) else datetime.fromisoformat(str(when))
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        local = moment.astimezone()
+    except (TypeError, ValueError):
+        return str(when)
+    return f"{local:%a} {local:%b} {local.day}"
 
 
 _LINKED_TEXT = (

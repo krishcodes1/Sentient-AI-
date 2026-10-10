@@ -50,6 +50,17 @@ pyobjc-framework-Cocoa>=10.0,<13; sys_platform == "darwin"
 # and the container image, and services/tools/computer/backend_windows.py
 # imports it lazily so the backend still loads everywhere else.
 uiautomation>=2.0,<3.0; sys_platform == "win32"
+# Document reading (services/files; top10:file_extraction). All three run only
+# inside the sandboxed parser worker and are pure Python.
+# pypdf: a PDF's text layer, page labels and metadata; 6.x bounds its own
+# stream decompression (the 2025 decompression-bomb fixes).
+pypdf>=6.1,<7
+# defusedxml: Word and PowerPoint XML parsed with DTDs, entities and external
+# references forbidden (openpyxl uses it too when it is installed).
+defusedxml>=0.7.1,<0.8
+# openpyxl: Excel workbooks read in read_only + data_only mode (cached values,
+# no formula is evaluated) under row, column and cell caps.
+openpyxl>=3.1.5,<3.2
 # IANA timezone data for zoneinfo (GET /api/usage/summary?tz=). Slim
 # container images may ship without /usr/share/zoneinfo, and zoneinfo
 # falls back to this package — without it every named zone is "unknown".

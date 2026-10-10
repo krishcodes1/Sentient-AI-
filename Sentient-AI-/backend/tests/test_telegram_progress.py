@@ -786,3 +786,20 @@ async def test_stopping_the_bot_mid_send_neither_hangs_nor_raises(
     await asyncio.wait_for(service.stop(), timeout=5)
     senders = [t for t in asyncio.all_tasks() if t.get_name() == "chat-progress"]
     assert all(t.done() or t.cancelling() for t in senders)
+
+
+# top10:knowledge_base
+@pytest.mark.parametrize(
+    ("data", "phrase"),
+    [
+        ({"name": "knowledge.search"}, "Searching your documents…"),
+        ({"name": "knowledge.read"}, "Reading your document…"),
+        ({"name": "knowledge.list"}, "Checking your knowledge base…"),
+        ({"name": "knowledge.remove"}, "Removing from your knowledge base…"),
+        ({"name": "knowledge.add", "host": "catalog.example.edu"}, "Saving catalog.example.edu to your knowledge base…"),
+        ({"name": "knowledge.add"}, "Saving to your knowledge base…"),
+        ({"name": "knowledge.something_new"}, "Checking your knowledge base…"),
+    ],
+)
+def test_knowledge_tools_earn_their_phrases(data, phrase):
+    assert phrase_for({"type": "tool_call", "data": data}) == phrase
