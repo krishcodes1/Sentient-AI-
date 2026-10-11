@@ -160,9 +160,12 @@ def test_definition_auth_network_and_presentation():
     assert net.ws_hosts == ("wss-primary.slack.com", "wss-backup.slack.com", "wss.slack.com")
 
 
-def test_docs_url_is_the_create_app_link_carrying_the_manifest():
+def test_token_url_is_the_create_app_link_carrying_the_manifest():
     prefix = "https://api.slack.com/apps?new_app=1&manifest_json="
-    assert DEFINITION.docs_url == MANIFEST_URL and MANIFEST_URL.startswith(prefix)
+    assert DEFINITION.auth.token_url == MANIFEST_URL and MANIFEST_URL.startswith(prefix)
+    assert DEFINITION.auth.token_url_label == "Create the Crawler Slack app"
+    # The setup guide is Slack's page about its token types.
+    assert DEFINITION.docs_url == "https://docs.slack.dev/authentication/tokens/"
     encoded = MANIFEST_URL[len(prefix) :]
     assert "&" not in encoded and " " not in encoded
     manifest = json.loads(unquote(encoded))

@@ -150,6 +150,10 @@ class OAuthSpec:
     scopes that grant it. ``base_scopes`` are always requested (for example
     ``offline_access`` so Microsoft returns a refresh token).
     ``authorize_params`` are extra consent-URL parameters.
+
+    ``client_setup_url`` is the provider page where the server owner
+    registers the sign-in client whose id goes in ``backend/.env`` (an
+    https URL). The Connectors page links it while sign-in is not set up.
     """
 
     provider: str
@@ -163,6 +167,7 @@ class OAuthSpec:
     base_scopes: tuple[str, ...] = ()
     authorize_params: Mapping[str, str] = field(default_factory=dict)
     pkce: bool = True
+    client_setup_url: str = ""
 
     def provider_scopes(self, catalog_scopes: tuple[str, ...] | list[str]) -> tuple[str, ...]:
         """Provider scopes for the given catalog scopes, in a stable order.
@@ -185,6 +190,16 @@ class AuthSpec:
     ``token_auth_method`` is the ``AuthMethod`` value stored on a
     pasted-token row (``api_key`` or ``bearer_token``); broker-created rows
     are always ``oauth2``.
+
+    ``token_url`` is the provider page where the user creates the
+    credential they paste (it needs the ``token`` method). It is an https
+    URL, or a template that starts with one ``{field_key}`` placeholder
+    naming a ``url`` field and followed by a path, query or nothing: the UI
+    fills it with the origin (scheme, host, port) of what the user typed
+    there, so a pasted page address still links to the right page (Canvas:
+    ``{base_url}/profile/settings``).
+    ``token_url_label`` is that link's text (at most 60 characters); the UI
+    falls back to "Get your token".
     """
 
     methods: tuple[AuthKind, ...]
@@ -192,6 +207,8 @@ class AuthSpec:
     oauth: Optional[OAuthSpec] = None
     token_auth_method: Literal["api_key", "bearer_token", "oauth2"] = "bearer_token"
     notes: str = ""
+    token_url: str = ""
+    token_url_label: str = ""
 
     @property
     def required_credentials(self) -> tuple[str, ...]:

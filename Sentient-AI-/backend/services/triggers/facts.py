@@ -549,8 +549,13 @@ def run_text(
 ) -> str:
     """The result of a task run as one message: "⚡ <label>", the reply,
     the notes and the usage line; URL queries stripped and foreign URLs
-    defanged; cut to *max_chars* with a pointer to the web thread."""
+    defanged; cut to *max_chars* with a pointer to the web thread. A code
+    block the reply (or the cut) leaves open is closed before what follows,
+    so Telegram, which shows the reply formatted, does not show the notes
+    as code. Slack gets the same text (main.fan_out_send), where the
+    closing fence helps too: its mrkdwn shows an unclosed one as written."""
     from api.routes.agent import strip_url_queries
+    from services.notifications.telegram_format import close_fence
 
     body = (reply or "").strip() or "(No reply this run.)"
     body = defang_foreign_urls(strip_url_queries(body), allowed)
@@ -562,5 +567,11 @@ def run_text(
     room = max_chars - len(head) - len(footer) - 4
     if len(body) > room:
         pointer = f"\n… The rest is in the web app, in the conversation \"{web_title}\"."
-        body = body[: max(0, room - len(pointer))].rstrip() + pointer
+        cut = body[: max(0, room - len(pointer))].rstrip()
+        closing = len(close_fence(cut)) - len(cut)
+        if closing:
+            cut = body[: max(0, room - len(pointer) - closing)].rstrip()
+        body = close_fence(cut) + pointer
+    else:
+        body = close_fence(body)
     return "\n".join(part for part in (head, body, footer) if part)

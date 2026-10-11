@@ -56,7 +56,7 @@ class NotionConnector(ReadsMixin, WritesMixin):
     def validate_credentials(cls, credentials: dict[str, Any]) -> list[str]:
         token = str(credentials.get("access_token") or "").strip()
         if token and any(char.isspace() for char in token):
-            return ["access_token must be the integration secret on its own, without spaces"]
+            return ["access_token must be the connection's API token on its own, without spaces"]
         return []
 
     async def authenticate(self, credentials: dict[str, Any]) -> bool:
@@ -64,7 +64,7 @@ class NotionConnector(ReadsMixin, WritesMixin):
         token = str(credentials.get("access_token") or "").strip()
         if not token:
             raise AuthenticationError(
-                "Notion needs its internal integration secret. Reconnect Notion in Connectors."
+                "Notion needs its connection API token. Reconnect Notion in Connectors."
             )
         self._token = token
         self._authenticated = True
@@ -105,19 +105,23 @@ DEFINITION = ConnectorDefinition(
         fields=(
             CredentialField(
                 "access_token",
-                "Internal integration secret",
+                "Connection API token",
                 type="password",
                 required=True,
-                placeholder="Paste the integration secret",
+                placeholder="Paste the connection's API token",
                 hint=(
-                    "Create an internal integration at notion.so/profile/integrations and "
-                    "copy its secret. Then share the pages you want Crawler to see with the "
-                    "integration (page menu, Connections)."
+                    "Create an internal connection, open its Configuration tab and copy the "
+                    "API token. Then share the pages you want Crawler to see with it (page "
+                    "menu, Connections)."
                 ),
             ),
         ),
         token_auth_method="bearer_token",
-        notes="Crawler sees only the pages and databases you share with the integration.",
+        notes="Crawler sees only the pages and databases you share with the connection.",
+        # Notion renamed integrations to connections in 2026; the old
+        # integrations page redirects here.
+        token_url="https://app.notion.com/developers/connections",
+        token_url_label="Create a Notion connection",
     ),
     network=NetworkSpec(
         policy_key="notion",
@@ -137,5 +141,5 @@ DEFINITION = ConnectorDefinition(
     ),
     actions=ACTIONS,
     connector_class=NotionConnector,
-    docs_url="https://www.notion.so/profile/integrations",
+    docs_url="https://developers.notion.com/guides/get-started/internal-connections",
 )

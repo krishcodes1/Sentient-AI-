@@ -205,6 +205,15 @@ DEFINITION = ConnectorDefinition(
         ),
         token_auth_method="bearer_token",
         notes="A personal access token with the notes scopes you grant below.",
+        # The page where the user creates the token they paste: the main
+        # link on the card and in the connect form. https, or a template that
+        # starts with one {field_key} placeholder naming a "url" field
+        # ("{base_url}/settings/tokens"), filled with the origin of what the
+        # user typed. Only a path, query or nothing may follow it.
+        token_url="https://example.com/settings/tokens/new",
+        token_url_label="Create an Example token",  # at most 60 characters
+        # With an OAuthSpec, also set its client_setup_url: the page where
+        # the server owner registers the sign-in client for backend/.env.
     ),
     network=NetworkSpec(
         policy_key="example",

@@ -538,6 +538,14 @@ def _inline_segments(
     return segments
 
 
+def inline_segments(text: str) -> list[_Segment]:
+    """Inline Markdown in *text* as ``(text, annotations, link)`` runs, read
+    by the same linear-time scanner Notion writes use (bold, italic,
+    strikethrough, code and http(s) links). Also used by the Telegram
+    renderer (services/notifications/telegram_format.py)."""
+    return _inline_segments(text, {}, None)
+
+
 def split_text(text: str, limit: int = RICH_TEXT_MAX_CHARS) -> list[str]:
     """*text* in chunks of at most *limit* UTF-16 code units (how Notion
     counts), never splitting a character."""

@@ -18,7 +18,7 @@ this guide gives the server access to anyone's data by itself.
 | Microsoft 365 | Yes (sign-in is the only way) | `MICROSOFT_OAUTH_CLIENT_ID` | Sign in with Microsoft, or sign in with a code |
 | GitHub | Only for "Sign in with a code" | `GITHUB_OAUTH_CLIENT_ID` | Sign in with a code (device flow), or paste a fine-grained token |
 | Slack | No | none | Paste the tokens of a Slack app created from the manifest |
-| Notion | No | none | Paste an internal integration secret |
+| Notion | No | none | Paste an internal connection's API token |
 | Canvas, Robinhood | No | none | Paste a token (see the hint on each card) |
 
 All sign-in settings live in `backend/.env` (see `backend/.env.example`) and
@@ -266,13 +266,14 @@ github.com, Settings, Developer settings.
 ## Slack (tokens from a manifest app)
 
 No server setup. Each user creates a Slack app for their workspace and
-pastes its tokens. The Slack card has a **Create the Slack app from its
-manifest** link that opens Slack's "create app" page with Crawler's manifest
+pastes its tokens. The Slack card has a **Create the Crawler Slack app**
+link that opens Slack's "create app" page with Crawler's manifest
 (`backend/services/connectors/slack_manifest.json`) filled in. The manifest
 turns on Socket Mode, so Slack needs no public URL for this install.
 
-1. Open the manifest link on the Slack card, choose the workspace and create
-   the app. (Or, at [api.slack.com/apps](https://api.slack.com/apps),
+1. Open **Create the Crawler Slack app** on the Slack card, choose the
+   workspace and create the app. (Or, at
+   [api.slack.com/apps](https://api.slack.com/apps),
    Create New App, From a manifest, and paste the JSON file.)
 2. **Install to Workspace** (a workspace administrator may have to approve
    it).
@@ -304,27 +305,29 @@ revokes the bot and user tokens, unless another connector still uses the
 same token; the app-level token can only be deleted on the app's Basic
 Information page.
 
-## Notion (internal integration secret)
+## Notion (internal connection API token)
 
-No server setup. Each user creates an internal integration in their Notion
-workspace and pastes its secret.
+No server setup. Each user creates an internal connection (Notion's new name
+for an integration) in their Notion workspace and pastes its API token. The
+Notion card's **Create a Notion connection** link opens the page directly.
 
-1. Open [notion.so/profile/integrations](https://www.notion.so/profile/integrations)
-   and create a new integration of type **Internal** for the workspace.
+1. Open [app.notion.com/developers/connections](https://app.notion.com/developers/connections)
+   and create a new **Internal** connection for the workspace.
 2. Capabilities: **Read content** is enough for reading. Add **Update
    content** and **Insert content** for editing and creating pages, **Read
    comments** and **Insert comments** for comments, and user information
    without email addresses for listing workspace members.
-3. Copy the **Internal Integration Secret** and paste it on the Notion card.
-4. Share each page or database Crawler should see with the integration:
-   page menu, Connections, then pick the integration. Pages inside a shared
+3. On its **Configuration** tab, copy the **API token** and paste it on the
+   Notion card.
+4. Share each page or database Crawler should see with the connection:
+   page menu, Connections, then pick the connection. Pages inside a shared
    page are included.
 
-Crawler sees only what is shared with the integration. Unticking a
+Crawler sees only what is shared with the connection. Unticking a
 capability in Notion is the provider-side limit; Crawler's own permissions
 (`notion.read`, `notion.write`, `notion.comment`, `notion.delete`) still
-decide which tools exist. Internal integration secrets cannot be revoked
-through the API: rotate or delete the secret in the integration's settings.
+decide which tools exist. A connection's API token cannot be revoked
+through the API: rotate it or delete the connection in Notion's settings.
 
 ## Troubleshooting
 

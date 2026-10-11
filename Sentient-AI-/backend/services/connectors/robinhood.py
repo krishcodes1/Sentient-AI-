@@ -379,6 +379,8 @@ DEFINITION = ConnectorDefinition(
         ),
         token_auth_method="api_key",
         notes="Read-only API credentials. Trading is permanently blocked by the platform.",
+        token_url="https://robinhood.com/account/crypto",
+        token_url_label="Open Robinhood crypto API keys",
     ),
     network=NetworkSpec(
         policy_key="robinhood",

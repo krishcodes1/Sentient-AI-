@@ -162,8 +162,7 @@ DEFINITION = ConnectorDefinition(
                 "bot_token",
                 "Bot token (xoxb-...)",
                 placeholder="xoxb-...",
-                hint="Create the app from the manifest link, install it, then copy "
-                "OAuth & Permissions, Bot User OAuth Token.",
+                hint="After you install the app: OAuth & Permissions, Bot User OAuth Token.",
             ),
             CredentialField(
                 "app_token",
@@ -182,10 +181,13 @@ DEFINITION = ConnectorDefinition(
         ),
         token_auth_method="bearer_token",
         notes=(
-            "Open the manifest link to create the Crawler Slack app, install it to your "
-            "workspace and paste its tokens. Invite the app to a channel before asking "
-            "Crawler to read it."
+            'Open "Create the Crawler Slack app" to make the app from its manifest, '
+            "install it to your workspace and paste its tokens. Invite the app to a "
+            "channel before asking Crawler to read it."
         ),
+        # Slack's "create app from manifest" page, prefilled with the manifest.
+        token_url=MANIFEST_URL,
+        token_url_label="Create the Crawler Slack app",
     ),
     network=NetworkSpec(
         policy_key="slack",
@@ -201,5 +203,5 @@ DEFINITION = ConnectorDefinition(
     ),
     actions=ACTIONS,
     connector_class=SlackConnector,
-    docs_url=MANIFEST_URL,
+    docs_url="https://docs.slack.dev/authentication/tokens/",
 )

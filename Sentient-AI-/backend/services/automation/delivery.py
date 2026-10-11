@@ -2,11 +2,12 @@
 (``compose``) and sends them to the owner's own linked chats (``deliver``).
 
 Why it exists: a scheduled result, a briefing and (wave 2) a trigger alert
-all reach Telegram and Slack the same way: plain text with a header that
-names the task and its local time, notes for what the owner must do (a card
-waits) or should know (a tool was not available, the budget ran out), the
-usage line and how to pause, every URL without its query string, and at most
-four parts before a pointer to the web app, where the whole result is kept.
+all reach Telegram and Slack the same way: text (the reply's Markdown is
+shown formatted on Telegram) with a header that names the task and its local
+time, notes for what the owner must do (a card waits) or should know (a tool
+was not available, the budget ran out), the usage line and how to pause,
+every URL without its query string, and at most four parts before a pointer
+to the web app, where the whole result is kept.
 Nothing here chooses a recipient: a sender only ever reaches the linked chat
 of the user it is given.
 """
@@ -74,16 +75,27 @@ def compose(
     ("🗓 <label> · Tue 08:00"), the reply, the notes, then the usage line
     and how to pause. URL queries are stripped from all of it. Split into
     parts of at most PART_CHARS (Telegram counts UTF-16 units); past
-    MAX_PARTS the rest is replaced by a pointer to the web app."""
+    MAX_PARTS the rest is replaced by a pointer to the web app.
+
+    Telegram's parts are TelegramMarkdown, so the reply shows formatted
+    there: split where a code block can close and reopen, with a block the
+    reply leaves open closed before the notes. Slack's are plain text."""
+    from services.notifications import telegram_format
     from services.notifications.page_watch import defang
 
     # The label is shown as text, never as a link or a /command.
     header = f"{_CALENDAR} {defang(label)} · {when_local}"
     body = (outcome.reply or "").strip() or "(No reply this run.)"
     notes = outcome_notes(outcome, channel)
+    telegram = channel == "telegram"
+    if telegram:
+        body = telegram_format.close_fence(body)
     text = _strip_queries("\n\n".join([header, body, *notes]))
-    length = cards.utf16_len if channel == "telegram" else len
-    parts = cards.split_text(text, max_chars=PART_CHARS, length=length)
+    length = cards.utf16_len if telegram else len
+    if telegram:
+        parts = telegram_format.split_markdown(text, PART_CHARS)
+    else:
+        parts = cards.split_text(text, max_chars=PART_CHARS, length=length)
     if len(parts) > MAX_PARTS:
         parts = parts[:MAX_PARTS] + [
             f'The rest is in the web app, in the conversation "Scheduled: {label}".'
@@ -100,6 +112,8 @@ def compose(
         parts[-1] = f"{parts[-1]}\n\n{footer}"
     else:
         parts.append(footer)
+    if telegram:
+        return [telegram_format.TelegramMarkdown(part) for part in parts]
     return parts
 
 

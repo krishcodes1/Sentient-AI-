@@ -126,12 +126,16 @@ const CANVAS = entry({
     oauth_configured: false,
     token_auth_method: "bearer_token",
     notes: "base_url is your school's Canvas instance.",
+    token_url: "{base_url}/profile/settings",
+    token_url_label: "Open your Canvas token page",
   },
   scopes: {
     read: [scope("courses.read"), scope("grades.read")],
     write: [scope("submissions.write", "write", true)],
   },
 });
+
+const GOOGLE_PLAYGROUND_URL = "https://developers.google.com/oauthplayground/";
 
 function google(oauthConfigured = true): ConnectorTypeInfo {
   return entry({
@@ -147,6 +151,11 @@ function google(oauthConfigured = true): ConnectorTypeInfo {
       oauth_configured: oauthConfigured,
       token_auth_method: "oauth2",
       notes: "",
+      token_url: GOOGLE_PLAYGROUND_URL,
+      token_url_label: "Get a token in the OAuth Playground",
+      client_setup_url: "https://console.cloud.google.com/auth/clients",
+      client_id_setting: "GOOGLE_OAUTH_CLIENT_ID",
+      client_secret_setting: "GOOGLE_OAUTH_CLIENT_SECRET",
     },
     scopes: {
       read: [scope("gmail.read"), scope("calendar.read")],
@@ -154,6 +163,9 @@ function google(oauthConfigured = true): ConnectorTypeInfo {
     },
   });
 }
+
+const GITHUB_TOKEN_URL =
+  "https://github.com/settings/personal-access-tokens/new?name=Crawler%20AI&contents=read&metadata=read";
 
 const GITHUB = entry({
   key: "github",
@@ -168,9 +180,14 @@ const GITHUB = entry({
     oauth_configured: true,
     token_auth_method: "bearer_token",
     notes: "",
+    token_url: GITHUB_TOKEN_URL,
+    token_url_label: "Create a GitHub token",
   },
   scopes: { read: [scope("repos.read")], write: [scope("issues.write", "write")] },
 });
+
+const MICROSOFT_CLIENT_SETUP_URL =
+  "https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade";
 
 function microsoft(oauthConfigured: boolean): ConnectorTypeInfo {
   return entry({
@@ -184,6 +201,9 @@ function microsoft(oauthConfigured: boolean): ConnectorTypeInfo {
       oauth_configured: oauthConfigured,
       token_auth_method: "oauth2",
       notes: "",
+      client_setup_url: MICROSOFT_CLIENT_SETUP_URL,
+      client_id_setting: "MICROSOFT_OAUTH_CLIENT_ID",
+      client_secret_setting: "",
     },
     scopes: { read: [scope("mail.read")], write: [scope("mail.send", "write", true)] },
   });
@@ -193,7 +213,7 @@ const SLACK = entry({
   key: "slack",
   label: "Slack",
   icon: "slack",
-  docs_url: "https://api.slack.com/apps?new_app=1",
+  docs_url: "https://docs.slack.dev/authentication/tokens/",
   auth: {
     methods: ["token"],
     fields: [
@@ -203,7 +223,9 @@ const SLACK = entry({
     provider: null,
     oauth_configured: false,
     token_auth_method: "bearer_token",
-    notes: "",
+    notes: "Slack notes from the catalog.",
+    token_url: "https://api.slack.com/apps?new_app=1",
+    token_url_label: "Create the Crawler Slack app",
   },
   scopes: { read: [scope("messages.read")], write: [scope("messages.send", "write", true)] },
 });
@@ -369,6 +391,128 @@ describe("pasted-token connect", () => {
     await user.clear(rate);
     await user.type(rate, "1000");
     expect(rate).toHaveValue(600);
+  });
+});
+
+describe("token links", () => {
+  it("links the Canvas token page under the Canvas URL once a valid address is typed", async () => {
+    const { user } = setup([CANVAS]);
+    const card = await screen.findByRole("article", { name: "Canvas LMS" });
+    // The card cannot know the school's address, so it keeps the guide.
+    expect(within(card).queryByRole("link", { name: /token page/ })).not.toBeInTheDocument();
+
+    const dialog = await openConnect(user, "Canvas LMS");
+    const linkName = /Open your Canvas token page/;
+    expect(within(dialog).queryByRole("link", { name: linkName })).not.toBeInTheDocument();
+    expect(
+      within(dialog).getByText("Enter your Canvas URL above to get a direct link to your token page."),
+    ).toBeInTheDocument();
+
+    const url = within(dialog).getByLabelText("Canvas URL");
+    await fill(user, url, "javascript:alert(1)");
+    expect(within(dialog).queryByRole("link", { name: linkName })).not.toBeInTheDocument();
+    await user.clear(url);
+    await fill(user, url, "https://school.instructure.com/");
+
+    const link = within(dialog).getByRole("link", { name: linkName });
+    expect(link).toHaveAttribute("href", "https://school.instructure.com/profile/settings");
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link.getAttribute("rel")).toContain("noopener");
+    expect(within(dialog).getByText("Follow the steps there, then fill in the rest of this form.")).toBeInTheDocument();
+    expect(link).toHaveAccessibleName("Open your Canvas token page (opens in a new tab)");
+    expect(within(dialog).queryByText(/to get a direct link/)).not.toBeInTheDocument();
+    // Right under the field it is built from, before the token field.
+    const tokenField = within(dialog).getByLabelText("Access token");
+    expect(url.compareDocumentPosition(link) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(link.compareDocumentPosition(tokenField) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(dialog).getByRole("link", { name: /Setup guide/ })).toHaveAttribute(
+      "href",
+      "https://canvas.example.edu/doc/api",
+    );
+  });
+
+  it("puts the GitHub token link on the card only while pasting a token is the way in", async () => {
+    setup([{ ...GITHUB, auth: { ...GITHUB.auth, oauth_configured: false } }]);
+    const card = await screen.findByRole("article", { name: "GitHub" });
+    expect(
+      within(card).getByRole("link", { name: "Create a GitHub token (opens in a new tab)" }),
+    ).toHaveAttribute("href", GITHUB_TOKEN_URL);
+  });
+
+  it("keeps the guide on the card when sign-in is ready, and links the token atop the token form", async () => {
+    const { user } = setup([{ ...GITHUB, docs_url: "https://docs.github.com/pat" }]);
+    const card = await screen.findByRole("article", { name: "GitHub" });
+    expect(within(card).queryByRole("link", { name: /Create a GitHub token/ })).not.toBeInTheDocument();
+    expect(within(card).getByRole("link", { name: "Setup guide for GitHub (opens in a new tab)" })).toHaveAttribute(
+      "href",
+      "https://docs.github.com/pat",
+    );
+
+    const dialog = await openConnect(user, "GitHub");
+    // Device sign-in is the default method: no token form, no token link.
+    expect(within(dialog).queryByRole("link", { name: /Create a GitHub token/ })).not.toBeInTheDocument();
+    await user.click(within(dialog).getByRole("radio", { name: "Paste a token" }));
+    expect(within(dialog).getByRole("link", { name: /Create a GitHub token/ })).toHaveAttribute(
+      "href",
+      GITHUB_TOKEN_URL,
+    );
+  });
+
+  it("points the owner at the sign-in client page when sign-in is not set up", async () => {
+    const { user } = setup([microsoft(false), google(false)]);
+    const ms = await screen.findByRole("article", { name: "Microsoft 365" });
+    expect(within(ms).getByRole("button", { name: "Connect Microsoft 365" })).toBeDisabled();
+    expect(
+      within(ms).getByRole("link", { name: "Register the sign-in app for Microsoft 365 (opens in a new tab)" }),
+    ).toHaveAttribute("href", MICROSOFT_CLIENT_SETUP_URL);
+    // The card is all the owner sees (Connect is disabled), so it says where the id goes.
+    expect(within(ms).getByText(/not set up on this server/)).toHaveTextContent(
+      "Register the sign-in app, then add its client ID to backend/.env as MICROSOFT_OAUTH_CLIENT_ID, and restart the backend.",
+    );
+
+    // Google has no working sign-in here, so pasting a token is the way in and the card links it.
+    const gw = screen.getByRole("article", { name: "Google Workspace" });
+    expect(within(gw).getByRole("link", { name: /Get a token in the OAuth Playground/ })).toHaveAttribute(
+      "href",
+      GOOGLE_PLAYGROUND_URL,
+    );
+
+    const dialog = await openConnect(user, "Google Workspace");
+    const note = within(dialog).getByText(/not set up on this server/);
+    expect(note).toHaveTextContent(
+      "add its client ID and secret to backend/.env as GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET, and restart the backend. You can paste a token instead.",
+    );
+    expect(
+      within(note).getByRole("link", { name: "Register the sign-in app for Google Workspace (opens in a new tab)" }),
+    ).toHaveAttribute("href", "https://console.cloud.google.com/auth/clients");
+  });
+
+  it("does not lead with the OAuth Playground when Google sign-in is ready", async () => {
+    const signedIn = row({ id: "c-g", connector_type: "google_workspace", auth_method: "oauth2", display_name: "Mail" });
+    const { user } = setup([google()], [signedIn]);
+    const card = await screen.findByRole("article", { name: "Google Workspace" });
+    expect(within(card).queryByRole("link", { name: /OAuth Playground/ })).not.toBeInTheDocument();
+
+    // Editing a signed-in row: the advice is Reconnect, so the token link is a small inline link.
+    await user.click(screen.getByRole("button", { name: "Edit Mail" }));
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByText(/use Reconnect on the card instead/)).toBeInTheDocument();
+    const link = within(dialog).getByRole("link", { name: /Get a token in the OAuth Playground/ });
+    expect(link).toHaveAttribute("href", GOOGLE_PLAYGROUND_URL);
+    expect(link).toHaveClass("underline");
+    expect(within(dialog).queryByText(/Follow the steps there/)).not.toBeInTheDocument();
+  });
+
+  it("Edit links the Canvas token page once the replacement address is typed", async () => {
+    const { user } = setup([CANVAS], [row({ id: "c-canvas", connector_type: "canvas", display_name: "School" })]);
+    await user.click(await screen.findByRole("button", { name: "Edit School" }));
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).queryByRole("link", { name: /Open your Canvas token page/ })).not.toBeInTheDocument();
+    await fill(user, within(dialog).getByLabelText("Canvas URL"), "http://canvas.school.test");
+    expect(within(dialog).getByRole("link", { name: /Open your Canvas token page/ })).toHaveAttribute(
+      "href",
+      "http://canvas.school.test/profile/settings",
+    );
   });
 });
 
@@ -956,16 +1100,27 @@ describe("existing rows", () => {
 });
 
 describe("Slack", () => {
-  it("links the manifest and explains the three tokens", async () => {
+  it("links the create-app page and the token guide, and explains the three tokens", async () => {
     const { user } = setup([SLACK]);
     const card = await screen.findByRole("article", { name: "Slack" });
-    expect(within(card).getByRole("link", { name: /app manifest/i })).toHaveAttribute(
+    expect(
+      within(card).getByRole("link", { name: "Create the Crawler Slack app (opens in a new tab)" }),
+    ).toHaveAttribute("href", "https://api.slack.com/apps?new_app=1");
+    const dialog = await openConnect(user, "Slack");
+    expect(within(dialog).getByText(/app-level token/)).toBeInTheDocument();
+    expect(within(dialog).getByText("Create the Crawler Slack app", { selector: "strong" })).toBeInTheDocument();
+    expect(within(dialog).getByRole("link", { name: /Create the Crawler Slack app/ })).toHaveAttribute(
       "href",
       "https://api.slack.com/apps?new_app=1",
     );
-    const dialog = await openConnect(user, "Slack");
-    expect(within(dialog).getByText(/app-level token/)).toBeInTheDocument();
-    expect(within(dialog).getByRole("link", { name: /manifest/ })).toBeInTheDocument();
+    expect(within(dialog).getByRole("link", { name: /Setup guide/ })).toHaveAttribute(
+      "href",
+      "https://docs.slack.dev/authentication/tokens/",
+    );
+    expect(within(dialog).queryByText(/manifest link/)).not.toBeInTheDocument();
+    // One set of instructions: Slack's own note stands in for auth.notes.
+    expect(within(dialog).queryByText("Slack notes from the catalog.")).not.toBeInTheDocument();
+    expect(within(dialog).getByText(/Invite the app to a channel/)).toBeInTheDocument();
   });
 
   it("links Slack DMs with a one-time code, polls until linked, and unlinks", async () => {
