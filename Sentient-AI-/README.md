@@ -429,7 +429,7 @@ permissions you granted.
 | **Slack** | Read channels, history, threads, users and files, search messages; post, reply, schedule, react, upload, set your status and manage channels (17 actions). Optional: chat with Crawler in a Slack DM | Open **Create the Crawler Slack app** on the card, install the app to your workspace, and paste its bot token (`xoxb-`). Add the app-level token (`xapp-`) for DMs and the user token (`xoxp-`) for search and status |
 | **Notion** | Search, read and edit the pages and databases you share with the connection, comments (15 actions) | Open **Create a Notion connection** on the card, copy the connection's API token, then share pages with it (page menu, Connections) |
 | **Canvas LMS** | Courses, assignments, grades, calendar events and submissions, and submitting an assignment (6 actions) | Paste your school's Canvas URL, then use **Open your Canvas token page** to make an access token and paste it |
-| **Robinhood Crypto** | Read-only portfolio, holdings and prices (3 actions); trading is permanently blocked | Paste read-only API credentials |
+| **Robinhood Crypto** | Read-only portfolio, holdings and prices (3 actions); trading is permanently blocked | Generate a key pair on the card, add its public key as an API credential at robinhood.com/account/crypto, then paste the API key Robinhood gives you |
 | **MCP servers** | The tools of any Streamable HTTP MCP server you register; every call needs approval | Server URL (and optional headers) |
 
 **Server setup for sign-in (owner, once per install).** "Sign in with

@@ -51,6 +51,7 @@ from services.connectors.definition import (
 )
 from services.connectors.google_workspace import GoogleWorkspaceConnector
 from services.connectors.robinhood import RobinhoodConnector
+from tests.test_connectors_behavior import RH_PRIVATE_KEY
 
 # The connectors that existed before the registry. Later packages append
 # connectors (and Google gains actions), so checks against the hand-written
@@ -711,7 +712,14 @@ OLD_CREDENTIAL_REQUIREMENTS = {
     "robinhood": {
         "required": ["api_key", "api_secret"],
         "optional": [],
-        "notes": "Read-only API credentials. Trading is permanently blocked by the platform.",
+        # Rewritten when signing moved from HMAC to Ed25519 key pairs.
+        "notes": (
+            "Requests to Robinhood are signed with an Ed25519 key pair. Generate one "
+            "below (or with the script in Robinhood's docs), add the public key as "
+            "a new API credential at robinhood.com/account/crypto (web classic, "
+            "US only), then paste the API key Robinhood gives you. Trading is "
+            "permanently blocked by the platform."
+        ),
     },
     "mcp": {
         "required": ["url"],
@@ -1061,7 +1069,7 @@ def test_lookups():
     [
         ("canvas", {"base_url": "https://s.instructure.com", "access_token": "t"}, CanvasConnector, "canvas"),
         ("google_workspace", {"access_token": "t", "client_id": "cid"}, GoogleWorkspaceConnector, "google"),
-        ("robinhood", {"api_key": "k", "api_secret": "s"}, RobinhoodConnector, "robinhood"),
+        ("robinhood", {"api_key": "k", "api_secret": RH_PRIVATE_KEY}, RobinhoodConnector, "robinhood"),
     ],
 )
 def test_create_connector_uses_the_definition(key, credentials, cls, policy):
@@ -1081,8 +1089,9 @@ def test_create_connector_reproduces_constructor_arguments():
     )
     assert canvas._base_url == "https://s.instructure.com"
     assert (canvas._client_id, canvas._client_secret) == ("", "")
-    robinhood = factory.create_connector("robinhood", {"api_key": "k", "api_secret": "s"})
-    assert robinhood._api_key == "" and robinhood._timeout == 30.0
+    robinhood = factory.create_connector("robinhood", {"api_key": "k", "api_secret": RH_PRIVATE_KEY})
+    assert robinhood._api_key == "" and robinhood._private_key is None
+    assert robinhood._timeout == 30.0
 
 
 def test_self_hosted_canvas_host_is_the_only_extra_host():

@@ -19,7 +19,8 @@ this guide gives the server access to anyone's data by itself.
 | GitHub | Only for "Sign in with a code" | `GITHUB_OAUTH_CLIENT_ID` | Sign in with a code (device flow), or paste a fine-grained token |
 | Slack | No | none | Paste the tokens of a Slack app created from the manifest |
 | Notion | No | none | Paste an internal connection's API token |
-| Canvas, Robinhood | No | none | Paste a token (see the hint on each card) |
+| Canvas | No | none | Paste a token (see the hint on the card) |
+| Robinhood | No | none | Register a public key with Robinhood, then paste its API key and the private key |
 
 All sign-in settings live in `backend/.env` (see `backend/.env.example`) and
 default to empty. Never commit real values. After changing `backend/.env`,
@@ -328,6 +329,30 @@ capability in Notion is the provider-side limit; Crawler's own permissions
 (`notion.read`, `notion.write`, `notion.comment`, `notion.delete`) still
 decide which tools exist. A connection's API token cannot be revoked
 through the API: rotate it or delete the connection in Notion's settings.
+
+## Robinhood (Ed25519 key pair)
+
+No server setup. Robinhood's Crypto Trading API (US only) needs every
+request signed with an Ed25519 key pair: Robinhood keeps the public key,
+Crawler keeps the private key, encrypted, and never sends it to Robinhood.
+
+1. In the Robinhood connect form, press **Generate a key pair**. This fills
+   the private key field and shows the public key to copy. (Or run the key
+   script in [Robinhood's docs](https://docs.robinhood.com/crypto/trading/)
+   and paste its base64 private key yourself.)
+2. Open [robinhood.com/account/crypto](https://robinhood.com/account/crypto)
+   (web classic), add an API credential, and paste the public key.
+3. Paste the API key Robinhood shows (`rh-api-...`) into the API key field
+   and create the connector.
+
+Trading stays permanently blocked whatever the credential allows, and every
+read asks for approval. A connector saved before Crawler signed with
+Ed25519 holds a secret that is not a private key, so Crawler refuses it
+with a message saying so: Edit it, generate a key pair, and paste the new
+API key. If Robinhood answers 401, the error names the public
+key Crawler signs with; it must match the one on the credential. Requests
+carry a timestamp that Robinhood accepts for 30 seconds, so a clock that is
+off by more than that fails too.
 
 ## Troubleshooting
 

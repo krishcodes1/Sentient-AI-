@@ -78,6 +78,7 @@ import {
   MAX_RATE_LIMIT,
   MCP_TYPE,
   MIN_RATE_LIMIT,
+  ROBINHOOD_TYPE,
   SLACK_TYPE,
   STATUS_POLL_MS,
   anyFieldEntered,
@@ -112,6 +113,7 @@ import {
   type ScopeView,
   type SignInKind,
 } from "./connectorCatalog";
+import { KEY_PAIR_UNSUPPORTED, generateRobinhoodKeyPair, type RobinhoodKeyPair } from "./robinhoodKeys";
 
 // ---------------------------------------------------------------------------
 // Shared bits
@@ -882,6 +884,88 @@ function SlackTokensNote({ linkLabel }: { linkLabel: string }) {
   );
 }
 
+/** Makes the Ed25519 key pair that signs requests to Robinhood: fills the
+ * private key field and shows the public key to register at Robinhood. The
+ * public key shows only while the field still holds its private key, so an
+ * edited field never sits beside a public key it does not match. */
+function RobinhoodKeyPairHelper({
+  privateKey,
+  onPrivateKey,
+}: {
+  privateKey: string | undefined;
+  onPrivateKey: (value: string) => void;
+}) {
+  const [pair, setPair] = useState<RobinhoodKeyPair | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const publicKeyId = useId();
+  const shown = pair && pair.privateKey === privateKey ? pair : null;
+
+  const generate = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const next = await generateRobinhoodKeyPair();
+      setPair(next);
+      onPrivateKey(next.privateKey);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : KEY_PAIR_UNSUPPORTED);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="px-3 py-2.5 rounded-[8px] text-xs leading-relaxed flex flex-col gap-2" style={infoNoticeStyle}>
+      <p>
+        No key pair yet? Generate one here. The private key fills its field and is saved only with
+        the connector; it never goes to Robinhood.
+      </p>
+      <div>
+        <button
+          type="button"
+          onClick={() => void generate()}
+          disabled={busy}
+          className="inline-flex items-center gap-1.5 px-3 rounded-[8px] text-xs font-medium disabled:opacity-50"
+          style={{ ...inputStyle, minHeight: 36 }}
+        >
+          <KeyRound className="w-3.5 h-3.5" aria-hidden />
+          {shown ? "Generate a new key pair" : "Generate a key pair"}
+        </button>
+      </div>
+      {shown && (
+        <div>
+          <label htmlFor={publicKeyId} className="block mb-1.5 font-medium">
+            Public key for Robinhood
+          </label>
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              id={publicKeyId}
+              readOnly
+              value={shown.publicKey}
+              onFocus={(e) => e.currentTarget.select()}
+              className={`${fieldCls} font-mono`}
+              style={{ ...inputStyle, flex: "1 1 16rem" }}
+              spellCheck={false}
+            />
+            <CopyButton key={shown.publicKey} text={shown.publicKey} label="Copy public key" />
+          </div>
+          <p className="mt-1.5">
+            Add it as a new API credential at{" "}
+            <ExternalAnchor href="https://robinhood.com/account/crypto">robinhood.com/account/crypto</ExternalAnchor>,
+            then paste the API key Robinhood gives you into the API key field.
+          </p>
+        </div>
+      )}
+      {error && (
+        <p role="alert" style={{ color: "var(--accent-danger)" }}>
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Sign-in (OAuth broker)
 // ---------------------------------------------------------------------------
@@ -1307,6 +1391,12 @@ function ConnectModal({
                       Credentials are encrypted (AES-256-GCM) before they touch the database and are
                       never displayed again after saving.
                     </p>
+                    {entry.key === ROBINHOOD_TYPE && (
+                      <RobinhoodKeyPairHelper
+                        privateKey={fieldValues.api_secret}
+                        onPrivateKey={(value) => setFieldValues((prev) => ({ ...prev, api_secret: value }))}
+                      />
+                    )}
                   </>
                 ) : (
                   <p className="text-xs" style={{ color: "var(--text-muted)" }}>
@@ -1710,6 +1800,12 @@ function EditConnectorModal({
                   // Reconnect is the advice for a sign-in row, so the token link stays small.
                   linkVariant={kind === "oauth_or_token" ? "inline" : "action"}
                 />
+                {connector.connector_type === ROBINHOOD_TYPE && (
+                  <RobinhoodKeyPairHelper
+                    privateKey={fieldValues.api_secret}
+                    onPrivateKey={(value) => setFieldValues((prev) => ({ ...prev, api_secret: value }))}
+                  />
+                )}
               </div>
               {anyCredentialEntered && !credentialsComplete && (
                 <p role="alert" className="text-xs mt-2" style={{ color: "var(--accent-warning)" }}>

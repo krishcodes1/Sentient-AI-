@@ -22,6 +22,7 @@ import type {
 
 export const MCP_TYPE = "mcp";
 export const SLACK_TYPE = "slack";
+export const ROBINHOOD_TYPE = "robinhood";
 
 /** Backend bounds for rate_limit_per_minute (POST, PATCH and the OAuth draft). */
 export const DEFAULT_RATE_LIMIT = 30;

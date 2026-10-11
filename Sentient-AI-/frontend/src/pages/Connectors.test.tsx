@@ -1418,3 +1418,111 @@ describe("Allow low-risk changes (permission tiers)", () => {
     expect(within(card).getByText("Allow low-risk changes")).toBeInTheDocument();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Robinhood key pair
+// ---------------------------------------------------------------------------
+
+const ROBINHOOD = entry({
+  key: "robinhood",
+  label: "Robinhood (read-only)",
+  icon: "trending-up",
+  auth: {
+    ...SLACK.auth,
+    fields: [
+      { key: "api_key", label: "API key", type: "password", required: true, placeholder: "rh-api-...", hint: "" },
+      { key: "api_secret", label: "Private key (base64)", type: "password", required: true, placeholder: "", hint: "" },
+    ],
+    token_auth_method: "api_key",
+  },
+  scopes: { read: [scope("crypto.read")], write: [] },
+});
+
+// 32 bytes in base64.
+const BASE64_KEY = /^[A-Za-z0-9+/]{43}=$/;
+
+describe("Robinhood key pair", () => {
+  it("fills the private key, shows the public key to register, and posts the generated key", async () => {
+    const { user } = setup([ROBINHOOD]);
+    vi.mocked(createConnector).mockImplementation(async (body) =>
+      row({ id: "c-rh", connector_type: body.connector_type, display_name: body.display_name }),
+    );
+    const dialog = await openConnect(user, "Robinhood (read-only)");
+    const secret = within(dialog).getByLabelText<HTMLInputElement>("Private key (base64)");
+    expect(within(dialog).queryByLabelText("Public key for Robinhood")).not.toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole("button", { name: "Generate a key pair" }));
+
+    const publicKey = await within(dialog).findByLabelText<HTMLInputElement>("Public key for Robinhood");
+    expect(publicKey.value).toMatch(BASE64_KEY);
+    expect(publicKey).toHaveAttribute("readonly");
+    expect(secret.value).toMatch(BASE64_KEY);
+    expect(secret.value).not.toBe(publicKey.value);
+    expect(secret).toHaveAttribute("type", "password");
+    expect(within(dialog).getByRole("button", { name: "Copy public key" })).toBeInTheDocument();
+    expect(within(dialog).getByRole("link", { name: /robinhood\.com\/account\/crypto/ })).toHaveAttribute(
+      "href",
+      "https://robinhood.com/account/crypto",
+    );
+    const generated = secret.value;
+
+    await fill(user, within(dialog).getByLabelText("Display name"), "Crypto");
+    await fill(user, within(dialog).getByLabelText("API key"), "rh-api-test");
+    await user.click(within(dialog).getByRole("button", { name: "Create connector" }));
+
+    expect(createConnector).toHaveBeenCalledWith(
+      expect.objectContaining({
+        connector_type: "robinhood",
+        auth_method: "api_key",
+        credentials: { api_key: "rh-api-test", api_secret: generated },
+      }),
+    );
+  });
+
+  it("hides the public key once the private key is edited by hand", async () => {
+    const { user } = setup([ROBINHOOD]);
+    const dialog = await openConnect(user, "Robinhood (read-only)");
+    await user.click(within(dialog).getByRole("button", { name: "Generate a key pair" }));
+    expect(await within(dialog).findByLabelText("Public key for Robinhood")).toBeInTheDocument();
+
+    await fill(user, within(dialog).getByLabelText("Private key (base64)"), "x");
+
+    expect(within(dialog).queryByLabelText("Public key for Robinhood")).not.toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Generate a key pair" })).toBeInTheDocument();
+  });
+
+  it("says why when the browser cannot make the key, and leaves the field empty", async () => {
+    const spy = vi
+      .spyOn(crypto.subtle, "generateKey")
+      .mockRejectedValue(new DOMException("nope", "NotSupportedError"));
+    try {
+      const { user } = setup([ROBINHOOD]);
+      const dialog = await openConnect(user, "Robinhood (read-only)");
+      await user.click(within(dialog).getByRole("button", { name: "Generate a key pair" }));
+
+      expect(await within(dialog).findByRole("alert")).toHaveTextContent("cannot make Ed25519 keys");
+      expect(within(dialog).getByLabelText("Private key (base64)")).toHaveValue("");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("is offered when replacing a Robinhood row's credentials, and only there", async () => {
+    const { user } = setup([ROBINHOOD, CANVAS], [
+      row({ id: "c-rh", connector_type: "robinhood", display_name: "Crypto", auth_method: "api_key" }),
+    ]);
+    await user.click(await screen.findByRole("button", { name: "Edit Crypto" }));
+    const dialog = screen.getByRole("dialog");
+
+    await user.click(within(dialog).getByRole("button", { name: "Generate a key pair" }));
+
+    expect(await within(dialog).findByLabelText("Public key for Robinhood")).toBeInTheDocument();
+    expect(within(dialog).getByLabelText<HTMLInputElement>("Private key (base64)").value).toMatch(BASE64_KEY);
+    // A new pair needs the new API key Robinhood issues for it.
+    expect(within(dialog).getByRole("button", { name: "Save changes" })).toBeDisabled();
+
+    await user.click(within(dialog).getByRole("button", { name: /cancel/i }));
+    const canvas = await openConnect(user, "Canvas LMS");
+    expect(within(canvas).queryByRole("button", { name: "Generate a key pair" })).not.toBeInTheDocument();
+  });
+});

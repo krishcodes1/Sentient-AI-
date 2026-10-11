@@ -1,4 +1,4 @@
-"""Implements the read-only Robinhood Crypto connector with HMAC-SHA256 request
+"""Implements the read-only Robinhood Crypto connector with Ed25519 request
 signing and a permanent block on every trading action.
 
 Why it exists: The factory constructs it for tool execution; keeping the hard-
@@ -10,18 +10,26 @@ Robinhood Crypto connector for Crawler AI.
 READ-ONLY access to Robinhood's official Crypto Trading API.
 All financial actions (trades, transfers, withdrawals) are
 permanently hard-blocked and cannot be overridden.
+
+Authentication (https://docs.robinhood.com/crypto/trading/): the user makes
+an Ed25519 key pair, registers the public key as an API credential at
+robinhood.com/account/crypto and gets an API key back. Every request carries
+that key, a Unix timestamp (valid for 30 seconds) and the base64 Ed25519
+signature of ``{api_key}{timestamp}{path}{method}{body}``.
 """
 
 from __future__ import annotations
 
-import hashlib
-import hmac
+import base64
+import binascii
 import time
 import uuid
 from typing import Any, Optional
 
 import httpx
 import structlog
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from services.agent.permissions import ActionCategory, PermissionTier
 
@@ -91,13 +99,46 @@ _HARD_BLOCKED_ACTIONS: frozenset[str] = frozenset(
     }
 )
 
+# An Ed25519 private key is a 32-byte seed. Robinhood's key script prints
+# it base64-encoded, and that is what the user stores as ``api_secret``.
+_SEED_BYTES = 32
+
+# Fixed text, so no message built from it can echo the stored value.
+_BAD_PRIVATE_KEY = (
+    "api_secret must be the base64 Ed25519 private key (a 32-byte seed) "
+    "whose public key is registered with Robinhood."
+)
+
+
+def load_private_key(secret: str) -> Ed25519PrivateKey:
+    """Decode the base64 private key seed stored as ``api_secret``.
+
+    Raises ``ValueError`` with a fixed message for anything else,
+    including a secret from before the switch to Ed25519.
+    """
+    try:
+        seed = base64.b64decode(secret.strip(), validate=True)
+    except (binascii.Error, ValueError):
+        raise ValueError(_BAD_PRIVATE_KEY) from None
+    if len(seed) != _SEED_BYTES:
+        raise ValueError(_BAD_PRIVATE_KEY)
+    return Ed25519PrivateKey.from_private_bytes(seed)
+
+
+def public_key_b64(private_key: Ed25519PrivateKey) -> str:
+    """The base64 public key Robinhood holds for *private_key*."""
+    raw = private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    return base64.b64encode(raw).decode("ascii")
+
 
 class RobinhoodConnector(BaseConnector):
     """Connector for the Robinhood Crypto Trading API.
 
-    Uses API key + secret authentication (HMAC-SHA256 request signing).
-    Strictly read-only -- every API call still requires ``USER_CONFIRM``,
-    and all trade/transfer actions raise ``HardBlockError``.
+    Authenticates with an API key and an Ed25519 private key that signs
+    every request; Robinhood checks the signature against the public key
+    registered with that API key. Strictly read-only -- every API call
+    still requires ``USER_CONFIRM``, and all trade/transfer actions raise
+    ``HardBlockError``.
     """
 
     BASE_URL = "https://trading.robinhood.com"
@@ -117,7 +158,9 @@ class RobinhoodConnector(BaseConnector):
         # Very conservative rate limit for financial API
         super().__init__(timeout_s=timeout_s or 30.0, rate_limit=30)
         self._api_key = api_key or ""
-        self._api_secret = api_secret or ""
+        self._private_key: Optional[Ed25519PrivateKey] = (
+            load_private_key(api_secret) if api_secret else None
+        )
 
     # -- Properties ----------------------------------------------------------
 
@@ -140,12 +183,27 @@ class RobinhoodConnector(BaseConnector):
         """Build an instance; the key pair is read in ``authenticate``."""
         return cls(timeout_s=timeout_s)
 
-    # -- Authentication (API key + HMAC signing) -----------------------------
+    @classmethod
+    def validate_credentials(cls, credentials: dict[str, Any]) -> list[str]:
+        """Check that ``api_secret`` decodes to a key; never echo it."""
+        secret = credentials.get("api_secret")
+        if secret is None or (isinstance(secret, str) and not secret.strip()):
+            return []  # missing required fields are reported by the factory
+        if not isinstance(secret, str):
+            return [_BAD_PRIVATE_KEY]
+        try:
+            load_private_key(secret)
+        except ValueError as exc:
+            return [str(exc)]
+        return []
+
+    # -- Authentication (API key + Ed25519 signing) --------------------------
 
     async def authenticate(self, credentials: dict[str, Any]) -> bool:
-        """Authenticate with API key and secret.
+        """Authenticate with the API key and the base64 Ed25519 private key.
 
-        Required keys: ``api_key``, ``api_secret``.
+        Required keys: ``api_key``, ``api_secret`` (the private key; the
+        name is kept so connectors stored before Ed25519 still load).
         """
         api_key = credentials.get("api_key")
         api_secret = credentials.get("api_secret")
@@ -153,15 +211,25 @@ class RobinhoodConnector(BaseConnector):
             raise AuthenticationError(
                 "Robinhood connector requires 'api_key' and 'api_secret'."
             )
+        try:
+            private_key = load_private_key(str(api_secret))
+        except ValueError as exc:
+            raise AuthenticationError(
+                f"{exc} Reconnect Robinhood in Connectors."
+            ) from None
 
-        self._api_key = api_key
-        self._api_secret = api_secret
+        self._api_key = str(api_key).strip()
+        self._private_key = private_key
 
         # Validate credentials by making a lightweight API call
         try:
             resp = await self._send_signed("GET", "/api/v1/crypto/trading/accounts/")
             if resp.status_code == 401:
-                raise AuthenticationError("Invalid Robinhood API credentials.")
+                raise AuthenticationError(
+                    "Robinhood rejected the API key or its signature. Check that "
+                    "the API credential at robinhood.com/account/crypto was "
+                    f"created with this public key: {public_key_b64(private_key)}"
+                )
             resp.raise_for_status()
         except AuthenticationError:
             raise
@@ -180,29 +248,28 @@ class RobinhoodConnector(BaseConnector):
         path: str,
         body: str = "",
     ) -> dict[str, str]:
-        """Build signed request headers using HMAC-SHA256.
+        """Build signed request headers using Ed25519.
 
         Robinhood Crypto API requires:
         - ``x-api-key``
-        - ``x-timestamp`` (Unix epoch)
-        - ``x-signature`` (HMAC of ``{api_key}{timestamp}{path}{method}{body}``)
+        - ``x-timestamp`` (Unix epoch, valid for 30 seconds)
+        - ``x-signature`` (base64 Ed25519 signature of
+          ``{api_key}{timestamp}{path}{method}{body}``)
 
         *path* must be the path-and-query exactly as it goes on the wire;
         see ``_send_signed``, which is the only caller that can guarantee
         that.
         """
+        if self._private_key is None:
+            raise AuthenticationError("Robinhood connector is not authenticated.")
         timestamp = str(int(time.time()))
         message = f"{self._api_key}{timestamp}{path}{method.upper()}{body}"
-        signature = hmac.new(
-            self._api_secret.encode("utf-8"),
-            message.encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
+        signature = self._private_key.sign(message.encode("utf-8"))
 
         return {
             "x-api-key": self._api_key,
             "x-timestamp": timestamp,
-            "x-signature": signature,
+            "x-signature": base64.b64encode(signature).decode("ascii"),
             "Content-Type": "application/json; charset=utf-8",
         }
 
@@ -218,8 +285,8 @@ class RobinhoodConnector(BaseConnector):
 
         The signature covers the path-and-query, so the string signed and
         the string transmitted have to be identical byte for byte. Building
-        the query twice — once with ``urlencode`` for the HMAC and once by
-        handing ``params`` to httpx — meant trusting two encoders to agree;
+        the query twice (once with ``urlencode`` for the signature and once by
+        handing ``params`` to httpx) meant trusting two encoders to agree;
         they do not (booleans, ``None``, and repeated keys all differ), and
         every disagreement is an opaque 401 from Robinhood. Building the
         request first and signing ``raw_path`` off that same object removes
@@ -374,11 +441,29 @@ DEFINITION = ConnectorDefinition(
     auth=AuthSpec(
         methods=("token",),
         fields=(
-            CredentialField("api_key", "API key", placeholder="Robinhood Crypto API key"),
-            CredentialField("api_secret", "API secret", placeholder="Robinhood Crypto API secret"),
+            CredentialField(
+                "api_key",
+                "API key",
+                placeholder="rh-api-...",
+                hint="Robinhood shows it after you add the public key as an API credential.",
+            ),
+            # The key stays "api_secret" so connectors stored before the
+            # switch to Ed25519 still load; the value is now the private key.
+            CredentialField(
+                "api_secret",
+                "Private key (base64)",
+                placeholder="Base64 Ed25519 private key",
+                hint="Stored encrypted and never sent to Robinhood; only its public key is registered there.",
+            ),
         ),
         token_auth_method="api_key",
-        notes="Read-only API credentials. Trading is permanently blocked by the platform.",
+        notes=(
+            "Requests to Robinhood are signed with an Ed25519 key pair. Generate one "
+            "below (or with the script in Robinhood's docs), add the public key as "
+            "a new API credential at robinhood.com/account/crypto (web classic, "
+            "US only), then paste the API key Robinhood gives you. Trading is "
+            "permanently blocked by the platform."
+        ),
         token_url="https://robinhood.com/account/crypto",
         token_url_label="Open Robinhood crypto API keys",
     ),
