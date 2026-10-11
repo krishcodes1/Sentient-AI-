@@ -56,6 +56,7 @@ from services.agent.unattended import SeedResult
 from services.automation.ledger import AutomationLedger
 from services.automation.runner import FAILED_STATUSES, UnattendedOutcome, UnattendedRequest
 from services.notifications.sweeper import SweepLoop, backoff_minutes, gate_open
+from services.notifications.telegram_format import TelegramMarkdown
 from services.triggers import CAPABILITY, RUNS_CAPABILITY
 from services.triggers import facts as shape
 from services.triggers import sources as src
@@ -1023,7 +1024,9 @@ class TriggerService:
                 allowed=shape.allowed_hosts(connector_type, [e.facts for e in events]),
                 web_title=f"Trigger: {trig.label}",
             )
-            ok = await self._deliver(trig.user_id, text)
+            # The model's reply: Telegram shows its Markdown formatted
+            # (every other channel gets the same plain str).
+            ok = await self._deliver(trig.user_id, TelegramMarkdown(text))
             delivered = ("chat",) if ok else ()
             await self._finish(events, "ran", "stopped" if outcome.status == "stopped" else None)
             await self._fired(trig, outcome.conversation_id)

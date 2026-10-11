@@ -1025,7 +1025,10 @@ DEFINITION = ConnectorDefinition(
                 "access_token",
                 "Access token",
                 placeholder="Paste your Canvas access token",
-                hint="Canvas, Account, Settings, + New access token.",
+                hint=(
+                    "On your token page, under Approved Integrations, add a new access "
+                    "token and copy it. Canvas shows it only once."
+                ),
             ),
             CredentialField(
                 "client_id",
@@ -1049,6 +1052,10 @@ DEFINITION = ConnectorDefinition(
         ),
         token_auth_method="bearer_token",
         notes="base_url is your school's Canvas instance, e.g. https://myschool.instructure.com",
+        # Filled from the Canvas URL the user typed: their own profile page,
+        # where Canvas issues access tokens.
+        token_url="{base_url}/profile/settings",
+        token_url_label="Open your Canvas token page",
     ),
     network=NetworkSpec(
         policy_key="canvas",
@@ -1067,5 +1074,8 @@ DEFINITION = ConnectorDefinition(
     ),
     actions=ACTIONS,
     connector_class=CanvasConnector,
-    docs_url="https://canvas.instructure.com/doc/api/file.oauth.html",
+    docs_url=(
+        "https://community.instructure.com/en/kb/articles/"
+        "662901-how-do-i-manage-api-access-tokens-in-my-user-account"
+    ),
 )

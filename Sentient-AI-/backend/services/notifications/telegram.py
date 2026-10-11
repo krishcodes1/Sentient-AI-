@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import html
 import json
 import secrets
 import time
@@ -71,7 +72,7 @@ from sqlalchemy import select, update
 from services.agent import cancel as agent_cancel
 from services.agent.app_approvals import REMEMBER_WEEK, Channel, weekly_app_for
 from services.agent.permission_grants import REMEMBER_LOW_RISK
-from services.notifications import cards
+from services.notifications import cards, telegram_format
 from services.notifications.progress import TurnProgress, takes_keyword, takes_on_event
 from services.notifications.voice import (  # top10:voice_notes
     TEXT_NOT_SET_UP,
@@ -198,6 +199,12 @@ TutorCallback = Callable[..., Awaitable[dict[str, Any]]]
 # Telegram rejects messages over 4096 chars; leave headroom for the
 # continuation marker.
 _MESSAGE_CHUNK = 3900
+# Telegram's own limit: a message's text after its formatting is read, in
+# UTF-16 code units.
+_TELEGRAM_MAX_UNITS = 4096
+# The longest plain out-of-band message send_text sends (the assistant's
+# Markdown goes whole, in parts of up to _TELEGRAM_MAX_UNITS).
+_SEND_TEXT_LIMIT = 3500
 
 # Bot API methods whose text Telegram may decorate with a link preview. A
 # preview is a card the reader did not ask for, and Telegram's servers fetch
@@ -205,6 +212,17 @@ _MESSAGE_CHUNK = 3900
 # with private data (spec §9). Disabled for these in _api, the one place
 # every text send and edit goes through.
 _TEXT_METHODS = frozenset({"sendMessage", "editMessageText"})
+
+# How Telegram words a 400 for formatting it could not read; the message is
+# then sent again once as plain text.
+_HTML_REJECTED = (
+    "can't parse entities",
+    "unsupported start tag",
+    "can't find end",
+    "unclosed",
+    "unmatched end tag",
+    "unexpected end tag",
+)
 
 # How long /stop waits for the cancelled work to finish unwinding before it
 # answers, and stopping the bot before it closes its client. Unwinding is an
@@ -401,22 +419,18 @@ def _day(when: Any) -> str:
 
 
 def _chunks(text: str, size: int = _MESSAGE_CHUNK) -> list[str]:
-    """Split a reply on line boundaries into Telegram-sized messages."""
-    if len(text) <= size:
-        return [text]
-    out: list[str] = []
-    current = ""
-    for line in text.splitlines(keepends=True):
-        if len(current) + len(line) > size and current:
-            out.append(current)
-            current = ""
-        while len(line) > size:
-            out.append(line[:size])
-            line = line[size:]
-        current += line
-    if current:
-        out.append(current)
-    return out
+    """Split plain text on line boundaries into Telegram-sized messages,
+    measured in UTF-16 units as Telegram counts them."""
+    return cards.split_text(text, max_chars=size, length=cards.utf16_len) or [text]
+
+
+def _html_rejected(data: Any) -> bool:
+    """True when Telegram answered a formatted message with a 400 for
+    formatting it could not read."""
+    if not isinstance(data, dict) or data.get("ok") or data.get("error_code") != 400:
+        return False
+    description = str(data.get("description", "")).lower()
+    return any(words in description for words in _HTML_REJECTED)
 
 
 def _own_private_chat(chat: Any, sender: Any) -> Optional[int]:
@@ -541,6 +555,12 @@ def _with_turn_notes(reply: str, outcome: dict[str, Any]) -> str:
     if outcome.get("blocked"):
         reply += "\n\n⛔ Blocked by security policy: " + ", ".join(outcome["blocked"])
     return reply
+
+
+def _turn_notes(outcome: dict[str, Any]) -> str:
+    """Just the notes _with_turn_notes adds. App text: _send_reply sends it
+    as written after the reply, never as Markdown."""
+    return _with_turn_notes("", outcome)
 
 
 def _expires_in_text(expires_at_iso: str) -> str:
@@ -803,14 +823,42 @@ class TelegramService:
         (services.security, policy CHANNEL; the withheld notice when the
         text cannot be checked); this is the single choke point, so no
         reply path can forget either.
+
+        Two private keys, never sent: ``_markdown=True`` marks the text as
+        the assistant's Markdown, sent as Telegram HTML (telegram_format)
+        once masked; ``_plain_tail`` is app text sent as written after it.
+        The plain text goes instead when the formatted one would be empty
+        or show a web address the Markdown does not have, and is sent again
+        once when Telegram cannot read the formatting. When the formatted
+        text would show a value masking did not catch (a card number split
+        by ``**``), what it shows goes as plain text with that value masked.
+        Any other call is sent exactly as given.
         """
+        markdown = params.pop("_markdown", False) is True
+        tail = params.pop("_plain_tail", None)
+        request = params
         if method in _TEXT_METHODS:
             params.setdefault("link_preview_options", {"is_disabled": True})
             if isinstance(params.get("text"), str):
-                params["text"] = secret_text.mask_text(params["text"], channel="telegram")[0]
+                text = secret_text.mask_text(params["text"], channel="telegram")[0]
+                masked_tail = (
+                    secret_text.mask_text(tail, channel="telegram")[0]
+                    if isinstance(tail, str) and tail
+                    else ""
+                )
+                params["text"] = text + masked_tail
+                if markdown:
+                    request = self._formatted(method, params, text, masked_tail)
         try:
-            resp = await self._client.post(f"/{method}", json=params)
+            resp = await self._client.post(f"/{method}", json=request)
             data = resp.json()
+            if request.get("parse_mode") == "HTML" and _html_rejected(data):
+                logger.warning(
+                    "telegram_html_rejected",
+                    method=method,
+                    description=str(data.get("description", ""))[:200],
+                )
+                data = (await self._client.post(f"/{method}", json=params)).json()
             if not data.get("ok"):
                 if method == "getUpdates" and data.get("error_code") == 409:
                     raise _PollerConflict(str(data.get("description", ""))[:200])
@@ -831,6 +879,37 @@ class TelegramService:
                 error=f"{type(exc).__name__}: {exc}",
             )
             return None
+
+    @staticmethod
+    def _formatted(method: str, params: dict[str, Any], markdown: str, tail: str) -> dict[str, Any]:
+        """The request to send for *params*, whose text is the masked
+        *markdown* with the masked *tail* after it: the Markdown as Telegram
+        HTML with *tail* escaped after it, or *params* as they are when the
+        formatted text shows nothing, or reading it joins a web address the
+        checks on the Markdown could not see whole (``htt**ps://x.io**``).
+        A value the joined text shows (masking ran on the Markdown, where
+        ``**`` can split a card number) is masked in what it shows, sent as
+        plain text with any such web address defanged: the Markdown as
+        written would show the value to anyone who reads past the stars."""
+        source = markdown + tail
+        rendered = telegram_format.render_html(markdown) + html.escape(tail, quote=False)
+        shown = telegram_format.visible_text(rendered)
+        if not shown.strip():
+            return params
+        masked = secret_text.mask_text(shown, channel="telegram")[0]
+        if masked != shown:
+            from services.notifications.page_watch import defang
+
+            logger.warning("telegram_markdown_withheld", method=method, reason="masked_value")
+            plain = telegram_format.replace_new_links(source, masked, defang)
+            if cards.utf16_len(plain) > _TELEGRAM_MAX_UNITS:
+                # A label can be longer than the value it hides.
+                plain = cards.split_text(plain, max_chars=_TELEGRAM_MAX_UNITS, length=cards.utf16_len)[0]
+            return {**params, "text": plain}
+        if telegram_format.adds_links(source, shown):
+            logger.warning("telegram_markdown_withheld", method=method, reason="new_link")
+            return params
+        return {**params, "text": rendered, "parse_mode": "HTML"}
 
     async def _send_photo(
         self,
@@ -941,13 +1020,30 @@ class TelegramService:
     async def send_text(self, user_id: str, text: str) -> bool:
         """Push a plain message to a user's linked chat. Returns False when
         the user has no linked chat (not an error — the feature is opt-in).
-        Used by reminder delivery and any other out-of-band nudge."""
+        Used by reminder delivery and any other out-of-band nudge.
+
+        A TelegramMarkdown text (a scheduled task's or a trigger run's
+        reply, which their makers keep to about one message) is shown
+        formatted and whole: its Markdown goes in parts Telegram takes (one
+        unless it is longer than a message, as an emoji-heavy one can be),
+        rendered by _api; True once the first part went out. Any other text
+        goes as written."""
         chat_id = await self.linked_chat_id(user_id)
         if chat_id is None:
             return False
+        markdown = isinstance(text, telegram_format.TelegramMarkdown)
         # Masked before it is cut, so a value is never cut in half.
         text = secret_text.mask_text(text, channel="telegram")[0]
-        result = await self._api("sendMessage", chat_id=chat_id, text=text[:3500])
+        if markdown:
+            # The text a part shows is never longer than its Markdown.
+            parts = telegram_format.split_markdown(text, _TELEGRAM_MAX_UNITS) or [text]
+            sent = False
+            for part in parts:
+                if await self._api("sendMessage", chat_id=chat_id, text=part, _markdown=True) is None:
+                    break
+                sent = True
+            return sent
+        result = await self._api("sendMessage", chat_id=chat_id, text=text[:_SEND_TEXT_LIMIT])
         return result is not None
 
     # ── outbound: approval notification ──────────────────────────────────
@@ -1584,8 +1680,9 @@ class TelegramService:
                 text=f"⚠️ {outcome['error']}"[:_MESSAGE_CHUNK],
             )
             return
-        reply = _with_turn_notes((outcome.get("content") or "").strip(), outcome)
-        if not reply:
+        reply = (outcome.get("content") or "").strip()
+        notes = _turn_notes(outcome)
+        if not reply and not notes:
             reply = "(The assistant returned no text.)"
         # Photos first, so the text (which ends with the usage line)
         # is the last thing the turn sends.
@@ -1593,7 +1690,7 @@ class TelegramService:
             await self._send_photo(
                 chat_id, image.get("data_url", ""), image.get("caption", "")
             )
-        await self._send_reply(chat_id, reply, outcome)
+        await self._send_reply(chat_id, reply, outcome, notes)
 
     def _turn_progress(self, chat_id: int) -> TurnProgress:
         """Progress lines (services/notifications/progress.py) for one turn,
@@ -1604,19 +1701,44 @@ class TelegramService:
             )
         )
 
-    async def _send_reply(self, chat_id: int, text: str, outcome: dict[str, Any]) -> None:
-        """Send a reply in Telegram-sized chunks, ending with the turn's
-        usage line when the outcome reports usage. The line is appended
-        after every other suffix and before chunking, so it is the last
-        thing in the last message however long the reply is. The reply is
-        masked whole before it is split (a value never straddles two
-        messages), with one footer when anything was hidden."""
-        text = secret_text.mask_reply(text, app="Telegram", channel="telegram")
+    async def _send_reply(
+        self, chat_id: int, text: str, outcome: dict[str, Any], notes: str = ""
+    ) -> None:
+        """Send a reply in Telegram-sized parts: *text* is the assistant's
+        Markdown, shown formatted (telegram_format, rendered by _api);
+        *notes* (_turn_notes), the footer when anything was hidden and the
+        turn's usage line are app text, sent as written after the last
+        part, so the usage line is the last thing in the last message
+        however long the reply is. The reply is masked whole before it is
+        split (a value never straddles two messages)."""
+        text, hidden = secret_text.mask_text(text, channel="telegram")
+        shown = telegram_format.visible_text(telegram_format.render_html(text))
+        if shown != text:
+            # A value only the formatting joins (``4111 **1111** 1111 1111``)
+            # is masked by _api in what its part shows; the footer counts it.
+            hidden += secret_text.mask_text(shown, channel="telegram")[1]
+        tail = ""
+        if notes:
+            tail, hidden_in_notes = secret_text.mask_text(notes, channel="telegram")
+            hidden += hidden_in_notes
+        if hidden:
+            tail += "\n\n" + secret_text.hidden_footer(hidden, app="Telegram")
         line = _usage_line(outcome)
         if line:
-            text = f"{text}\n\n{line}"
-        for chunk in _chunks(text):
-            await self._api("sendMessage", chat_id=chat_id, text=chunk)
+            tail += f"\n\n{line}"
+        parts = telegram_format.split_markdown(text, _MESSAGE_CHUNK) or [text]
+        for index, part in enumerate(parts):
+            if index < len(parts) - 1 or not tail:
+                await self._api("sendMessage", chat_id=chat_id, text=part, _markdown=True)
+            elif cards.utf16_len(part) + cards.utf16_len(tail) <= _TELEGRAM_MAX_UNITS:
+                await self._api(
+                    "sendMessage", chat_id=chat_id, text=part, _markdown=True, _plain_tail=tail
+                )
+            else:
+                # No room left in the last part: the notes follow on their own.
+                await self._api("sendMessage", chat_id=chat_id, text=part, _markdown=True)
+                for chunk in _chunks(tail.lstrip("\n")):
+                    await self._api("sendMessage", chat_id=chat_id, text=chunk)
 
     async def _keep_typing(self, chat_id: int) -> None:
         # Telegram clears the indicator after ~5s; refresh it while a turn
@@ -1825,10 +1947,13 @@ class TelegramService:
         if outcome.get("error"):
             await self._api("sendMessage", chat_id=chat_id, text=f"⚠️ {outcome['error']}"[:_MESSAGE_CHUNK])
             return
-        reply = _with_turn_notes((outcome.get("content") or "").strip(), outcome)
+        reply = (outcome.get("content") or "").strip()
+        notes = _turn_notes(outcome)
         for image in outcome.get("images") or []:
             await self._send_photo(chat_id, image.get("data_url", ""), image.get("caption", ""))
-        await self._send_reply(chat_id, reply or "(The assistant returned no text.)", outcome)
+        await self._send_reply(
+            chat_id, reply or ("" if notes else "(The assistant returned no text.)"), outcome, notes
+        )
 
     # ── voice notes (top10:voice_notes) ──────────────────────────────────
 
@@ -2179,7 +2304,7 @@ class TelegramService:
                 await self._send_photo(
                     chat_id, image.get("data_url", ""), image.get("caption", "")
                 )
-            await self._send_reply(chat_id, _with_turn_notes(str(summary), outcome), outcome)
+            await self._send_reply(chat_id, str(summary), outcome, _turn_notes(outcome))
 
 
 class NotifyingApprovalStore:

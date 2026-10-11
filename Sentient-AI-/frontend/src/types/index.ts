@@ -540,6 +540,16 @@ export interface ConnectorAuthInfo {
   /** The auth_method to send when creating a pasted-token connector. */
   token_auth_method: AuthMethod;
   notes: string;
+  /** The page where the user creates the token they paste: an https URL, or a template whose
+   *  leading `{field_key}` is filled from that "url" field (connectorCatalog.tokenLink). */
+  token_url?: string;
+  /** That link's text (connectorCatalog.tokenLinkLabel falls back to "Get your token"). */
+  token_url_label?: string;
+  /** Where the server owner registers the sign-in client whose id goes in backend/.env. */
+  client_setup_url?: string;
+  /** The backend/.env names (never values) for that client's id and secret ("" when none). */
+  client_id_setting?: string;
+  client_secret_setting?: string;
 }
 
 /** One entry of GET /connectors/types (backend registry.connector_types_payload). */

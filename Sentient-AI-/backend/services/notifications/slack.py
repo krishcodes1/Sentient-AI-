@@ -24,6 +24,11 @@ workspace auth.test named; then the sender must be the linked Slack user. An
 unlinked sender whose message is exactly the pending code is linked; everyone
 else gets no reply. The socket URL carries a ticket and is never logged, and no
 token ever is.
+
+Outbound text is escaped (slack_escape) and masked at the one post choke point.
+Only the model's own reply is rendered from Markdown to Slack mrkdwn
+(slack_format.py); approval cards keep plain_text blocks, and command replies,
+notes and every other text go out as typed.
 """
 
 from __future__ import annotations
@@ -56,8 +61,9 @@ from services.agent import cancel as agent_cancel
 from services.connectors.base import AuthenticationError, ConnectorError
 from services.connectors.slack import SlackConnector
 from services.connectors.slack_api.client import API_BASE, TS_RE, USER_ID_RE, slack_error
-from services.notifications import cards
+from services.notifications import cards, slack_format
 from services.notifications.progress import TurnProgress, takes_keyword, takes_on_event
+from services.notifications.slack_format import SlackMarkdown, slack_escape, slack_unescape
 from services.security import channels as secret_text
 
 logger = structlog.get_logger(__name__)
@@ -197,33 +203,24 @@ def link_code_expiry() -> datetime:
 
 
 # ── Slack text helpers ───────────────────────────────────────────────────
-
-
-def slack_escape(text: str) -> str:
-    """Escape the three characters Slack treats as markup, so text the model
-    wrote can never become a disguised link or a mention."""
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
-def slack_unescape(text: str) -> str:
-    """Undo the escaping Slack applies to message text in events."""
-    return text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
-
+# slack_escape, slack_unescape and the mrkdwn rendering of the model's
+# replies live in slack_format.py.
 
 # How the DM tells the person to list their waiting approval cards.
 _PENDING_HINT = "send pending"
 
 
-def _with_turn_notes(reply: str, outcome: dict[str, Any]) -> str:
-    """*reply* plus what the turn left for the person (cards.turn_notes),
-    and a note for screenshots a text-only DM cannot show."""
-    reply += cards.turn_notes(outcome, where="DM", pending_hint=_PENDING_HINT)
+def _turn_notes(outcome: dict[str, Any]) -> str:
+    """What the turn left for the person (cards.turn_notes), and a note for
+    screenshots a text-only DM cannot show. Each note starts with a blank
+    line; empty when there is none."""
+    notes = cards.turn_notes(outcome, where="DM", pending_hint=_PENDING_HINT)
     images = outcome.get("images") or []
     if images:
         count = len(images)
         noun = "screenshot" if count == 1 else "screenshots"
-        reply += f"\n\n({count} {noun} not shown: Slack DMs carry text only.)"
-    return reply
+        notes += f"\n\n({count} {noun} not shown: Slack DMs carry text only.)"
+    return notes
 
 
 def _section(text: str) -> dict[str, Any]:
@@ -1159,8 +1156,8 @@ class SlackChannel:
                 if outcome.get("error"):
                     await self._post_text(channel, f"⚠️ {outcome['error']}"[:TEXT_CHUNK])
                     return
-                reply = _with_turn_notes(str(outcome.get("content") or "").strip(), outcome)
-                await self._send_reply(channel, reply or "(The assistant returned no text.)", outcome)
+                content = str(outcome.get("content") or "").strip()
+                await self._send_reply(channel, SlackMarkdown(content), outcome)
         except asyncio.CancelledError:
             if fresh and not started:
                 self._fresh = True
@@ -1252,10 +1249,8 @@ class SlackChannel:
                 if outcome.get("error"):
                     await self._post_text(channel, f"⚠️ {outcome['error']}"[:TEXT_CHUNK])
                     return
-                reply = _with_turn_notes(str(outcome.get("content") or "").strip(), outcome)
-                await self._send_reply(
-                    channel, reply or "(The assistant returned no text.)", outcome
-                )
+                content = str(outcome.get("content") or "").strip()
+                await self._send_reply(channel, SlackMarkdown(content), outcome)
         except asyncio.CancelledError:
             if fresh and not started:
                 # Stopped while queued: keep the unused "new" for next time.
@@ -1265,18 +1260,37 @@ class SlackChannel:
     def _progress(self, channel: str) -> TurnProgress:
         return TurnProgress(lambda line: self._post_text(channel, line))
 
-    async def _send_reply(self, channel: str, text: str, outcome: dict[str, Any]) -> None:
-        """Send *text* in Slack-sized, paced parts, the turn's usage line last.
-        The reply is masked whole before it is split (a value never straddles
-        two messages), with one footer when anything was hidden."""
-        text = secret_text.mask_reply(text, app="Slack", channel="slack")
+    async def _send_reply(self, channel: str, reply: str, outcome: dict[str, Any]) -> None:
+        """Send *reply*, the turn notes (_turn_notes) and the turn's usage
+        line last, in Slack-sized, paced parts.
+
+        A SlackMarkdown reply (the model's own words) is rendered as mrkdwn
+        (slack_format.render_reply); any other reply, and the notes and
+        usage line always, go out escaped as typed. The reply is masked raw,
+        whole, before it is rendered or split (a value never straddles two
+        messages), and a rendered reply's visible text is checked again,
+        with one footer when anything was hidden."""
+        notes = _turn_notes(outcome)
+        if not reply and not notes:
+            reply = "(The assistant returned no text.)"
+        masked, hidden = secret_text.mask_text(reply, channel="slack")
+        if isinstance(reply, SlackMarkdown):
+            body, rehidden = slack_format.render_reply(masked)
+            hidden += rehidden
+        else:
+            body = slack_escape(masked)
+        tail, notes_hidden = secret_text.mask_text(notes, channel="slack")
+        hidden += notes_hidden
+        if hidden:
+            tail += f"\n\n{secret_text.hidden_footer(hidden, app='Slack')}"
         line = cards.usage_line(outcome)
         if line:
-            text = f"{text}\n\n{line}"
-        for index, part in enumerate(cards.split_text(text, max_chars=TEXT_CHUNK)):
+            tail += f"\n\n{line}"
+        text = body + slack_escape(tail if body else tail.lstrip("\n"))
+        for index, part in enumerate(slack_format.split(text, max_chars=TEXT_CHUNK)):
             if index:
                 await self._sleep(POST_INTERVAL_S)
-            await self._post_text(channel, part)
+            await self._post(channel, part)
 
     async def _handle_stop(self, channel: str) -> None:
         """Cancel this channel's running turn and anything queued behind it,
@@ -1379,7 +1393,12 @@ class SlackChannel:
         await self._freeze_card(press, verdict)
         summary = outcome.get("summary")
         if summary:
-            await self._send_reply(press.channel, _with_turn_notes(str(summary), outcome), outcome)
+            # The resumed turn's own reply is the model's Markdown; the fact
+            # line the applier writes when there is none goes out as typed.
+            reply = str(summary)
+            if outcome.get("summary_is_reply"):
+                reply = SlackMarkdown(reply)
+            await self._send_reply(press.channel, reply, outcome)
 
     async def _freeze_card(self, press: ButtonPress, verdict: str) -> None:
         """Replace the buttons with the decision so the card cannot be

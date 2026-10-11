@@ -42,6 +42,11 @@ _AUTH_KEYS = {
     "oauth_configured",
     "token_auth_method",
     "notes",
+    "token_url",
+    "token_url_label",
+    "client_setup_url",
+    "client_id_setting",
+    "client_secret_setting",
 }
 _FIELD_KEYS = {"key", "label", "type", "required", "placeholder", "hint"}
 _CANVAS_CREDENTIALS = {

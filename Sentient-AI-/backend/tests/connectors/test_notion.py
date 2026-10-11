@@ -136,11 +136,15 @@ def test_definition_declares_the_spec_contract():
     assert DEFINITION.auth.methods == ("token",)
     (field,) = DEFINITION.auth.fields
     assert (field.key, field.type, field.required) == ("access_token", "password", True)
-    assert field.label == "Internal integration secret"
+    assert field.label == "Connection API token"
     assert "share" in field.hint.lower()
     assert DEFINITION.network.https_only is True
     assert DEFINITION.network.redirect_hosts == {}
-    assert DEFINITION.docs_url == "https://www.notion.so/profile/integrations"
+    assert DEFINITION.docs_url == (
+        "https://developers.notion.com/guides/get-started/internal-connections"
+    )
+    assert DEFINITION.auth.token_url == "https://app.notion.com/developers/connections"
+    assert DEFINITION.auth.token_url_label == "Create a Notion connection"
 
 
 # ---------------------------------------------------------------------------

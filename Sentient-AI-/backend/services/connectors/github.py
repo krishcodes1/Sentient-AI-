@@ -160,6 +160,16 @@ _SCOPE_MAP: dict[str, tuple[str, ...]] = {
 }
 
 
+# GitHub's "new fine-grained token" page, prefilled (query parameters GitHub
+# supports since 2025-08) with a name, a 90-day expiry and read-only access to
+# what the actions use. The user still picks the repositories.
+_TOKEN_URL = (
+    "https://github.com/settings/personal-access-tokens/new"
+    "?name=Crawler%20AI&description=Crawler%20AI%20connector&expires_in=90"
+    "&contents=read&issues=read&pull_requests=read&actions=read&statuses=read&metadata=read"
+)
+
+
 DEFINITION = ConnectorDefinition(
     key="github",
     label="GitHub",
@@ -176,10 +186,9 @@ DEFINITION = ConnectorDefinition(
                 "Fine-grained personal access token",
                 placeholder="github_pat_...",
                 hint=(
-                    "GitHub, Settings, Developer settings, Fine-grained tokens. Pick only the "
-                    "repositories Crawler should reach and the least permissions you need: "
-                    "Contents, Issues, Pull requests and Actions (read-only unless you want "
-                    "Crawler to make changes), plus Metadata."
+                    "The link fills in a name and read-only permissions. Pick the "
+                    "repositories Crawler may reach, then Generate token. Switch a "
+                    "permission to Read and write only if Crawler should make changes."
                 ),
             ),
         ),
@@ -189,12 +198,15 @@ DEFINITION = ConnectorDefinition(
             device_code_url="https://github.com/login/device/code",
             client_id_setting="GITHUB_OAUTH_CLIENT_ID",
             scope_map=_SCOPE_MAP,
+            client_setup_url="https://github.com/settings/applications/new",
         ),
         token_auth_method="bearer_token",
         notes=(
             "Sign in with a device code, or paste a fine-grained personal access token. "
             "Notifications need the device sign-in or a classic token."
         ),
+        token_url=_TOKEN_URL,
+        token_url_label="Create a GitHub token",
     ),
     network=NetworkSpec(
         policy_key="github",
@@ -222,5 +234,8 @@ DEFINITION = ConnectorDefinition(
     ),
     actions=ACTIONS,
     connector_class=GitHubConnector,
-    docs_url="https://github.com/settings/personal-access-tokens/new",
+    docs_url=(
+        "https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/"
+        "managing-your-personal-access-tokens"
+    ),
 )

@@ -104,6 +104,30 @@ A bad definition stops the app at import with a list of every problem.
   id or secret) and whose `scope_map` maps every catalog scope and nothing
   else. `oauth` also needs an https `authorize_url`, `device` a
   `device_code_url`. An `OAuthSpec` without either method is refused.
+- **Links.** `docs_url` is the setup guide (a how-to page). `AuthSpec.token_url`
+  is where the user creates the token they paste; the Connectors page shows it
+  as the main call to action, labelled `token_url_label` (at most 60
+  characters, no em or en dash; "Get your token" when empty). It needs the
+  `token` method and is either an https URL or a template that starts with
+  one `{field_key}` placeholder naming a `url` field, which the page fills
+  with the origin (scheme, host, port) of what the user typed there. Only a
+  path, query, fragment or nothing may follow the placeholder, so the link
+  stays on the user's own server. No other brace may appear, and the filled
+  URL must be https with a host.
+  `OAuthSpec.client_setup_url` (https) is where the server owner registers
+  the sign-in client whose id goes in `backend/.env`; the page links it while
+  sign-in is not set up. For example:
+
+  ```python
+  auth=AuthSpec(
+      methods=("oauth", "token"),
+      fields=(CredentialField("base_url", "Server URL", type="url"),
+              CredentialField("access_token", "Access token")),
+      oauth=OAuthSpec(..., client_setup_url="https://example.com/developers/apps/new"),
+      token_url="{base_url}/settings/tokens",
+      token_url_label="Open your Example token page",
+  )
+  ```
 - **Permissions.** Generated rows: READ auto-approve, WRITE/DELETE/EXECUTE
   user-confirm, FINANCIAL hard-blocked. `policy_overrides` may only name the
   connector's own policy keys, never use ADMIN_ONLY (the runtime adapter

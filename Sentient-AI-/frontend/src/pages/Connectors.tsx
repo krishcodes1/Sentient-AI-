@@ -10,11 +10,19 @@
  * the icon map in components/connectorIcons.ts.
  */
 
-import { createElement, useEffect, useId, useMemo, useRef, useState, type CSSProperties } from "react";
+import {
+  Fragment,
+  createElement,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import {
   Check,
   Copy,
-  ExternalLink,
   KeyRound,
   Link2,
   Loader2,
@@ -60,6 +68,7 @@ import {
   updateConnector,
 } from "@/services/api";
 import ConfirmDialog from "@/components/ConfirmDialog";
+import ExternalAnchor from "@/components/ExternalAnchor";
 import { ErrorAlert, ResultLine } from "@/components/FormFeedback";
 import { errorText, inputStyle, panelStyle } from "@/components/formStyles";
 import { connectorIcon } from "@/components/connectorIcons";
@@ -69,6 +78,7 @@ import {
   MAX_RATE_LIMIT,
   MCP_TYPE,
   MIN_RATE_LIMIT,
+  ROBINHOOD_TYPE,
   SLACK_TYPE,
   STATUS_POLL_MS,
   anyFieldEntered,
@@ -93,6 +103,9 @@ import {
   scopeView,
   signInMethods,
   toggleScope,
+  tokenLink,
+  tokenLinkLabel,
+  tokenLinkWaitsFor,
   visibleFieldErrors,
   type FieldValues,
   type RowKind,
@@ -100,6 +113,7 @@ import {
   type ScopeView,
   type SignInKind,
 } from "./connectorCatalog";
+import { KEY_PAIR_UNSUPPORTED, generateRobinhoodKeyPair, type RobinhoodKeyPair } from "./robinhoodKeys";
 
 // ---------------------------------------------------------------------------
 // Shared bits
@@ -189,34 +203,6 @@ function EntryIcon({
 function rowIcon(connector: Connector, entry: ConnectorTypeInfo | undefined): string | undefined {
   if (connector.connector_type === MCP_TYPE) return "server";
   return entry?.icon;
-}
-
-/** An external link that opens in a new tab (the desktop app hands it to the
- * system browser). Renders nothing for a value that is not an http(s) URL. */
-function ExternalAnchor({
-  href,
-  children,
-  label,
-}: {
-  href: string | null | undefined;
-  children: React.ReactNode;
-  label?: string;
-}) {
-  const url = externalUrl(href);
-  if (!url) return null;
-  return (
-    <a
-      href={url}
-      target="_blank"
-      rel="noopener noreferrer"
-      aria-label={label}
-      className="inline-flex items-center gap-1 text-xs font-medium underline underline-offset-2"
-      style={{ color: "var(--accent-primary)" }}
-    >
-      {children}
-      <ExternalLink className="w-3 h-3" aria-hidden />
-    </a>
-  );
 }
 
 function openExternal(url: string): void {
@@ -428,12 +414,15 @@ function CredentialFields({
   onChange,
   idPrefix,
   placeholderOverride,
+  after,
 }: {
   fields: ConnectorTypeInfo["auth"]["fields"];
   values: FieldValues;
   onChange: (key: string, value: string) => void;
   idPrefix: string;
   placeholderOverride?: string;
+  /** Rendered right after the field with this key (the token link under the Canvas URL). */
+  after?: { key: string; node: React.ReactNode };
 }) {
   const errors = visibleFieldErrors(fields, values);
   return (
@@ -445,42 +434,138 @@ function CredentialFields({
           [problem ? `${id}-error` : "", field.hint ? `${id}-hint` : ""].filter(Boolean).join(" ") ||
           undefined;
         return (
-          <div key={field.key}>
-            <label htmlFor={id} className={labelCls}>
-              {field.label}
-              {!field.required && (
-                <span style={{ color: "var(--text-muted)" }}> (optional)</span>
+          <Fragment key={field.key}>
+            <div>
+              <label htmlFor={id} className={labelCls}>
+                {field.label}
+                {!field.required && (
+                  <span style={{ color: "var(--text-muted)" }}> (optional)</span>
+                )}
+              </label>
+              <input
+                id={id}
+                // "url" is validated here rather than by the browser, so a
+                // bad value shows the same message everywhere.
+                type={field.type === "password" ? "password" : "text"}
+                inputMode={field.type === "url" ? "url" : undefined}
+                value={values[field.key] ?? ""}
+                onChange={(e) => onChange(field.key, e.target.value)}
+                aria-invalid={problem ? true : undefined}
+                aria-describedby={describedBy}
+                className={fieldCls}
+                style={inputStyle}
+                placeholder={placeholderOverride ?? field.placeholder}
+                autoComplete="off"
+                spellCheck={false}
+              />
+              {problem && (
+                <p id={`${id}-error`} className="text-xs mt-1.5" style={{ color: "var(--accent-danger)" }}>
+                  {problem}
+                </p>
               )}
-            </label>
-            <input
-              id={id}
-              // "url" is validated here rather than by the browser, so a
-              // bad value shows the same message everywhere.
-              type={field.type === "password" ? "password" : "text"}
-              inputMode={field.type === "url" ? "url" : undefined}
-              value={values[field.key] ?? ""}
-              onChange={(e) => onChange(field.key, e.target.value)}
-              aria-invalid={problem ? true : undefined}
-              aria-describedby={describedBy}
-              className={fieldCls}
-              style={inputStyle}
-              placeholder={placeholderOverride ?? field.placeholder}
-              autoComplete="off"
-              spellCheck={false}
-            />
-            {problem && (
-              <p id={`${id}-error`} className="text-xs mt-1.5" style={{ color: "var(--accent-danger)" }}>
-                {problem}
-              </p>
-            )}
-            {field.hint && (
-              <p id={`${id}-hint`} className="text-xs mt-1.5" style={{ color: "var(--text-muted)" }}>
-                {field.hint}
-              </p>
-            )}
-          </div>
+              {field.hint && (
+                <p id={`${id}-hint`} className="text-xs mt-1.5" style={{ color: "var(--text-muted)" }}>
+                  {field.hint}
+                </p>
+              )}
+            </div>
+            {after?.key === field.key && after.node}
+          </Fragment>
         );
       })}
+    </>
+  );
+}
+
+/**
+ * The token form's main call to action: the page where the user creates the token, in a new tab.
+ * A template link (Canvas) appears once its field holds a valid address; until then, with
+ * `waitingHint`, a muted line says what to fill in. `variant="inline"` is a plain small link, for
+ * where pasting a token is not the recommended path.
+ */
+function TokenLinkCta({
+  entry,
+  values,
+  waitingHint = false,
+  variant = "action",
+}: {
+  entry: ConnectorTypeInfo;
+  values: FieldValues;
+  waitingHint?: boolean;
+  variant?: "action" | "inline";
+}) {
+  const href = tokenLink(entry, values);
+  if (!href) {
+    const waitsFor = tokenLinkWaitsFor(entry);
+    if (!waitingHint || !waitsFor) return null;
+    return (
+      <p className="text-xs -mt-1" style={{ color: "var(--text-muted)" }}>
+        Enter your {waitsFor.label} above to get a direct link to your token page.
+      </p>
+    );
+  }
+  const label = tokenLinkLabel(entry);
+  if (variant === "inline") {
+    return (
+      <p>
+        <ExternalAnchor href={href}>{label}</ExternalAnchor>
+      </p>
+    );
+  }
+  // The steps differ per service (Slack installs an app, Robinhood registers a key), so the
+  // line stays neutral. The new-tab cue is on the link itself.
+  return (
+    <div className="flex flex-col items-start gap-1.5">
+      <ExternalAnchor href={href} variant="action">
+        {label}
+      </ExternalAnchor>
+      <p className="text-xs" style={{ color: "var(--text-muted)" }}>
+        Follow the steps there, then fill in the rest of this form.
+      </p>
+    </div>
+  );
+}
+
+/** The token form's fields with its token link: right under the field a template link is built
+ * from (Canvas URL), otherwise above the fields. */
+function TokenFields({
+  entry,
+  fields,
+  values,
+  onChange,
+  idPrefix,
+  placeholderOverride,
+  waitingHint = false,
+  linkVariant = "action",
+}: {
+  entry: ConnectorTypeInfo | undefined;
+  fields: ConnectorTypeInfo["auth"]["fields"];
+  values: FieldValues;
+  onChange: (key: string, value: string) => void;
+  idPrefix: string;
+  placeholderOverride?: string;
+  waitingHint?: boolean;
+  linkVariant?: "action" | "inline";
+}) {
+  const link = entry ? (
+    <TokenLinkCta entry={entry} values={values} waitingHint={waitingHint} variant={linkVariant} />
+  ) : null;
+  const waitsFor = entry ? tokenLinkWaitsFor(entry) : null;
+  const after =
+    waitsFor && fields.some((f) => f.key === waitsFor.key)
+      ? { key: waitsFor.key, node: link }
+      : undefined;
+  return (
+    <>
+      {!after && link}
+      <CredentialFields
+        fields={fields}
+        values={values}
+        onChange={onChange}
+        idPrefix={idPrefix}
+        placeholderOverride={placeholderOverride}
+        after={after}
+      />
     </>
   );
 }
@@ -734,11 +819,50 @@ function MethodChooser({
   );
 }
 
+/**
+ * What the server owner does to turn sign-in on: register the sign-in app (linked when the
+ * definition has client_setup_url), put its client ID (and secret) in backend/.env under the
+ * setting names the catalog sends, and restart the backend. Shared by the card and the modal.
+ */
+function SignInSetupSteps({ entry }: { entry: ConnectorTypeInfo }) {
+  const { client_setup_url: setupUrl, client_id_setting: idName, client_secret_setting: secretName } =
+    entry.auth;
+  const what = secretName ? "client ID and secret" : "client ID";
+  return (
+    <>
+      {setupUrl ? (
+        <>
+          <ExternalAnchor href={setupUrl} label={`Register the sign-in app for ${entry.label}`}>
+            Register the sign-in app
+          </ExternalAnchor>
+          , then add its {what}
+        </>
+      ) : (
+        <>Add the OAuth {what}</>
+      )}{" "}
+      to <code>backend/.env</code>
+      {idName && (
+        <>
+          {" "}
+          as <code>{idName}</code>
+          {secretName && (
+            <>
+              {" "}
+              and <code>{secretName}</code>
+            </>
+          )}
+        </>
+      )}
+      , and restart the backend.
+    </>
+  );
+}
+
 function SignInNotSetUpNote({ entry, tokenFallback }: { entry: ConnectorTypeInfo; tokenFallback: boolean }) {
   return (
     <div className="px-3 py-2.5 rounded-[8px] text-xs leading-relaxed" style={warningNoticeStyle}>
-      Sign-in with {entry.label} is not set up on this server: an administrator has to add its
-      OAuth client ID to the server settings first.{" "}
+      Sign-in with {entry.label} is not set up on this server yet.{" "}
+      <SignInSetupSteps entry={entry} />{" "}
       {tokenFallback
         ? "You can paste a token instead."
         : "Until then this service cannot be connected here."}
@@ -746,14 +870,98 @@ function SignInNotSetUpNote({ entry, tokenFallback }: { entry: ConnectorTypeInfo
   );
 }
 
-function SlackTokensNote() {
+/** Slack's connect notes (in place of auth.notes): what each of the three tokens is for. */
+function SlackTokensNote({ linkLabel }: { linkLabel: string }) {
   return (
     <div className="px-3 py-2.5 rounded-[8px] text-xs leading-relaxed" style={infoNoticeStyle}>
-      Create the Crawler app in Slack from the manifest link, install it to your workspace, then
-      paste its tokens: the <strong>bot token</strong> (xoxb-) lets Crawler read channels and post
-      with your approval; the <strong>app-level token</strong> (xapp-) is only needed to chat with
-      Crawler in Slack direct messages; the <strong>user token</strong> (xoxp-) is only needed for
-      search and setting your status.
+      Use <strong>{linkLabel}</strong> below to make the Crawler app from its manifest, install it
+      to your workspace, then paste its tokens: the <strong>bot token</strong> (xoxb-) lets Crawler
+      read channels and post with your approval; the <strong>app-level token</strong> (xapp-) is
+      only needed to chat with Crawler in Slack direct messages; the <strong>user token</strong>
+      (xoxp-) is only needed for search and setting your status. Invite the app to a channel
+      before asking Crawler to read it.
+    </div>
+  );
+}
+
+/** Makes the Ed25519 key pair that signs requests to Robinhood: fills the
+ * private key field and shows the public key to register at Robinhood. The
+ * public key shows only while the field still holds its private key, so an
+ * edited field never sits beside a public key it does not match. */
+function RobinhoodKeyPairHelper({
+  privateKey,
+  onPrivateKey,
+}: {
+  privateKey: string | undefined;
+  onPrivateKey: (value: string) => void;
+}) {
+  const [pair, setPair] = useState<RobinhoodKeyPair | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const publicKeyId = useId();
+  const shown = pair && pair.privateKey === privateKey ? pair : null;
+
+  const generate = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const next = await generateRobinhoodKeyPair();
+      setPair(next);
+      onPrivateKey(next.privateKey);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : KEY_PAIR_UNSUPPORTED);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="px-3 py-2.5 rounded-[8px] text-xs leading-relaxed flex flex-col gap-2" style={infoNoticeStyle}>
+      <p>
+        No key pair yet? Generate one here. The private key fills its field and is saved only with
+        the connector; it never goes to Robinhood.
+      </p>
+      <div>
+        <button
+          type="button"
+          onClick={() => void generate()}
+          disabled={busy}
+          className="inline-flex items-center gap-1.5 px-3 rounded-[8px] text-xs font-medium disabled:opacity-50"
+          style={{ ...inputStyle, minHeight: 36 }}
+        >
+          <KeyRound className="w-3.5 h-3.5" aria-hidden />
+          {shown ? "Generate a new key pair" : "Generate a key pair"}
+        </button>
+      </div>
+      {shown && (
+        <div>
+          <label htmlFor={publicKeyId} className="block mb-1.5 font-medium">
+            Public key for Robinhood
+          </label>
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              id={publicKeyId}
+              readOnly
+              value={shown.publicKey}
+              onFocus={(e) => e.currentTarget.select()}
+              className={`${fieldCls} font-mono`}
+              style={{ ...inputStyle, flex: "1 1 16rem" }}
+              spellCheck={false}
+            />
+            <CopyButton key={shown.publicKey} text={shown.publicKey} label="Copy public key" />
+          </div>
+          <p className="mt-1.5">
+            Add it as a new API credential at{" "}
+            <ExternalAnchor href="https://robinhood.com/account/crypto">robinhood.com/account/crypto</ExternalAnchor>,
+            then paste the API key Robinhood gives you into the API key field.
+          </p>
+        </div>
+      )}
+      {error && (
+        <p role="alert" style={{ color: "var(--accent-danger)" }}>
+          {error}
+        </p>
+      )}
     </div>
   );
 }
@@ -1126,18 +1334,17 @@ function ConnectModal({
               )}
               {entry.docs_url && (
                 <p className="mt-1.5">
-                  <ExternalAnchor href={entry.docs_url}>
-                    {entry.key === SLACK_TYPE ? "Create the Slack app from its manifest" : "Setup guide"}
-                  </ExternalAnchor>
+                  <ExternalAnchor href={entry.docs_url}>Setup guide</ExternalAnchor>
                 </p>
               )}
             </div>
 
-            {entry.key === SLACK_TYPE && <SlackTokensNote />}
+            {entry.key === SLACK_TYPE && <SlackTokensNote linkLabel={tokenLinkLabel(entry)} />}
             {options.signInUnavailable && (
               <SignInNotSetUpNote entry={entry} tokenFallback={options.methods.includes("token")} />
             )}
-            {entry.auth.notes && method === "token" && (
+            {/* Slack's note above already says what its auth.notes says. */}
+            {entry.auth.notes && method === "token" && entry.key !== SLACK_TYPE && (
               <div className="px-3 py-2.5 rounded-[8px] text-xs leading-relaxed" style={infoNoticeStyle}>
                 {entry.auth.notes}
               </div>
@@ -1172,16 +1379,24 @@ function ConnectModal({
 
                 {method === "token" ? (
                   <>
-                    <CredentialFields
+                    <TokenFields
+                      entry={entry}
                       fields={entry.auth.fields}
                       values={fieldValues}
                       onChange={(key, value) => setFieldValues((prev) => ({ ...prev, [key]: value }))}
                       idPrefix={ids.field}
+                      waitingHint
                     />
                     <p className="text-xs -mt-1" style={{ color: "var(--text-muted)" }}>
                       Credentials are encrypted (AES-256-GCM) before they touch the database and are
                       never displayed again after saving.
                     </p>
+                    {entry.key === ROBINHOOD_TYPE && (
+                      <RobinhoodKeyPairHelper
+                        privateKey={fieldValues.api_secret}
+                        onPrivateKey={(value) => setFieldValues((prev) => ({ ...prev, api_secret: value }))}
+                      />
+                    )}
                   </>
                 ) : (
                   <p className="text-xs" style={{ color: "var(--text-muted)" }}>
@@ -1575,13 +1790,22 @@ function EditConnectorModal({
                   : ""}
               </p>
               <div className="flex flex-col gap-4">
-                <CredentialFields
+                <TokenFields
+                  entry={entry}
                   fields={credentialFields}
                   values={fieldValues}
                   onChange={(key, value) => setFieldValues((prev) => ({ ...prev, [key]: value }))}
                   idPrefix={ids.field}
                   placeholderOverride="Leave blank to keep existing"
+                  // Reconnect is the advice for a sign-in row, so the token link stays small.
+                  linkVariant={kind === "oauth_or_token" ? "inline" : "action"}
                 />
+                {connector.connector_type === ROBINHOOD_TYPE && (
+                  <RobinhoodKeyPairHelper
+                    privateKey={fieldValues.api_secret}
+                    onPrivateKey={(value) => setFieldValues((prev) => ({ ...prev, api_secret: value }))}
+                  />
+                )}
               </div>
               {anyCredentialEntered && !credentialsComplete && (
                 <p role="alert" className="text-xs mt-2" style={{ color: "var(--accent-warning)" }}>
@@ -2139,6 +2363,11 @@ function CatalogCard({
   const titleId = useId();
   const options = connectOptions(entry);
   const blocked = options.methods.length === 0;
+  // The card links the token page itself when pasting a token is the first
+  // way to connect here and the link needs nothing typed (Notion, or GitHub
+  // without sign-in); a template link (Canvas) waits for the connect form.
+  // Where sign-in is ready (Google), the guide stays: sign-in is the advice.
+  const directTokenLink = options.methods[0] === "token" ? tokenLink(entry) : null;
   return (
     <article
       aria-labelledby={titleId}
@@ -2169,17 +2398,18 @@ function CatalogCard({
         </p>
       )}
       {blocked && options.signInUnavailable && (
-        <p className="text-xs" style={{ color: "var(--accent-warning)" }}>
-          Sign-in is not set up on this server yet.
+        <p className="text-xs leading-relaxed" style={{ color: "var(--accent-warning)" }}>
+          {/* Connect is disabled here, so tell the owner how to fix it. */}
+          Sign-in is not set up on this server yet. <SignInSetupSteps entry={entry} />
         </p>
       )}
       <div className="mt-auto flex flex-wrap items-center justify-between gap-2">
-        {entry.docs_url ? (
-          <ExternalAnchor
-            href={entry.docs_url}
-            label={`${entry.label} ${entry.key === SLACK_TYPE ? "app manifest" : "setup guide"} (opens in a new tab)`}
-          >
-            {entry.key === SLACK_TYPE ? "App manifest" : "Setup guide"}
+        {directTokenLink ? (
+          // Every token_url_label already names its service.
+          <ExternalAnchor href={directTokenLink}>{tokenLinkLabel(entry)}</ExternalAnchor>
+        ) : entry.docs_url ? (
+          <ExternalAnchor href={entry.docs_url} label={`Setup guide for ${entry.label}`}>
+            Setup guide
           </ExternalAnchor>
         ) : (
           <span />

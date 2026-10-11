@@ -20,6 +20,7 @@ import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import urlparse
 from typing import Any, Callable, Optional
 
 import pytest
@@ -50,6 +51,7 @@ from services.connectors.definition import (
 )
 from services.connectors.google_workspace import GoogleWorkspaceConnector
 from services.connectors.robinhood import RobinhoodConnector
+from tests.test_connectors_behavior import RH_PRIVATE_KEY
 
 # The connectors that existed before the registry. Later packages append
 # connectors (and Google gains actions), so checks against the hand-written
@@ -578,6 +580,73 @@ def test_auth_rules(auth, fragment):
     _only(registry.validate_registry([dataclasses.replace(GOOD, auth=auth)]), fragment)
 
 
+# A token connector whose first field is the user's own server address, for
+# the token_url template rules.
+_URL_FIELDS = (
+    CredentialField("base_url", "Server URL", type="url"),
+    CredentialField("access_token", "Access token"),
+)
+
+
+def _token_link(**changes: Any) -> ConnectorDefinition:
+    auth = AuthSpec(methods=("token",), fields=_URL_FIELDS, **changes)
+    return dataclasses.replace(GOOD, auth=auth)
+
+
+def test_valid_token_links_are_accepted():
+    for definition in (
+        _token_link(token_url="https://acme.test/tokens", token_url_label="Create an Acme token"),
+        _token_link(token_url="{base_url}/profile/settings"),
+        _token_link(token_url="{base_url}"),
+        _oauth(client_setup_url="https://acme.test/apps/new"),
+    ):
+        assert registry.validate_registry([definition]) == []
+
+
+@pytest.mark.parametrize(
+    "definition,fragment",
+    [
+        (_token_link(token_url="http://acme.test/tokens"), "token_url must be an https:// URL"),
+        (_token_link(token_url="acme.test/tokens"), "token_url must be an https:// URL"),
+        (_token_link(token_url="{nope}/tokens"), "'{nope}' must name a credential field of type 'url'"),
+        (
+            _token_link(token_url="{access_token}/tokens"),
+            "'{access_token}' must name a credential field of type 'url'",
+        ),
+        (_token_link(token_url="https://acme.test/{base_url}"), "placeholder must come first"),
+        (_token_link(token_url="{base_url}/a/{base_url}"), "at most one"),
+        (_token_link(token_url="{base_url}/x{"), "not a {field_key} placeholder"),
+        (_token_link(token_url="https://acme.test/}"), "not a {field_key} placeholder"),
+        (_token_link(token_url="{base_url}@/tokens"), "followed by '/', '?', '#' or nothing"),
+        # The typed address must not become userinfo or a subdomain of another host.
+        (_token_link(token_url="{base_url}@x.test/t"), "followed by '/', '?', '#' or nothing"),
+        (_token_link(token_url="{base_url}.x.test/t"), "followed by '/', '?', '#' or nothing"),
+        (_token_link(token_url="{base_url}:8443/t"), "followed by '/', '?', '#' or nothing"),
+        (
+            dataclasses.replace(
+                OAUTH_GOOD,
+                auth=dataclasses.replace(
+                    OAUTH_GOOD.auth, methods=("oauth",), token_url="https://acme.test/tokens"
+                ),
+            ),
+            "token_url needs the 'token' method",
+        ),
+        (
+            _token_link(token_url="https://acme.test/tokens", token_url_label=f"Get one {chr(0x2014)} now"),
+            "em or en dash",
+        ),
+        (
+            _token_link(token_url="https://acme.test/tokens", token_url_label=f"Get one {chr(0x2013)} now"),
+            "em or en dash",
+        ),
+        (_token_link(token_url_label="x" * 61), "at most 60 characters"),
+        (_oauth(client_setup_url="http://acme.test/apps/new"), "client_setup_url"),
+    ],
+)
+def test_token_link_rules(definition, fragment):
+    _only(registry.validate_registry([definition]), fragment)
+
+
 def test_oauth_spec_without_a_broker_method_is_refused():
     auth = dataclasses.replace(OAUTH_GOOD.auth, methods=("token",))
     _only(
@@ -643,7 +712,14 @@ OLD_CREDENTIAL_REQUIREMENTS = {
     "robinhood": {
         "required": ["api_key", "api_secret"],
         "optional": [],
-        "notes": "Read-only API credentials. Trading is permanently blocked by the platform.",
+        # Rewritten when signing moved from HMAC to Ed25519 key pairs.
+        "notes": (
+            "Requests to Robinhood are signed with an Ed25519 key pair. Generate one "
+            "below (or with the script in Robinhood's docs), add the public key as "
+            "a new API credential at robinhood.com/account/crypto (web classic, "
+            "US only), then paste the API key Robinhood gives you. Trading is "
+            "permanently blocked by the platform."
+        ),
     },
     "mcp": {
         "required": ["url"],
@@ -993,7 +1069,7 @@ def test_lookups():
     [
         ("canvas", {"base_url": "https://s.instructure.com", "access_token": "t"}, CanvasConnector, "canvas"),
         ("google_workspace", {"access_token": "t", "client_id": "cid"}, GoogleWorkspaceConnector, "google"),
-        ("robinhood", {"api_key": "k", "api_secret": "s"}, RobinhoodConnector, "robinhood"),
+        ("robinhood", {"api_key": "k", "api_secret": RH_PRIVATE_KEY}, RobinhoodConnector, "robinhood"),
     ],
 )
 def test_create_connector_uses_the_definition(key, credentials, cls, policy):
@@ -1013,8 +1089,9 @@ def test_create_connector_reproduces_constructor_arguments():
     )
     assert canvas._base_url == "https://s.instructure.com"
     assert (canvas._client_id, canvas._client_secret) == ("", "")
-    robinhood = factory.create_connector("robinhood", {"api_key": "k", "api_secret": "s"})
-    assert robinhood._api_key == "" and robinhood._timeout == 30.0
+    robinhood = factory.create_connector("robinhood", {"api_key": "k", "api_secret": RH_PRIVATE_KEY})
+    assert robinhood._api_key == "" and robinhood._private_key is None
+    assert robinhood._timeout == 30.0
 
 
 def test_self_hosted_canvas_host_is_the_only_extra_host():
@@ -1078,6 +1155,8 @@ def test_payload_shape():
         assert entry["creatable"] is True
         assert set(entry["auth"]) == {
             "methods", "fields", "provider", "oauth_configured", "token_auth_method", "notes",
+            "token_url", "token_url_label", "client_setup_url",
+            "client_id_setting", "client_secret_setting",
         }
         for field in entry["auth"]["fields"]:
             assert set(field) == {"key", "label", "type", "required", "placeholder", "hint"}
@@ -1107,6 +1186,42 @@ def test_payload_shape():
     canvas = by_key["canvas"]
     assert canvas["auth"]["provider"] is None and canvas["auth"]["oauth_configured"] is False
     assert canvas["auth"]["fields"][0]["type"] == "url"
+    assert canvas["auth"]["token_url"] == "{base_url}/profile/settings"
+    assert canvas["auth"]["token_url_label"] == "Open your Canvas token page"
+    assert canvas["auth"]["client_setup_url"] == ""  # no OAuth spec
+    assert by_key["microsoft"]["auth"]["token_url"] == ""  # no token method
+    assert by_key["microsoft"]["auth"]["client_setup_url"].startswith("https://entra.microsoft.com/")
+    assert google["auth"]["client_setup_url"] == "https://console.cloud.google.com/auth/clients"
+    # Setting names (never values), so the page can say which backend/.env entries to fill.
+    assert google["auth"]["client_id_setting"] == "GOOGLE_OAUTH_CLIENT_ID"
+    assert google["auth"]["client_secret_setting"] == "GOOGLE_OAUTH_CLIENT_SECRET"
+    assert by_key["microsoft"]["auth"]["client_id_setting"] == "MICROSOFT_OAUTH_CLIENT_ID"
+    assert by_key["microsoft"]["auth"]["client_secret_setting"] == ""  # public client
+    assert canvas["auth"]["client_id_setting"] == canvas["auth"]["client_secret_setting"] == ""
+
+
+@pytest.mark.parametrize("entry", registry.connector_types_payload(), ids=lambda e: e["key"])
+def test_every_connector_link_is_https_or_a_valid_template(entry):
+    """docs_url and client_setup_url are https; token_url is https, or a
+    template whose one leading placeholder names a url field and gives an
+    https URL once filled."""
+    auth = entry["auth"]
+    for url in (entry["docs_url"], auth["client_setup_url"]):
+        assert url == "" or url.startswith("https://"), url
+    token_url = auth["token_url"]
+    if token_url.startswith("{"):
+        key, _, rest = token_url[1:].partition("}")
+        assert key in {f["key"] for f in auth["fields"] if f["type"] == "url"}
+        filled = urlparse("https://school.example.test" + rest)
+        assert filled.scheme == "https" and filled.hostname == "school.example.test"
+        assert "{" not in rest and "}" not in rest
+        assert rest == "" or rest[0] in "/?#"
+    else:
+        assert token_url == "" or token_url.startswith("https://"), token_url
+    if token_url:
+        assert "token" in auth["methods"]
+    label = auth["token_url_label"]
+    assert len(label) <= 60 and chr(0x2014) not in label and chr(0x2013) not in label
 
 
 def test_payload_oauth_configured_reads_the_named_setting(monkeypatch):

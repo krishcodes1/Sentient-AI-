@@ -50,6 +50,7 @@ from services.agent.approvals import (
     InMemoryApprovalStore,
     StoredAction,
 )
+from services.agent.channel_style import TELEGRAM_STYLE_PROMPT
 from services.agent.context_manager import (
     FIND_TOOL_NAME,
     ContextManager,
@@ -2047,6 +2048,7 @@ class AgentRuntime:
         *,
         purchases: bool = False,
         shopping: bool = False,
+        channel_block: Optional[str] = None,
         # top10:system_prompt:secret_pii_redaction
         privacy: bool = False,
 
@@ -2078,6 +2080,11 @@ class AgentRuntime:
         buying off the system message is the pre-purchases one, unchanged.
         ``shopping`` (a browser tool is offered) adds the ``<shopping>``
         playbook after it, before the date, on the same terms.
+
+        ``channel_block`` is the reply style for the channel the turn came
+        from (services/agent/channel_style.py; only Telegram has one). It
+        goes after the memory block and before the tutor block, which stays
+        last; None leaves the system message exactly as it was.
         """
         # The model has no clock. Day granularity is enough for "next Friday"
         # and keeps the cached prompt prefix identical across a whole day;
@@ -2105,6 +2112,9 @@ class AgentRuntime:
             + (f"\n\n{unattended}" if unattended else "")
 
             + (f"\n\n{memory_block}" if memory_block else "")
+            # The channel's reply style: before the tutor block, so
+            # swap_tutor_block still finds that block at the very end.
+            + (f"\n\n{channel_block}" if channel_block else "")
             # top10:system_prompt:tutor_mode
             # Tutor mode's fixed block goes last (services/tutor/prompt.py),
             # so the prefix before it stays cached; none when the mode is off.
@@ -2858,7 +2868,10 @@ class AgentRuntime:
         ``channel`` is where the request came from (the Telegram chat, or the
         browser's device id): a desktop.act in an app the owner allowed for a
         week from that same channel runs without a card
-        (services.agent.app_approvals). None uses no weekly approval.
+        (services.agent.app_approvals). None uses no weekly approval. A
+        Telegram channel also adds the ``<telegram_style>`` block
+        (services/agent/channel_style.py); web and None leave the system
+        message unchanged.
 
         ``unattended`` (services.agent.unattended) makes this a turn nobody
         is watching: the ``<unattended>`` block follows ``<permissions>``, no
@@ -2895,6 +2908,12 @@ class AgentRuntime:
                 permissions_text,
                 purchases=any(t.name == CHECKOUT_TOOL for t in tools or []),
                 shopping=any(is_browser_tool(t.name) for t in tools or []),
+                # A Telegram turn's reply is read on a phone: the chat style.
+                channel_block=(
+                    TELEGRAM_STYLE_PROMPT
+                    if channel is not None and channel.kind == "telegram"
+                    else None
+                ),
                 privacy=privacy,
                 study=offers_study(tools),
                 **_unattended_kwargs(unattended.system_block() if unattended is not None else None),

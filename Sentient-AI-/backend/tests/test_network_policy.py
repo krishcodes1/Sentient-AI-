@@ -44,6 +44,7 @@ def no_dns(monkeypatch):
 async def test_robinhood_real_request_urls_all_pass_policy(no_dns):
     """Every URL the connector actually requests is allowlisted."""
     from services.connectors.robinhood import RobinhoodConnector
+    from tests.test_connectors_behavior import RH_PRIVATE_KEY
 
     seen: list[str] = []
 
@@ -51,14 +52,14 @@ async def test_robinhood_real_request_urls_all_pass_policy(no_dns):
         seen.append(str(request.url))
         return httpx.Response(200, json={})
 
-    connector = RobinhoodConnector(api_key="k", api_secret="s")
+    connector = RobinhoodConnector(api_key="k", api_secret=RH_PRIVATE_KEY)
     connector._http_client = httpx.AsyncClient(
         transport=httpx.MockTransport(handler), base_url=connector.BASE_URL
     )
 
     try:
         # Exercises the credential-check URL too.
-        await connector.authenticate({"api_key": "k", "api_secret": "s"})
+        await connector.authenticate({"api_key": "k", "api_secret": RH_PRIVATE_KEY})
         await connector.get_crypto_portfolio(user_confirmed=True)
         await connector.get_crypto_prices(["BTC", "ETH"], user_confirmed=True)
         await connector.get_crypto_holdings(user_confirmed=True)
