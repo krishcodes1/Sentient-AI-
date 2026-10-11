@@ -2538,6 +2538,10 @@ def build_decision_applier(app: Any, session_factory: Any = async_session):
         if "error" in result:
             return result
         summary = None
+        # True when the summary is the assistant reply the decision left (the
+        # resumed turn's own Markdown, or an unattended card's "Done" line),
+        # which a chat channel may format; False for the fact line below.
+        summary_is_reply = False
         outcome: Dict[str, Any] = {}
         if approved:
             reply = (result.get("assistant_reply") or "").strip()
@@ -2546,6 +2550,7 @@ def build_decision_applier(app: Any, session_factory: Any = async_session):
                 # The whole reply: the channel splits long text into several
                 # messages, and a cut here would also cut the usage line.
                 summary = reply
+                summary_is_reply = True
             else:
                 # No reply to relay, so the channel hears what ran and why
                 # it stops here, from facts. The chat can carry the whole
@@ -2576,6 +2581,7 @@ def build_decision_applier(app: Any, session_factory: Any = async_session):
         return {
             "status": "approved" if approved else "denied",
             "summary": summary,
+            "summary_is_reply": summary_is_reply,
             **outcome,
             # The app the tap allowed for a week, for the card's own line.
             **({"weekly": result["weekly"]} if result.get("weekly") else {}),

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import re
 from bisect import bisect_left
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Iterator, NamedTuple, Optional
 from urllib.parse import unquote, urlparse
 
 from services.connectors.base import ConnectorError
@@ -504,35 +504,64 @@ class _InlineScanner:
         return None
 
 
+class InlineSpan(NamedTuple):
+    """One inline span :func:`inline_spans` found."""
+
+    #: Where its opening marker starts, and just past its closing one.
+    start: int
+    end: int
+    #: "code", "link", "bold", "italic" or "strikethrough".
+    kind: str
+    #: Its text without the markers (a link's label).
+    inner_start: int
+    inner_end: int
+    #: A link's http(s) target; None for every other kind.
+    target: Optional[str]
+
+
+def inline_spans(text: str) -> Iterator[InlineSpan]:
+    """The outermost inline spans of *text*, left to right, by the scanner's
+    rules (see :class:`_InlineScanner`): the earliest span wins and the scan
+    resumes after it. Spans nested in one are found by scanning its inner
+    text again. The Notion parser reads Markdown this way, and so does the
+    Slack channel's mrkdwn renderer (services/notifications/slack_format.py)."""
+    scanner = _InlineScanner(text)
+    search_from = 0
+    while True:
+        opener = _OPENER_RE.search(text, search_from)
+        if opener is None:
+            return
+        span = scanner.span_at(opener.start())
+        if span is None:
+            search_from = opener.start() + 1
+            continue
+        end, kind, inner_start, inner_end, target = span
+        yield InlineSpan(opener.start(), end, kind, inner_start, inner_end, target)
+        search_from = end
+
+
 def _inline_segments(
     text: str, annotations: dict[str, bool], href: Optional[str], depth: int = 0
 ) -> list[_Segment]:
     if depth >= _MAX_INLINE_DEPTH:
         return [(text, annotations, href)] if text else []
     segments: list[_Segment] = []
-    scanner = _InlineScanner(text)
     position = 0  # end of the text already emitted
-    search_from = 0
-    while True:
-        opener = _OPENER_RE.search(text, search_from)
-        if opener is None:
-            break
-        span = scanner.span_at(opener.start())
-        if span is None:
-            search_from = opener.start() + 1
-            continue
-        end, kind, inner_start, inner_end, target = span
-        if opener.start() > position:
-            segments.append((text[position : opener.start()], annotations, href))
-        inner = text[inner_start:inner_end]
-        if kind == "code":
+    for span in inline_spans(text):
+        if span.start > position:
+            segments.append((text[position : span.start], annotations, href))
+        inner = text[span.inner_start : span.inner_end]
+        if span.kind == "code":
             segments.append((inner, {**annotations, "code": True}, href))
-        elif kind == "link":
+        elif span.kind == "link":
+            target = span.target
             link = href or (target if target and len(target) <= _MAX_LINK_CHARS else None)
             segments.extend(_inline_segments(inner, annotations, link, depth + 1))
         else:
-            segments.extend(_inline_segments(inner, {**annotations, kind: True}, href, depth + 1))
-        position = search_from = end
+            segments.extend(
+                _inline_segments(inner, {**annotations, span.kind: True}, href, depth + 1)
+            )
+        position = span.end
     if position < len(text):
         segments.append((text[position:], annotations, href))
     return segments

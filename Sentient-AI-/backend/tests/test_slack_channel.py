@@ -923,22 +923,112 @@ async def test_stop_names_the_cards_still_waiting(linked):
 
 
 def test_reply_notes_use_the_dm_wording():
-    reply = slack_mod._with_turn_notes(
-        "Done.",
+    notes = slack_mod._turn_notes(
         {"pending_approvals": ["gmail.send"], "blocked": ["web.fetch"], "images": ["a", "b"]},
     )
-    assert reply.startswith("Done.\n\n")
+    assert notes.startswith("\n\n")
     assert (
         "Waiting on your approval for: gmail.send. The request is in this DM, or send pending."
-        in reply
+        in notes
     )
-    assert "Blocked by security policy: web.fetch" in reply
-    assert "(2 screenshots not shown: Slack DMs carry text only.)" in reply
-    assert slack_mod._with_turn_notes("Done.", {}) == "Done."
+    assert "Blocked by security policy: web.fetch" in notes
+    assert "(2 screenshots not shown: Slack DMs carry text only.)" in notes
+    assert slack_mod._turn_notes({}) == ""
     assert cards.waiting_cards_note(0, pending_hint="send pending") == ""
     assert "3 actions are still waiting for your approval (send pending). Approving one" in (
         cards.waiting_cards_note(3, pending_hint="send pending")
     )
+
+
+# ── Markdown replies (slack_format) ──────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_the_models_reply_is_rendered_as_mrkdwn_and_its_notes_are_not(linked):
+    linked.chat_reply = {
+        "content": "## Plan\n**Done** with [the docs](https://e.com/?a=1&b=2) & `x<y`\n- one",
+        "pending_approvals": ["**tool**"],
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6",
+    }
+    await linked.deliver(dm_event("plan it"))
+    (post,) = linked.api.posts()
+    text = post["text"]
+    assert text.startswith(
+        "*Plan*\n*Done* with the docs (https://e.com/?a=1&amp;b=2) &amp; `x&lt;y`\n• one\n\n"
+    )
+    # The notes are the app's own text: sent as typed, never rendered.
+    assert "Waiting on your approval for: **tool**." in text
+    assert "<" not in text and ">" not in text
+    assert "blocks" not in post
+
+
+@pytest.mark.asyncio
+async def test_a_value_the_rendering_would_join_is_hidden_with_one_footer(linked):
+    token = "ghp_" + "FAKE" * 9
+    linked.chat_reply = {"content": f"Your key is {token[:4]}**{token[4:]}** for now."}
+    await linked.deliver(dm_event("my key?"))
+    text = "".join(p["text"] for p in linked.api.posts())
+    assert "FAKE" not in text
+    assert "[hidden: GitHub token]" in text
+    assert text.count("Crawler hid 1 value that looks like a key, card or ID number.") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_long_rendered_reply_keeps_every_code_block_closed(linked):
+    code = "\n".join(f"print({n})  # a < b & c" for n in range(400))
+    linked.chat_reply = {"content": f"**Script:**\n```python\n{code}\n```\nRun it."}
+    await linked.deliver(dm_event("script please"))
+    posts = [p["text"] for p in linked.api.posts()]
+    assert len(posts) >= 3
+    assert all(len(text) <= slack_mod.TEXT_CHUNK for text in posts)
+    assert all(text.count("```") % 2 == 0 for text in posts)
+    assert posts[0].startswith("*Script:*\n```\nprint(0)  # a &lt; b &amp; c")
+    assert posts[-1].rstrip().endswith("```\nRun it.")
+    assert linked.sleeps.count(slack_mod.POST_INTERVAL_S) == len(posts) - 1
+
+
+@pytest.mark.asyncio
+async def test_errors_and_reminders_go_out_as_typed(linked):
+    linked.chat_reply = {"error": "**Rate** limit"}
+    await linked.deliver(dm_event("hi"))
+    assert linked.api.posts()[-1]["text"] == "⚠️ **Rate** limit"
+    assert await linked.channel.send_text(str(linked.user_id), "Due: **essay** [x](https://e.com)")
+    assert linked.api.posts()[-1]["text"] == "Due: **essay** [x](https://e.com)"
+
+
+@pytest.mark.asyncio
+async def test_approval_cards_stay_plain_text_and_unrendered(linked):
+    arguments = {"text": "**hi** [x](https://e.com) # not a heading"}
+    action = await park_action(linked.session_factory, linked.user_id, arguments)
+    assert await linked.channel.notify_pending(action) is True
+    (post,) = linked.api.posts()
+    section = post["blocks"][0]["text"]
+    assert section["type"] == "plain_text"
+    assert '"text": "**hi** [x](https://e.com) # not a heading"' in section["text"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("from_model", "expected"), [(True, "*Sent* it"), (False, "**Sent** it")])
+async def test_only_a_resumed_reply_the_model_wrote_is_rendered(linked, from_model, expected):
+    async def decide(user_id: str, action_id: str, approved: bool, **_: Any) -> dict[str, Any]:
+        return {"status": "approved", "summary": "**Sent** it", "summary_is_reply": from_model}
+
+    linked.channel.decide = decide
+    action = await park_action(linked.session_factory, linked.user_id, {"a": 1})
+    await linked.deliver(press(action.action_id, approve=True))
+    assert linked.api.posts()[-1]["text"] == expected
+
+
+@pytest.mark.asyncio
+async def test_the_decision_applier_marks_its_fact_line_as_not_a_reply(linked):
+    wire_decisions(linked)
+    action = await park_action(linked.session_factory, linked.user_id, {"a": 1})
+    assert linked.channel.decide is not None
+    outcome = await linked.channel.decide(str(linked.user_id), action.action_id, True)
+    assert outcome["summary"].startswith("The approved action ran: slack.post_message.")
+    assert outcome["summary_is_reply"] is False
 
 
 @pytest.mark.asyncio
