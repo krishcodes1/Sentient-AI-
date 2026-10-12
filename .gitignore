@@ -29,3 +29,8 @@ docker/data/
 
 # Claude
 .claude/
+
+# Senior Project Reports
+*.txt
+*.docx
+*.pdf
