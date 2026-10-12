@@ -1,5 +1,13 @@
 # Skills: design
 
+> **What shipped:** the bundled-skills half of this design shipped on 2026-10-12 as
+> specified in `2026-10-12-muse-skills-and-goals-design.md`. That spec wins where the two
+> differ, and its §11 lists every deviation from this one. The main differences: there are
+> no user-added skills (no upload or `skill_approvals`; owner switches live in
+> `skill_states`), skill bodies stay tainted, `skills.read` has a 34,000-character budget,
+> `allowed-tools` is ignored, and `learnings.*` / `graph.*` are deferred. The rest of this
+> document is the original design, kept for its research and for those follow-ups.
+
 Date: 2026-09-25. Branch: `feat/connectors-and-skills` (from `origin/main` at `5f6ddc1`).
 Backlog item covered: C5 (SKILL.md loader). The companion spec is
 `2026-09-25-connectors-design.md`. Both specs share the OpenClaw research summarised in §2.

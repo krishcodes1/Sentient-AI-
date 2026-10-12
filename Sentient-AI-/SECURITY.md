@@ -563,6 +563,198 @@ Users can register external MCP servers (Streamable HTTP). Trust posture:
 - Server URLs are SSRF-checked on every request; responses are sanitized
   like first-party connector output and wrapped in the untrusted envelope.
 
+## Skills (SKILL.md playbooks)
+
+A skill is a short Markdown playbook the model follows for one kind of task
+(`backend/skills/<name>/SKILL.md`). The model sees each skill's name and
+description in an `<available_skills>` block in the system prompt and reads
+the body on demand with `skills.read`. Because a skill steers what the model
+does, it is treated as a place a hostile edit could plant instructions.
+Design: `docs/superpowers/specs/2026-10-12-muse-skills-and-goals-design.md`.
+
+- **Bundled only, by design.** The only skills are the folders in
+  `backend/skills/`, reviewed in a pull request. There is no upload, no
+  marketplace and no install command, and the model can never add, edit or
+  delete a skill. User-added skills were left out on purpose. The public
+  skill registries have shipped malware as skills (the ClawHavoc and
+  ToxicSkills incidents in the 2026-09-25 skills spec), and every public
+  skill scanner has been bypassed (Trail of Bits, June 2026). A scanner
+  therefore cannot be the gate. Keeping skills to "text the team reviewed"
+  makes that review the gate. Staged uploads with owner approval are
+  backlog item C14.
+- **Text only, never code.** A skill folder may hold only `SKILL.md` and
+  `references/<file>.md` or `.txt`. Any other file or folder, a symlink, a
+  dotfile, a `scripts/` or `bin/` folder, an archive or a binary makes the
+  skill `invalid`. Nothing in a skill is ever executed. The frontmatter is
+  parsed with `yaml.safe_load` only, after a walk over the YAML events has
+  refused anchors, aliases, tags, directives, duplicate keys and deep
+  nesting. Oversize files (24,000 bytes per file, 20 files and 512 KB per
+  skill) are rejected, never truncated, which defeats the padding attack.
+  OpenClaw's `allowed-tools` and `metadata.openclaw` `install` / `requires`
+  are ignored, with a warn finding.
+- **The scanner** (`services/skills/scanner.py`) is deterministic and
+  offline. Each finding names the pattern and never quotes the matched text,
+  so a report cannot carry an injection back to the model.
+  - **Block findings:**
+    - a fetch piped into a shell or interpreter, including one named by
+      path or run through `env` (`shell_pipe`);
+    - decoding or evaluating hidden code (`decode_exec`);
+    - password-protected archives (`password_archive`);
+    - paste and request-capture sites (`paste_site`);
+    - links to an IP address (`ip_literal_url`);
+    - a setup, install or prerequisites heading (the keyword anywhere in the
+      heading) followed by download, install or run steps
+      (`install_section`);
+    - administrator or root rights (`privilege_escalation`);
+    - credential stores and agent memory files (`sensitive_path`);
+    - invisible, bidi, tag or variation-selector characters, where a single
+      U+FE0F after a visible character is allowed so emoji work
+      (`invisible_unicode`), and control characters
+      (`control_character`);
+    - HTML or Markdown comments with words in them (`hidden_comment`) and
+      markup that hides text (`hidden_markup`);
+    - text the prompt guard grades HIGH or CRITICAL (`prompt_guard`);
+    - a guard exception (`guard_error`, fail closed).
+  - **The description** is the only skill text placed in the system prompt,
+    and two rules apply to it:
+    - It must be exactly what the prompt shows. If the prompt's sanitiser
+      (`services/skills/prompt.py` `sanitise_line`) would change anything
+      but whitespace, the skill is `invalid` (`description_invalid`). That
+      covers `<` or `>` and control, private-use, unassigned, invisible or
+      variation-selector characters. The guard then checks the very string
+      the model will see, so a split such as `Ign<>ore` cannot hide words
+      the sanitiser would join back up.
+    - It must grade NONE or LOW with the guard, both raw and as shown
+      (`description_guard`). That is the bar saved memories meet.
+  - **Warn findings** list external links, words asking to skip an
+    approval, requests for passwords or keys in chat, and ignored
+    frontmatter keys.
+- **Hash pinning.**
+  - `backend/skills/manifest.json` holds the SHA-256 of every skill file.
+    CRLF is turned into LF before hashing, so every OS pins the same bytes.
+  - `python -m scripts.skills_manifest` is the only writer. It scans first
+    and writes nothing while any skill is invalid or has a block finding.
+    `tests/test_skills_bundled.py` runs its `--check`.
+  - A skill missing from the manifest is `unpinned`, and one whose files
+    differ is `changed`. Neither is ever offered or read.
+  - The files are hashed again on every `skills.read` and
+    `skills.read_reference`, on `skills.scan_report` of a usable skill, and
+    before Settings shows a skill's files or switches one on. A mismatch is
+    refused, and the skill shows as `changed` until the backend restarts.
+    Files that merely could not be read just now refuse that one call (rule
+    `unavailable`, or a 503 on the route) and mark nothing.
+- **Owner switches.**
+  - The `skills` capability ("Skills (built-in playbooks)", on by default,
+    low risk) turns the whole feature on or off.
+  - Settings → Skills has an install-wide switch for each skill
+    (`skill_states`). It is owner only (`require_admin`), audited as
+    `skill_enabled` / `skill_disabled` with the skill's name and hash only.
+    A skill that is not usable cannot be switched on (409).
+  - A switched-off skill is neither listed nor readable. If the switches
+    cannot be read, the block is left out of the prompt and `skills.read`
+    refuses (rule `storage`), so both fail closed.
+- **Read-only tools; loading never grants.**
+  - The `skills.*` tools are READ: the READ policy row is `AUTO_APPROVE`,
+    and WRITE, DELETE, EXECUTE and FINANCIAL are hard-blocked. The executor
+    runs READ only. The tools take no user, and unknown arguments fail
+    closed.
+  - Reading a skill loads the tools its `metadata.crawler.tools` names into
+    the conversation, as `tools.find` does. It loads only names already in
+    the turn's own tool list, so they are already allowed by capability,
+    scope and tier, and it skips tools tutor mode withholds.
+  - Loading never grants a tool, a scope or an approval. Every action a
+    playbook leads to meets the same approval cards as any other call.
+- **Untrusted envelope, taint kept.**
+  - A skill's body comes back as a list of sections inside the untrusted
+    tool-result envelope. Each section is screened by the prompt guard on
+    every read, and the text is taint-tracked like any result. This is the
+    conservative choice, since taint only ever adds approval cards.
+  - The `<available_skills>` block holds only names and sanitised
+    descriptions. A description the guard rejects, or that makes the guard
+    fail, is left out.
+  - The block's header tells the model that a skill never grants a tool,
+    never changes an approval and never outranks the user. It also says
+    that a skill asking to skip an approval, reveal a secret or contact
+    someone the user did not name is prompt injection.
+- **Never in unattended runs.** `skills` is in `fence.NEVER_TYPES`, and the
+  block is never built for a scheduled or trigger run.
+- **Audit.** A `skills.*` result is stored as facts only: which skill and
+  reference, its hash, status, counts and the tools loaded, never the
+  playbook's text (`skills_result_for_audit`).
+
+## Goals
+
+Goals (`goals.*` tools, the Goals page, `services/goals/store.py`) keep a
+user's goals with a plan of milestones and a progress log. The text in them
+is the user's own words, and part of it can be written by the model.
+
+- **Its own bounded store.**
+  - The `goals`, `goal_milestones` and `goal_entries` tables cascade on
+    account delete. Every lookup is scoped to the caller: another user's
+    goal reads as not found (a 404 on the routes).
+  - `user_id` comes from the executor or the JWT, never from an argument.
+    A model-supplied one is dropped, and any other unknown argument is
+    refused.
+  - Limits: 50 goals per user (25 open), 20 milestones and 500 notes per
+    goal, and fixed field sizes. Hitting a limit is an error that names it.
+  - A per-user writer lock (a Postgres transaction advisory lock) stops two
+    writers for one user from passing the same duplicate or limit check at
+    once.
+- **Writes run without a card; delete always has one.**
+  - The READ and WRITE policy rows are `AUTO_APPROVE`: the tools write only
+    to the user's own bounded store and send nothing anywhere, like
+    `study.*` and `reminders.*`.
+  - `goals.delete` is a DELETE with `always_confirm`, the `user_confirm`
+    stance and the executor's confirm set, so an `auto_approve` tier never
+    lifts its card. EXECUTE and FINANCIAL are hard-blocked.
+  - The card's sentence is built from database facts by an async bind:
+    *Delete the goal "…" with N milestones and M progress notes.* The
+    model's words are not used.
+  - A `_goal` the model supplies itself is refused before any card
+    (`goals_rule`). An unbound delete never runs, and a goal that changed
+    after its card was made is not deleted.
+  - A database error while binding is the call's own error (rule
+    `storage`), never shown as a security block.
+- **Screened on write.**
+  - Titles, descriptions, current states, milestone titles and notes are
+    cleaned first: control and invisible characters are removed, and
+    Unicode spaces become plain spaces.
+  - Text the prompt guard grades unsafe is refused, and so is anything the
+    shared secret detector flags under the `MEMORY` policy. A guard or
+    detector error refuses too (fail closed).
+  - An error never repeats the user's text.
+- **Never in the system prompt.** Anything in the system slot is trusted.
+  Goal text can be written by a call with no card in a turn that read an
+  untrusted page, and the taint gate does not escalate calls that the
+  policy runs without a card. So goals reach the model only as tool results,
+  inside the untrusted envelope and scanned by the prompt guard. The bundled
+  `goals` skill tells the model to call `goals.list` when a request touches
+  a goal. Showing goals in the prompt would need a memory-style approval
+  card on every goal write, which is backlog item C16.
+- **The audit keeps ids and counts.**
+  - The arguments of every `goals.*` call, under any action name, go
+    through an allowlist (`services/audit.py`):
+    - an id is kept only when it is a UUID;
+    - a status, category, check-in choice or source is kept only when it is
+      one the goals accept;
+    - a target date is kept only as `YYYY-MM-DD`, and `clear_target_date`
+      only as true or false;
+    - anything else, such as a title given where an id belongs or an
+      unknown key, is stored only as its length or item count, or not at
+      all.
+  - Results go through `services/goals/audit_facts.py`, which keeps ids,
+    statuses, dates and counts, never a title or a note.
+  - The Goals page's `goal_created`, `goal_updated`, `goal_deleted` and
+    `goal_progress_logged` rows hold ids only.
+- **Unattended runs.** `goals` is not fenced from them. A scheduled
+  check-in may read `goals.list` and `goals.get`. A goal write the run
+  lists only parks a 180-minute approval card. `goals.delete` is never
+  given to an unattended run.
+- **The Goals page** (`/api/goals`, per user) works whatever the `goals`
+  switch says, because that switch gates only the agent's tools, so a user
+  can always see and delete their own goals. Delete on the page has a
+  confirm step, and the person clicking it is the approval.
+
 ## Operational hardening
 
 - Security headers on every API response (CSP, HSTS, nosniff, frame-deny,
@@ -603,8 +795,9 @@ Tracked honestly so nobody mistakes this for finished security work:
 - **Single-process assumptions.** The HTTP rate limiter is now Redis-backed
   (shared across workers, with a per-process in-memory fallback if Redis is
   down), and audit-chain appends are serialized at the database with
-  `SELECT ... FOR UPDATE` on the user row, so the chain is safe across
-  workers. The per-connector rate limiters and the MCP tool cache are still
+  `SELECT ... FOR NO KEY UPDATE` on the user row, so the chain is safe across
+  workers (NO KEY: an insert that references the user, such as a new goal,
+  holds a key-share lock until commit and must not block the append). The per-connector rate limiters and the MCP tool cache are still
   per-process: behind multiple workers each enforces its own limit, so the
   effective ceiling is (workers x limit).
 - **Sessions** — no MFA and no password reset flow, and the SPA stores the
@@ -680,6 +873,31 @@ Tracked honestly so nobody mistakes this for finished security work:
 - **TLS** — nothing in the compose stack terminates TLS. Put a
   TLS-terminating reverse proxy or load balancer in front of the frontend
   service before exposing it beyond localhost/LAN.
+- **The skill scanner is a signal, not a gate.** Its rules are patterns,
+  and a hostile author can phrase around them, as with every public skill
+  scanner. Other controls hold whatever a skill says:
+  - skills are bundled only and reviewed in a pull request;
+  - approvals, tiers, hard blocks and capability gates are enforced in
+    code;
+  - skill text reaches the model only as untrusted, guard-screened results,
+    apart from the description line.
+- **A malicious pull request.** Anyone who can merge to the repository can
+  change a skill and re-pin `manifest.json` in the same change. The
+  manifest proves the files are the ones that were merged, not that the
+  merge was right. The controls are review and branch protection. Review a
+  skill change like code: the manifest diff names every changed file, and
+  `python -m scripts.skills_manifest --check` must pass. Write access to
+  the server's disk is outside this model, because it could change the
+  code as well. A skill edited on disk is refused from its next read,
+  since the running backend compares it with the hash it loaded at
+  startup. But a manifest edited alongside it is trusted after the next
+  restart.
+- **Goal text from a tainted turn.** A goal write runs without a card, and
+  the taint gate does not escalate calls that the policy runs without a
+  card. Text a fetched page planted can therefore be saved into a goal,
+  after the prompt guard and the secret detector have screened it. It
+  stays data: it is shown on the Goals page and returned as an untrusted
+  tool result, and it is never put in the system prompt.
 
 ## Reporting
 

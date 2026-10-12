@@ -431,6 +431,8 @@ async def test_security_prompt_survives_provider_conversion_with_summary():
 
 @pytest.mark.asyncio
 async def test_dynamic_tool_selection_caps_tool_count():
+    from services.agent.context_manager import MAX_OFFERED_TOOLS
+
     provider = ScriptedProvider([LLMResponse(content="hi")])
     runtime, _, _ = _runtime(provider)
 
@@ -441,7 +443,7 @@ async def test_dynamic_tool_selection_caps_tool_count():
             parameters={"type": "object", "properties": {}},
             connector_type="conn",
         )
-        for i in range(25)
+        for i in range(MAX_OFFERED_TOOLS + 1)
     ]
 
     await runtime.chat(
@@ -452,8 +454,6 @@ async def test_dynamic_tool_selection_caps_tool_count():
 
     sent_tools = provider.calls[0]["tools"]
     assert sent_tools is not None
-    from services.agent.context_manager import MAX_OFFERED_TOOLS
-
     assert len(sent_tools) == MAX_OFFERED_TOOLS < len(tools)
 
 

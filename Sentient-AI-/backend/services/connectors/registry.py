@@ -78,6 +78,7 @@ RESERVED_KEYS: frozenset[str] = frozenset(
         "skills",
         "learnings",
         "graph",
+        "goals",
         "tools",
         "memory",
         "mcp",

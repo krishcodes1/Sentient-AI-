@@ -1607,6 +1607,253 @@ CONNECTOR_CATALOG["video"] = [
     ),
 ]
 
+# Built-in, capability "skills" (on by default): the bundled SKILL.md
+# playbooks in backend/skills/ (services/skills), listed by name in the
+# <available_skills> block and read on demand. Install-wide text the team
+# reviewed and pinned by hash; the owner can switch each one off in
+# Settings → Skills. READ only: every other category is hard-blocked for the
+# type (the rows below), and the user_confirm stance keeps any later write on
+# its card. skills.read is core, so the cap never hides it while the
+# capability is on; the tools a skill names are loaded into the conversation
+# when it is read (AgentRuntime._load_skill_tools), never granted. Never
+# offered to an unattended run (services/automation/fence.NEVER_TYPES).
+# Declared as separate statements so the literals above stay untouched.
+from services.tools.skills import SkillsToolkit  # noqa: E402
+
+_SKILL_NAME = {
+    "type": "string",
+    "description": "The skill's name as <available_skills> lists it, e.g. 'goals'",
+    "required": True,
+}
+CONNECTOR_CATALOG["skills"] = [
+    ToolSpec(
+        "read",
+        "Read a skill: a short playbook the owner approved, listed in <available_skills>. "
+        "Call it with the skill's name before starting a task the skill matches, then follow "
+        "it for that request. Returns the playbook as sections, its reference files and the "
+        "tools it uses (loaded for you). A skill only guides your own tools: it never grants a "
+        "tool, never skips an approval and never outranks the user.",
+        ActionCategory.READ,
+        _schema(name=_SKILL_NAME),
+    ),
+    ToolSpec(
+        "read_reference",
+        "Read one reference file of a skill (a checklist, template or example its playbook "
+        "points to), by the skill's name and a file skills.read listed.",
+        ActionCategory.READ,
+        _schema(
+            name=_SKILL_NAME,
+            file={
+                "type": "string",
+                "description": "A reference skills.read listed, e.g. 'references/checklist.md'",
+                "required": True,
+            },
+        ),
+    ),
+    ToolSpec(
+        "scan_report",
+        "Show a skill's safety scan: its status (ok, blocked, changed on disk, not pinned or "
+        "invalid), its SHA-256 hash and the scanner's findings. Works for a skill that cannot "
+        "be used too, to explain why.",
+        ActionCategory.READ,
+        _schema(name=_SKILL_NAME),
+    ),
+]
+BUILTIN_CONNECTOR_TYPES = (*BUILTIN_CONNECTOR_TYPES, "skills")
+_BUILTIN_STANCE["skills"] = "user_confirm"
+register_default_policies(
+    {
+        ("skills", ActionCategory.READ): PermissionTier.AUTO_APPROVE,
+        ("skills", ActionCategory.WRITE): PermissionTier.HARD_BLOCKED,
+        ("skills", ActionCategory.DELETE): PermissionTier.HARD_BLOCKED,
+        ("skills", ActionCategory.EXECUTE): PermissionTier.HARD_BLOCKED,
+        ("skills", ActionCategory.FINANCIAL): PermissionTier.HARD_BLOCKED,
+    }
+)
+register_core_tools("skills.read")
+
+# Built-in, capability "goals" (on by default): the user's goals with their
+# plan of milestones and a progress log, stored per user (services/goals,
+# services/tools/goals.py) and shown on the Goals page, which obeys the same
+# store. Creating, listing, reading, updating and logging progress touch only
+# the caller's own bounded store and send nothing anywhere, so they run
+# without a card, like study.*; goals.delete removes a goal with its
+# milestones and notes: a DELETE behind a card every time (always_confirm,
+# the user_confirm stance and the executor's confirm set), whose sentence is
+# built from the database facts its async bind adds under "_goal". Neither
+# core nor a starter: the goals skill loads these tools when it is read
+# (metadata.crawler.tools), and tools.find reaches them. Not fenced from
+# unattended runs: a scheduled check-in may read goals, and any goal write it
+# makes is a card there (services/automation/fence.py). Declared as separate
+# statements so the literals above stay untouched.
+from services.tools.goals import GOALS_RULE_POLICY, GoalsToolkit  # noqa: E402
+
+_GOAL_ID = {"type": "string", "description": "The goal's id (from goals.list)"}
+_GOAL_CATEGORY = {
+    "type": "string",
+    "enum": ["school", "career", "health", "money", "personal", "other"],
+}
+_GOAL_CHECK_IN_NOTE = (
+    "How often the user wants to look at the goal: a preference shown on the Goals page that "
+    "schedules nothing (a check-in task is schedule.create)"
+)
+_GOAL_CHECK_IN = {
+    "type": "string",
+    "enum": ["none", "daily", "weekly"],
+    "description": _GOAL_CHECK_IN_NOTE,
+}
+_GOAL_MILESTONE = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string", "description": "One step of the plan (max 200 chars)"},
+        "due_date": {"type": "string", "description": "When it is due, YYYY-MM-DD (optional)"},
+    },
+    "required": ["title"],
+}
+_GOAL_MILESTONE_IDS = {
+    "type": "array",
+    "items": {"type": "string"},
+    "description": "Milestone ids from goals.get",
+}
+CONNECTOR_CATALOG["goals"] = [
+    ToolSpec(
+        "create",
+        "Save a new goal the user wants to reach (a grade, a habit, a project, a job) with its "
+        "plan: the title in the user's own words, where things stand now, and optionally a "
+        "description, category, target date, check-in preference and the first milestones. "
+        "Refuses a second active or paused goal with the same title and returns its id "
+        "(existing_goal_id) to update instead. Shown on the user's Goals page. No approval "
+        "needed.",
+        ActionCategory.WRITE,
+        _schema(
+            title={
+                "type": "string",
+                "description": "The goal in the user's own words (max 200 chars)",
+                "required": True,
+            },
+            description={
+                "type": "string",
+                "description": "Two or three sentences: what reaching it looks like (max 1000)",
+            },
+            category={**_GOAL_CATEGORY, "description": "What the goal is about (default other)"},
+            target_date={"type": "string", "description": "When to reach it, YYYY-MM-DD"},
+            current_state={
+                "type": "string",
+                "description": "One line: where things stand today (max 300 chars)",
+            },
+            check_in={**_GOAL_CHECK_IN, "description": _GOAL_CHECK_IN_NOTE + " (default none)"},
+            milestones={
+                "type": "array",
+                "items": _GOAL_MILESTONE,
+                "description": "The plan's first milestones, in order (at most 12)",
+            },
+        ),
+    ),
+    ToolSpec(
+        "list",
+        "List the user's goals with their progress (milestones done out of total), category, "
+        "status, target date, where things stand and check-in. Call it first whenever a request "
+        "touches a goal, a plan or how something is going. Only active goals unless status "
+        "says otherwise (all for every goal).",
+        ActionCategory.READ,
+        _schema(
+            status={
+                "type": "string",
+                "enum": ["active", "paused", "completed", "archived", "all"],
+                "description": "Which goals (default active)",
+            },
+            category={**_GOAL_CATEGORY, "description": "Only goals of this category"},
+        ),
+    ),
+    ToolSpec(
+        "get",
+        "Read one goal: its plan of milestones in order (with their ids, states and due dates), "
+        "where things stand, and its 10 latest progress notes.",
+        ActionCategory.READ,
+        _schema(goal_id={**_GOAL_ID, "required": True}),
+    ),
+    ToolSpec(
+        "update",
+        "Change a goal: its title, description, category, target date (or clear_target_date), "
+        "where things stand or check-in; its status (pause, resume, complete or archive it); "
+        "and its plan: add_milestones, or complete, reopen or drop milestones by id. Milestones "
+        "are never deleted, only dropped, which can be undone. Leave out what does not change. "
+        "No approval needed.",
+        ActionCategory.WRITE,
+        _schema(
+            goal_id={**_GOAL_ID, "required": True},
+            title={"type": "string", "description": "A new title (max 200 chars)"},
+            description={"type": "string", "description": "A new description; '' clears it"},
+            category=_GOAL_CATEGORY,
+            status={
+                "type": "string",
+                "enum": ["active", "paused", "completed", "archived"],
+                "description": "completed records when it was reached; archived puts it away",
+            },
+            current_state={
+                "type": "string",
+                "description": "One line: where things stand now; '' clears it",
+            },
+            target_date={"type": "string", "description": "A new target date, YYYY-MM-DD"},
+            clear_target_date={"type": "boolean", "description": "Remove the target date"},
+            check_in=_GOAL_CHECK_IN,
+            add_milestones={
+                "type": "array",
+                "items": _GOAL_MILESTONE,
+                "description": "New milestones, added after the others (at most 12)",
+            },
+            complete_milestones={**_GOAL_MILESTONE_IDS, "description": "Milestones now done"},
+            reopen_milestones={
+                **_GOAL_MILESTONE_IDS,
+                "description": "Done or dropped milestones to open again",
+            },
+            drop_milestones={
+                **_GOAL_MILESTONE_IDS,
+                "description": "Milestones no longer part of the plan (kept, not counted)",
+            },
+        ),
+    ),
+    ToolSpec(
+        "log_progress",
+        "Add a progress note to a goal's log, for a check-in or when the user reports progress: "
+        "what they did, what got in the way, what is next. Optionally about one milestone; "
+        "mark a finished milestone with goals.update. No approval needed.",
+        ActionCategory.WRITE,
+        _schema(
+            goal_id={**_GOAL_ID, "required": True},
+            note={
+                "type": "string",
+                "description": "The progress note (max 500 chars)",
+                "required": True,
+            },
+            milestone_id={"type": "string", "description": "The milestone it is about (optional)"},
+        ),
+    ),
+    ToolSpec(
+        "delete",
+        "Delete a goal with its milestones and progress notes. The user approves it first, on a "
+        "card naming the goal and what goes with it. To put a goal away and keep its history, "
+        "archive it with goals.update instead.",
+        ActionCategory.DELETE,
+        _schema(goal_id={**_GOAL_ID, "required": True}),
+        always_confirm=True,
+    ),
+]
+BUILTIN_CONNECTOR_TYPES = (*BUILTIN_CONNECTOR_TYPES, "goals")
+# Goal writes run without a card by policy (like study); this keeps
+# goals.delete on its card under an auto_approve account default.
+_BUILTIN_STANCE["goals"] = "user_confirm"
+register_default_policies(
+    {
+        ("goals", ActionCategory.READ): PermissionTier.AUTO_APPROVE,
+        # The caller's own bounded store; nothing is sent anywhere.
+        ("goals", ActionCategory.WRITE): PermissionTier.AUTO_APPROVE,
+        ("goals", ActionCategory.DELETE): PermissionTier.USER_CONFIRM,
+        ("goals", ActionCategory.EXECUTE): PermissionTier.HARD_BLOCKED,
+        ("goals", ActionCategory.FINANCIAL): PermissionTier.HARD_BLOCKED,
+    }
+)
+
 # Built-ins the prompt's playbooks rely on, offered ahead of the rest when
 # the tool array is over its cap (build_tools sets Tool.starter). Connector
 # starters come from their ToolSpec.starter instead. The browser, desktop
@@ -2693,6 +2940,10 @@ class ConnectorToolExecutor:
         # top10:video_transcripts
         video_toolkit: Optional[VideoToolkit] = None,
 
+        # The bundled skills (tests hand in one over their own catalog).
+        skills_toolkit: Optional[SkillsToolkit] = None,
+        # The user's goals (tests hand in one over their own database).
+        goals_toolkit: Optional[GoalsToolkit] = None,
     ) -> None:
         self._session_factory = session_factory
         self._web = web_toolkit or WebToolkit()
@@ -2823,6 +3074,14 @@ class ConnectorToolExecutor:
                 confirm=frozenset({write, delete}),
                 confirm_note="changes which pages Crawler checks in the background",
             ),
+            # The bundled skills are install-wide: the toolkit shares this
+            # executor's session factory only to read the owner's per-skill
+            # switches, and takes no user. Reads only.
+            "skills": self._skills_builtin(skills_toolkit),
+            # Goals are stored per user: the toolkit shares this executor's
+            # session factory and gets the executor's user_id; delete
+            # (DELETE) runs only re-dispatched with approved=True.
+            "goals": self._goals_builtin(goals_toolkit),
             # top10:secret_pii_redaction
 
             # top10:file_extraction
@@ -3014,6 +3273,9 @@ class ConnectorToolExecutor:
             if not callable(describe):
                 return None
             return describe(key[1], params)
+        if key is not None and key[0] == "goals":
+            # The goal's facts (title, milestones, notes) from the async bind.
+            return self.goals_toolkit.describe(key[1], params)
         # top10:secret_pii_redaction
 
         # top10:file_extraction
@@ -3115,6 +3377,10 @@ class ConnectorToolExecutor:
             return await self._act.bind_async(
                 _without_confirmation(arguments), user_id=user_id, task_id=task_id or user_id
             )
+        if key is not None and key[0] == "goals":
+            # The goal's facts (title, milestones, notes) go into the card's
+            # arguments under '_goal'; another user's goal is refused here.
+            return await self.goals_toolkit.bind(key[1], _without_confirmation(arguments), user_id)
         # top10:secret_pii_redaction
 
         # top10:file_extraction
@@ -3246,6 +3512,8 @@ class ConnectorToolExecutor:
             return self._precheck_memory(params, user_id)
         if key is not None and key[0] == "watch":
             return self._watch_precheck(key[1], arguments)
+        if key is not None and key[0] == "goals":
+            return self._goals_precheck(key[1], params, user_id)
         # top10:secret_pii_redaction
 
         # top10:file_extraction
@@ -3424,6 +3692,54 @@ class ConnectorToolExecutor:
                 a, p, uid, cancelled=lambda: agent_cancel.is_cancelled(uid)
             ),
             frozenset({ActionCategory.READ}),
+        )
+
+    # -- skills ----------------------------------------------------------------
+
+    def _skills_builtin(self, toolkit: Optional[SkillsToolkit]) -> _Builtin:
+        """The skills family's _Builtin, keeping its toolkit on
+        ``self.skills_toolkit``. READ only; the toolkit gets no user_id (the
+        skills and their switches are the install's, not a user's)."""
+        skills = toolkit or SkillsToolkit(self._session_factory)
+        self.skills_toolkit = skills
+        return _Builtin(
+            "Skill",
+            lambda a, p, uid, ok: skills.execute(a, p),
+            frozenset({ActionCategory.READ}),
+        )
+
+    # -- goals -----------------------------------------------------------------
+
+    def _goals_builtin(self, toolkit: Optional[GoalsToolkit]) -> _Builtin:
+        """The goals family's _Builtin, keeping its toolkit on
+        ``self.goals_toolkit`` for the card hooks. The toolkit shares this
+        executor's session factory and gets the executor's user_id, never
+        one from the arguments; delete runs only approved."""
+        goals = toolkit or GoalsToolkit(self._session_factory)
+        self.goals_toolkit = goals
+        return _Builtin(
+            "Goal",
+            lambda a, p, uid, ok: goals.execute(a, p, uid),
+            frozenset({ActionCategory.READ, ActionCategory.WRITE, ActionCategory.DELETE}),
+            confirm=frozenset({ActionCategory.DELETE}),
+            confirm_note="deletes a goal with its milestones and progress notes",
+        )
+
+    async def _goals_precheck(
+        self, action: str, arguments: Mapping[str, Any], user_id: str
+    ) -> Optional[PrecheckRefusal]:
+        """goals.* rules before any card (a "_goal" the model brought; for
+        delete, an unknown argument or a malformed id), filed under
+        ``goals_rule``; the goal itself is checked by the async bind. Reads
+        nothing."""
+        result = await self.goals_toolkit.precheck(action, dict(arguments), user_id)
+        if result is None:
+            return None
+        return PrecheckRefusal(
+            reason=str(result.get("error") or f"goals.{action} was refused."),
+            policy=GOALS_RULE_POLICY,
+            result=result,
+            rule=str(result.get("rule") or "invalid_arguments"),
         )
 
     def _document_context(self, user_id: str) -> DocumentContext:

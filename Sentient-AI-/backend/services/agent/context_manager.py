@@ -331,8 +331,10 @@ CORE_TOOL_NAMES = frozenset(
 _core_tool_names: set[str] = set(CORE_TOOL_NAMES)
 
 # How many tools one request offers, and how many names a conversation keeps
-# loaded through tools.find (spec 4.5).
-MAX_OFFERED_TOOLS = 24
+# loaded through tools.find (spec 4.5). The offer was 24; skills.read became
+# core (skills spec 2026-10-12, §4.3) with no slot to spare, so it is 25 and
+# every existing entry point keeps its place.
+MAX_OFFERED_TOOLS = 25
 MAX_LOADED_TOOLS = 24
 
 

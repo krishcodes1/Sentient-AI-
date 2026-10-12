@@ -1,0 +1,5 @@
+# The bundled skills are pinned by SHA-256 in manifest.json; core.autocrlf on
+# Windows must not rewrite them to CRLF, or a Windows checkout would hash
+# different bytes (the loader also folds CRLF to LF before hashing, so this
+# keeps the files themselves identical too).
+Sentient-AI-/backend/skills/** text eol=lf

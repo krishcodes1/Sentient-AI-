@@ -71,11 +71,17 @@ def _alembic(db_path: Path) -> Config:
     return config
 
 
+# The revisions after the reserved chain, in order; the last is the single
+# head.
+AFTER_CHAIN = ("0025_skill_states", "0026_goals")
+HEAD = AFTER_CHAIN[-1]
+
+
 def test_the_reserved_revisions_form_one_linear_chain_from_0016_to_0024():
     script = ScriptDirectory.from_config(_alembic(Path("unused.db")))
-    assert script.get_heads() == ["0024_media_transcripts"]
-    # Walking down from the head passes through exactly the reserved ids, in
-    # order, and lands on the 0016 merge.
+    assert script.get_heads() == [HEAD]
+    # Walking down from the chain's end (0024) passes through exactly the
+    # reserved ids, in order, and lands on the 0016 merge.
     walked = []
     revision = script.get_revision("0024_media_transcripts")
     while revision is not None and revision.revision != "0016_merge_app_approvals":
@@ -88,7 +94,13 @@ def test_the_reserved_revisions_form_one_linear_chain_from_0016_to_0024():
     )
     for (rev, _, _), (child, _, _) in zip(RESERVED, RESERVED[1:], strict=False):
         assert script.get_revision(rev).nextrev == frozenset({child})
-    assert script.get_revision("0024_media_transcripts").nextrev == frozenset()
+    # The chain ends at 0024; the revisions after it continue it in a line.
+    parent = "0024_media_transcripts"
+    for child in AFTER_CHAIN:
+        assert script.get_revision(parent).nextrev == frozenset({child})
+        assert script.get_revision(child).down_revision == parent
+        parent = child
+    assert script.get_revision(HEAD).nextrev == frozenset()
 
 
 def test_each_reserved_revision_lives_in_its_own_file():

@@ -78,6 +78,20 @@ capability's family prefix covers it: `reminders.now` is the model's clock
 and stays available with Reminders off. Never name one of these in a
 capability's `tools`.
 
+## A tool the bounded offer must never hide
+
+A request offers at most `context_manager.MAX_OFFERED_TOOLS` (25) tools.
+When the prompt tells the model to call one of your tools (the
+`<available_skills>` block says to call `skills.read` first), that tool
+must not be cut by the cap. Register it as core, next to its catalog entry
+in `tool_registry.py`: `register_core_tools("skills.read")`. `files.read`
+is the other built-in registered this way. A core tool is offered whenever
+the turn has it, which means only while its capability is on. Off, it is
+not offered at all. The core set only grows, so check that the existing
+core tools and lead starters still get their slots
+(`tests/test_tool_offering.py`, `tests/test_offered_tools.py`). The skills
+work raised the cap from 24 to 25 for exactly that reason.
+
 ## A tool that needs two switches
 
 A tool is claimed by exactly one capability (`tools=`), and the registry

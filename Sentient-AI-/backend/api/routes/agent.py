@@ -69,6 +69,9 @@ from services.agent.runtime import (
 from services.agent.tool_registry import ConnectorSpec, build_tools, effective_tier, resolve_tool
 from services.files.intake import InboundFile  # top10:file_extraction
 from services.scheduler.timezones import TIMEZONE_HEADER, remember_zone
+from services.skills.loader import bundled_catalog
+from services.skills.prompt import offers_skills, render_available_skills
+from services.tools.skills import disabled_skill_names
 from services.tutor import service as tutor_service
 from services.tutor.commands import parse_tutor_command
 from services.tutor.state import TutorTurn
@@ -566,6 +569,56 @@ class TurnContext(NamedTuple):
     # a conversation and the tutor_mode capability is on; the caller hands
     # it to runtime.chat(tutor=...) and persists it after the turn.
     tutor: Optional[TutorTurn] = None
+    # The <available_skills> block (services/skills/prompt.py), when
+    # skills.read is in the turn's tools and a skill qualifies; the four chat
+    # call sites hand it to runtime.chat(skills_text=...), the unattended
+    # runner never does.
+    skills_text: Optional[str] = None
+
+
+async def _skills_text(
+    db: AsyncSession, tools: Sequence[Any], enabled_capabilities: frozenset[str]
+) -> Optional[str]:
+    """The <available_skills> block for a turn offering *tools*: the bundled
+    skills that are usable, switched on by the owner and whose requirements
+    this turn meets (capabilities from the same report as the tools,
+    connector types from the tools themselves). None when skills.read is
+    not among the tools or no skill qualifies, and None when the owner's
+    switches cannot be read: a skill they switched off is never advertised
+    (fail closed), and skills.read refuses it anyway.
+
+    The switches are read through a short-lived session of their own, on
+    its own pooled connection to the same database (as SkillsToolkit reads
+    them): on Postgres a failed statement aborts its whole transaction and
+    COMMIT then quietly rolls back, so a failed read on *db* would lose the
+    user message this turn has already flushed. An engine whose pool hands
+    every session the one connection (the in-memory SQLite test database)
+    is read through *db* itself: a second session there would share the
+    connection and roll back *db*'s pending rows when it closed, and SQLite
+    leaves a transaction usable after a failed statement."""
+    if not offers_skills(tools):
+        return None
+    from sqlalchemy.pool import SingletonThreadPool, StaticPool
+
+    bind = getattr(db, "bind", None)
+    shared = bind is None or isinstance(
+        getattr(bind, "pool", None), (StaticPool, SingletonThreadPool)
+    )
+    try:
+        if shared:
+            disabled = await disabled_skill_names(db)
+        else:
+            async with AsyncSession(bind=bind) as switches:
+                disabled = await disabled_skill_names(switches)
+    except Exception as exc:  # noqa: BLE001 - a missing block must not fail the turn
+        logger.warning("skills_switches_unreadable", error_type=type(exc).__name__)
+        return None
+    return render_available_skills(
+        bundled_catalog(),
+        enabled_capabilities=enabled_capabilities,
+        connector_types={t.connector_type for t in tools if getattr(t, "connector_type", "")},
+        disabled_names=disabled,
+    )
 
 
 async def _build_tools_and_memory(
@@ -669,7 +722,11 @@ async def _build_tools_and_memory(
         channel=tutor_channel,
     )
     return TurnContext(
-        tools=tools, memory_block=memory_block, permissions_text=permissions_text, tutor=tutor
+        tools=tools,
+        memory_block=memory_block,
+        permissions_text=permissions_text,
+        tutor=tutor,
+        skills_text=await _skills_text(db, tools, enabled_capabilities),
     )
 
 
@@ -1196,6 +1253,7 @@ async def send_message(
             loaded_tools=loaded_tools,
             channel=web_channel(request),
             tutor=turn_context.tutor,
+            skills_text=turn_context.skills_text,
         )
     except ProviderNotConfigured as exc:
         # Not an upstream failure: no key for the provider this turn needs.
@@ -1492,6 +1550,7 @@ async def stream_message(
                     loaded_tools=loaded_tools,
                     channel=channel,
                     tutor=tutor,
+                    skills_text=turn_context.skills_text,
                 ):
                     etype = event.get("type", "message")
                     data = event.get("data", {})
@@ -2034,6 +2093,7 @@ async def _resume_after_approval(
             loaded_tools=loaded_tools,
             channel=channel,
             tutor=turn_context.tutor,
+            skills_text=turn_context.skills_text,
         )
     except asyncio.CancelledError:
         # Stopped from a chat channel mid-turn: keep the calls already
@@ -2947,6 +3007,7 @@ def build_chat_applier(
                 loaded_tools=loaded_tools,
                 channel=channel,
                 tutor=turn_context.tutor,
+                skills_text=turn_context.skills_text,
             )
         except asyncio.CancelledError:
             # /stop: the reply will never come. Close the turn in the

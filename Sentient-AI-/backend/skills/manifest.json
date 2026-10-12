@@ -1,0 +1,66 @@
+{
+  "skills": {
+    "github": {
+      "files": {
+        "SKILL.md": "dc4c682b56136c7561e7c0fae18a3a946b872ede7fc28498259093186bc0c36a"
+      },
+      "sha256": "bb0476e7f2d3410d4ba7f2bf84442a325ee857eafa431e3f80088f5ad2d77576"
+    },
+    "goals": {
+      "files": {
+        "SKILL.md": "9e416ab3c6ef8aff62213f3cbd7cd650c29e741e411df7f713595046e9d74cc4",
+        "references/by-category.md": "05d3c36035664a6d83cd56610fe1d886f39a9144bce5356e243af423e3dbe4e8"
+      },
+      "sha256": "01d16daf062129f1b7b7f8c0b8ef10586fda1b4fc0e60f4cd7bb768f36b86b75"
+    },
+    "google-workspace": {
+      "files": {
+        "SKILL.md": "5ffcca140b307b3c301634cf1a349c60f498ba78da0e0c3a918b9ca3a077216b"
+      },
+      "sha256": "63d77e567ddb68dca8281df4f445871dde0690d0b37ec96d1039f2c3ff959ab6"
+    },
+    "inbox-triage": {
+      "files": {
+        "SKILL.md": "80194acaa8ed90f9f829829e539c41551043c6dac1e51eaa1b9ef29d0ab2d347"
+      },
+      "sha256": "75c3a8801a2012d1d7770ba4618e0b4a5987304a17af9cc00a74a427aa4b63cf"
+    },
+    "meal-planner": {
+      "files": {
+        "SKILL.md": "daf184014645c1a741d5f19c1c39e18b67b8874c61ab56dafa84dd27d13a2c41"
+      },
+      "sha256": "cede4253aa17806591762ad611d48a6813a2c7eb4b32f6e6a9a19c290b2c87a1"
+    },
+    "school-week-planner": {
+      "files": {
+        "SKILL.md": "94f40554161c2c6f5ef2cf176fb1318a355101f7c36602f9a0c944480ade1534"
+      },
+      "sha256": "cba8e500af314684da02677068c14502b24d7f4e1c1c4ebd138575bcb89d5d07"
+    },
+    "shopping": {
+      "files": {
+        "SKILL.md": "7b6cf3aca6f2476f6eb2670ef30b11c9a9c018c74520878a4f38a72bfcae578f"
+      },
+      "sha256": "f11bfac92321ccc0547f749f2341a1e8b66691628111e1deb4e963b2ffba555f"
+    },
+    "skill-vetter": {
+      "files": {
+        "SKILL.md": "f1d16dcb234acae55b605d1a57fb14ac610d4a798606d6318efa8dd46bf92b48"
+      },
+      "sha256": "b29ec716b52360dcbc7f0455828148ad7d6aee9767ce4781f4a3d94b6a4a57ec"
+    },
+    "travel-planning": {
+      "files": {
+        "SKILL.md": "9bbe4274bdbbe21c1354b7d59deb65dc7cc5ee430e7552b1e000c47ee9e10bb9"
+      },
+      "sha256": "68541fecf0d2ee4166d6a63e5702b6e98e156af1a80178cdb379f204495d649f"
+    },
+    "wide-research": {
+      "files": {
+        "SKILL.md": "fda538f1248ae17952f9d98a7b34a1e4b62072c25316fd7be4a97d24086a56a3"
+      },
+      "sha256": "32e30f826f8b8e5dffe3fffbc19b1001b17c06dccfc3782aa7c825f5f5e8d7e3"
+    }
+  },
+  "version": 1
+}

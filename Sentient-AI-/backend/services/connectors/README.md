@@ -56,7 +56,8 @@ A bad definition stops the app at import with a list of every problem.
 
 - **Key.** Matches `^[a-z][a-z0-9_]{1,31}$`, has no `__`, is unique, and is
   not reserved (`web`, `reminders`, `system`, `desktop`, `browser`, `skills`,
-  `learnings`, `graph`, `tools`, `memory`, `mcp`, `custom`). Label,
+  `learnings`, `graph`, `goals`, `tools`, `memory`, `mcp`, `custom`, and the
+  other built-in families `RESERVED_KEYS` in `registry.py` lists). Label,
   description and icon are not empty; `docs_url`, when set, is `https://`.
 - **Uniqueness across connectors.** Permission keys, network policy keys and
   OAuth provider names each belong to one connector only.
@@ -228,9 +229,11 @@ register: `<OAUTH_REDIRECT_BASE>/api/oauth/callback/<provider>`.
 
 ### How the model finds a connector's tools
 
-A request offers the model at most 24 tools. When a user's connectors add
-up to more, the slots go to the core built-ins (`web.search`,
-`web.fetch_page`, `reminders.now`, `tools.find`), then the tools this
+A request offers the model at most 25 tools
+(`context_manager.MAX_OFFERED_TOOLS`). When a user's connectors add up to
+more, the slots go to the core built-ins (`web.search`, `web.fetch_page`,
+`reminders.now`, `tools.find`, `files.read` while file reading is on and
+`skills.read` while the skills capability is on), then the tools this
 conversation loaded, then `starter=True` actions, then the rest. The model
 reaches everything else with `tools.find(query, connector?)`, which ranks
 the tools the user can use this turn by words in the tool name (weight 3)
@@ -238,3 +241,12 @@ and description (weight 1) and loads up to 8 of them into the conversation
 (`Conversation.loaded_tools`, at most 24 names). So: mark 2 to 4 everyday
 reads as starters, and write action names and descriptions with the words
 a user would say ("send an email", "list pull requests").
+
+A bundled skill (`backend/skills/<name>/SKILL.md`) can also name a
+connector's tools in `metadata.crawler.tools`, by their plain
+`<key>.<action>` name. Reading that skill loads those of them the turn may
+already use into the same list (every account's copy when the user has two
+accounts of the type; at most 8 names per read), so a playbook can drive
+the tools without a `tools.find`. Loading never grants a scope or skips an
+approval. Renaming an action means updating every skill that names it:
+`tests/test_skills_bundled.py` fails on a name that no longer exists.

@@ -10,7 +10,7 @@ React 19 + Vite + TanStack Query + Tailwind v4. The product is internally
 
 1. `frontend/src/pages/Chat.tsx` + `frontend/src/components/ChatComposer.tsx` — user types, submits.
 2. `frontend/src/services/api.ts` — `sendMessageStream` opens an SSE POST to `/api/agent/conversations/{id}/messages/stream`.
-3. `backend/api/routes/agent.py` `stream_message` — auth, loads conversation, calls `_build_tools_and_memory` (capability-gated tool list + rendered memory block).
+3. `backend/api/routes/agent.py` `stream_message` — auth, loads conversation, calls `_build_tools_and_memory` (capability-gated tool list + rendered memory block + the `<available_skills>` block while `skills.read` is in the tools).
 4. `backend/services/agent/runtime.py` `AgentRuntime.stream_chat` → `_run_turn` — orchestrates the turn.
 5. `backend/services/agent/prompt_guard.py` `RuntimePromptGuard.scan_input` — screens user text for injection before anything else runs.
 6. `backend/services/agent/providers.py` — the resolved `LLMProvider` (Anthropic/OpenAI-compatible/Ollama) is called for a completion.
@@ -78,6 +78,8 @@ the chat gets what ran and why it stopped, in plain words
 - `telegram.py` — link-code generation/status/unlink for the approval channel.
 - `usage.py` — signed-in account's token/cost usage summary.
 - `audit.py` — read-only audit log list/stats/integrity-verify (no write endpoint by design).
+- `skills.py` — Settings ▸ Skills (owner only, `require_admin`): `GET /skills` (every bundled skill with status, hash, findings and switch), `GET /skills/{name}` (plus each file's text, hashed again first; a 503 when the files cannot be read just now), `PATCH /skills/{name}` (`{"enabled": bool}`, 409 when switching on a skill that is not usable; audited `skill_enabled` / `skill_disabled` with name and hash only).
+- `goals.py` — the Goals page's `/goals` routes, per user: list by status, create (201), read with milestones and the last 50 notes, PATCH (answers the same 50 notes), add a note (201), delete (204); store refusals map to 404 / 409 / 422; audited with ids only. Works whatever the `goals` switch says.
 - `vault.py` — the owner's payment card (owner-only): `GET /vault/items` (masked views, plus `available` and the `reason` the Settings page shows instead of the form; a 200 always, and it never mints the key), `PUT /vault/card` (loopback peer only; 409 `vault_unavailable` in a container; 422 never echoes the input), `DELETE /vault/items/{id}`. No route returns a number or a blob.
 
 ## Agent runtime (`backend/services/agent/`)
@@ -90,7 +92,7 @@ the chat gets what ran and why it stopped, in plain words
 - `permissions.py` — `PermissionEngine`: tiers, `ActionCategory`, hard-blocked actions, per-connector policy rows. `("browser", FINANCIAL)` is `USER_CONFIRM` (`FINANCIAL_CONFIRM_KEYS`); every connector's FINANCIAL row stays hard-blocked.
 - `tool_registry.py` — connector/tool catalog, capability gating (`_capabilities_of`: the claiming capability plus `_REQUIRED_CAPABILITIES`, so `browser.checkout` needs `purchases` and `browser_control`), `ConnectorToolExecutor` (dispatch to built-in toolkits, connectors, MCP; `FINANCIAL_BUILTINS` names the one financial action ever dispatched, `browser.checkout`; the approval hooks `describe_approval` / `precheck_approval` / `approval_arguments` / `approval_arguments_async` / `approval_image` route `desktop.act`, `browser.act` and `browser.checkout` to their toolkits).
 - `approvals.py` — `ApprovalStore` implementations (in-memory + DB-backed `PendingAction` rows), single-use/expiry semantics.
-- `context_manager.py` — token estimation, per-model context windows, message summarization/compression, offered-tool-set selection, turn-replay cache.
+- `context_manager.py` — token estimation, per-model context windows, message summarization/compression, offered-tool-set selection (`MAX_OFFERED_TOOLS` 25; the core set, extended through `register_core_tools` by `files.read` and `skills.read`, is always offered), turn-replay cache.
 - `audit_facts.py` — `keep_facts`/`FactRules`: what a `tool_executed` audit row keeps of a result by allowlist (numbers, flags, named ids and Crawler's own words; any other list counted). `runtime.result_for_audit` uses it with each skill's rules for `schedule.*`, `study.*` and `triggers.*` results.
 
 ## Built-in tools (`backend/services/tools/`)
@@ -105,6 +107,8 @@ the chat gets what ran and why it stopped, in plain words
 - `system.py` — capability report tool + `system.install_capability` (fixed argv allowlist installer, e.g. hidden browser).
 - `browser/` — Crawler's own browser (one per user, `session.py`; egress guard `guard.py`; sign-in/2FA handoff `handoff.py`; ARIA outline `snapshot.py`). `actions.py` is `browser.read` (READ; its click, which has no card, only follows a plain link to no order path (an order history aside) or clicks a control outside any form on a page with no total, payment method on file or wallet, `markers.read_click_allowed`, and the guard never lets it, or a handoff the model asked for, open an order step or send anything to an order address; while it clicks, no page script sends anything but a GET), `act.py` is `browser.act` (WRITE, one card per call, tied to the page by `_page` (origin, address and outline, for every act, a key press included); `bind_async` puts a masked picture of the page with the target outlined in red on every card, kept in memory and served by `approval_image`, and a money warning from the page's facts; never into a password or card field, never on `http://`, never a click, submit or Enter that pays — the control that would send the form is judged (`markers.pays`): a purchase-worded button, a form holding a card, a POST to an order path, or a button on a page showing an order total next to a payment method on file is `use_checkout`), `checkout/` is `browser.checkout` (FINANCIAL, one card per purchase: `markers.py` is the one classifier of card fields, buttons that pay and pages where an order is placed, shared by the facts, the outline, the screenshot mask and `browser.act`; `facts.py` reads the origin, the on-screen total nearest the card form, items, card fields and the order button's target off the page, `merchant.py` refuses the wrong or a look-alike host, `amounts.py` parses money, `ledger.py` writes the `purchases` audit rows and sums the last 24 h over every submitted card (a decline excepted), `toolkit.py` runs precheck → begin (the card's facts and an in-memory screenshot) → run (decrypts the card at fill time only, submits, reads the confirmation)). `pagememory.py` is the page the last read observed, which act and checkout are checked against; `_shared.py` holds the helpers the three toolkits share (the outline, the masked screenshot, the handoff and its window: `hand_over` when a toolkit hands the page to the person, `take_back` on the agent's next action).
 - `computer/` — desktop.observe / desktop.act on this platform's backend (see `docs/superpowers/specs/2026-09-24-computer-control-design.md`).
+- `skills.py` — `SkillsToolkit`: `skills.read` (the playbook as sections, its references and the tools it names), `skills.read_reference`, `skills.scan_report` (status, hash, pin, findings, `declared_tools`, `requires`, each list at most 16 names; works for unusable skills); READ only, takes no user, re-hashes the files on every read, refuses a skill switched off or changed, and a result too long to show whole (`too_large`); `disabled_skill_names`, `skills_result_for_audit`.
+- `goals.py` — `GoalsToolkit`: `goals.create` / `list` / `get` / `update` / `log_progress` / `delete` over `services/goals/store.py`; the delete card's hooks (`precheck` refuses a model-supplied `_goal`, the async `bind` adds the goal's facts, `describe` builds the sentence); results kept within their budgets (oldest notes dropped first); `GOALS_RULE_POLICY`.
 
 ## Vault and platform secrets
 
@@ -131,6 +135,8 @@ the chat gets what ran and why it stopped, in plain words
 - `save_memories.py` — the `save_memories` capability (`memory.remember`).
 - `page_watch.py` — the `page_watch` capability (`watch.*`; off by default, needs Telegram).
 - `web_browsing.py` — the `web_browsing` capability (`web.search`, `web.fetch_page`, `web.research`).
+- `skills.py` — the `skills` capability ("Skills (built-in playbooks)": on by default, low risk, claims `skills.`).
+- `goals.py` — the `goals` capability ("Goals and plans": on by default, low risk, claims `goals.`).
 
 ## Installation & settings
 
@@ -177,10 +183,18 @@ the chat gets what ran and why it stopped, in plain words
 - `backend/services/auth.py` — registration, authentication, account lockout tracking.
 - `backend/services/memory.py` — renders saved per-user memories into the system prompt; injection screening on write.
 - `backend/scripts/verify_audit_log.py` — standalone CLI to verify the audit chain's integrity end to end.
+- `backend/scripts/skills_manifest.py` — `python -m scripts.skills_manifest` scans every bundled skill and rewrites `backend/skills/manifest.json`, refusing while a skill is invalid or has a block finding; `--check` verifies without writing. Needs none of the app's settings.
+
+## Skills and goals (spec `docs/superpowers/specs/2026-10-12-muse-skills-and-goals-design.md`)
+
+- `backend/skills/` — the bundled skills: one folder per skill (`SKILL.md`, optional `references/*.md`), `manifest.json` (the SHA-256 of every file), `README.md` (how to add a skill), `CREDITS.md` (where each method came from) and `_template/` (skipped by the loader). Ten ship: `goals`, `wide-research`, `travel-planning`, `shopping`, `meal-planner`, `inbox-triage`, `school-week-planner`, `skill-vetter`, `github`, `google-workspace`.
+- `backend/services/skills/` — `scanner.py` (the format, size, file and content rules as block and warn findings, and the frontmatter parser), `loader.py` (reads, hashes and loads the skills into a catalog with a status each: ok, invalid, blocked, unpinned, changed; the process-wide `bundled_catalog`, `current_hash` re-checked on every read, `mark_changed`, `SkillReadError`), `manifest.py` (manifest.json's format and the ok / unpinned / changed verdict), `prompt.py` (the `<available_skills>` block and `sanitise_line`; imports neither the registry nor the runtime).
+- `backend/services/goals/` — `store.py` (every rule a goal obeys: arguments, limits, the duplicate-title rule, screening, milestone states, the per-user writer lock, the JSON shapes; used by both the tools and the routes) and `audit_facts.py` (what an audit row keeps of a goals.* result).
+- Wiring: `tool_registry.py` (the `skills` and `goals` catalogs, policy rows, stances, executor entries; `skills.read` registered as core), `runtime.py` (`skills_block` after `<permissions>`, `_load_skill_tools` after a `skills.read`, `MAX_SKILL_TOOL_LOADS`, the result budgets and audit reductions), `api/routes/agent.py` (`TurnContext.skills_text`, `_skills_text` reading the switches on a connection of its own), `services/audit.py` (the goals.* argument allowlist), `api/routes/auth.py` (the export's `goals` section), `services/notifications/progress.py` (the progress lines), `connectors/registry.py` (`goals` reserved), `main.py` (loads the catalog at startup and mounts both routers); `skills` is in `services/automation/fence.NEVER_TYPES`, `goals` is not.
 
 ## Models & migrations
 
-Models (`backend/models/`): `user.py` (User, telegram link fields), `conversation.py` (Conversation/Message/MessageRole), `audit.py` (AuditLog/AuditStatus, hash chain columns), `connector.py` (ConnectorConfig + enums), `installation.py` (single-row Installation), `memory.py` (Memory/MemoryCategory/MemorySource), `pending_action.py` (PendingAction — persisted approvals), `reminder.py` (Reminder/ReminderSource/ReminderStatus), `page_watch.py` (PageWatch/PageWatchStatus), `vault_item.py` (VaultItem — the owner's sealed card: kind, label, masked, AES-GCM blob; never plaintext).
+Models (`backend/models/`): `user.py` (User, telegram link fields), `conversation.py` (Conversation/Message/MessageRole), `audit.py` (AuditLog/AuditStatus, hash chain columns), `connector.py` (ConnectorConfig + enums), `installation.py` (single-row Installation), `memory.py` (Memory/MemoryCategory/MemorySource), `pending_action.py` (PendingAction — persisted approvals), `reminder.py` (Reminder/ReminderSource/ReminderStatus), `page_watch.py` (PageWatch/PageWatchStatus), `vault_item.py` (VaultItem — the owner's sealed card: kind, label, masked, AES-GCM blob; never plaintext), `skill_state.py` (SkillState — the owner's install-wide switch per bundled skill, keyed by name, with the hash the owner saw), `goal.py` (Goal, GoalMilestone, GoalEntry, and the limits the goals store and tests share).
 
 Migrations (`backend/alembic/versions/`), oldest first:
 - `0001_baseline_schema.py` — baseline schema (everything `create_all()` used to build); stamped, never run, on pre-Alembic DBs.
@@ -204,6 +218,8 @@ Migrations (`backend/alembic/versions/`), oldest first:
   - `0022_event_triggers.py` — `event_triggers` and `trigger_events`.
   - `0023_permission_grants.py` — `permission_grants` and `pending_actions.grant_offer` (and the `low_risk` label of Postgres's `permission_tier` enum).
   - `0024_media_transcripts.py` — `media_transcripts`.
+- `0025_skill_states.py` — `skill_states` (the per-skill switches; `updated_by` set to NULL when that account is deleted). The first revision after the reserved chain.
+- `0026_goals.py` — `goals`, `goal_milestones` and `goal_entries` (cascading with their user and goal; a note's `milestone_id` has no foreign key). The current head: the next migration revises it.
 
 `backend/alembic/env.py` — reads `DATABASE_URL` from `core.config.settings` (no second credential copy); `backend/alembic/README.md` explains the adoption logic for pre-Alembic deployments.
 
@@ -213,6 +229,8 @@ Migrations (`backend/alembic/versions/`), oldest first:
 account export · admin role/tier · agent-loop security · vision/image turns · approval arg re-scanning · approval flow (DB+memory stores, concurrency) · auth-event audit trail · audit event→status mapping · HMAC audit hashing · audit service chaining · audit stats endpoint · auth hardening (XFF, lockout) · capabilities HTTP API · capabilities registry invariants · capability report logic · capability gating at both call sites · concurrency/failure modes · connector behavior (Canvas/Google/Robinhood) · connector route policy · context manager budgets/windows · conversation lifecycle routes · conversation search · desktop screenshot tool · executor security (credentials, scopes) · installation service · MCP integration · MCP client protocol · MCP DNS pinning (rebinding) · persistent memory CRUD · memory search · message usage/attachments · legacy-DB migration adoption · migration schema drift · network policy (SSRF per connector) · Ollama streaming errors · production-hardening config checks · prompt-guard false positives · prompt-guard normalization evasion · prompt-injection red-team suite · provider layer (Anthropic/OpenAI-compatible) · query-efficiency regressions · reminder tools · reminder CRUD/sweeper · resume-after-approval · route-level security · lazy provider resolution · security-middleware ordering · session refresh · Settings/account validation · setup wizard API · SSRF address policy · stream resilience/audit ordering · SSE streaming · built-in system tools (install allowlist) · taint tracking · Telegram approval channel · Telegram decisions answered at once and run off the poll loop (`test_telegram_decisions.py`) · Telegram progress lines (`test_telegram_progress.py`) · Telegram cost line, linked account only and `/stop` (`test_telegram_cost_safety.py`) · the turn resumed after an approved desktop action reaches the chat, or says why it could not (`test_telegram_desktop_resume.py`) · stop requests and the runtime's stop boundaries (`test_agent_cancel.py`, `test_runtime_stop.py`) · desktop acts refused before the card and cards tied to their screen (`test_computer_precheck.py`) · desktop latest-observation policy (`test_desktop_observation_policy.py`) · current provider model families (`test_provider_model_families.py`) · web chat screenshots shown live and never stored (`test_web_chat_images.py`) · Telegram manager lifecycle · tool registry/executor · token usage accounting · per-user LLM follows install default · audit-log verifier CLI · built-in web tools · app wiring (`test_wiring.py`).
 
 Purchases (2026-09-25): the vault (`test_vault_crypto.py`, `test_vault_keys.py`, `test_vault_service.py`, `test_vault_api.py`), the platform secret stores with a recorded `security` argv and a fake DPAPI shim (`test_platform.py`), `browser.act` and the page memory (`test_browser_act.py`), the act switch, the picture on every act card, its money warning and the read-tier click (`test_browser_act_card.py`), the risk note absent on a real-looking host (`test_purchase_card_text.py`), the decision path's confirmation pictures for the web and Telegram (`test_resume_after_approval.py`), the fake site's checkout pages and TLS harness (`test_fakesite_checkout.py`), the checkout parts (`test_checkout_amounts.py`, `test_checkout_merchant.py`, `test_checkout_facts.py`, `test_checkout_ledger.py`) and toolkit (`test_checkout_toolkit.py`), the capability and its caps (`test_purchases_capability.py`), the permission/registry/runtime/Telegram wiring on fakes (`test_purchases_wiring.py`, `test_telegram_purchase_card.py`), and the whole chain through the runtime on the real executor, toolkits, vault, ledger and audit log against the fake shop over TLS (`test_purchase_flow.py`: one card, Approve pays from the vault with the number reaching nothing the model sees, Deny fills nothing, cap / http / wrong or look-alike merchant / changed page / switch off refused). `tests/fixtures/purchase_notice.txt` is the notice the frontend copies.
+
+Skills and goals (2026-10-12): the scanner, loader, manifest script and prompt block (`test_skills_scanner.py`, `test_skills_loader.py`, `test_skills_manifest.py`, `test_skills_prompt.py`), every bundled skill `ok`, pinned and naming only real tools (`test_skills_bundled.py`), the toolkit (`test_skills_toolkit.py`), the capability, prompt placement and tool loading in a real turn (`test_skills_capability.py`), the owner's routes (`test_skills_api.py`), migration 0025 (`test_skills_migration.py`); the goals store, toolkit, routes, capability and migration (`test_goals_store.py`, `test_goals_toolkit.py`, `test_goals_api.py`, `test_goals_capability.py`, `test_goals_migration.py`), the goals.* argument allowlist in the audit log (`test_goals_audit.py`), and a storage outage while binding a card that is never shown as a security block (`test_runtime_bind_outage.py`). Existing files gained the export's `goals` section (`test_account_export.py`), the new routes in `test_route_security.py`, the head `0026_goals` (`test_integration_seams.py`, `test_page_watch_migration.py`), the goals tables' cascade on user delete (`test_migrations.py`) and the 25-tool cap (`test_tool_offering.py`, `test_agent_loop_security.py`).
 
 Top10 wave 0 (`test_integration_seams.py`): the reserved migration chain, `TurnContext`, the one model call (`AgentRuntime._provider_complete`) and the provider-first order in `chat()`, Gemini's `_post_with_retries`, the `default_provider` report fact, the Telegram command/button tables and `/help` text, the Slack keyword handlers, and every `top10:` anchor in its place (removed with the anchors by the cleanup PR).
 
@@ -225,7 +243,8 @@ Top10 wave 1 integration (`test_top10_wave1_integration.py`): where the merged s
 - `Dashboard.tsx` — home: approvals, connector health, usage snapshot.
 - `Login.tsx` — login/register ("Create one" only while registration is open; otherwise a plain hint. A register attempt that gets 403 asks the setup status again and shows the matching hint).
 - `Memory.tsx` — memory list/create/edit/search.
-- `Settings.tsx` — profile, password, Permissions (capabilities), owner Server section, account export/delete.
+- `Settings.tsx` — profile, password, Permissions (capabilities), the owner's Skills section (`SkillsSettings`), owner Server section, account export/delete.
+- `Goals.tsx` — the Goals page (`/goals`): goals by status (Active / Paused / Completed / All), the New goal form, one card per goal with a progress bar, its milestones (tick, drop, add), the progress log with Add note, and Pause / Resume, Complete, Archive and Delete (after a confirm step).
 - `Setup.tsx` — first-run wizard: owner account → provider → Telegram → permissions → summary.
 - `AuditLogs.tsx` — audit log browser + integrity verification.
 - `approvalCountdown.ts` — shared TTL-countdown hook for approval cards (kept out of Chat's chunk so Dashboard doesn't pull in react-markdown).
@@ -247,6 +266,7 @@ Top10 wave 1 integration (`test_top10_wave1_integration.py`): where the merged s
 - `ProviderForm.tsx` — shared provider-choice form (Setup wizard + Settings ▸ Server).
 - `PurchaseApproval.tsx` — the `browser.checkout` approval card (Chat's `ApprovalCard`, Dashboard's `ApprovalRow`): the screenshot, Pay / To / With facts, item lines, the model's note and the notice above Approve/Deny.
 - `ServerSettings.tsx` — owner-only Server section (provider, registration toggle).
+- `SkillsSettings.tsx` — Settings ▸ Skills (owner only): each bundled skill with its status badge (Ready / Blocked / Changed on disk / Not pinned / Invalid) and switch, and View: its files as plain text in a `<pre>` (never rendered Markdown), the SHA-256, its tools and the scan findings, read again on every open.
 - `ThemeToggle.tsx` — light/system/dark switch.
 - `TokenUsage.tsx` — per-message token/cache caption.
 - `ToolScreenshot.tsx` — a tool's screenshot under its tool call, or a note: "Screenshot not kept" after a reload, "not shown" past the 3-per-reply limit.
@@ -255,7 +275,7 @@ Top10 wave 1 integration (`test_top10_wave1_integration.py`): where the merged s
 - `toolScreenshots.ts` — which image URLs the chat may show (base64 PNG/JPEG/WebP data URLs only), screenshot alt text, the saved placeholder, which note stands in for a missing screenshot.
 - `usageFormat.ts` — token/cost formatting + `Intl.NumberFormat` (fixed locale).
 - `layout/Layout.tsx` — app shell: sidebar + outlet, mobile drawer.
-- `layout/Sidebar.tsx` — nav links.
+- `layout/Sidebar.tsx` — nav links (Goals included).
 
 ## Frontend hooks
 
@@ -265,7 +285,7 @@ Top10 wave 1 integration (`test_top10_wave1_integration.py`): where the merged s
 
 ## Frontend services / types
 
-- `services/api.ts` — the entire backend client: auth, conversations, streaming SSE parsing, connectors, capabilities, usage, setup.
+- `services/api.ts` — the entire backend client: auth, conversations, streaming SSE parsing, connectors, capabilities, usage, setup, skills and goals.
 - `types/index.ts` — shared TypeScript types mirroring backend Pydantic models (User, Conversation, CapabilityStatus, UsageSummary, etc).
 - `theme.tsx` — `ThemeProvider`/`useTheme` (light/dark/system), synced with `index.html`'s inline bootstrap script.
 - `main.tsx` — app bootstrap: router, QueryClient, ThemeProvider, self-hosted font imports.
@@ -274,6 +294,8 @@ Top10 wave 1 integration (`test_top10_wave1_integration.py`): where the merged s
 ## Frontend tests (grouped by theme)
 
 Component tests mirror their component 1:1 (`CapabilityList`, `ChatComposer`, `ConfirmDialog`, `ErrorBoundary`, `MarkdownMessage`, `ProviderErrorText`, `TokenUsage`, `UsagePanel`, `Layout`), plus `toolScreenshots.test.ts`. Page tests: `Dashboard.test.tsx`, `Settings.test.tsx`, `Setup.test.tsx`, `Chat.stop.test.tsx` (the Stop button asks the server and keeps the stream), `Chat.screenshots.test.tsx` (a turn's screenshot shows as an image and survives an approval's refetch; a reloaded thread shows the note), `Login.test.tsx` ("Create one" or the closed-registration hint, and the 403 fallback), `approvalCountdown.test.ts`, `approvalArguments.test.ts`. Service tests: `api.test.ts` (general client), `api.approvals.test.ts`, `api.refresh.test.ts` (401→refresh flow), `api.setup.test.ts`, `api.stop.test.ts`. `theme.test.tsx` (theme persistence/sync), `App.test.tsx` (routing/setup redirect). `test/` holds shared fixtures, not tests: `setup.ts` (jsdom matchMedia polyfill), `http.ts` (fetch/location doubles), `capabilities.ts` and `usage.ts` (realistic fixture bodies).
+
+Skills and goals (2026-10-12): `Goals.test.tsx` (the page: filters, the New goal form, milestones, notes, Pause, Delete after its confirm step, the server's reasons), `SkillsSettings.test.tsx` (switches, View as plain text, a skill that is not ready), `api.goals.test.ts` (the goals and skills calls), and the Settings and Layout mock updates.
 
 Purchases (2026-09-25): `CapabilitySettings.test.tsx`, `PaymentCardSettings.test.tsx` (never renders a number, posts once, clears the inputs, keeps the form on 422, shows the container's reason from the list or a 409, names a card once, deletes with confirm), `PurchaseApproval.test.tsx` (plus a Dashboard integration case: the purchase card with Approve/Deny and no JSON block), `Chat.approvalCards.test.tsx` and `Dashboard.actCard.test.tsx` (a `browser.act` card is one sentence; the confirmation picture after Approve), `purchaseNotice.test.ts` (equal to the backend fixture), and purchase cases in `CapabilityList.test.tsx`, `Settings.test.tsx` and `approvalArguments.test.ts`.
 
@@ -294,6 +316,7 @@ Purchases (2026-09-25): `CapabilitySettings.test.tsx`, `PaymentCardSettings.test
 - `docs/superpowers/specs/2026-09-23-capabilities-and-setup-wizard-design.md` — design doc for that work.
 - `docs/superpowers/plans/2026-09-23-capabilities-and-setup-wizard.md` — implementation plan for that work.
 - `docs/superpowers/specs/2026-09-25-purchases-design.md` — design and the five implementation contracts for `purchases` (the vault, `browser.act`, `browser.checkout`, the wiring, the frontend).
+- `docs/superpowers/specs/2026-10-12-muse-skills-and-goals-design.md` — the bundled skills and goals as shipped; it builds on `docs/superpowers/specs/2026-09-25-skills-design.md` and wins where they differ. `backend/skills/README.md` — how to add a skill.
 - `docs/testing/headless-mac-full-test.md` — the full live test on the headless test Mac (native install, wizard, Telegram, macOS grants, every agent flow, and section 5.2 for a purchase that stops at the approval card); `docs/testing/computer-control-headless-mac.md` is the low-level computer-control smoke test.
 - `backend/alembic/README.md` — migration workflow + pre-Alembic adoption.
 - `backend/services/capabilities/README.md` — how to add a capability (five steps, referenced above).

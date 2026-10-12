@@ -138,8 +138,9 @@ To take page watch out again, undo the merge and then that line only:
 `upgrade()`/`downgrade()` (docs/CODE-MAP.md lists what each adds). The ids were fixed up front
 so parallel branches never pick the same parent: fill only your own file,
 never change a `down_revision`, and add no revision or merge revision
-inside the chain. `tests/test_integration_seams.py` pins it. The next new
-migration after the chain revises `0024_media_transcripts`.
+inside the chain. `tests/test_integration_seams.py` pins it. The first
+revisions after the chain are `0025_skill_states` and `0026_goals` (below);
+**the next new migration revises `0026_goals`**, the current head.
 
 `0023_permission_grants` (permission tiers) creates `permission_grants`
 (7-day low-risk grants, cascading with their user and their connector) and
@@ -151,6 +152,26 @@ needs nothing, the label fits the VARCHAR(12)). Its downgrade maps every
 (the stricter neighbour) and drops the column and the table. **Postgres
 cannot drop an enum label, so `low_risk` stays in the type after a
 downgrade**; no row uses it, and upgrading again is a no-op for the type.
+
+## Skills and goals (0025_skill_states and 0026_goals)
+
+These two follow the reserved chain:
+`0024_media_transcripts` -> `0025_skill_states` -> `0026_goals`. They came
+with the skills and goals work
+(`docs/superpowers/specs/2026-10-12-muse-skills-and-goals-design.md`). Each
+create is guarded (a table that already exists is left alone), because an
+adopted pre-Alembic database is built from the current models before it is
+stamped and upgraded. Neither creates a Postgres enum type: statuses,
+categories and the other choices are plain strings that the code validates.
+
+| Revision | What it does | Downgrade |
+|---|---|---|
+| `0025_skill_states` | Creates `skill_states`: the owner's install-wide on/off switch per bundled skill, keyed by the skill's name (`String(64)`), with `enabled`, the `sha256` the owner saw, `updated_at`, and `updated_by` (a foreign key to `users.id` with `ON DELETE SET NULL`, so the switch outlives the account that set it). No row means the skill's default (on). | Drops the table. |
+| `0026_goals` | Creates `goals`, `goal_milestones` and `goal_entries` with their indexes (`ix_goals_user_id_status`, `ix_goals_user_id_created_at`, `ix_goal_milestones_goal_id_position`, `ix_goal_entries_goal_id_created_at`). Every `user_id` cascades on account delete, and a milestone or note cascades with its goal. `goal_entries.milestone_id` has no foreign key, so a note keeps pointing at a milestone that was dropped. | Drops the three tables, children first. |
+
+`tests/test_skills_migration.py` and `tests/test_goals_migration.py` pin
+both revisions: upgrade, downgrade, the cascades, and an adopted database
+left unchanged.
 
 ## Writing a new migration
 

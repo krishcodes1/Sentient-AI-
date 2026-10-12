@@ -50,6 +50,15 @@ import type {
   ProviderChoice,
   VaultItemView,
   VaultItems,
+  AddGoalEntryRequest,
+  CreateGoalRequest,
+  Goal,
+  GoalDetail,
+  GoalEntry,
+  GoalStatus,
+  UpdateGoalRequest,
+  SkillDetail,
+  SkillInfo,
 } from "@/types";
 // Every request below, the raw fetches included, names this browser in
 // X-Crawler-Device, so an app allowed for a week from here applies only to
@@ -965,6 +974,65 @@ export async function updateMemory(
 
 export async function deleteMemory(id: string): Promise<void> {
   return request<void>(`/memories/${id}`, { method: "DELETE" });
+}
+
+// Goals (the Goals page). Every route is the signed-in account's own: another account's goal is a
+// 404. A rule the store refuses (a duplicate, a limit, text it will not save) is a 409 or 422
+// whose message is ready to show.
+
+/** This account's goals with one status (default `active`), or every goal with `all`. */
+export async function listGoals(status: GoalStatus | "all" = "active"): Promise<Goal[]> {
+  return request<Goal[]>(`/goals?status=${encodeURIComponent(status)}`);
+}
+
+/** One goal with its milestones in order and its latest progress notes. */
+export async function getGoal(id: string): Promise<GoalDetail> {
+  return request<GoalDetail>(`/goals/${encodeURIComponent(id)}`);
+}
+
+export async function createGoal(body: CreateGoalRequest): Promise<GoalDetail> {
+  return request<GoalDetail>("/goals", { method: "POST", body: JSON.stringify(body) });
+}
+
+/** Change a goal, its status or its milestones; milestones are dropped, never deleted. */
+export async function updateGoal(id: string, body: UpdateGoalRequest): Promise<GoalDetail> {
+  return request<GoalDetail>(`/goals/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
+/** Add a progress note written on the page (source `user`). */
+export async function addGoalEntry(id: string, body: AddGoalEntryRequest): Promise<GoalEntry> {
+  return request<GoalEntry>(`/goals/${encodeURIComponent(id)}/entries`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/** Delete a goal with its milestones and notes. The click on the page is the approval. */
+export async function deleteGoal(id: string): Promise<void> {
+  return request<void>(`/goals/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+// Skills (Settings ▸ Skills, owner only: 403 for anyone else).
+
+/** Every bundled skill with its status, hash, switch and scan findings, sorted by name. */
+export async function listSkills(): Promise<SkillInfo[]> {
+  return request<SkillInfo[]>("/skills");
+}
+
+/** One skill with the text of each of its files (404 for an unknown name). */
+export async function getSkill(name: string): Promise<SkillDetail> {
+  return request<SkillDetail>(`/skills/${encodeURIComponent(name)}`);
+}
+
+/** Switch one skill on or off. Turning on a skill that is not usable is a 409. */
+export async function setSkillEnabled(name: string, enabled: boolean): Promise<SkillInfo> {
+  return request<SkillInfo>(`/skills/${encodeURIComponent(name)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ enabled }),
+  });
 }
 
 

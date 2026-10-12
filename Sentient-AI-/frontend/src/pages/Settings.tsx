@@ -1,7 +1,7 @@
 /**
  * Settings page: profile, password, permission tier and rate limit, LLM provider choice, Telegram
  * linking and bot token, capability permissions, data export and account deletion, plus the
- * owner's Server section.
+ * owner's Skills section (the bundled playbooks, their switches and text) and Server section.
  *
  * Why it exists: Every per-account setting the backend exposes is edited here, each section saving
  * and reporting on its own.
@@ -25,6 +25,7 @@ import CapabilityList, { CapabilityListError } from "@/components/CapabilityList
 import PaymentCardSettings from "@/components/PaymentCardSettings";
 import TutorLocks from "@/components/TutorLocks";
 import ServerSettings from "@/components/ServerSettings";
+import SkillsSettings from "@/components/SkillsSettings";
 import type { CapabilityStatus, User } from "@/types";
 import {
   ApiError,
@@ -802,6 +803,10 @@ export default function Settings() {
         {/* Each account also lists and revokes its own low-risk grants (permission tiers). */}
         <PermissionGrants />
       </section>
+
+      {/* Skills (owner only): the bundled playbooks, their switches, text, hash and scan.
+          The skills routes refuse anyone else, so the section is not rendered for them. */}
+      {me?.is_admin && <SkillsSettings />}
 
       {/* Payment card (owner only): the card "Buy things for me" pays with.
           Entered here and nowhere else; the vault route refuses anyone

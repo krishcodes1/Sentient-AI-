@@ -113,6 +113,7 @@ from services.security.guard import (
     check_stored,
     record_hidden,
 )
+from services.skills.prompt import SKILLS_READ_TOOL, offers_skills
 from services.study.prompt import STUDY_SYSTEM_PROMPT, offers_study  # top10:flashcards_quizzes
 from services.usage.pricing import _PRICES as _LISTED_PRICES
 from services.usage.pricing import estimate_turn_cost_usd, pricing_model_for
@@ -341,6 +342,12 @@ class Tool:
     # connection. None and "" for built-in and MCP tools.
     connector_id: Optional[str] = None
     account: str = ""
+
+
+# How many of the tools a skill names one skills.read loads into the
+# conversation (AgentRuntime._load_skill_tools), as many as a tools.find. A
+# name counts once however many accounts have it.
+MAX_SKILL_TOOL_LOADS = 8
 
 
 @dataclass
@@ -626,6 +633,26 @@ RESULT_CHAR_BUDGETS: dict[str, int] = {
     "microsoft.get_file_text": 27000,
     "web.fetch_page": 16000,
     "watch.list": 16000,
+    # A skill's SKILL.md or reference is at most 24,000 bytes (the loader's
+    # cap); as shown, with JSON escaping, its section headings and keys, it
+    # fits 34000 (READ_RESULT_CHARS in services/tools/skills.py, which
+    # refuses a longer result rather than let it be cut; raise both
+    # together). read_reference comes first: the lookup is a prefix match in
+    # this order, and skills.read is a prefix of it. A scan report keeps the
+    # findings that fit 8000 (SCAN_REPORT_CHARS).
+    "skills.read_reference": 34000,
+    "skills.read": 34000,
+    "skills.scan_report": 8000,
+    # The goals toolkit keeps each whole result within its own cap as shown
+    # here (services/tools/goals.py: MAX_LIST_RESULT_CHARS 16000,
+    # MAX_GET_RESULT_CHARS 20000, MAX_WRITE_RESULT_CHARS 10000 for create and
+    # update; raise both together), dropping the oldest notes first, so no
+    # goal or milestone id is cut out of the middle; 2000 of headroom, as
+    # study's. log_progress and delete fit the default.
+    "goals.list": 18000,
+    "goals.get": 22000,
+    "goals.create": 12000,
+    "goals.update": 12000,
     # top10:secret_pii_redaction
 
     # top10:file_extraction
@@ -1046,10 +1073,22 @@ def result_for_audit(tool_name: Any, result: Any) -> Any:
     video.* result reduced to its metadata and counts, never a passage
     (services/tools/video/facts.py); a schedule.*, study.* or triggers.*
     result reduced by allowlist to ids, status and counts, never a prompt,
-    card text or what a trigger saw (services/agent/audit_facts.py);
-    anything else unchanged."""
+    card text or what a trigger saw (services/agent/audit_facts.py); a
+    skills.* result reduced to which skill, its hash, status and counts,
+    never the playbook's text (services/tools/skills.py); a goals.* result
+    reduced to ids, statuses, dates and counts, never a title, a milestone
+    or a progress note (services/goals/audit_facts.py); anything else
+    unchanged."""
     if isinstance(tool_name, str) and tool_name in DESKTOP_OUTLINE_TOOLS:
         return desktop_result_for_audit(tool_name, result)
+    if isinstance(tool_name, str) and tool_name.startswith("skills."):
+        from services.tools.skills import skills_result_for_audit
+
+        return skills_result_for_audit(result)
+    if isinstance(tool_name, str) and canonical_tool_name(tool_name).startswith("goals."):
+        from services.goals.audit_facts import goals_result_for_audit
+
+        return goals_result_for_audit(result)
     # top10:knowledge_base: a knowledge.* result keeps citations, ids and
     # counts only (services/knowledge/facts.py).
     if isinstance(tool_name, str) and tool_name.startswith("knowledge."):
@@ -1255,6 +1294,10 @@ PURCHASE_RULE_POLICY = "purchase_rule"
 _BIND_REFUSAL_POLICIES: dict[str, str] = {
     "browser.act": BROWSER_RULE_POLICY,
     "browser.checkout": PURCHASE_RULE_POLICY,
+    # A delete of a goal that is not the user's (or no longer exists), or a
+    # call that brought its own "_goal": services.tools.goals.GOALS_RULE_POLICY
+    # (a test holds them equal).
+    "goals.delete": "goals_rule",
     # top10:secret_pii_redaction
 
     # top10:file_extraction
@@ -1363,7 +1406,9 @@ _PRECHECK_STOPPED_RULE = "cancelled"
 _PRECHECK_FAILURE_RULES = frozenset(
     # unknown_placeholder: a [[EMAIL_n]]-style placeholder this turn never
     # minted (services.security.guard); the model resends with the right one.
-    {"stale_ref", "needs_observe", "invalid_arguments", UNKNOWN_PLACEHOLDER_RULE}
+    # storage: a bind could not read its facts (goals.delete); an outage,
+    # never a security block.
+    {"stale_ref", "needs_observe", "invalid_arguments", UNKNOWN_PLACEHOLDER_RULE, "storage"}
 )
 
 
@@ -2049,6 +2094,7 @@ class AgentRuntime:
         purchases: bool = False,
         shopping: bool = False,
         channel_block: Optional[str] = None,
+        skills_block: Optional[str] = None,
         # top10:system_prompt:secret_pii_redaction
         privacy: bool = False,
 
@@ -2085,6 +2131,12 @@ class AgentRuntime:
         from (services/agent/channel_style.py; only Telegram has one). It
         goes after the memory block and before the tutor block, which stays
         last; None leaves the system message exactly as it was.
+
+        ``skills_block`` is the ``<available_skills>`` list
+        (services/skills/prompt.py). It goes right after ``<permissions>``,
+        before the unattended and memory blocks: it changes only when the
+        owner's switches or the bundled skills do. None leaves the system
+        message exactly as it was.
         """
         # The model has no clock. Day granularity is enough for "next Friday"
         # and keeps the cached prompt prefix identical across a whole day;
@@ -2108,6 +2160,7 @@ class AgentRuntime:
 
             + f"\n\n{today_line}"
             + (f"\n\n{permissions_text}" if permissions_text else "")
+            + (f"\n\n{skills_block}" if skills_block else "")
             # top10:system_prompt:scheduler_briefing
             + (f"\n\n{unattended}" if unattended else "")
 
@@ -2735,6 +2788,59 @@ class AgentRuntime:
             )
         return result
 
+    @staticmethod
+    def _load_skill_tools(
+        result: Any,
+        tool_schemas: list[dict[str, Any]],
+        loaded: LoadedTools,
+        allows: Optional[Callable[[str], bool]] = None,
+    ) -> Any:
+        """After a successful skills.read, load the tools the skill names
+        into *loaded*, exactly as tools.find loads what it finds, so its
+        playbook can be followed without guessing tool names.
+
+        Only names in *tool_schemas* (the turn's full tool list, which
+        build_tools already filtered by capability, scope and tier) are
+        loaded, so reading a skill never widens what the turn may use, and
+        loading never grants or approves anything. A skill names tools by
+        their canonical name (``github.get_pr``), so each loads every
+        account's tool of that name (``github__1a2b3c4d.get_pr`` for each
+        of two GitHub accounts). Core names (always offered) and names
+        ``allows`` withholds (tutor mode) are skipped; at most
+        MAX_SKILL_TOOL_LOADS of the skill's names per read. The result's
+        ``tools`` is rewritten to the real names loaded; any other result
+        is returned as is.
+        """
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            return result
+        named = result.get("tools")
+        if not isinstance(named, list):
+            return result
+        available = [str(t.get("name", "")) for t in tool_schemas]
+        by_canonical: dict[str, list[str]] = {}
+        for real in available:
+            by_canonical.setdefault(canonical_tool_name(real), []).append(real)
+        core = core_tool_names()
+        to_load: list[str] = []
+        loaded_names = 0
+        for name in dict.fromkeys(canonical_tool_name(n) for n in named if isinstance(n, str)):
+            if loaded_names >= MAX_SKILL_TOOL_LOADS:
+                break
+            reals = [
+                real
+                for real in by_canonical.get(name, ())
+                if real not in core and (allows is None or allows(real))
+            ]
+            if reals:
+                to_load += reals
+                loaded_names += 1
+        if to_load:
+            merged = merge_loaded(loaded.names, to_load, available)
+            if merged != loaded.names:
+                loaded.names = merged
+                loaded.changed = True
+        return {**result, "tools": to_load}
+
     async def _scan_and_redact_result(self, result: Any, user_id: str) -> Any:
         """Redact unsafe tool output at the finest granularity available.
 
@@ -2822,6 +2928,7 @@ class AgentRuntime:
         # top10:chat_params:tutor_mode
         tutor: Optional[TutorTurn] = None,
 
+        skills_text: Optional[str] = None,
     ) -> AgentResponse:
         """Process a conversation turn.
 
@@ -2885,6 +2992,12 @@ class AgentRuntime:
         newest user message names engages before the system prompt is built,
         and the turn updates it in place. The caller persists it when
         ``changed`` is set (services.tutor.service.persist_tutor_state).
+
+        ``skills_text`` is the ``<available_skills>`` block the routes built
+        for this turn (TurnContext.skills_text). It is added after
+        ``<permissions>`` only while skills.read is in ``tools``, so the
+        model is never pointed at skills it cannot read (the capability
+        off, the unattended fence); None changes nothing.
         """
         if stop_mark is None:
             stop_mark = agent_cancel.mark(user_id)
@@ -2914,6 +3027,7 @@ class AgentRuntime:
                     if channel is not None and channel.kind == "telegram"
                     else None
                 ),
+                skills_block=skills_text if skills_text and offers_skills(tools) else None,
                 privacy=privacy,
                 study=offers_study(tools),
                 **_unattended_kwargs(unattended.system_block() if unattended is not None else None),
@@ -3958,6 +4072,16 @@ class AgentRuntime:
                     # 3d. Scan tool response (per-item where the shape allows,
                     # so one bad email doesn't redact a whole inbox page).
                     result = await section.run(self._scan_and_redact_result(result, user_id))
+                    if tc.name == SKILLS_READ_TOOL:
+                        # A skill was read: the tools its playbook names that
+                        # this turn may use are offered from the next round
+                        # on, as a tools.find would load them.
+                        result = self._load_skill_tools(
+                            result,
+                            all_tool_schemas,
+                            loaded,
+                            allows=tutor.allows if tutor is not None else None,
+                        )
 
                     # Best-effort: the side effect already happened, so a failed
                     # result row must not fail the turn — that would drop the
@@ -4418,6 +4542,7 @@ class AgentRuntime:
         # top10:chat_params:tutor_mode
         tutor: Optional[TutorTurn] = None,
 
+        skills_text: Optional[str] = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Streaming variant — yields dicts with ``type`` and ``data`` keys.
 
@@ -4462,7 +4587,8 @@ class AgentRuntime:
         the turn starts still ends it), ``loaded_tools`` (updated in place
         by tools.find; read it once ``done`` arrives, or in ``on_orphaned``)
         and ``channel`` (the browser the request came from, for weekly app
-        approvals) are handed to :meth:`chat` unchanged.
+        approvals) are handed to :meth:`chat` unchanged, as is
+        ``skills_text`` (the ``<available_skills>`` block).
         """
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
@@ -4488,6 +4614,7 @@ class AgentRuntime:
                 channel=channel,
                 **_unattended_kwargs(unattended),
                 tutor=tutor,
+                skills_text=skills_text,
             )
         )
 

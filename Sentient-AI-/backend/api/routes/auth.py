@@ -1074,6 +1074,79 @@ async def export_account(
             yield chunk
         yield ","
 
+        # Goals: each goal (in the Goals page's shape, services/goals/store.py)
+        # with its milestones in order and its whole progress log, oldest note
+        # first, paged so a long log never lands in memory whole.
+        from models.goal import Goal, GoalEntry, GoalMilestone
+        from services.goals.store import (
+            progress_of,
+            serialize_entry,
+            serialize_goal,
+            serialize_milestone,
+        )
+
+        yield '"goals":['
+        goals = (
+            (
+                await db.execute(
+                    select(Goal)
+                    .where(Goal.user_id == current_user.id)
+                    .order_by(Goal.created_at, Goal.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for goal_idx, goal in enumerate(goals):
+            milestones = (
+                (
+                    await db.execute(
+                        select(GoalMilestone)
+                        .where(
+                            GoalMilestone.goal_id == goal.id,
+                            GoalMilestone.user_id == current_user.id,
+                        )
+                        .order_by(GoalMilestone.position, GoalMilestone.created_at)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            goal_head = {
+                **serialize_goal(goal, progress_of(milestones)),
+                "milestones": [serialize_milestone(m) for m in milestones],
+            }
+            yield ("" if goal_idx == 0 else ",") + _json(goal_head)[:-1] + ',"entries":['
+            offset = 0
+            first_entry = True
+            while True:
+                entries = (
+                    (
+                        await db.execute(
+                            select(GoalEntry)
+                            .where(
+                                GoalEntry.goal_id == goal.id,
+                                GoalEntry.user_id == current_user.id,
+                            )
+                            .order_by(GoalEntry.created_at, GoalEntry.id)
+                            .offset(offset)
+                            .limit(BATCH)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                if not entries:
+                    break
+                for entry in entries:
+                    yield ("" if first_entry else ",") + _json(serialize_entry(entry))
+                    first_entry = False
+                offset += len(entries)
+                if len(entries) < BATCH:
+                    break
+            yield "]}"
+        yield "],"
+
         async for chunk in _stream_table(
             AuditLog,
             AuditLog.timestamp,

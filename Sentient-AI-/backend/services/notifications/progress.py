@@ -116,6 +116,13 @@ _TOOL_PHRASES: dict[str, Optional[str]] = {
     "watch.delete": "Removing a page watch…",
     "system.capabilities": "Checking what this computer can do…",
     "system.install_capability": "Installing software…",
+    "skills.scan_report": "Checking a skill…",
+    "goals.list": "Checking your goals…",
+    "goals.get": "Checking your goal…",
+    "goals.create": "Saving your goal…",
+    "goals.update": "Updating your goal…",
+    "goals.log_progress": "Logging your progress…",
+    "goals.delete": "Deleting a goal…",
     # top10:secret_pii_redaction
 
     # top10:file_extraction
@@ -211,6 +218,8 @@ _FAMILY_PHRASES: dict[str, str] = {
     "watch": "Checking your page watches…",
     "system": "Checking this computer's setup…",
     "mcp": "Using a connected app…",
+    "skills": "Reading a skill…",
+    "goals": "Working on your goals…",
     # top10:secret_pii_redaction
 
     # top10:file_extraction

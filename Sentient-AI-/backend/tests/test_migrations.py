@@ -229,6 +229,9 @@ def test_user_owned_rows_cascade_on_delete(migrated):
         "event_triggers",
         "trigger_events",
         "permission_grants",
+        "goals",
+        "goal_milestones",
+        "goal_entries",
     ):
         cascades = {
             fk[3]

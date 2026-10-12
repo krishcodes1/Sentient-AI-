@@ -1,5 +1,5 @@
 """Tests for offering tools at scale (connectors spec 4.5): the bounded, stable
-selection of offered tools (core, loaded, starters, the rest; cap 24), the
+selection of offered tools (core, loaded, starters, the rest; cap 25), the
 tools.find built-in the runtime answers from the turn's full tool list, the
 conversation's persisted loaded list, and the result budgets for long
 connector reads.
@@ -199,9 +199,10 @@ def test_over_the_cap_core_then_starters_then_the_rest_in_build_order():
     assert len(offered) == MAX_OFFERED_TOOLS
     assert set(CORE) <= set(names)
     assert {"acme.list_things", "acme.get_thing"} <= set(names)
-    # The remaining 18 slots go to the rest in build order.
+    # The remaining slots (all but 4 core and 2 starters) go to the rest in
+    # build order.
     rest = [n for n in names if n.startswith("acme.op_")]
-    assert rest == [f"acme.op_{i:02d}" for i in range(18)]
+    assert rest == [f"acme.op_{i:02d}" for i in range(MAX_OFFERED_TOOLS - 6)]
     # The result keeps the build order of the chosen tools.
     positions = [_names(tools).index(n) for n in names]
     assert positions == sorted(positions)
@@ -253,12 +254,14 @@ def test_starters_and_the_rest_prefer_active_connectors():
 
 
 def test_the_core_set_is_extensible(monkeypatch):
+    # The default core set, before any registration (the registry already
+    # registered the real skills.read at import).
+    monkeypatch.setattr(context_manager, "_core_tool_names", set(context_manager.CORE_TOOL_NAMES))
     tools = _big_set(rest=30) + [_tool("skills.read")]
     assert "skills.read" not in _names(select_offered_tools(tools, ["acme"]))
     assert "skills.read" in _names(
         select_offered_tools(tools, ["acme"], core=[*CORE, "skills.read"])
     )
-    monkeypatch.setattr(context_manager, "_core_tool_names", set(context_manager.CORE_TOOL_NAMES))
     context_manager.register_core_tools("skills.read")
     assert "skills.read" in context_manager.core_tool_names()
     assert "skills.read" in _names(select_offered_tools(tools, ["acme"]))

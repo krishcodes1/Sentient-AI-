@@ -12,6 +12,7 @@ from services.capabilities import (
     browser_act,
     browser_control,
     computer_control,
+    goals,
     installs,
     page_watch,
     purchases,
@@ -19,6 +20,7 @@ from services.capabilities import (
     save_memories,
     screen,
     site_screenshots,
+    skills,
     slack,
     telegram,
     web_browsing,
@@ -83,6 +85,8 @@ REGISTRY: tuple[Capability, ...] = (
     computer_control.CAPABILITY,
     purchases.CAPABILITY,
     page_watch.CAPABILITY,
+    skills.CAPABILITY,
+    goals.CAPABILITY,
     # top10:secret_pii_redaction
     hide_personal_details.CAPABILITY,
 

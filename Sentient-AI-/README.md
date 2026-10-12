@@ -398,10 +398,48 @@ them read-only.
 | **Install optional software** | Installing optional components from a fixed list (e.g. the hidden browser above), asking you before every install | On |
 | **Telegram chat and approvals** | Chatting with Crawler from Telegram and approving pending actions from your phone. Needs a bot token configured (`.env` or the wizard's Telegram step). | On |
 | **Slack chat and approvals** | Chatting with Crawler in a Slack DM and approving pending actions from Slack. Needs a Slack connector with an app-level token (`xapp-`), linked from its card; see [Integrations](#integrations). | On |
+| **Skills (built-in playbooks)** | Following the short playbooks bundled with Crawler (`skills.read`, `skills.read_reference`, `skills.scan_report`); see [Skills and goals](#skills-and-goals). Read-only and low risk: a skill never runs code or skips an approval. | On |
+| **Goals and plans** | Saving the goals you tell Crawler about, with a plan of milestones and a progress log, and checking how they are going (`goals.*`). Low risk: goals stay in your own account, and deleting one always asks first. | On |
 
 See `backend/services/capabilities/README.md` if you're adding a new one —
 declaring a capability there is what drives the switch, the gating, and the
 prompt text; nothing else needs to change.
+
+## Skills and goals
+
+**Skills** are short playbooks (`SKILL.md` files) that teach Crawler how
+to do one kind of task well with its own tools: plan a goal, research a
+topic widely, plan a trip, compare products, plan meals, triage an inbox,
+plan a school week, vet a skill, and work with GitHub, Google Workspace or
+Microsoft 365. Ten ship with Crawler in `backend/skills/`. The model sees
+each skill's name and a one-line description, and reads the full playbook
+only when a request matches it.
+
+- **Bundled only.** Users cannot add skills. Every skill is text the team
+  reviewed in a pull request, and it never runs code, installs anything,
+  grants a tool or skips an approval. Every action a playbook leads to goes
+  through the same permission checks and approval cards as any other.
+- **Hash-pinned.** `backend/skills/manifest.json` records the SHA-256 of
+  every skill file. The files are hashed again every time a skill is read,
+  so a skill edited after the review is refused and shows as "Changed on
+  disk" until it is reviewed and pinned again.
+- **The owner decides.** The **Skills (built-in playbooks)** switch turns
+  the feature on or off. **Settings → Skills** (owner only) lists each skill
+  with its status, its own on/off switch, and View, which shows its files
+  as plain text with the SHA-256 and the safety scan's findings.
+
+To add a skill, see [`backend/skills/README.md`](backend/skills/README.md).
+
+**Goals** keep what you are working towards (a grade, a habit, a project, a
+job). You can tell Crawler in chat ("my goal is to run a 5K by May"), and
+it saves the goal and suggests a first milestone. Or you can make one on the
+**Goals** page, which lists your goals by status (Active, Paused, Completed,
+All). Each goal has a plan of milestones you tick off and a progress log
+you or Crawler add notes to. A goal runs nothing by itself. A regular
+check-in is a scheduled task you approve on its own card. Deleting a goal
+from chat always shows an approval card first. The Goals page keeps working
+when the **Goals and plans** switch is off, because that switch controls
+only Crawler's tools.
 
 **Testing everything live on a Mac.** Browser control and computer control
 need the backend running directly on the Mac, not in Docker.
@@ -460,7 +498,7 @@ with the **Slack chat and approvals** switch. Run a single backend process
 (one worker) while Slack DMs are on: two processes on one Slack app would
 split its DMs and button presses at random (see [SECURITY.md](SECURITY.md)).
 
-**Many tools, small requests.** A request offers the model at most 24
+**Many tools, small requests.** A request offers the model at most 25
 tools: the everyday ones first, including a few "starter" tools per
 connector. When it needs something else it calls `tools.find`, which looks
 through the tools you can use and adds the matches to the conversation.
@@ -564,13 +602,14 @@ crawler-ai/
 │   │   ├── mcp/                # MCP client + server integration (experimental)
 │   │   ├── audit.py            # Tamper-evident audit logging (hash chain)
 │   │   └── auth.py             # JWT authentication
+│   ├── skills/                 # Bundled SKILL.md playbooks, pinned in manifest.json
 │   ├── alembic/                # Schema migrations (see alembic/README.md)
 │   ├── api/                    # FastAPI routes + middleware
 │   ├── scripts/                # Operator tools (audit-log verifier)
 │   └── tests/                  # pytest suite (route security, executor, approvals, audit, MCP)
 ├── frontend/                   # React / TypeScript / Vite / Tailwind
 │   └── src/
-│       ├── pages/              # Login, Dashboard, Chat, Connectors, Audit Logs, Memory, Settings
+│       ├── pages/              # Login, Dashboard, Chat, Connectors, Audit Logs, Memory, Goals, Settings
 │       ├── components/         # Brand, ConfirmDialog, ErrorBoundary, MarkdownMessage, layout/
 │       └── services/           # API client
 └── docker/                     # Docker Compose (dev + prod), Dockerfiles
@@ -618,7 +657,8 @@ still open — lives in **[SECURITY.md](SECURITY.md)**. Highlights:
 - **Admin role** — the first account registered owns the deployment;
   `admin_only` connectors are usable only by it
 - **Data export** — Settings → Export my data downloads every conversation,
-  memory, connector setting, and audit record as JSON (credentials excluded)
+  memory, goal, connector setting, and audit record as JSON (credentials
+  excluded)
 
 ### Smart Context Management
 
@@ -626,11 +666,12 @@ Crawler AI solves the token explosion problem seen in platforms like OpenClaw:
 
 - **Sliding window** — keeps last 12 messages in full, summarizes older ones
 - **Tool result compression** — truncates large API responses to 2000 chars
-- **Bounded tool offering**: a request carries at most 24 tool schemas
+- **Bounded tool offering**: a request carries at most 25 tool schemas
   (core built-ins, the tools this conversation loaded, each connector's
   starter tools, then the rest), in the same order turn after turn so the
   prompt cache holds. The model finds anything else with `tools.find`, which
-  loads up to 8 matching tools into the conversation
+  loads up to 8 matching tools into the conversation; reading a skill with
+  `skills.read` loads the tools that skill names the same way
 - **Semantic caching** — caches identical queries to avoid duplicate API calls
 - **Accurate token estimation** — uses ~3.5 chars/token (not the broken 4.0 estimate that causes 47% undercounting)
 

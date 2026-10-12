@@ -28,7 +28,8 @@ Four layers live here:
 - ``sanitize_request_data`` / ``_sanitize``: strip credentials and other
   sensitive values before anything is persisted; ``redact_tool_arguments``
   keeps only the length of what some tools take (the text desktop.act types,
-  the text memory.remember saves).
+  the text memory.remember saves), and only the ids and choices of a goals.*
+  call.
 - ``build_hash_payload`` + ``append_audit_log``: the canonical hash
   payload (shared with ``api/routes/audit.py`` verification and
   ``scripts/verify_audit_log.py``) and the chained insert.
@@ -43,6 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import uuid
 from typing import Any, Callable, Optional
 
@@ -52,7 +54,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.security import compute_audit_hash
 from models.audit import AuditLog, AuditStatus
+from models.goal import CHECK_INS, ENTRY_SOURCES, GOAL_CATEGORIES, GOAL_STATUSES
 from models.user import User
+from services.goals.store import CREATE_KEYS, PROGRESS_KEYS, UPDATE_KEYS
 from services.security.policies import AUDIT
 from services.security.redact import contains, redact_obj
 
@@ -178,13 +182,126 @@ _COUNT_ONLY_ARGUMENTS: dict[tuple[str, str], frozenset[str]] = {
     ("study", "save"): frozenset({"items"}),
 }
 
+# Every goals.* row (any action, a misspelt or dotted one too, and the Goals
+# page's goal_* rows) keeps facts only, by allowlist rather than by naming the text
+# fields. A goal's title, description and current state, a milestone's title
+# and a progress note are the user's own words, kept in the goal they can
+# edit or delete on the Goals page, and they can arrive under any key: a
+# title given where an id belongs, or a key goals.* does not take. The
+# runtime writes a call's arguments before the toolkit refuses them, and
+# nothing written here can be taken back. So an id, or each id of a list, is
+# kept only when it is a UUID; a status, category, check-in choice or source
+# only when it is one the goals take, a target date only as YYYY-MM-DD and
+# clear_target_date only as true or false; every other value but a null is
+# kept as its length, or a list as its item count (a delete card's facts,
+# _goal, hold the goal's title and are not kept at all), and a key goals.*
+# does not take as its length too, even one shaped like a field name (a
+# milestone's title written as Finish_problem_set_4), numbered when two
+# share a length.
+_GOALS_CONNECTOR = "goals"
+_GOALS_ID_KEYS = frozenset(
+    {
+        "goal_id",
+        "milestone_id",
+        "entry_id",
+        "complete_milestones",
+        "reopen_milestones",
+        "drop_milestones",
+    }
+)
+_GOALS_CHOICES: dict[str, frozenset[str]] = {
+    # goals.list also takes "all".
+    "status": frozenset((*GOAL_STATUSES, "all")),
+    "category": frozenset(GOAL_CATEGORIES),
+    "check_in": frozenset(CHECK_INS),
+    # A note's writer, and "web" on a Goals page row.
+    "source": frozenset((*ENTRY_SOURCES, "web")),
+}
+_GOALS_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+# The key names a goals.* row keeps as they are: every field a goals.* call
+# (services.goals.store and the toolkit's ids) or a Goals page row takes.
+_GOALS_KEYS = frozenset(
+    {
+        *CREATE_KEYS,
+        *UPDATE_KEYS,
+        *PROGRESS_KEYS,
+        *_GOALS_ID_KEYS,
+        *_GOALS_CHOICES,
+        "target_date",
+        "clear_target_date",
+        "note",
+        "source",
+        "entry_id",
+        "_goal",
+    }
+)
+
+
+def _is_uuid(value: Any) -> bool:
+    if isinstance(value, uuid.UUID):
+        return True
+    if not isinstance(value, str):
+        return False
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _goals_argument(key: str, value: Any) -> Any:
+    """One goals.* argument as an audit row keeps it (``_GOALS_*``)."""
+    if key in _GOALS_ID_KEYS:
+        if value is None or _is_uuid(value):
+            return value
+        if isinstance(value, list):
+            return [item if _is_uuid(item) else _length_marker(item) for item in value]
+        return _length_marker(value)
+    if key in _GOALS_CHOICES:
+        kept = isinstance(value, str) and value.strip().lower() in _GOALS_CHOICES[key]
+    elif key == "target_date":
+        kept = isinstance(value, str) and _GOALS_DATE.fullmatch(value.strip()) is not None
+    elif key == "clear_target_date":
+        kept = isinstance(value, bool)
+    else:
+        kept = False
+    return value if kept or value is None else _length_marker(value, count=True)
+
+
+def _goals_arguments(arguments: Any) -> Any:
+    if arguments is None:
+        return None
+    if not isinstance(arguments, dict):
+        return _length_marker(arguments, count=True)
+    reduced: dict[str, Any] = {}
+    for key, value in arguments.items():
+        name = str(key)
+        shown = name if name in _GOALS_KEYS else _length_marker(name)
+        if shown in reduced:
+            number = 2
+            while f"{shown} ({number})" in reduced:
+                number += 1
+            shown = f"{shown} ({number})"
+        reduced[shown] = _goals_argument(name, value)
+    return reduced
+
+
+def _first_connector(tool: str) -> str:
+    """The connector type before *tool*'s first dot, the one
+    RuntimeAuditLogger files the row under: 'goals.milestones.add' is a
+    goals row though ``_tool_key`` reads its connector as 'goals.milestones'."""
+    return tool.strip().lower().split(".", 1)[0].split("__", 1)[0].strip()
+
 
 def redact_tool_arguments(tool: str, arguments: Any) -> Any:
     """*arguments* of a call to *tool* as an audit row stores them: the
     fields in ``_LENGTH_ONLY_ARGUMENTS`` replaced by their length
     (``"<14 characters>"``, or ``"<3 items>"`` for a list in
-    ``_COUNT_ONLY_ARGUMENTS``), everything else untouched."""
+    ``_COUNT_ONLY_ARGUMENTS``), everything else untouched; a goals.* call's
+    reduced to its ids and choices (``_GOALS_*``)."""
     key_of_tool = _tool_key(tool)
+    if _GOALS_CONNECTOR in (key_of_tool[0], _first_connector(tool)):
+        return _goals_arguments(arguments)
     fields = _LENGTH_ONLY_ARGUMENTS.get(key_of_tool)
     if not fields or not isinstance(arguments, dict):
         return arguments
@@ -326,8 +443,16 @@ async def append_audit_log(
         # covers multi-worker deployments, which an in-process lock never
         # could. SQLite has no FOR UPDATE — SQLAlchemy omits it there — but
         # SQLite serializes writers anyway, so the guarantee holds on both.
+        #
+        # FOR NO KEY UPDATE, not FOR UPDATE: it conflicts with itself, so
+        # appenders still run one at a time, but not with the FOR KEY SHARE
+        # that a row with a foreign key to users holds until its commit. A
+        # caller that inserted such a row (a goal, a milestone, a progress
+        # note) and then audits in the same transaction waits here for the
+        # in-process lock; with FOR UPDATE, the lock's holder waited on that
+        # caller's KEY SHARE, a cycle PostgreSQL cannot see, and both hung.
         await db.execute(
-            select(User.id).where(User.id == user_uuid).with_for_update()
+            select(User.id).where(User.id == user_uuid).with_for_update(key_share=True)
         )
 
         # seq is the deterministic order key; timestamp alone is ambiguous
@@ -470,6 +595,16 @@ _EVENT_STATUS: dict[str, AuditStatus] = {
     # that approval (services.agent.app_approvals).
     "app_approval_granted": AuditStatus.approved,
     "app_approval_revoked": AuditStatus.approved,
+    # The owner switched a bundled skill on or off in Settings → Skills
+    # (api/routes/skills.py): the skill's name and hash only.
+    "skill_enabled": AuditStatus.approved,
+    "skill_disabled": AuditStatus.approved,
+    # The user created, changed or deleted a goal, or logged progress on
+    # one, on the Goals page (api/routes/goals.py): ids only.
+    "goal_created": AuditStatus.approved,
+    "goal_updated": AuditStatus.approved,
+    "goal_deleted": AuditStatus.approved,
+    "goal_progress_logged": AuditStatus.approved,
     # top10:secret_pii_redaction
     # Keys, card or ID numbers, or contact details were hidden from the AI
     # provider this turn (services.security.guard.record_hidden): counts only.

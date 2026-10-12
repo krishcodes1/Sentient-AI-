@@ -169,6 +169,7 @@ describe("Layout on a desktop", () => {
       "Gateway",
       "Chat",
       "Memory",
+      "Goals",
       "Connectors",
       "Audit logs",
       "Settings",

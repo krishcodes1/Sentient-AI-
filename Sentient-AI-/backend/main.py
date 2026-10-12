@@ -78,6 +78,7 @@ from services.notifications.telegram_manager import TelegramManager
 from services.notifications.voice import voice_notes_for  # top10:voice_notes
 from services.tools.system import SystemToolkit
 from services.platform import current as current_platform
+from services.skills.loader import bundled_catalog
 from services.tools.browser import guard as browser_guard
 from services.tools.browser import handoff as browser_handoff
 from services.tools.browser.act import BrowserActToolkit
@@ -125,6 +126,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await reminder_service.start()
     page_watch_service: PageWatchService = app.state.page_watches
     await page_watch_service.start()
+    await log_bundled_skills()
 
     # top10:secret_pii_redaction
 
@@ -308,6 +310,25 @@ def start_browser_reaper(app: Any) -> None:
                 logger.warning("browser_reap_failed", error_type=type(exc).__name__)
 
     app.state.browser_reaper = asyncio.create_task(loop())
+
+
+async def log_bundled_skills() -> None:
+    """Load the bundled skills (backend/skills/) once, off the event loop, so
+    the first turn reads nothing from disk, and log each one's status (a
+    skill that is not usable is also logged with its own warning). A
+    skill, or the whole folder, that fails to load never keeps the API
+    down: the loader gives it a status, and anything else is logged."""
+    try:
+        catalog = await asyncio.to_thread(bundled_catalog)
+    except Exception as exc:
+        logger.warning("skills_load_failed", error_type=type(exc).__name__)
+        return
+    logger.info(
+        "skills_loaded",
+        total=len(catalog),
+        usable=len(catalog.usable()),
+        statuses={record.name: record.status for record in catalog},
+    )
 
 
 async def close_browser_sessions(app: Any) -> None:
@@ -847,6 +868,14 @@ app.include_router(capabilities.router, prefix="/api")
 app.include_router(setup.router, prefix="/api")
 app.include_router(vault.router, prefix="/api")  # vault
 app.include_router(app_approvals.router, prefix="/api")
+# Settings ▸ Skills: the bundled skills' switches and files (owner only).
+from api.routes import skills as skills_routes
+
+app.include_router(skills_routes.router, prefix="/api")
+# The Goals page: the signed-in user's goals, milestones and progress notes.
+from api.routes import goals as goals_routes
+
+app.include_router(goals_routes.router, prefix="/api")
 # top10:secret_pii_redaction
 
 # top10:file_extraction

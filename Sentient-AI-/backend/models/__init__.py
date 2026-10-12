@@ -9,12 +9,14 @@ from models.connector import (
     PermissionTier,
 )
 from models.conversation import Conversation, Message, MessageRole
+from models.goal import Goal, GoalEntry, GoalMilestone
 from models.installation import INSTALLATION_ROW_ID, Installation
 from models.memory import Memory, MemoryCategory, MemorySource
 from models.oauth_state import OAuthFlowKind, OAuthFlowStatus, OAuthState
 from models.page_watch import PageWatch, PageWatchStatus
 from models.pending_action import PendingAction, PendingActionStatus
 from models.reminder import Reminder, ReminderSource, ReminderStatus
+from models.skill_state import SkillState
 from models.slack_link import SlackChannelLink
 from models.user import User
 from models.vault_item import VaultItem
@@ -61,6 +63,9 @@ __all__ = [
     "ConnectorConfig",
     "ConnectorType",
     "Conversation",
+    "Goal",
+    "GoalEntry",
+    "GoalMilestone",
     "Installation",
     "Memory",
     "MemoryCategory",
@@ -78,6 +83,7 @@ __all__ = [
     "Reminder",
     "ReminderSource",
     "ReminderStatus",
+    "SkillState",
     "SlackChannelLink",
     "User",
     "VaultItem",

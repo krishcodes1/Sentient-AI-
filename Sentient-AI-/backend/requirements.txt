@@ -19,6 +19,10 @@ httpcore>=1.0.0,<2.0.0
 # Already pulled in by uvicorn[standard]; declared because the channel imports
 # websockets.asyncio.client directly and passes sock=/proxy=, which need 15+.
 websockets>=15.0,<18.0
+# Frontmatter of the bundled SKILL.md playbooks (services/skills). Already
+# pulled in by uvicorn[standard]; declared because services/skills imports it
+# directly (yaml.safe_load only, after refusing anchors, aliases and tags).
+PyYAML>=6.0,<7
 redis>=5.0.0,<6.0.0
 anthropic>=0.40.0,<1.0.0
 openai>=1.10.0,<2.0.0

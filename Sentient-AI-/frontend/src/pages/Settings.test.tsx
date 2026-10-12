@@ -1,8 +1,8 @@
 /**
  * Tests for Settings: they prove the LLM provider choice sends nulls to follow the install
  * default, deletion requires the password and signs out, the Telegram bot token is admin-only, the
- * Server and Payment card sections are owner-only, and a changed purchase cap saves through
- * updateCapabilitySettings.
+ * Server, Payment card and Skills sections are owner-only, and a changed purchase cap saves
+ * through updateCapabilitySettings.
  *
  * Why it exists: Guards against saving a provider the user never tested, deleting an account
  * without its password, or showing a non-owner controls the server would refuse.
@@ -53,6 +53,10 @@ vi.mock("@/services/api", () => {
     // Permissions ▸ Accounts allowed low-risk changes: none unless a test says so.
     listPermissionGrants: vi.fn(async () => []),
     revokePermissionGrant: vi.fn(),
+    // Owner-only Skills section: no bundled skills unless a test says so.
+    listSkills: vi.fn(async () => []),
+    getSkill: vi.fn(),
+    setSkillEnabled: vi.fn(),
     // Owner-only Payment card section: an install with a vault and no card.
     getVaultItems: vi.fn(async () => ({ items: [], available: true, reason: "" })),
     saveVaultCard: vi.fn(),
@@ -95,6 +99,7 @@ import {
   getVaultItems,
   listAppApprovals,
   listPermissionGrants,
+  listSkills,
   listTutorLocks,
   logout,
   removeTelegramToken,
@@ -713,5 +718,35 @@ describe("Settings permission tiers", () => {
     expect(within(region).getByRole("button", { name: "Revoke low-risk changes on School Gmail" })).toBeEnabled();
     const permissions = screen.getByRole("heading", { name: "Permissions" }).closest("section");
     expect(permissions).toContainElement(region);
+  });
+});
+
+describe("Settings skills", () => {
+  afterEach(() => {
+    vi.mocked(getMe).mockReset();
+    vi.mocked(listSkills).mockClear();
+  });
+
+  it("shows the owner the Skills section as its own section after Permissions", async () => {
+    vi.mocked(getMe).mockResolvedValue(user({ is_admin: true }));
+    render(<Settings />);
+
+    const region = await screen.findByRole("region", { name: "Skills" });
+    expect(await within(region).findByText(/no built-in skills/i)).toBeInTheDocument();
+    const permissions = screen.getByRole("heading", { name: "Permissions" }).closest("section");
+    expect(permissions).not.toContainElement(region);
+    expect(
+      permissions!.compareDocumentPosition(region) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(listSkills).toHaveBeenCalled();
+  });
+
+  it("never shows the section, or asks for the skills, for an account that is not the owner", async () => {
+    vi.mocked(getMe).mockResolvedValue(user({ is_admin: false }));
+    render(<Settings />);
+
+    await waitFor(() => expect(screen.getByLabelText("Name")).toHaveValue("Me"));
+    expect(screen.queryByRole("region", { name: "Skills" })).not.toBeInTheDocument();
+    expect(listSkills).not.toHaveBeenCalled();
   });
 });

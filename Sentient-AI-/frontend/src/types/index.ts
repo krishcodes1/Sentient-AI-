@@ -54,6 +54,129 @@ export interface MemoryFilters {
   offset?: number;
 }
 
+// Goals (/api/goals, per account): what the Goals page and the goals.* tools share through
+// services/goals/store.py. Dates without a time (target_date, due_date) are "YYYY-MM-DD".
+export type GoalCategory = "school" | "career" | "health" | "money" | "personal" | "other";
+export type GoalStatus = "active" | "paused" | "completed" | "archived";
+/** A preference shown to the user and the goals skill; it schedules nothing by itself. */
+export type GoalCheckIn = "none" | "daily" | "weekly";
+/** Milestones are never deleted, only dropped (reversible). */
+export type MilestoneState = "open" | "done" | "dropped";
+
+export interface Goal {
+  id: string;
+  title: string;
+  description: string | null;
+  category: GoalCategory;
+  status: GoalStatus;
+  /** One line: where things stand. */
+  current_state: string | null;
+  target_date: string | null;
+  check_in: GoalCheckIn;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+  /** Milestones done, out of the milestones the server counts. */
+  progress: { done: number; total: number };
+}
+
+export interface GoalMilestone {
+  id: string;
+  title: string;
+  due_date: string | null;
+  state: MilestoneState;
+  position: number;
+  done_at: string | null;
+}
+
+/** One progress note: `user` from the Goals page, `agent` from goals.log_progress in a chat. */
+export interface GoalEntry {
+  id: string;
+  note: string;
+  source: "user" | "agent";
+  milestone_id: string | null;
+  created_at: string;
+}
+
+/** GET /goals/{id}: the goal, its milestones in order and its latest progress notes. */
+export interface GoalDetail extends Goal {
+  milestones: GoalMilestone[];
+  entries: GoalEntry[];
+}
+
+export interface GoalMilestoneInput {
+  title: string;
+  due_date?: string;
+}
+
+export interface CreateGoalRequest {
+  title: string;
+  description?: string;
+  category?: GoalCategory;
+  target_date?: string;
+  current_state?: string;
+  check_in?: GoalCheckIn;
+  milestones?: GoalMilestoneInput[];
+}
+
+export interface UpdateGoalRequest {
+  title?: string;
+  description?: string;
+  category?: GoalCategory;
+  status?: GoalStatus;
+  current_state?: string;
+  target_date?: string;
+  clear_target_date?: boolean;
+  check_in?: GoalCheckIn;
+  add_milestones?: GoalMilestoneInput[];
+  complete_milestones?: string[];
+  reopen_milestones?: string[];
+  drop_milestones?: string[];
+}
+
+export interface AddGoalEntryRequest {
+  note: string;
+  milestone_id?: string;
+}
+
+// Skills (/api/skills, owner only): the bundled SKILL.md playbooks and their switches
+// (backend/skills, services/skills).
+/** ok is the only usable status; "changed" means the files no longer match manifest.json. */
+export type SkillStatus = "ok" | "invalid" | "blocked" | "unpinned" | "changed";
+
+/** One scanner finding; `line` is null for a finding about the whole file. */
+export interface SkillFinding {
+  severity: "block" | "warn";
+  rule: string;
+  file: string;
+  line: number | null;
+  message: string;
+}
+
+export interface SkillInfo {
+  name: string;
+  title: string;
+  description: string;
+  category: string | null;
+  version: string | null;
+  license: string | null;
+  source: "bundled";
+  sha256: string;
+  status: SkillStatus;
+  status_reason: string | null;
+  enabled: boolean;
+  /** The tools reading the skill loads into the chat; never a grant. */
+  tools: string[];
+  /** Any one connector satisfies `connectors`; every capability must be on. */
+  requires: { connectors: string[]; capabilities: string[] };
+  findings: SkillFinding[];
+}
+
+/** GET /skills/{name}: the skill plus every file's text, shown as plain text only. */
+export interface SkillDetail extends SkillInfo {
+  files: { path: string; text: string }[];
+}
+
 export type PermissionTier =
   | "auto_approve"
   // "Allow low-risk changes": only actions graded LOW run without asking.

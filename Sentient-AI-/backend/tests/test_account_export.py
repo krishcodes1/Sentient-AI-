@@ -120,6 +120,8 @@ async def test_export_is_valid_json_and_contains_the_account(client, session_fac
     assert {"study_decks", "study_items", "study_quiz_attempts", "study_reviews"} <= set(data)
     # top10:video_transcripts
     assert "media_transcripts" in data
+    # Goals with their milestones and progress notes.
+    assert "goals" in data
 
 
 @pytest.mark.asyncio
@@ -289,3 +291,56 @@ async def test_export_includes_study_decks_items_reviews_and_quizzes(client, ses
     )
     assert [r["rating"] for r in data["study_reviews"]] == [3]
     assert [q["status"] for q in data["study_quiz_attempts"]] == ["active"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("batch_size", [1, 2, 500])
+async def test_export_includes_goals_with_their_milestones_and_notes(
+    client, monkeypatch, batch_size
+):
+    """Each goal comes with its milestones in order and its whole progress
+    log, oldest note first, across batch boundaries; another account's goal
+    never does."""
+    from api.routes import auth as auth_routes
+
+    headers = await _account(client, f"goals{batch_size}@example.com")
+    other = await _account(client, f"goals-other{batch_size}@example.com")
+    made = await client.post(
+        "/api/goals",
+        json={
+            "title": "Run a 5k",
+            "category": "health",
+            "milestones": [{"title": "Run 2k"}, {"title": "Run 5k", "due_date": "2026-12-01"}],
+        },
+        headers=headers,
+    )
+    assert made.status_code == 201, made.text
+    goal = made.json()
+    books = await client.post("/api/goals", json={"title": "Read 12 books"}, headers=headers)
+    assert books.status_code == 201, books.text
+    for n in range(3):
+        noted = await client.post(
+            f"/api/goals/{goal['id']}/entries", json={"note": f"Ran {n + 1}k"}, headers=headers
+        )
+        assert noted.status_code == 201, noted.text
+    theirs = await client.post("/api/goals", json={"title": "Learn the cello"}, headers=other)
+    assert theirs.status_code == 201
+    monkeypatch.setattr(auth_routes, "_EXPORT_BATCH_SIZE", batch_size)
+
+    resp = await client.get("/api/auth/export", headers=headers)
+    data = json.loads(resp.text)  # raises if a boundary broke the document
+
+    assert [g["title"] for g in data["goals"]] == ["Run a 5k", "Read 12 books"]
+    first, second = data["goals"]
+    assert (first["id"], first["category"], first["status"]) == (goal["id"], "health", "active")
+    assert first["progress"] == {"done": 0, "total": 2}
+    assert [(m["title"], m["due_date"], m["position"]) for m in first["milestones"]] == [
+        ("Run 2k", None, 0),
+        ("Run 5k", "2026-12-01", 1),
+    ]
+    assert [e["note"] for e in first["entries"]] == ["Ran 1k", "Ran 2k", "Ran 3k"]
+    assert {e["source"] for e in first["entries"]} == {"user"}
+    assert second["milestones"] == [] and second["entries"] == []
+    assert "Learn the cello" not in resp.text
+    their_export = json.loads((await client.get("/api/auth/export", headers=other)).text)
+    assert [g["title"] for g in their_export["goals"]] == ["Learn the cello"]

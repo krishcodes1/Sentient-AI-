@@ -15,6 +15,7 @@ import {
   Plug,
   Shield,
   Settings as SettingsIcon,
+  Target,
   LogOut,
   X,
 } from "lucide-react";
@@ -29,6 +30,7 @@ const navItems = [
   { to: "/", icon: LayoutDashboard, label: "Gateway", end: true },
   { to: "/chat", icon: MessageSquare, label: "Chat" },
   { to: "/memory", icon: Brain, label: "Memory" },
+  { to: "/goals", icon: Target, label: "Goals" },
   { to: "/connectors", icon: Plug, label: "Connectors" },
   { to: "/audit", icon: Shield, label: "Audit logs" },
   { to: "/settings", icon: SettingsIcon, label: "Settings" },

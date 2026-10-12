@@ -66,6 +66,17 @@ PROTECTED_ROUTES = [
     ("GET", "/api/triggers"),
     ("PATCH", f"/api/triggers/{SOME_ID}"),
     ("DELETE", f"/api/triggers/{SOME_ID}"),
+    # Settings ▸ Skills: the install-wide skill switches (owner only).
+    ("GET", "/api/skills"),
+    ("GET", "/api/skills/goals"),
+    ("PATCH", "/api/skills/goals"),
+    # The Goals page: each account's own goals.
+    ("GET", "/api/goals"),
+    ("POST", "/api/goals"),
+    ("GET", f"/api/goals/{SOME_ID}"),
+    ("PATCH", f"/api/goals/{SOME_ID}"),
+    ("DELETE", f"/api/goals/{SOME_ID}"),
+    ("POST", f"/api/goals/{SOME_ID}/entries"),
 ]
 
 # The /api routes that answer without a signed-in user, each on purpose.
