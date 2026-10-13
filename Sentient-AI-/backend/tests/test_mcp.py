@@ -575,7 +575,7 @@ async def test_connectors_route_mcp_test_endpoint(client, session_factory, monke
         f"/api/connectors/{connector_id}/test", headers=auth_headers(token)
     )
     assert resp.status_code == 200
-    assert resp.json() == {"ok": False, "detail": "server exploded"}
+    assert resp.json() == {"ok": False, "detail": "server exploded", "account": None, "user": None}
 
 
 # ---------------------------------------------------------------------------

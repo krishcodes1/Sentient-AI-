@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from .base import AuthenticationError, ConnectorError
+from .base import AuthenticationError, ConnectorError, ConnectorUnreachable, json_object
 from .definition import AuthSpec, ConnectorDefinition, CredentialField, NetworkSpec, ToolSpec
 from .notion_api.common import API, NOTION_VERSION
 from .notion_api.reads import READ_ACTIONS, ReadsMixin
@@ -82,10 +82,17 @@ class NotionConnector(ReadsMixin, WritesMixin):
     async def health_check(self) -> bool:
         """One cheap authenticated call: the integration's own bot user."""
         try:
-            await self._request("GET", f"{API}/users/me")
-            return True
+            response = await self._request("GET", f"{API}/users/me")
+        except ConnectorUnreachable:
+            self._health_problem = "unreachable"
+            return False
         except ConnectorError:
             return False
+        me = json_object(response)
+        bot = me.get("bot")
+        workspace = bot.get("workspace_name") if isinstance(bot, dict) else None
+        self._remember_identity(account=workspace, user=me.get("name"))
+        return True
 
     async def revoke(self) -> bool:
         # Internal integration secrets have no revoke endpoint (Notion's

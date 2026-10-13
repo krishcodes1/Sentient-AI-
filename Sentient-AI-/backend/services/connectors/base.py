@@ -22,7 +22,7 @@ import time
 from abc import ABC, abstractmethod
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Literal, Optional
 from urllib.parse import quote
 
 import httpcore
@@ -168,6 +168,18 @@ class AuthenticationError(ConnectorError):
     """Raised when authentication fails."""
 
 
+HealthProblem = Literal["unreachable", "wrong_address"]
+"""See ``BaseConnector.health_problem``."""
+
+
+class ConnectorUnreachable(ConnectorError):
+    """Raised when the service did not answer at all (connect error, timeout,
+    transport failure, or the outbound policy refused the host), so nothing
+    is known about the credentials. A health check tells this apart from a
+    refusal, so the user is not sent to make a new code when the address or
+    the network is the problem."""
+
+
 class RateLimitExceededError(ConnectorError):
     """Raised when the rate limit is exceeded."""
 
@@ -202,6 +214,57 @@ class ConnectorResponse:
     data: dict[str, Any]
     sanitized: bool
     execution_time_ms: float
+
+
+# C0 and C1 controls, plus the bidirectional marks, overrides and isolates
+# that can make provider-chosen text display as something else.
+_DISPLAY_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+
+IDENTITY_MAX_CHARS = 100
+
+
+def clean_display_text(value: Any, max_chars: int) -> str:
+    """*value* as one short line of display text, or "" when it is not a string.
+
+    Names a provider chose (a workspace, a school, a user) reach the UI
+    as they are, so control characters become spaces, whitespace runs
+    collapse to one space and the result is cut to *max_chars*.
+    """
+    if not isinstance(value, str):
+        return ""
+    text = " ".join(_DISPLAY_CONTROL_RE.sub(" ", value).split())
+    return text[:max_chars].rstrip()
+
+
+def json_object(response: httpx.Response) -> dict[str, Any]:
+    """*response*'s body when it is a JSON object, else ``{}``. Never raises."""
+    try:
+        body = response.json()
+    except ValueError:  # JSONDecodeError and UnicodeDecodeError both
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+@dataclass(frozen=True)
+class ConnectorIdentity:
+    """Who a health check found at the other end of a connector.
+
+    The connection test shows it as "Connected to <account> as <user>".
+    Both parts are cleaned display text; an empty string means the
+    provider did not say.
+    """
+
+    account: str = ""
+    user: str = ""
+
+    @classmethod
+    def of(cls, *, account: Any = "", user: Any = "") -> Optional[ConnectorIdentity]:
+        """A cleaned identity, or None when neither part has any text."""
+        identity = cls(
+            account=clean_display_text(account, IDENTITY_MAX_CHARS),
+            user=clean_display_text(user, IDENTITY_MAX_CHARS),
+        )
+        return identity if identity.account or identity.user else None
 
 
 @dataclass(frozen=True)
@@ -493,6 +556,10 @@ class BaseConnector(ABC):
         self._network_backend: Optional[httpcore.AsyncNetworkBackend] = None
         # Test seam: retries wait through this, so tests never sleep.
         self._sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+        # What the last successful health check learned (see identity()).
+        self._identity: Optional[ConnectorIdentity] = None
+        # Why the last health check failed, when it could tell (see health_problem()).
+        self._health_problem: Optional[HealthProblem] = None
         self._log = logger.bind(connector=self.name)
 
     # -- Network policy --------------------------------------------------------
@@ -576,7 +643,7 @@ class BaseConnector(ABC):
                 policy=self._network_policy_key,
                 reason=result.reason,
             )
-            raise ConnectorError(
+            raise ConnectorUnreachable(
                 f"Outbound request blocked by network policy: {result.reason}"
             )
         pin_for_request(self._pins, request, result.resolved_ips)
@@ -620,6 +687,28 @@ class BaseConnector(ABC):
     async def health_check(self) -> bool:
         """Return True if the upstream service is reachable and healthy."""
         ...
+
+    def identity(self) -> Optional[ConnectorIdentity]:
+        """The account and user the last successful health check saw.
+
+        None by default. A connector whose health check already receives
+        an identity (Canvas, Slack, Notion, GitHub) records it with
+        ``_remember_identity``; no request is ever made just for this.
+        """
+        return self._identity
+
+    def _remember_identity(self, *, account: Any = "", user: Any = "") -> None:
+        self._identity = ConnectorIdentity.of(account=account, user=user)
+
+    def health_problem(self) -> Optional[HealthProblem]:
+        """Why the last health check failed, when it could tell.
+
+        "unreachable": the service did not answer (network, timeout, policy).
+        "wrong_address": something answered at the configured address, but
+        not this service (Canvas at a school's main site). None: refused, or
+        nothing more is known; the credentials are the likely problem.
+        """
+        return self._health_problem
 
     # -- Registry hooks --------------------------------------------------------
     #
@@ -845,18 +934,18 @@ class BaseConnector(ABC):
                 )
             except httpx.ConnectTimeout:
                 if last_attempt or verb not in IDEMPOTENT_METHODS:
-                    raise ConnectorError(
+                    raise ConnectorUnreachable(
                         f"Could not connect to {self.name}: connection timed out."
                     ) from None
                 await self._sleep(TRANSIENT_BACKOFF_S)
                 continue
             except httpx.TimeoutException:
-                raise ConnectorError(
+                raise ConnectorUnreachable(
                     f"Request to {self.name} timed out after {self._timeout}s."
                 ) from None
             except httpx.ConnectError:
                 if last_attempt or verb not in IDEMPOTENT_METHODS:
-                    raise ConnectorError(f"Could not connect to {self.name}.") from None
+                    raise ConnectorUnreachable(f"Could not connect to {self.name}.") from None
                 await self._sleep(TRANSIENT_BACKOFF_S)
                 continue
             except httpx.TooManyRedirects:
@@ -864,7 +953,7 @@ class BaseConnector(ABC):
             except httpx.HTTPError as exc:
                 # Protocol or transport failure. The type name is enough to
                 # diagnose; httpx messages can quote the URL.
-                raise ConnectorError(
+                raise ConnectorUnreachable(
                     f"Network error talking to {self.name} ({type(exc).__name__})."
                 ) from None
 

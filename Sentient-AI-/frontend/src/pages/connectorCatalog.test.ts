@@ -104,7 +104,7 @@ describe("tokenLinkWaitsFor", () => {
 describe("tokenLinkLabel", () => {
   it("uses the catalog's label, falling back to a generic one", () => {
     expect(tokenLinkLabel(CANVAS)).toBe("Open your Canvas token page");
-    expect(tokenLinkLabel(withAuth({ token_url: "https://a.test" }))).toBe("Get your token");
-    expect(tokenLinkLabel(withAuth({ token_url_label: "  " }))).toBe("Get your token");
+    expect(tokenLinkLabel(withAuth({ token_url: "https://a.test" }))).toBe("Get your code");
+    expect(tokenLinkLabel(withAuth({ token_url_label: "  " }))).toBe("Get your code");
   });
 });

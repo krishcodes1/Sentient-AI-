@@ -19,7 +19,7 @@ from __future__ import annotations
 import re
 from typing import Any, Optional
 
-from .base import AuthenticationError, ConnectorError
+from .base import AuthenticationError, ConnectorError, ConnectorUnreachable, json_object
 from .definition import (
     AuthSpec,
     ConnectorDefinition,
@@ -114,10 +114,15 @@ class GitHubConnector(ReposMixin, IssuesMixin, PullsMixin, WorkflowsMixin, Activ
 
     async def health_check(self) -> bool:
         try:
-            await self._request("GET", f"{API}/user")
-            return True
+            response = await self._request("GET", f"{API}/user")
+        except ConnectorUnreachable:
+            self._health_problem = "unreachable"
+            return False
         except ConnectorError:
             return False
+        # The login, not the display name: it is unique and always set.
+        self._remember_identity(user=json_object(response).get("login"))
+        return True
 
     async def revoke(self) -> bool:
         # GitHub's only revoke endpoint (DELETE /applications/{client_id}/grant)

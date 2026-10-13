@@ -31,6 +31,7 @@ from .base import (
     BaseConnector,
     ConnectorError,
     UserConfirmationRequired,
+    json_object,
     path_segment,
 )
 from .definition import (
@@ -1001,9 +1002,31 @@ class CanvasConnector(BaseConnector):
                 f"{self._base_url}/api/v1/users/self",
                 headers=self._headers(),
             )
-            return resp.status_code == 200
         except Exception:
+            # No answer at all (DNS, connect, timeout, policy): the address or
+            # the network is the problem, not the token.
+            self._health_problem = "unreachable"
             return False
+        if resp.status_code != 200:
+            refused_by_canvas = resp.status_code in (401, 403) and "json" in resp.headers.get(
+                "content-type", ""
+            ).lower()
+            if resp.status_code >= 500:
+                self._health_problem = "unreachable"
+            elif not refused_by_canvas:
+                # Canvas refuses a code with a JSON error. A redirect, a 404 or
+                # an HTML page (a school's main site, or its firewall) means the
+                # address is not a Canvas instance.
+                self._health_problem = "wrong_address"
+            return False
+        profile = json_object(resp)
+        user = profile.get("name")
+        if not isinstance(user, str) or not user.strip():
+            user = profile.get("short_name")
+        # users/self names the person, not the school, so the account is
+        # the instance host the user connected to.
+        self._remember_identity(account=self.instance_host, user=user)
+        return True
 
 
 DEFINITION = ConnectorDefinition(
@@ -1051,7 +1074,7 @@ DEFINITION = ConnectorDefinition(
             ),
         ),
         token_auth_method="bearer_token",
-        notes="base_url is your school's Canvas instance, e.g. https://myschool.instructure.com",
+        notes="Your school's Canvas address, for example https://myschool.instructure.com",
         # Filled from the Canvas URL the user typed: their own profile page,
         # where Canvas issues access tokens.
         token_url="{base_url}/profile/settings",

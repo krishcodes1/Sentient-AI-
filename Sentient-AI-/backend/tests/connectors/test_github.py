@@ -33,6 +33,7 @@ from services.connectors import factory, registry
 from services.connectors.base import (
     AuthenticationError,
     ConnectorError,
+    ConnectorIdentity,
     RateLimitExceededError,
     UserConfirmationRequired,
 )
@@ -259,6 +260,18 @@ async def test_health_check_is_false_on_any_connector_error():
     connector, seen = make_connector(ok({"message": "Bad credentials"}, status=401))
     assert await connector.health_check() is False
     assert len(seen) == 1
+    assert connector.identity() is None
+
+
+@pytest.mark.asyncio
+async def test_health_check_remembers_the_login_not_the_display_name():
+    connector, seen = make_connector(ok({"login": "octocat", "name": "The Octocat"}))
+    assert await connector.health_check() is True
+    assert connector.identity() == ConnectorIdentity(user="octocat")
+    assert len(seen) == 1
+    connector, _ = make_connector(ok(["not", "a", "user"]))
+    assert await connector.health_check() is True
+    assert connector.identity() is None
 
 
 @pytest.mark.asyncio

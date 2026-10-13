@@ -35,9 +35,11 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from services.connectors.base import (
+    IDENTITY_MAX_CHARS,
     AuthenticationError,
     BaseConnector,
     ConnectorError,
+    ConnectorIdentity,
     HardBlockError,
     RateLimiter,
     RateLimitExceededError,
@@ -728,6 +730,43 @@ async def test_canvas_health_check_reflects_upstream_status():
     async with _wired(_canvas(), lambda _r: httpx.Response(500)) as connector:
         await connector.authenticate({"access_token": "tok"})
         assert await connector.health_check() is False
+        assert connector.identity() is None
+
+
+@pytest.mark.asyncio
+async def test_canvas_health_check_remembers_the_school_host_and_the_student():
+    profile = {"id": 1, "name": "Ada Lovelace", "short_name": "Ada"}
+    recorder = _Recorder(_json_ok(profile))
+    async with _wired(_canvas(), recorder) as connector:
+        await connector.authenticate({"access_token": "tok"})
+        assert connector.identity() is None
+        assert await connector.health_check() is True
+        assert connector.identity() == ConnectorIdentity(
+            account="school.instructure.com", user="Ada Lovelace"
+        )
+    assert len(recorder.requests) == 1  # users/self only, nothing extra
+
+    async with _wired(_canvas(), _json_ok({"id": 1, "name": "", "short_name": "Ada"})) as connector:
+        await connector.authenticate({"access_token": "tok"})
+        assert await connector.health_check() is True
+        assert connector.identity() == ConnectorIdentity(
+            account="school.instructure.com", user="Ada"
+        )
+
+    # A body that is not JSON still passes; only the host is known then.
+    async with _wired(_canvas(), lambda _r: httpx.Response(200, content=b"while(1);")) as connector:
+        await connector.authenticate({"access_token": "tok"})
+        assert await connector.health_check() is True
+        assert connector.identity() == ConnectorIdentity(account="school.instructure.com")
+
+
+def test_connector_identity_is_cleaned_display_text():
+    hostile = "  Acme" + chr(0) + "Corp" + chr(0x202E) + "\n\tHQ  "
+    identity = ConnectorIdentity.of(account=hostile, user="x" * 500)
+    assert identity == ConnectorIdentity(account="Acme Corp HQ", user="x" * IDENTITY_MAX_CHARS)
+    assert ConnectorIdentity.of(account=None, user=42) is None
+    assert ConnectorIdentity.of(account=" ", user=chr(7)) is None
+    assert ConnectorIdentity.of(user="ada") == ConnectorIdentity(account="", user="ada")
 
 
 # ---------------------------------------------------------------------------

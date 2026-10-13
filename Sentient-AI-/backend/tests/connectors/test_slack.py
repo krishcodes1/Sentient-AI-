@@ -25,6 +25,7 @@ from services.agent.permissions import ActionCategory
 from services.connectors.base import (
     AuthenticationError,
     ConnectorError,
+    ConnectorIdentity,
     RateLimitExceededError,
     UserConfirmationRequired,
 )
@@ -1130,6 +1131,22 @@ async def test_health_check_calls_auth_test():
     for response in (fail("invalid_auth"), httpx.Response(500)):
         connector, _ = _connector(lambda r, resp=response: resp)
         assert await connector.health_check() is False
+
+
+@pytest.mark.asyncio
+async def test_health_check_remembers_the_workspace_and_bot_user():
+    connector, seen = _connector(lambda r: ok(team="Acme Corp", user="crawler", user_id="U1"))
+    assert connector.identity() is None
+    assert await connector.health_check() is True
+    assert connector.identity() == ConnectorIdentity(account="Acme Corp", user="crawler")
+    assert len(seen) == 1  # no request beyond auth.test
+    # Odd values never break the check; they just leave a part blank.
+    connector, _ = _connector(lambda r: ok(team=["Acme"], user="  "))
+    assert await connector.health_check() is True
+    assert connector.identity() is None
+    connector, _ = _connector(lambda r: fail("invalid_auth"))
+    assert await connector.health_check() is False
+    assert connector.identity() is None
 
 
 @pytest.mark.asyncio

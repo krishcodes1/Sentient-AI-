@@ -22,7 +22,7 @@ import re
 from typing import Any, Optional
 
 from services.agent.permissions import ActionCategory
-from services.connectors.base import ConnectorError, path_segment
+from services.connectors.base import ConnectorError, ConnectorUnreachable, path_segment
 from services.connectors.definition import ToolSpec, _schema
 from services.connectors.shaping import clamp_limit
 
@@ -397,7 +397,7 @@ class WorkflowsMixin(GitHubApiBase):
                 follow_redirects=True,
             )
         except ConnectorError as exc:
-            if type(exc) is not ConnectorError:
+            if type(exc) not in (ConnectorError, ConnectorUnreachable):
                 raise  # authentication and rate-limit errors concern every job
             return "", False, str(exc)
         text = body.content.decode("utf-8", errors="replace")

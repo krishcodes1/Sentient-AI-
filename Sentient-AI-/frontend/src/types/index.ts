@@ -118,6 +118,18 @@ export interface UpdateConnectorRequest {
 export interface ConnectorTestResult {
   ok: boolean;
   detail: string;
+  /** On success, where the check landed (Canvas school address, Slack or Notion workspace), when
+   *  the service says; absent from servers that predate it. */
+  account?: string | null;
+  /** On success, who the connection acts as (Canvas name, Slack bot, GitHub login). */
+  user?: string | null;
+}
+
+/** One result of GET /connectors/canvas/schools: a school and its Canvas host. */
+export interface CanvasSchool {
+  name: string;
+  /** A bare hostname such as "nyit.instructure.com". */
+  domain: string;
 }
 
 export type AuditStatus = "approved" | "blocked" | "pending";
@@ -543,7 +555,7 @@ export interface ConnectorAuthInfo {
   /** The page where the user creates the token they paste: an https URL, or a template whose
    *  leading `{field_key}` is filled from that "url" field (connectorCatalog.tokenLink). */
   token_url?: string;
-  /** That link's text (connectorCatalog.tokenLinkLabel falls back to "Get your token"). */
+  /** That link's text (connectorCatalog.tokenLinkLabel falls back to "Get your code"). */
   token_url_label?: string;
   /** Where the server owner registers the sign-in client whose id goes in backend/.env. */
   client_setup_url?: string;
