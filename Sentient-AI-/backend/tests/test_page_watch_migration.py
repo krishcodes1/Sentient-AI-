@@ -40,8 +40,11 @@ def _inspect(db_path: Path):
 
 
 PAGE_WATCH_MERGE = "0015_merge_page_watches"
-# The single head: the page-watch merge and 0015_app_approvals, joined.
-HEAD = "0016_merge_app_approvals"
+# Joins the page-watch merge and 0015_app_approvals into one line.
+APP_APPROVALS_MERGE = "0016_merge_app_approvals"
+# The single head: the last of the revisions reserved on top of that merge
+# (0017-0024, tests/test_integration_seams.py).
+HEAD = "0024_media_transcripts"
 
 
 def _versions(db_path: Path) -> list[str]:
@@ -64,9 +67,9 @@ def test_0011_keeps_its_parent_and_the_merge_is_the_only_head():
     merge = script.get_revision(PAGE_WATCH_MERGE)
     assert merge is not None
     assert merge.down_revision == ("0014_slack_channel_links", "0011_page_watches")
-    head = script.get_revision(HEAD)
-    assert head is not None
-    assert head.down_revision == (PAGE_WATCH_MERGE, "0015_app_approvals")
+    joined = script.get_revision(APP_APPROVALS_MERGE)
+    assert joined is not None
+    assert joined.down_revision == (PAGE_WATCH_MERGE, "0015_app_approvals")
     assert script.get_heads() == [HEAD]
 
 

@@ -227,8 +227,12 @@ class NetworkPolicy:
 # interactive /login/oauth2/auth page is browser-side and stays blocked.
 # Shared between the hosted (*.instructure.com) and self-hosted cases so
 # a self-hosted instance is never reachable at paths the hosted one is
-# not.
-_CANVAS_PATHS = ["/api/v1/", "/login/oauth2/token"]
+# not. /files/ is a course file's download address (canvas.get_file_text;
+# top10:file_extraction); the connector registry's policy says the same.
+_CANVAS_PATHS = ["/api/v1/", "/login/oauth2/token", "/files/"]
+
+# Policy key of the unauthenticated Canvas school search (see below).
+CANVAS_SCHOOL_SEARCH_POLICY = "canvas_school_search"
 
 # Default network policies per connector (deny-by-default)
 DEFAULT_POLICIES: dict[str, NetworkPolicy] = {
@@ -269,6 +273,17 @@ DEFAULT_POLICIES: dict[str, NetworkPolicy] = {
                 "/api/v1/crypto/marketdata/",
             ],
         },
+    ),
+    # Not a connector: the Canvas school finder
+    # (services/connectors/canvas_schools.py) reads Instructure's public
+    # school directory without credentials. Its own key keeps that read off
+    # the Canvas connector's *.instructure.com allowlist: one host, HTTPS
+    # only, the one search path. The registry never derives or replaces it.
+    CANVAS_SCHOOL_SEARCH_POLICY: NetworkPolicy(
+        connector_type=CANVAS_SCHOOL_SEARCH_POLICY,
+        allowed_hosts=["canvas.instructure.com"],
+        allowed_paths={"canvas.instructure.com": ["/api/v1/accounts/search"]},
+        https_only=True,
     ),
 }
 

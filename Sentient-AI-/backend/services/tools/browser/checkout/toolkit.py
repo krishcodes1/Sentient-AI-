@@ -189,6 +189,17 @@ def _refusal(rule: str, message: str) -> dict[str, Any]:
     return {"ok": False, "refused": True, "rule": rule, "error": message}
 
 
+def _new_checkout_id() -> str:
+    """16 random hex characters for a card and its ledger rows, never all
+    digits: the audit log redacts a 13-19 digit run that stands alone as a
+    card number, and a row whose id was redacted no longer pairs with its
+    checkout."""
+    while True:
+        checkout_id = secrets.token_hex(8)
+        if not checkout_id.isdigit():
+            return checkout_id
+
+
 def _log_failure(event: str, exc: BaseException, *, detail: bool = True, **fields: Any) -> None:
     """A warning with the exception's type and, unless *detail* is off,
     its text with Playwright's call log, any quoted fill value and every
@@ -476,7 +487,7 @@ class BrowserCheckoutToolkit:
             return _refusal(
                 "check_failed", "Could not read the checkout page, so nothing was done. Try again."
             )
-        checkout_id = secrets.token_hex(8)
+        checkout_id = _new_checkout_id()
         self._purge_expired()
         self._pending[user_id] = _Pending(
             checkout_id=checkout_id,

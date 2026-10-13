@@ -61,6 +61,8 @@ DOCS_ACTIONS: tuple[ToolSpec, ...] = (
         _schema(title={"type": "string", "required": True}, text={"type": "string"}),
         policy_key="google_docs",
         required_scope="docs.write",
+        risk="low",
+        low_risk_note="create new Google Docs",
     ),
     ToolSpec(
         "append_text",

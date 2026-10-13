@@ -70,6 +70,7 @@ Still open: a Telegram `/stop` writes no audit row of its own (the web stop's `s
 - `memory.remember` (capability `save_memories`, on by default): saves one fact the user stated about themselves, always through the approval card showing the exact text; refuses secrets (`services/tools/memory.py:looks_like_secret`), duplicates, and memory that is switched off or full.
 - Page watch: `watch.create`/`list`/`delete` (capability `page_watch`, off by default, available only while Telegram can deliver the alerts). Create and delete go through the approval card; the sweeper (`services/notifications/page_watch.py`, wired in `main.py` next to `ReminderService`) checks each page on its interval with leased claims, a guarded fetch and error backoff, and messages the owner on Telegram when the text changes. Migration `0011_page_watches` (on 0009), joined with the connectors line by `0015_merge_page_watches`.
 - The offered-tool array (`context_manager.select_offered_tools`, 24 tools, with `tools.find` for the rest) never offers a reminder or page-watch create without the tools that list and undo what it makes (`UNDO_COMPANIONS`); `memory.remember` and the page-watch tools are built-in starters, and `canvas.get_upcoming` is a Canvas starter.
+- When the starters do not all fit, each skill's entry point (`tool_registry.LEAD_STARTER_TOOLS`: the tool its prompt playbook names, e.g. `knowledge.search`, `schedule.create`, `video.transcript`, `desktop.observe`/`desktop.act`) and each connected account's first starter go first; second tools (`schedule.briefing`, `study.review`, extra reads, `web.screenshot`, the installer) give way (`tests/test_offered_tools.py`).
 
 ## Track D — Scheduling and automations
 | ID | Item | Where | Done when | Size |
@@ -125,3 +126,216 @@ Still open: a Telegram `/stop` writes no audit row of its own (the web stop's `s
 3. **C1** — Google OAuth fix (an existing connector that currently dies in an hour).
 4. **E1** — brand artwork (design, no code conflicts).
 5. **G1 + G3** — SQLite default and serving the SPA (the two prerequisites for the native installer).
+
+<!-- top10:secret_pii_redaction -->
+**F6 shipped (top-10 `secret_pii_redaction`).** One detector and policy table in
+`backend/services/security/` (`secrets.py` holds every format audit.py and
+memory.py knew plus provider keys, bot and Canvas tokens, PEM keys, an entropy
+check on `KEY=value`, cards with Luhn and issuer prefix, IBAN, SSN/ITIN, stated
+passport and licence numbers, and contact details). Memory writes (the tool and
+`POST`/`PATCH /api/memories`, now 422) are refused; audit rows and logs are
+masked; Telegram and Slack text and cards are masked (the card digest still
+hashes the real arguments); every tool call carrying a key, card, bank or ID
+number is refused (`secret_guard`); and a floor that cannot be switched off
+masks those in every model request. The owner switch "Hide personal details
+from the AI provider" (`hide_personal_details`, on by default) sends contact
+details to cloud providers as `[[EMAIL_1@uni.edu]]`-style placeholders that are
+restored in replies and approved actions. Design:
+`docs/superpowers/specs/2026-09-30-secret-pii-redaction-design.md`.
+
+<!-- top10:file_extraction -->
+### File extraction (top10) status and follow-ups
+
+- **A3 — done** (documents, captions and photos): Telegram documents and photos reach the agent (`telegram.py` media routes, `build_chat_applier` `files=` / `images=`); Slack DM `file_share` too. Web chat uploads PDF, Word, PowerPoint, Excel, CSV, text, Markdown, HTML and JSON files; connectors and `web.fetch_page` read PDF and Office files as sections.
+- **Deferred to a follow-up PR (phase 4, as the plan allowed):** local OCR of scanned pages (`local_ocr` ALLOWLIST entry, Windows.Media.Ocr / Apple Vision in the worker, `ReportContext.local_ocr_installed`), the `scan_vision` capability with `files.view_page` and `VISION_ONLY_TOOLS`, and the `user_file_pages` table. Until then scanned pages are reported as unread (`scanned_pages_unread`) and the model is told never to guess them. `Installable.native_only` / `platforms` already exist for that entry.
+- Follow-ups: a Files page in Settings (list / forget uploads); ODF (.odt/.ods/.odp) and RTF/EPUB readers; watching PDFs with page watch; a per-model vision flag for Ollama; local OCR of screenshots so PromptGuard can scan pixel text; live checks against a real Canvas (verifier URL, InstFS/S3 redirect hosts) and Slack `files:read` on existing apps.
+- `canvas.list_files` is not a starter tool: Canvas already declares the registry's maximum of four; the model reaches it with `tools.find`.
+
+<!-- top10:scheduler_briefing -->
+### D1 status: scheduled tasks and the daily briefing (top10 `scheduler_briefing`)
+
+**Done, with one deliberate deviation from the D1 row above (an owner decision).** D1 asked
+for an `agent_turn` payload on the reminders table driven by croniter/APScheduler. It ships
+instead as a separate `scheduled_tasks` table (migration `0017_scheduled_tasks`) with
+standard-library recurrence (`services/scheduler/recurrence.py`, zoneinfo only) on one shared
+poll loop (`services/notifications/sweeper.py` `SweepLoop`, which page watch now uses too).
+There is no croniter, no APScheduler and no second scheduler engine. Reminders keep their
+one-shot claim; a daily run needs a budget, a history (`automation_runs`), pausing and an error
+count, which do not fit that row. Plain recurring reminders are a small follow-up that reuses
+`recurrence.py`.
+
+- The owner turns on "Scheduled tasks and daily briefing" (`scheduled_tasks`, off by default).
+  `schedule.create` / `schedule.briefing` / `schedule.pause` / `schedule.delete` are always
+  approval cards; `schedule.list` is a read.
+- Runs are unattended agent turns under a fence (`services/agent/unattended.py`,
+  `services/automation/`): only the listed reads run, listed writes only park a 180-minute
+  card whose approval runs that one call and resumes no turn, everything else is refused,
+  web reads steered by tool results are refused, and each run and each day has a budget
+  (5 cents a run, 25 cents a day, 24 runs a day by default; the owner changes them under the
+  switch in Settings → Permissions). A run never counts against its own budget, and the wait
+  for one of the shared runner's two slots is not part of a run's deadline: a scheduled run
+  waits up to 5 minutes (else it is skipped as `skipped_busy`, not a failure), a trigger run
+  20 seconds (else its events go back to the queue).
+- A nudge whose switch is off moves on to its next time (never made up later), and one whose
+  renderer is gone is stopped, so neither crowds the due tasks out of the sweeper's scan.
+- The briefing is built from direct reads (Canvas, calendar, optionally mail sender and
+  subject only, a news topic) with an optional three-line overview (off by default).
+- Results go to the owner's linked Telegram chat and Slack DM and to a web conversation
+  "Scheduled: <label>". Telegram: `/schedules`, `/briefing`, `/timezone`; Slack: the same
+  words. REST: `/api/schedules` (what the D2 page will use).
+- "Every weekday at 8am summarise Canvas" runs: that is D1's done-when.
+
+<!-- top10:tutor_mode -->
+
+**C12 — Tutor mode (top-10 #4, research item 109). Shipped on the top10 branch.** A per-conversation Socratic mode: the chat guides with questions and escalating hints, checks the student's steps and never hands over a final answer, full solution, finished code or finished essay for schoolwork, while logistics (due dates, grades, planning) stay normal.
+
+- Switching: `/tutor on|off|status` on the web and Telegram, bare `tutor on|off|status` in a Slack DM (never a model call), `PUT /api/agent/conversations/{id}/tutor`, or the model's runtime built-in `tutor.start` (it can only turn the mode on; there is no `tutor.stop`).
+- Owner locks (`tutor_locks`, Settings ▸ Permissions ▸ Tutor locks, owner only): a Canvas course (id, code, name, aliases) or a whole account, for one account or every account. A course lock engages in a chat, permanently, when the person's message names the course, a Canvas call's `course_id` is the course, or a page URL has `/courses/<id>/`. Nobody lifts a lock from a chat, a channel or a tool.
+- While on: the fixed `<tutor_mode>` block ends the system message (no owner or Canvas text in it); `canvas.submit_assignment` is withheld at offer, dispatch (`tutor_mode` policy) and approval; `browser.act` is refused before its card on Canvas quiz, assignment and discussion pages (`tutor_rule` / `graded_work_page`). Reads are never restricted.
+- One capability, `tutor_mode` (on by default, low risk); off means no offer, no block, nothing withheld and every lock dormant.
+- Code: `services/tutor/`, `api/routes/tutor.py`, `components/TutorLocks.tsx`; migration `0019_tutor_mode`.
+- Unattended runs: scheduled and trigger runs carry their conversation's tutor state (`services/automation/turns.py` passes `tutor=ctx.tutor` and stores a lock the run engaged), so account and course locks apply with nobody watching; `tutor.*` itself is outside every unattended fence.
+- Still open: a Chat.tsx "Tutor" pill backed by the GET/PUT route; New Quizzes (LTI) pages and other LMSs are not covered by the graded-page rule; honest limits: a guardrail, not proctoring (`/new` starts an unlocked thread until the course is named again, unless an account lock applies).
+
+<!-- top10:knowledge_base -->
+### Knowledge base (top10 `knowledge_base`, research item 97) status and follow-ups
+
+**Done.** Per-user collections of saved documents, searched with a pure-Python BM25 index held
+in plain tables (`kb_collections`, `kb_documents`, `kb_chunks`, `kb_postings`, `kb_embeddings`;
+migration `0020_knowledge_base`), so ranking is the same on SQLite and Postgres with no pgvector,
+FTS5, tsvector or sqlite-vec. Passages cite by page, slide, sheet or section ('Syllabus.pdf, p. 3').
+
+- "Knowledge base (your documents)" (`knowledge_base`, on by default) gates `knowledge.search`,
+  `knowledge.read`, `knowledge.list` (reads) and `knowledge.add`, `knowledge.remove` (always an
+  approval card). Sources: an upload's `file_id`, a public URL (needs "Browse the web"), a
+  connected app's files read through that connector's own READ action (Drive, OneDrive, Canvas
+  `get_file_text`, Notion `get_page`), or a note. Limits (documents, MB of text, MB per file,
+  embedding tokens a day) are the capability's settings.
+- Every passage is redacted (the INDEX policy) and PromptGuard-scanned before it is stored; a
+  flagged passage is kept but withheld (never returned, never embedded).
+- "Smarter knowledge search (meaning index)" (`knowledge_semantic`, off by default) adds a vector
+  index built by a background sweeper with the install-wide provider's embedding model (Gemini,
+  OpenAI) or Ollama (`KB_EMBEDDINGS=ollama`); search fuses it with BM25 (RRF). Other providers
+  keep keyword search.
+- Telegram: a document captioned `/kb <collection>` is saved (the linked user's own act).
+- Deviations from the design, per the build brief: no Knowledge web page and no upload route
+  (files come from the chat composer's uploads), and no connector `fetch_for_index` path.
+- Follow-ups: a Knowledge page (browse, rename, delete, view withheld passages); Slack file-share
+  ingest; a `<knowledge_base>` prompt block listing collections; linking a collection to a Canvas
+  course (`course_ref` is stored but unused); counting embedding spend in B2 budgets; more
+  embedding providers (Mistral); numpy as an optional `fast_vector_search` install.
+
+<!-- top10:flashcards_quizzes -->
+### Flashcards and practice quizzes (top10 `flashcards_quizzes`)
+
+**Done.** A built-in `study` family behind the "Flashcards and practice quizzes" switch (off by
+default, low risk). The agent turns the user's material (pasted notes, `files.read`, knowledge
+search, Canvas, Drive, Notion) into stored decks of cards and multiple-choice items with an
+explanation and a note on why each wrong option is wrong (migration `0021_study`).
+- Scheduling is a deterministic in-house SM-2 (`services/study/srs.py`) with a daily new-card
+  cap; no fsrs, no genanki.
+- Reviews and quizzes run in chat (`study.review`, `study.quiz`: quiz answers stay server-side
+  and choices are graded in code), and with no model on Telegram (`/decks`, `/review`, `/quiz`,
+  `/export`, buttons plus `/show` ... `/end` fallbacks) and in Slack DMs (keywords).
+- The daily "cards are due" reminder is a scheduler nudge (`study_due` renderer), not a second
+  scheduler: counts and deck titles only. `study.settings` turns it on or off.
+- Export as an Anki TSV or a CSV through a one-time 10-minute `cse_` link or `/export`.
+- Only `study.delete` has a card; saving, editing, reviews, quizzes and settings run without one
+  (like `reminders.create`).
+- Left for later: native `.apkg` export (genanki), FSRS, AnkiConnect push, Slack Block Kit
+  buttons and file export, and a model-free web review page.
+
+<!-- top10:event_triggers -->
+### D4 — App-event triggers (top10 `event_triggers`, research item 19)
+
+**Done.** "When X happens in a connected app, tell me, or run this task", owner-approved rules
+checked by a model-free sweeper (`services/notifications/event_triggers.py`, on the shared
+`SweepLoop`) through each trigger's own connector row and its existing READ actions (scopes,
+rate limits, token refresh and the network policy all apply). Migration `0022_event_triggers`
+(`event_triggers`, `trigger_events`); a trigger dies with its connector row.
+
+- Sources: new mail from named senders or with a subject (Gmail, Outlook), Canvas
+  announcements, new assignments and grades, a calendar event about to start (Google,
+  Outlook), a new file in a Drive or OneDrive folder, and a page watch's change. The first
+  check only records a baseline; items are deduplicated by hashed ids; at most 5 per check
+  ("…and N more"). New connector reads: `canvas.get_announcements`,
+  `canvas.get_recent_grades`, and `list_folder(newest_first)` on Drive and OneDrive.
+- Two switches, both off by default: "Tell me when something happens in my apps"
+  (`event_triggers`, needs Telegram or Slack) and "Run a task when something happens in my
+  apps" (`trigger_runs`, high risk, gates `mode=run_task`).
+- notify (the default): a fixed-format message built in code, defanged, subjects PromptGuard
+  flags withheld, never a mail body, no model call. run_task: one unattended run through the
+  scheduler's runner and budget (the source connector's reads, its writes only as 180-minute
+  approval cards when allowed, the facts as untrusted seed data, 4 rounds, a per-trigger daily
+  cap); a mail task needs an exact sender allowlist, re-checked on the parsed address.
+- `triggers.create` / `update` / `delete` are always approval cards (the account is pinned on
+  the card); `triggers.list` and `triggers.history` are reads. No unattended run can create
+  or change a trigger. Telegram `/triggers` (Pause/Resume buttons, "/triggers delete 2 yes"),
+  Slack "triggers …", REST `GET/PATCH/DELETE /api/triggers` (for the D2 page).
+- Still open: webhooks (D3) could queue `trigger_events` later; more sources (GitHub review
+  requests, Slack mentions, Notion edits); SPF/DKIM checks before trusting a From header;
+  quiet hours; a web page for triggers (D2); `web.*` in trigger runs once F2's taint check
+  for web calls ships.
+
+<!-- top10:permission_tiers -->
+### F4 and item 128: risk grades, the low-risk tier and 7-day grants (top10 `permission_tiers`)
+
+**F4: the tightening half of "argument-aware confirmation" is done; sends are never loosened.**
+Every connector call is graded LOW, MEDIUM or HIGH in code (`services/agent/risk.py`) from its
+catalog entry and the arguments sent. A HIGH call never runs without a card under any tier, so
+`auto_approve` no longer runs invitations (guests on an event), side-door deletes (Gmail TRASH or
+SPAM, an Outlook move to Deleted Items or Junk), public gists or repositories, or EXECUTE actions
+(`github.rerun_failed_jobs`). Four actions that speak for the user became `always_confirm`
+(`canvas.submit_assignment`, both `respond_to_invite`, `slack.invite_to_channel`), extending
+connectors spec §4.4 by its own criteria. Still open from F4: shell side effects, and a general
+"new recipient" rule beyond invitations (every send still asks).
+
+**128: done.** A per-connection tier "Allow low-risk changes" (`low_risk`, migration
+`0023_permission_grants`) and 7-day grants from a card ("Allow low-risk changes on <account> for
+7 days"; Settings, Telegram `/grants`, Slack `grants`) run only LOW calls without a card, at most
+10 a turn, never in an unattended turn, never after a PromptGuard-flagged result, with an executor
+backstop and a "Done without asking" line on the reply. The owner switch "Make low-risk changes
+without asking" is on by default (owner decision; it loosens nothing by itself). Archive and
+mark-read stay MEDIUM in v1 (owner decision).
+
+Follow-ups: the per-turn cap and the 7-day length are constants, not owner settings; F1's panic
+button should also call `PermissionGrantStore.revoke_all`; the tripwire does not suspend weekly
+desktop app approvals (weekly spec unchanged); the account export does not list grants.
+
+<!-- top10:voice_notes -->
+### Voice notes (top10) status and follow-ups
+
+- **A4 — done** (sized L, not M: the killable secret-free worker, the forwarded-audio trust handling and the provider audio block): a Telegram voice note or audio file (at most 20 MB and 10 minutes) is transcribed, echoed silently ("🎤 Heard: “…”"), then run through the normal `build_chat_applier` turn. Two switches, both off by default: **Voice notes, transcribed on this computer** (`voice_notes`, faster-whisper base in a worker process, installed through the `speech_to_text` ALLOWLIST entry; wins whenever it is on, never falls back to the cloud) and **Voice notes, transcribed by your AI provider** (`voice_notes_cloud`, Gemini audio through `complete_once`; ogg, mp3, wav and flac only, up to 14 MB). The owner's own non-forwarded note counts as typed text; forwarded notes and audio files are PromptGuard-scanned (withheld when flagged) and fenced as shared content (`services/agent/shared_content.py`), which also taints writes. Audio stays in memory only. Quotas (10 notes per 10 minutes, 60 audio minutes a day) are in memory and reset on restart. Docker: build with `WITH_SPEECH_TO_TEXT=1`.
+- Follow-ups: Slack audio clips (today a text reply; needs the files-pri download and the same service), OpenAI / Groq / Mistral `/audio/transcriptions` engines with per-minute pricing, a web mic/upload button, audio token pricing (Gemini audio is priced at the text rate), owner-editable quotas, and a model-size choice (base vs small).
+
+<!-- top10:video_transcripts -->
+### Video and podcast transcripts (top10 `video_transcripts`, research id 98)
+
+**Phase 1 done.** `video.transcript` turns a link into timestamped passages the model summarises
+and cites (M:SS); `video.list` lists the user's saved transcripts. The switch is "Summarise videos
+and podcasts" (`video_transcripts`, on by default, low risk, needs "Browse the web").
+
+- Sources, cheapest and most faithful first: a podcast feed's `<podcast:transcript>` (Apple
+  Podcasts links resolved through the public iTunes lookup), a lecture page's `<track>` captions,
+  a captions file (VTT, SRT, SBV, TTML/DFXP, Podcast-Index JSON, HTML, plain text), then YouTube.
+- **YouTube is never fetched.** youtube.com's robots.txt disallows `/api/` (timedtext) and
+  `/youtubei/`, the terms forbid automated access, and `captions.download` needs edit rights on
+  the video. Crawler's only YouTube request is the public oEmbed endpoint (title, channel, a 404
+  or private video caught before any spend), enforced on every hop by the toolkit's client; the
+  video itself is read by the turn's own provider when that is Gemini (its documented YouTube URL
+  input: 0.25 fps, low media resolution, a JSON schema, no tools), never with the install's
+  Gemini key behind another provider. No yt-dlp, youtube-transcript-api or pytube, and no browser
+  fallback: a 403, 429 or bot check is reported. `web.fetch_page` answers a YouTube link with a
+  pointer to `video.transcript`, and `web.research` skips YouTube results.
+- Limits (the capability's settings): 45 provider minutes per call (verbatim a third), 240 per
+  user per day counted from the billed seconds stored on the rows, transcripts kept 14 days after
+  their last use (200 per user, least recently used first out; `TranscriptJanitor` every 6 h).
+  The provider read's tokens are added to the turn's usage and cost (`services/agent/turn_context.py`),
+  so the cost footer, the task cap and an unattended run's budget count it.
+- Phase 2 (audio transcription through voice_notes' engine) is a follow-up after voice_notes
+  merges: until then an episode or link with no published text answers "This episode has no
+  published transcript; transcribing audio is not available yet."
+- The owner sets the three limits under the switch in Settings → Permissions
+  (`CapabilitySettings.tsx`, as for scheduled tasks and the knowledge base).
+- Follow-ups: a bundled lecture-notes skill; lecture recordings behind Canvas LTI tools
+  (Studio, Panopto, Kaltura).

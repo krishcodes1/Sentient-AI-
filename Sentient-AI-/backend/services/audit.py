@@ -43,7 +43,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import uuid
 from typing import Any, Callable, Optional
 
@@ -54,6 +53,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.security import compute_audit_hash
 from models.audit import AuditLog, AuditStatus
 from models.user import User
+from services.security.policies import AUDIT
+from services.security.redact import contains, redact_obj
 
 logger = structlog.get_logger(__name__)
 
@@ -62,76 +63,25 @@ logger = structlog.get_logger(__name__)
 # Sensitive-data sanitizer
 # ------------------------------------------------------------------ #
 
-_SENSITIVE_KEYS = re.compile(
-    r"(token|password|passwd|secret|api[_-]?key|access[_-]?key|"
-    r"authorization|credential|private[_-]?key|client[_-]?secret|"
-    r"session[_-]?id|cookie|bearer|refresh[_-]?token|ssn|"
-    r"credit[_-]?card|card[_-]?number|cvv|cvc|"
-    # OAuth PKCE verifier, and a device code only at the end of the key, so
-    # "device_code_url" (a public address) is kept.
-    r"code[_-]?verifier|device[_-]?code(?![_-]?[a-z0-9]))|"
-    # OAuth authorization codes and states, matched as the WHOLE key only:
-    # a substring match would also hit "statement", "zip_code" or "barcode".
-    r"^(?:code|state|oauth[_-]?(?:code|state)|auth[_-]?code)$",
-    re.IGNORECASE,
-)
-
-# Token formats redacted wherever they appear inside a string. Every
-# alternative starts with a fixed prefix, and the prefixes that also occur
-# in ordinary text (secret_, ntn_, 1//) carry a long body floor, so a word
-# such as "secret_santa" survives. A match runs to the end of the token.
-_SENSITIVE_VALUE_PATTERNS = re.compile(
-    # A full JWT or JWE (header.payload.signature and beyond), or a bare header.
-    r"(?:eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+){0,3})|"
-    r"(?:sk-[A-Za-z0-9]{20,})|"                    # OpenAI-style keys
-    r"(?:github_pat_[A-Za-z0-9_]{22,})|"           # GitHub fine-grained PATs
-    r"(?:gh[opusr]_[A-Za-z0-9]{36,})|"             # GitHub classic, OAuth, app tokens
-    r"(?:xox[abepr]-[A-Za-z0-9-]{10,})|"           # Slack bot, user, refresh tokens
-    r"(?:xapp-[A-Za-z0-9-]{10,})|"                 # Slack app-level tokens
-    r"(?:secret_[A-Za-z0-9]{32,})|"                # Notion integration secrets (legacy)
-    r"(?:ntn_[A-Za-z0-9]{32,})|"                   # Notion integration tokens
-    r"(?:ya29\.[A-Za-z0-9_-]{20,})|"               # Google OAuth access tokens
-    r"(?:(?<![A-Za-z0-9/])1//[A-Za-z0-9_-]{30,})|"  # Google OAuth refresh tokens
-    r"(?:GOCSPX-[A-Za-z0-9_-]{20,})|"              # Google OAuth client secrets
-    # Microsoft: personal-account access tokens are opaque "EwB..." blobs
-    # (standard base64, hundreds of chars); personal-account refresh tokens
-    # and codes look like "M.C5xx_BAY.0.U.<body>"; work and school (Entra ID
-    # v2) refresh tokens start "0.A" or "1.A". Work and school access tokens
-    # are JWTs (above). Each needs a long unbroken body, so "EwB", "M.C."
-    # or "version 1.A" in prose is kept. A match never ends on a dot, so
-    # the full stop after a token in a sentence survives.
-    r"(?:(?<![A-Za-z0-9+/])EwB[A-Za-z0-9+/=_-]{100,})|"
-    r"(?:(?<![A-Za-z0-9.])M\.[CR][0-9]{1,4}_[A-Za-z0-9]{2,8}\.[A-Za-z0-9!*$._-]{29,}[A-Za-z0-9!*$_-])|"
-    r"(?:(?<![A-Za-z0-9.])[01]\.A[A-Za-z0-9_*.-]{99,}[A-Za-z0-9_*-])|"
-    r"(?:AKIA[A-Z0-9]{16})|"                       # AWS access keys
-    r"(?:\b[0-9]{13,19}\b)",                        # Credit card numbers
-    re.ASCII,
-)
+# The token formats and the key-name rule this sanitizer applies live in
+# services/security (secrets.RULES and policies.AUDIT_KEY_NAMES), shared with
+# memory, the logs, the chat channels, tool arguments and the model request,
+# so each format is defined once (backlog F6).
 
 
 def contains_sensitive_value(text: str) -> bool:
     """True when *text* holds a value ``_sanitize`` would redact: a JWT, an
-    API or access key, or a card-length number. For a writer that must
-    refuse such a value outright rather than store it redacted (the agent's
-    memory.remember: a memory is sent with every future prompt)."""
-    return bool(_SENSITIVE_VALUE_PATTERNS.search(text))
+    API or access key, a card-length number, a stated password, an ID
+    number. For a writer that must refuse such a value outright rather than
+    store it redacted. A detector error counts as True."""
+    return contains(text, AUDIT)
 
 
 def _sanitize(data: Any) -> Any:
-    """Recursively strip sensitive values from data before storage."""
-    if isinstance(data, dict):
-        sanitized = {}
-        for key, value in data.items():
-            if _SENSITIVE_KEYS.search(str(key)):
-                sanitized[key] = "***REDACTED***"
-            else:
-                sanitized[key] = _sanitize(value)
-        return sanitized
-    if isinstance(data, list):
-        return [_sanitize(item) for item in data]
-    if isinstance(data, str):
-        return _SENSITIVE_VALUE_PATTERNS.sub("***REDACTED***", data)
-    return data
+    """Recursively strip sensitive values from data before storage: the
+    whole value of a sensitive key name, and every key, token, card, bank
+    or ID number inside a string (policy AUDIT; fails closed per string)."""
+    return redact_obj(data, AUDIT)
 
 
 def sanitize_request_data(data: Any) -> str:
@@ -161,6 +111,47 @@ _LENGTH_ONLY_ARGUMENTS: dict[tuple[str, str], frozenset[str]] = {
     ("desktop", "act"): frozenset({"text"}),
     ("browser", "act"): frozenset({"text", "fields"}),
     ("memory", "remember"): frozenset({"content"}),
+    # top10:secret_pii_redaction
+
+    # top10:file_extraction
+
+    # top10:scheduler_briefing
+    # A scheduled prompt and a briefing's topic are the owner's own text,
+    # kept in the task row they can delete; the log keeps their length.
+    ("schedule", "create"): frozenset({"prompt"}),
+    ("schedule", "briefing"): frozenset({"topic"}),
+
+    # top10:tutor_mode
+
+    # top10:knowledge_base
+    # A note saved to the knowledge base is the user's own text, kept in the
+    # knowledge base they can delete; the log keeps its length.
+    ("knowledge", "add"): frozenset({"text"}),
+
+    # top10:flashcards_quizzes
+    # Card text comes from the user's study material and is kept in the deck
+    # they can edit or delete; the log keeps how many items a save held and the
+    # length of each edited text field.
+    ("study", "save"): frozenset({"items"}),
+    ("study", "edit"): frozenset(
+        {"title", "course", "front", "back", "choices", "explanation", "choice_notes", "tags"}
+    ),
+
+    # top10:event_triggers
+    # A trigger's prompt is the owner's own text and its sender and subject
+    # filters name people and mail; the trigger row (which they can delete)
+    # keeps them, the log keeps their length. A change card's snapshot of the
+    # trigger (_trigger) holds the same, so it is not kept at all.
+    ("triggers", "create"): frozenset({"prompt", "senders", "subject_contains"}),
+    ("triggers", "update"): frozenset({"prompt", "senders", "subject_contains", "_trigger"}),
+    ("triggers", "delete"): frozenset({"_trigger"}),
+
+    # top10:permission_tiers
+
+    # top10:voice_notes
+
+    # top10:video_transcripts
+
 }
 
 
@@ -172,21 +163,35 @@ def _tool_key(tool: str) -> tuple[str, str]:
     return connector.split("__", 1)[0].strip(" ."), action.strip()
 
 
-def _length_marker(value: Any) -> str:
+def _length_marker(value: Any, *, count: bool = False) -> str:
+    if count and isinstance(value, list):
+        return "<1 item>" if len(value) == 1 else f"<{len(value)} items>"
     if not isinstance(value, str):
         return "***REDACTED***"
     return "<1 character>" if len(value) == 1 else f"<{len(value)} characters>"
 
 
+# Length-only fields that are lists of records, kept as their item count
+# ("<12 items>") rather than hidden outright (top10:flashcards_quizzes:
+# study.save's items).
+_COUNT_ONLY_ARGUMENTS: dict[tuple[str, str], frozenset[str]] = {
+    ("study", "save"): frozenset({"items"}),
+}
+
+
 def redact_tool_arguments(tool: str, arguments: Any) -> Any:
     """*arguments* of a call to *tool* as an audit row stores them: the
     fields in ``_LENGTH_ONLY_ARGUMENTS`` replaced by their length
-    (``"<14 characters>"``), everything else untouched."""
-    fields = _LENGTH_ONLY_ARGUMENTS.get(_tool_key(tool))
+    (``"<14 characters>"``, or ``"<3 items>"`` for a list in
+    ``_COUNT_ONLY_ARGUMENTS``), everything else untouched."""
+    key_of_tool = _tool_key(tool)
+    fields = _LENGTH_ONLY_ARGUMENTS.get(key_of_tool)
     if not fields or not isinstance(arguments, dict):
         return arguments
+    counted = _COUNT_ONLY_ARGUMENTS.get(key_of_tool, frozenset())
     return {
-        key: _length_marker(value) if key in fields else value for key, value in arguments.items()
+        key: _length_marker(value, count=key in counted) if key in fields else value
+        for key, value in arguments.items()
     }
 
 
@@ -465,6 +470,66 @@ _EVENT_STATUS: dict[str, AuditStatus] = {
     # that approval (services.agent.app_approvals).
     "app_approval_granted": AuditStatus.approved,
     "app_approval_revoked": AuditStatus.approved,
+    # top10:secret_pii_redaction
+    # Keys, card or ID numbers, or contact details were hidden from the AI
+    # provider this turn (services.security.guard.record_hidden): counts only.
+    "sensitive_data_hidden": AuditStatus.approved,
+
+    # top10:file_extraction
+    # A file a person sent was read and stored, or refused (with its code
+    # only; services.files.intake). Never a name or any text.
+    "file_uploaded": AuditStatus.approved,
+    "file_upload_refused": AuditStatus.blocked,
+
+    # top10:scheduler_briefing
+
+    # top10:tutor_mode
+    # Tutor mode changed for a conversation, or an owner lock engaged in
+    # one; the owner created or deleted a tutor lock (services/tutor).
+    "tutor_mode_changed": AuditStatus.approved,
+    "tutor_lock_engaged": AuditStatus.approved,
+    "tutor_lock_created": AuditStatus.approved,
+    "tutor_lock_deleted": AuditStatus.approved,
+
+    # top10:knowledge_base
+    # A document saved from Telegram ("/kb <collection>" on a file): the
+    # document id, source kind and counts only, never a title or any text.
+    "knowledge_document_added": AuditStatus.approved,
+
+    # top10:flashcards_quizzes
+
+    # top10:event_triggers
+    # What the trigger sweeper and the owner's /triggers commands did on
+    # their own (services/notifications/event_triggers.py,
+    # services/triggers/commands.py): ids, counts and costs only.
+    "trigger_fired": AuditStatus.approved,
+    "trigger_run": AuditStatus.approved,
+    "trigger_suppressed": AuditStatus.blocked,
+    "trigger_stopped": AuditStatus.blocked,
+    "trigger_paused": AuditStatus.approved,
+    "trigger_resumed": AuditStatus.approved,
+    "trigger_deleted": AuditStatus.approved,
+
+    # top10:permission_tiers
+    # A 7-day low-risk grant was made from a card or taken back, and a
+    # connection's or the account's permission tier changed
+    # (services.agent.permission_grants).
+    "permission_grant_granted": AuditStatus.approved,
+    "permission_grant_revoked": AuditStatus.approved,
+    "connector_tier_changed": AuditStatus.approved,
+    "account_tier_changed": AuditStatus.approved,
+
+    # top10:voice_notes
+    # A Telegram voice note was transcribed, or refused before or after its
+    # download (services/notifications/voice.py): facts only, never the text.
+    "voice_note_transcribed": AuditStatus.approved,
+    "voice_note_refused": AuditStatus.blocked,
+
+    # top10:video_transcripts
+    # A YouTube video was read by the turn's own AI provider for
+    # video.transcript: the window, tokens and estimated cost only.
+    "video_provider_read": AuditStatus.approved,
+
 }
 
 
@@ -506,7 +571,11 @@ class RuntimeAuditLogger:
         # "rule" names the tool's own hard rule when a call was refused
         # before its approval card (policy computer_rule: blocked_app ...).
         # "approval" is "weekly" on an act a weekly app approval ran, with
-        # that approval's id, app, channel and expiry.
+        # that approval's id, app, channel and expiry; "tier", "low_risk" or
+        # "low_risk_grant" on a call standing consent ran, with its risk
+        # grade, the grade's fixed reason and the grant's id (permission
+        # tiers), which a permission_grant_granted row also carries with the
+        # connection and the kind.
         for key in (
             "reason",
             "policy",
@@ -518,6 +587,11 @@ class RuntimeAuditLogger:
             "app",
             "channel",
             "expires_at",
+            "risk",
+            "risk_reason",
+            "grant_id",
+            "connector_id",
+            "kind",
         ):
             if entry.get(key) is not None:
                 reasoning[key] = entry[key]

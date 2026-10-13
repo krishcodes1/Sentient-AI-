@@ -76,6 +76,8 @@ CONTACTS_ACTIONS: tuple[ToolSpec, ...] = (
         _schema(given_name={"type": "string", "required": True}, **_FIELDS),
         policy_key="google_contacts",
         required_scope="contacts.write",
+        risk="low",
+        low_risk_note="add new contacts",
     ),
     ToolSpec(
         "update_contact",

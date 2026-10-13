@@ -24,6 +24,7 @@ from core.network_security import NetworkPolicy
 from services.connectors.base import (
     AuthenticationError,
     ConnectorError,
+    ConnectorIdentity,
     RateLimitExceededError,
     UserConfirmationRequired,
 )
@@ -136,11 +137,15 @@ def test_definition_declares_the_spec_contract():
     assert DEFINITION.auth.methods == ("token",)
     (field,) = DEFINITION.auth.fields
     assert (field.key, field.type, field.required) == ("access_token", "password", True)
-    assert field.label == "Internal integration secret"
+    assert field.label == "Connection API token"
     assert "share" in field.hint.lower()
     assert DEFINITION.network.https_only is True
     assert DEFINITION.network.redirect_hosts == {}
-    assert DEFINITION.docs_url == "https://www.notion.so/profile/integrations"
+    assert DEFINITION.docs_url == (
+        "https://developers.notion.com/guides/get-started/internal-connections"
+    )
+    assert DEFINITION.auth.token_url == "https://app.notion.com/developers/connections"
+    assert DEFINITION.auth.token_url_label == "Create a Notion connection"
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +168,23 @@ async def test_requests_carry_bearer_token_and_pinned_notion_version():
 async def test_health_check_is_false_when_the_secret_is_rejected():
     connector, _ = _connector(lambda r: httpx.Response(401, json={"code": "unauthorized"}))
     assert await connector.health_check() is False
+    assert connector.identity() is None
+
+
+@pytest.mark.asyncio
+async def test_health_check_remembers_the_workspace_and_connection_name():
+    me = {"object": "user", "type": "bot", "name": "Crawler", "bot": {"workspace_name": "Acme HQ"}}
+    connector, seen = _connector(_routes({("GET", "/v1/users/me"): me}))
+    assert await connector.health_check() is True
+    assert connector.identity() == ConnectorIdentity(account="Acme HQ", user="Crawler")
+    assert len(seen) == 1
+    # A body without the fields, or not JSON at all, still passes the check.
+    connector, _ = _connector(_routes({("GET", "/v1/users/me"): {"object": "user", "bot": "x"}}))
+    assert await connector.health_check() is True
+    assert connector.identity() is None
+    connector, _ = _connector(lambda r: httpx.Response(200, content=b"not json"))
+    assert await connector.health_check() is True
+    assert connector.identity() is None
 
 
 @pytest.mark.asyncio

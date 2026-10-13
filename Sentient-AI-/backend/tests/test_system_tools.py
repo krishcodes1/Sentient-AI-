@@ -62,8 +62,10 @@ class FakeHost:
         self._results = list(results or [])
 
     def detect(self, name: str) -> bool:
-        assert name == "browser"
-        return self.installed
+        # Only the browser flips; every other entry (speech_to_text) reads
+        # as missing here.
+        assert name in ALLOWLIST
+        return self.installed if name == "browser" else False
 
     async def run(self, argv: list[str], timeout_s: float) -> tuple[int, str]:
         self.calls.append((list(argv), timeout_s))
@@ -86,7 +88,7 @@ class FakeHost:
 
 
 def test_allowlist_holds_fixed_argv_lists_and_nothing_else():
-    assert set(ALLOWLIST) == {"browser"}
+    assert set(ALLOWLIST) == {"browser", "speech_to_text"}
     browser = ALLOWLIST["browser"]
     assert [list(step) for step in browser.steps] == BROWSER_STEPS
     # Tuples of plain strings: nothing to format, nothing to append to.
@@ -105,7 +107,7 @@ async def test_install_rejects_unknown_names_without_running_anything():
         result = await toolkit.execute("install_capability", {"name": name})
         assert result["ok"] is False
         assert result["error"] == "Unknown capability"
-        assert result["allowed"] == ["browser"]
+        assert result["allowed"] == ["browser", "speech_to_text"]
     assert host.calls == []
 
 
@@ -320,7 +322,8 @@ async def test_capabilities_reports_installed_and_missing():
     present = await FakeHost(installed=True).toolkit().execute("capabilities", {})
 
     assert missing["ok"] is True and present["ok"] is True
-    (entry,) = missing["capabilities"]
+    assert [c["name"] for c in missing["capabilities"]] == ["browser", "speech_to_text"]
+    entry = missing["capabilities"][0]
     assert entry["name"] == "browser"
     assert entry["installed"] is False
     assert "web.screenshot" in entry["description"]
@@ -491,7 +494,7 @@ def test_catalog_offers_system_tools_to_a_user_with_no_connectors():
     schema = tools["system.install_capability"].parameters
     assert schema["required"] == ["name"]
     assert set(schema["properties"]) == {"name"}
-    assert schema["properties"]["name"]["enum"] == ["browser"]
+    assert schema["properties"]["name"]["enum"] == ["browser", "speech_to_text"]
 
     description = tools["system.install_capability"].description
     assert "web.screenshot" in description
@@ -694,3 +697,52 @@ async def test_screenshot_missing_browser_error_names_the_capability():
     assert "system.install_capability" in result["error"]
     assert "'browser'" in result["error"]
     assert "approve" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# speech_to_text (top10:voice_notes)
+# ---------------------------------------------------------------------------
+
+
+def test_speech_to_text_steps_are_fixed_binary_only_and_pinned():
+    from services.tools import transcribe
+
+    speech = ALLOWLIST["speech_to_text"]
+    assert speech.native_only is True and speech.size_hint == "~250 MB download"
+    assert speech.detect is transcribe.local_engine_installed
+    assert isinstance(speech.steps, tuple) and len(speech.steps) == 2
+    assert all(isinstance(step, tuple) for step in speech.steps)
+    assert all(isinstance(arg, str) for step in speech.steps for arg in step)
+    pip, fetch = speech.steps
+    assert list(pip) == [
+        sys.executable, "-m", "pip", "install", "--only-binary=:all:", "faster-whisper>=1.2,<1.3"
+    ]
+    assert list(fetch[:2]) == [sys.executable, "-c"] and len(fetch) == 3
+    source = fetch[2]
+    compile(source, "<speech-fetch>", "exec")  # a complete program
+    assert repr(transcribe.SPEECH_MODEL_REVISION) in source
+    assert repr(transcribe.SPEECH_MODEL_SHA256) in source
+    assert repr(transcribe.SPEECH_MODEL_REPO) in source
+    assert repr(transcribe.SPEECH_MODEL_DIR) in source
+    assert "HF_HUB_DISABLE_TELEMETRY" in source and "HF_HUB_DISABLE_IMPLICIT_TOKEN" in source
+    assert "token=False" in source and "os.remove(path)" in source and "sys.exit(1)" in source
+
+
+@pytest.mark.asyncio
+async def test_speech_to_text_is_refused_in_a_container_before_any_step(monkeypatch):
+    monkeypatch.setenv("CRAWLER_CONTAINER", "1")
+    host = FakeHost()
+    result = await host.toolkit().execute("install_capability", {"name": "speech_to_text"})
+    assert result["ok"] is False and "Docker container" in result["error"]
+    assert host.calls == []
+
+
+@pytest.mark.asyncio
+async def test_speech_to_text_runs_its_two_steps_natively(monkeypatch):
+    from services.capabilities import env
+
+    monkeypatch.setattr(env, "in_container", lambda: False)
+    host = FakeHost()
+    result = await host.toolkit().execute("install_capability", {"name": "speech_to_text"})
+    assert result["ok"] is True
+    assert [argv for argv, _ in host.calls] == [list(step) for step in ALLOWLIST["speech_to_text"].steps]

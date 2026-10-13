@@ -591,6 +591,10 @@ def test_telegram_card_locks_are_per_chat_and_go_away_with_the_service():
     assert telegram._card_lock(service, 2) is not lock
     assert telegram._card_lock(other, 1) is not lock
 
+    # A service another test dropped can still be waiting for the cycle
+    # collector (its command and button tables hold handlers bound to it),
+    # so count only the live ones.
+    gc.collect()
     held = len(telegram._CARD_LOCKS)
     del service
     gc.collect()

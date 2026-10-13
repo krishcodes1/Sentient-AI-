@@ -20,6 +20,7 @@ import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import urlparse
 from typing import Any, Callable, Optional
 
 import pytest
@@ -50,6 +51,7 @@ from services.connectors.definition import (
 )
 from services.connectors.google_workspace import GoogleWorkspaceConnector
 from services.connectors.robinhood import RobinhoodConnector
+from tests.test_connectors_behavior import RH_PRIVATE_KEY
 
 # The connectors that existed before the registry. Later packages append
 # connectors (and Google gains actions), so checks against the hand-written
@@ -578,6 +580,73 @@ def test_auth_rules(auth, fragment):
     _only(registry.validate_registry([dataclasses.replace(GOOD, auth=auth)]), fragment)
 
 
+# A token connector whose first field is the user's own server address, for
+# the token_url template rules.
+_URL_FIELDS = (
+    CredentialField("base_url", "Server URL", type="url"),
+    CredentialField("access_token", "Access token"),
+)
+
+
+def _token_link(**changes: Any) -> ConnectorDefinition:
+    auth = AuthSpec(methods=("token",), fields=_URL_FIELDS, **changes)
+    return dataclasses.replace(GOOD, auth=auth)
+
+
+def test_valid_token_links_are_accepted():
+    for definition in (
+        _token_link(token_url="https://acme.test/tokens", token_url_label="Create an Acme token"),
+        _token_link(token_url="{base_url}/profile/settings"),
+        _token_link(token_url="{base_url}"),
+        _oauth(client_setup_url="https://acme.test/apps/new"),
+    ):
+        assert registry.validate_registry([definition]) == []
+
+
+@pytest.mark.parametrize(
+    "definition,fragment",
+    [
+        (_token_link(token_url="http://acme.test/tokens"), "token_url must be an https:// URL"),
+        (_token_link(token_url="acme.test/tokens"), "token_url must be an https:// URL"),
+        (_token_link(token_url="{nope}/tokens"), "'{nope}' must name a credential field of type 'url'"),
+        (
+            _token_link(token_url="{access_token}/tokens"),
+            "'{access_token}' must name a credential field of type 'url'",
+        ),
+        (_token_link(token_url="https://acme.test/{base_url}"), "placeholder must come first"),
+        (_token_link(token_url="{base_url}/a/{base_url}"), "at most one"),
+        (_token_link(token_url="{base_url}/x{"), "not a {field_key} placeholder"),
+        (_token_link(token_url="https://acme.test/}"), "not a {field_key} placeholder"),
+        (_token_link(token_url="{base_url}@/tokens"), "followed by '/', '?', '#' or nothing"),
+        # The typed address must not become userinfo or a subdomain of another host.
+        (_token_link(token_url="{base_url}@x.test/t"), "followed by '/', '?', '#' or nothing"),
+        (_token_link(token_url="{base_url}.x.test/t"), "followed by '/', '?', '#' or nothing"),
+        (_token_link(token_url="{base_url}:8443/t"), "followed by '/', '?', '#' or nothing"),
+        (
+            dataclasses.replace(
+                OAUTH_GOOD,
+                auth=dataclasses.replace(
+                    OAUTH_GOOD.auth, methods=("oauth",), token_url="https://acme.test/tokens"
+                ),
+            ),
+            "token_url needs the 'token' method",
+        ),
+        (
+            _token_link(token_url="https://acme.test/tokens", token_url_label=f"Get one {chr(0x2014)} now"),
+            "em or en dash",
+        ),
+        (
+            _token_link(token_url="https://acme.test/tokens", token_url_label=f"Get one {chr(0x2013)} now"),
+            "em or en dash",
+        ),
+        (_token_link(token_url_label="x" * 61), "at most 60 characters"),
+        (_oauth(client_setup_url="http://acme.test/apps/new"), "client_setup_url"),
+    ],
+)
+def test_token_link_rules(definition, fragment):
+    _only(registry.validate_registry([definition]), fragment)
+
+
 def test_oauth_spec_without_a_broker_method_is_refused():
     auth = dataclasses.replace(OAUTH_GOOD.auth, methods=("token",))
     _only(
@@ -633,17 +702,26 @@ OLD_CREDENTIAL_REQUIREMENTS = {
     "canvas": {
         "required": ["base_url", "access_token"],
         "optional": ["client_id", "client_secret", "refresh_token"],
-        "notes": "base_url is your school's Canvas instance, e.g. https://myschool.instructure.com",
+        # Reworded in plain language for the guided connect flow.
+        "notes": "Your school's Canvas address, for example https://myschool.instructure.com",
     },
     "google_workspace": {
         "required": ["access_token"],
         "optional": ["refresh_token", "client_id", "client_secret"],
-        "notes": "OAuth access token with the Gmail/Calendar scopes you intend to grant.",
+        # Reworded in plain language for the guided connect flow.
+        "notes": "A Google access code with the Gmail and Calendar permissions you plan to allow.",
     },
     "robinhood": {
         "required": ["api_key", "api_secret"],
         "optional": [],
-        "notes": "Read-only API credentials. Trading is permanently blocked by the platform.",
+        # Rewritten when signing moved from HMAC to Ed25519 key pairs.
+        "notes": (
+            "Requests to Robinhood are signed with an Ed25519 key pair. Generate one "
+            "below (or with the script in Robinhood's docs), add the public key as "
+            "a new API credential at robinhood.com/account/crypto (web classic, "
+            "US only), then paste the API key Robinhood gives you. Trading is "
+            "permanently blocked by the platform."
+        ),
     },
     "mcp": {
         "required": ["url"],
@@ -775,14 +853,24 @@ def test_connector_catalog_entries_equal_the_old_catalog():
         old_names = [old[0] for old in expected]
         assert [n for n in by_name if n in old_names] == old_names, key
     # Canvas and Robinhood are not extended by the connectors plan; Canvas
-    # gained get_upcoming and grade_whatif since (the assistant tools).
+    # gained get_upcoming and grade_whatif since (the assistant tools), and
+    # get_announcements and get_recent_grades (the app-event triggers).
     assert [s.action for s in CONNECTOR_CATALOG["robinhood"]] == [
         o[0] for o in OLD_CATALOG["robinhood"]
     ]
     canvas_extra = {s.action for s in CONNECTOR_CATALOG["canvas"]} - {
         o[0] for o in OLD_CATALOG["canvas"]
     }
-    assert canvas_extra == {"get_upcoming", "grade_whatif"}
+    # top10:file_extraction added the course-file reads, top10:event_triggers
+    # the announcement and recent-grade reads.
+    assert canvas_extra == {
+        "get_upcoming",
+        "grade_whatif",
+        "list_files",
+        "get_file_text",
+        "get_announcements",
+        "get_recent_grades",
+    }
     for name, description in OLD_DESCRIPTIONS.items():
         key, action = name.split(".")
         assert next(s for s in CONNECTOR_CATALOG[key] if s.action == action).description == description
@@ -816,9 +904,12 @@ def test_always_confirm_and_starter_flags():
         for s in d.actions:
             if s.category == D:
                 assert s.always_confirm, f"{d.key}.{s.action}"
-    # Nothing in Canvas or Robinhood, nor Google's calendar write, needs it.
+    # Nothing in Canvas or Robinhood, nor Google's calendar write, needs it,
+    # except handing in work (permission tiers: it speaks for the student).
     for name, (confirm, _) in flags.items():
-        if name.split(".")[0] in ("canvas", "robinhood") or name == "google_workspace.create_event":
+        if name == "canvas.submit_assignment":
+            assert confirm, name
+        elif name.split(".")[0] in ("canvas", "robinhood") or name == "google_workspace.create_event":
             assert not confirm, name
     for d in registry.REGISTRY:
         starters = [s for s in d.actions if s.starter]
@@ -845,8 +936,15 @@ def _literal_network_policies(monkeypatch) -> dict[str, Any]:
 
 
 def test_literal_network_policies_are_subsets_of_the_registry_ones(monkeypatch):
+    from core.network_security import CANVAS_SCHOOL_SEARCH_POLICY
+
     literal = _literal_network_policies(monkeypatch)
     derived = registry.network_policies()
+    # The school search is not a connector: the registry neither derives
+    # nor replaces it, and the live table keeps the literal entry.
+    school_search = literal.pop(CANVAS_SCHOOL_SEARCH_POLICY)
+    assert CANVAS_SCHOOL_SEARCH_POLICY not in derived
+    assert vars(DEFAULT_POLICIES[CANVAS_SCHOOL_SEARCH_POLICY]) == vars(school_search)
     assert set(literal) <= set(derived)
     for key, old in literal.items():
         new = derived[key]
@@ -861,7 +959,8 @@ def test_registry_network_policies_are_armed_at_import():
     assert "/revoke" in google.allowed_paths["oauth2.googleapis.com"]
     assert google.https_only is True
     assert DEFAULT_POLICIES["canvas"].https_only is False
-    assert DEFAULT_POLICIES["canvas"].instance_paths == ["/api/v1/", "/login/oauth2/token"]
+    # /files/: a course file's download address (top10:file_extraction).
+    assert DEFAULT_POLICIES["canvas"].instance_paths == ["/api/v1/", "/login/oauth2/token", "/files/"]
     robinhood_paths = DEFAULT_POLICIES["robinhood"].allowed_paths["trading.robinhood.com"]
     assert not any("orders" in path for path in robinhood_paths)
 
@@ -979,7 +1078,7 @@ def test_lookups():
     [
         ("canvas", {"base_url": "https://s.instructure.com", "access_token": "t"}, CanvasConnector, "canvas"),
         ("google_workspace", {"access_token": "t", "client_id": "cid"}, GoogleWorkspaceConnector, "google"),
-        ("robinhood", {"api_key": "k", "api_secret": "s"}, RobinhoodConnector, "robinhood"),
+        ("robinhood", {"api_key": "k", "api_secret": RH_PRIVATE_KEY}, RobinhoodConnector, "robinhood"),
     ],
 )
 def test_create_connector_uses_the_definition(key, credentials, cls, policy):
@@ -999,8 +1098,9 @@ def test_create_connector_reproduces_constructor_arguments():
     )
     assert canvas._base_url == "https://s.instructure.com"
     assert (canvas._client_id, canvas._client_secret) == ("", "")
-    robinhood = factory.create_connector("robinhood", {"api_key": "k", "api_secret": "s"})
-    assert robinhood._api_key == "" and robinhood._timeout == 30.0
+    robinhood = factory.create_connector("robinhood", {"api_key": "k", "api_secret": RH_PRIVATE_KEY})
+    assert robinhood._api_key == "" and robinhood._private_key is None
+    assert robinhood._timeout == 30.0
 
 
 def test_self_hosted_canvas_host_is_the_only_extra_host():
@@ -1058,10 +1158,14 @@ def test_payload_shape():
     assert [entry["key"] for entry in payload] == [d.key for d in registry.REGISTRY]
     assert [entry["key"] for entry in payload][:3] == LEGACY_KEYS
     for entry in payload:
-        assert set(entry) == {"key", "label", "description", "icon", "docs_url", "creatable", "auth", "scopes"}
+        assert set(entry) == {
+            "key", "label", "description", "icon", "docs_url", "creatable", "auth", "scopes", "low_risk"
+        }
         assert entry["creatable"] is True
         assert set(entry["auth"]) == {
             "methods", "fields", "provider", "oauth_configured", "token_auth_method", "notes",
+            "token_url", "token_url_label", "client_setup_url",
+            "client_id_setting", "client_secret_setting",
         }
         for field in entry["auth"]["fields"]:
             assert set(field) == {"key", "label", "type", "required", "placeholder", "hint"}
@@ -1091,6 +1195,42 @@ def test_payload_shape():
     canvas = by_key["canvas"]
     assert canvas["auth"]["provider"] is None and canvas["auth"]["oauth_configured"] is False
     assert canvas["auth"]["fields"][0]["type"] == "url"
+    assert canvas["auth"]["token_url"] == "{base_url}/profile/settings"
+    assert canvas["auth"]["token_url_label"] == "Open your Canvas token page"
+    assert canvas["auth"]["client_setup_url"] == ""  # no OAuth spec
+    assert by_key["microsoft"]["auth"]["token_url"] == ""  # no token method
+    assert by_key["microsoft"]["auth"]["client_setup_url"].startswith("https://entra.microsoft.com/")
+    assert google["auth"]["client_setup_url"] == "https://console.cloud.google.com/auth/clients"
+    # Setting names (never values), so the page can say which backend/.env entries to fill.
+    assert google["auth"]["client_id_setting"] == "GOOGLE_OAUTH_CLIENT_ID"
+    assert google["auth"]["client_secret_setting"] == "GOOGLE_OAUTH_CLIENT_SECRET"
+    assert by_key["microsoft"]["auth"]["client_id_setting"] == "MICROSOFT_OAUTH_CLIENT_ID"
+    assert by_key["microsoft"]["auth"]["client_secret_setting"] == ""  # public client
+    assert canvas["auth"]["client_id_setting"] == canvas["auth"]["client_secret_setting"] == ""
+
+
+@pytest.mark.parametrize("entry", registry.connector_types_payload(), ids=lambda e: e["key"])
+def test_every_connector_link_is_https_or_a_valid_template(entry):
+    """docs_url and client_setup_url are https; token_url is https, or a
+    template whose one leading placeholder names a url field and gives an
+    https URL once filled."""
+    auth = entry["auth"]
+    for url in (entry["docs_url"], auth["client_setup_url"]):
+        assert url == "" or url.startswith("https://"), url
+    token_url = auth["token_url"]
+    if token_url.startswith("{"):
+        key, _, rest = token_url[1:].partition("}")
+        assert key in {f["key"] for f in auth["fields"] if f["type"] == "url"}
+        filled = urlparse("https://school.example.test" + rest)
+        assert filled.scheme == "https" and filled.hostname == "school.example.test"
+        assert "{" not in rest and "}" not in rest
+        assert rest == "" or rest[0] in "/?#"
+    else:
+        assert token_url == "" or token_url.startswith("https://"), token_url
+    if token_url:
+        assert "token" in auth["methods"]
+    label = auth["token_url_label"]
+    assert len(label) <= 60 and chr(0x2014) not in label and chr(0x2013) not in label
 
 
 def test_payload_oauth_configured_reads_the_named_setting(monkeypatch):
@@ -1385,3 +1525,80 @@ def test_readme_documents_the_registry_steps():
         assert needle in readme
     # House style: no em or en dashes (U+2014, U+2013).
     assert chr(0x2014) not in readme and chr(0x2013) not in readme
+
+
+# top10:knowledge_base
+def test_knowledge_is_a_reserved_key():
+    assert "knowledge" in registry.RESERVED_KEYS
+    _only(registry.validate_registry([dataclasses.replace(GOOD, key="knowledge")]), "reserved")
+
+
+# ---------------------------------------------------------------------------
+# Permission tiers: risk declarations (services/agent/risk.py)
+# ---------------------------------------------------------------------------
+
+
+async def _star_thing(self, thing_id, *, user_confirmed=False):
+    return {}
+
+
+_STAR = ToolSpec(
+    "star_thing",
+    "Star a thing.",
+    ActionCategory.WRITE,
+    _schema(thing_id={"type": "string", "required": True}),
+    required_scope="things.write",
+    risk="low",
+    ref_args=("thing_id",),
+    low_risk_note="star things",
+)
+
+
+def _starred(spec: ToolSpec) -> ConnectorDefinition:
+    return _with((_LIST, _DELETE, spec), {"star_thing": _star_thing})
+
+
+def test_a_low_risk_write_with_a_note_and_valid_ref_args_is_valid():
+    assert registry.validate_registry([_starred(_STAR)]) == []
+
+
+@pytest.mark.parametrize(
+    "changes,fragment",
+    [
+        ({"risk": "medium"}, "risk may only be 'low'"),
+        ({"always_confirm": True}, "an always_confirm action may not declare risk='low'"),
+        ({"low_risk_note": ""}, "risk='low' needs a low_risk_note"),
+        ({"low_risk_note": "x" * 81}, "low_risk_note is over 80 characters"),
+        ({"ref_args": ("thing",)}, "ref_arg 'thing' is not a parameter"),
+        ({"ref_args": ("thing_id", "thing_id")}, "ref_args name an argument twice"),
+    ],
+)
+def test_risk_declarations_are_validated(changes, fragment):
+    problems = registry.validate_registry([_starred(dataclasses.replace(_STAR, **changes))])
+    assert any(fragment in p for p in problems), problems
+
+
+def test_only_a_write_may_be_low_and_notes_and_refs_are_for_low_only():
+    read_low = dataclasses.replace(_LIST, risk="low", low_risk_note="list things")
+    problems = registry.validate_registry([_with((read_low, _DELETE))])
+    assert any("only a WRITE may declare risk='low'" in p for p in problems), problems
+    plain = dataclasses.replace(_STAR, risk=None, low_risk_note="", ref_args=("thing_id",))
+    _only(registry.validate_registry([_starred(plain)]), "ref_args are only for risk='low' actions")
+    noted = dataclasses.replace(_STAR, risk=None, low_risk_note="star things", ref_args=())
+    _only(registry.validate_registry([_starred(noted)]), "low_risk_note is only for risk='low'")
+
+
+@pytest.mark.parametrize(
+    "key,action",
+    [
+        ("canvas", "submit_assignment"),
+        ("google_workspace", "respond_to_invite"),
+        ("microsoft", "respond_to_invite"),
+        ("slack", "invite_to_channel"),
+    ],
+)
+def test_actions_that_speak_for_the_user_always_confirm(key, action):
+    definition = registry.get_definition(key)
+    assert definition is not None
+    spec = next(s for s in definition.actions if s.action == action)
+    assert spec.always_confirm is True

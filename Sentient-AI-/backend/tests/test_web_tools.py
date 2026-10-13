@@ -646,13 +646,29 @@ async def test_fetch_page_reports_the_url_it_ended_on():
 @pytest.mark.asyncio
 async def test_fetch_page_refuses_non_text_content():
     def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"\x89PNG\r\n\x1a\n", headers={"content-type": "image/png"})
+
+    result = await toolkit(handler, {"example.com": (PUBLIC_ADDRESS,)}).fetch_page(
+        "https://example.com/photo.png"
+    )
+    assert result["ok"] is False
+    assert "image/png" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_page_reads_a_pdf_only_in_a_document_context():
+    # top10:file_extraction: a PDF is read as sections, which needs the
+    # executor's document context ("Read files and documents"); without
+    # one the answer is that switch's refusal (tests/files/test_files_web.py
+    # covers the read itself).
+    def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=b"%PDF-1.4", headers={"content-type": "application/pdf"})
 
     result = await toolkit(handler, {"example.com": (PUBLIC_ADDRESS,)}).fetch_page(
         "https://example.com/doc.pdf"
     )
     assert result["ok"] is False
-    assert "application/pdf" in result["error"]
+    assert "Read files and documents" in result["error"]
 
 
 @pytest.mark.asyncio

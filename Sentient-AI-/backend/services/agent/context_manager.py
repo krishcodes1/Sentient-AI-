@@ -357,6 +357,32 @@ def core_tool_names() -> frozenset[str]:
 UNDO_COMPANIONS: dict[str, tuple[str, ...]] = {
     "reminders.create": ("reminders.list", "reminders.cancel"),
     "watch.create": ("watch.list", "watch.delete"),
+    # top10:secret_pii_redaction
+
+    # top10:file_extraction
+
+    # top10:scheduler_briefing
+    "schedule.create": ("schedule.list", "schedule.delete"),
+    "schedule.briefing": ("schedule.list", "schedule.delete"),
+
+    # top10:tutor_mode
+
+    # top10:knowledge_base
+
+    # top10:flashcards_quizzes
+    # The daily "cards are due" reminder is set by study.settings; the trim
+    # keeps study.progress (which shows it) with it.
+    "study.settings": ("study.progress",),
+
+    # top10:event_triggers
+    "triggers.create": ("triggers.list", "triggers.delete"),
+
+    # top10:permission_tiers
+
+    # top10:voice_notes
+
+    # top10:video_transcripts
+
 }
 
 
@@ -399,8 +425,10 @@ def select_offered_tools(
     When everything fits, the list is offered as built. Otherwise slots go,
     in priority order, to: core tools (``core``, default
     :func:`core_tool_names`); loaded tools, most recently loaded first;
-    starter tools (``starter`` true); then the rest. Starters and the rest
-    prefer the active connectors, then keep build order. A loaded name
+    lead tools (``lead`` true: each skill's and each account's entry
+    point, tool_registry.LEAD_STARTER_TOOLS); the other starter tools
+    (``starter`` true); then the rest. Leads, starters and the rest prefer
+    the active connectors, then keep build order. A loaded name
     missing from ``tools`` (connector removed, scope revoked) is skipped.
     A tool with ``UNDO_COMPANIONS`` brings them along at its own priority
     and is never chosen without them: a core or loaded tool's companions
@@ -446,9 +474,11 @@ def select_offered_tools(
         connector = (tools[position].get("connector_type") or "").lower()
         return (0 if connector in active else 1, position)
 
-    starters = [p for p, tool in enumerate(tools) if tool.get("starter")]
-    rest = [p for p, tool in enumerate(tools) if not tool.get("starter")]
-    for position in sorted(starters, key=preference) + sorted(rest, key=preference):
+    leads = [p for p, tool in enumerate(tools) if tool.get("lead")]
+    starters = [p for p, tool in enumerate(tools) if tool.get("starter") and not tool.get("lead")]
+    rest = [p for p, tool in enumerate(tools) if not tool.get("starter") and not tool.get("lead")]
+    walk = sorted(leads, key=preference) + sorted(starters, key=preference) + sorted(rest, key=preference)
+    for position in walk:
         if len(chosen) >= max_tools:
             break
         members = group(position)

@@ -15,6 +15,7 @@ from __future__ import annotations
 import pytest
 
 from tests.conftest import auth_headers, make_user
+from tests.test_connectors_behavior import RH_PRIVATE_KEY
 from tests.test_mcp import FakeTransport, _make_mcp_connector
 
 
@@ -88,7 +89,7 @@ async def test_financial_scope_rejected(client, session_factory):
             "connector_type": "robinhood",
             "display_name": "trade grab",
             "auth_method": "api_key",
-            "credentials": {"api_key": "k", "api_secret": "s"},
+            "credentials": {"api_key": "k", "api_secret": RH_PRIVATE_KEY},
             "granted_scopes": ["crypto.read", "crypto.trade"],
         },
     )

@@ -28,6 +28,7 @@ from services.agent.context_manager import (
 from services.agent.runtime import AgentRuntime, PermissionEngine, Tool
 from services.agent.tool_registry import (
     CONNECTOR_CATALOG,
+    LEAD_STARTER_TOOLS,
     ConnectorSpec,
     build_tools,
     connector_scopes,
@@ -115,6 +116,66 @@ async def test_the_assistant_tools_survive_a_trim(
     for create, companions in UNDO_COMPANIONS.items():
         if create in offered:
             assert set(companions) <= offered, create
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("connector_types", "switches"),
+    [
+        (("canvas", "google_workspace"), _DEFAULT_SWITCHES | {"scheduled_tasks"}),
+        (("canvas", "google_workspace"), _DEFAULT_SWITCHES | {"scheduled_tasks", "study", "event_triggers"}),
+        ((), _EVERY_CAPABILITY),
+        (("canvas",), _DEFAULT_SWITCHES | {"scheduled_tasks", "study", "event_triggers", "page_watch"}),
+        (("github",), _EVERY_CAPABILITY - {"page_watch"}),
+    ],
+    ids=["student-scheduled", "student-study-triggers", "no-connectors-all-on", "canvas-opt-ins", "github-most-on"],
+)
+async def test_every_skill_and_account_keeps_its_entry_point_through_a_trim(
+    connector_types: tuple[str, ...], switches: frozenset[str]
+):
+    """An opt-in switch must not push out a default-on skill's entry point
+    (knowledge.search, video.transcript) or another opt-in's: a trim drops
+    second tools (schedule.briefing, study.review, extra reads) first."""
+    tools = build_tools(_connected(connector_types, write_scopes=True), enabled_capabilities=switches)
+    assert len(tools) > MAX_OFFERED_TOOLS  # precondition: this is a trim
+    offered = await _offered_in_a_turn(tools)
+    leads = [t.name for t in tools if t.lead]
+    for name in leads:
+        assert name in offered, name
+    built = {t.name for t in tools}
+    assert LEAD_STARTER_TOOLS & built <= set(leads)
+    # Each connected account leads with one everyday read.
+    for connector_type in connector_types:
+        assert any(n.startswith(f"{connector_type}.") for n in leads), connector_type
+    if "scheduled_tasks" in switches:
+        assert {"knowledge.search", "video.transcript", "schedule.create"} <= offered
+
+
+def test_every_lead_is_a_real_starter():
+    tools = {
+        t.name: t
+        for t in build_tools(
+            _connected(("canvas",), write_scopes=False), enabled_capabilities=_EVERY_CAPABILITY
+        )
+    }
+    for name in LEAD_STARTER_TOOLS:
+        assert resolve_tool(name) is not None, name
+        assert tools[name].starter and tools[name].lead, name
+    assert not tools["schedule.briefing"].lead and tools["schedule.briefing"].starter
+
+
+def test_leads_go_before_the_other_starters():
+    tools = [
+        *_core(),
+        _tool("alpha.one", starter=True),
+        _tool("alpha.two", starter=True),
+        {**_tool("beta.entry", starter=True), "lead": True},
+        *[_tool(f"gamma.t{i}") for i in range(30)],
+    ]
+    offered = [t["name"] for t in select_offered_tools(tools, [], max_tools=len(CORE_TOOL_NAMES) + 2)]
+    assert "beta.entry" in offered and "alpha.one" in offered and "alpha.two" not in offered
+    # The result keeps build order.
+    assert offered.index("alpha.one") < offered.index("beta.entry")
 
 
 def test_the_new_builtins_and_get_upcoming_are_starters():
@@ -242,3 +303,30 @@ def test_a_second_accounts_create_brings_its_own_undo():
         "reminders__1f2e3d4c.list",
         "reminders__1f2e3d4c.cancel",
     }
+
+
+# top10:knowledge_base
+def test_knowledge_search_is_a_starter_but_not_core_and_writes_are_never_auto():
+    tools = {t.name: t for t in build_tools([], enabled_capabilities=_DEFAULT_SWITCHES)}
+    assert tools["knowledge.search"].starter and "knowledge.search" not in CORE_TOOL_NAMES
+    assert not tools["knowledge.add"].starter and not tools["knowledge.remove"].starter
+    assert tools["knowledge.search"].permission_tier == "auto"
+    assert tools["knowledge.add"].permission_tier == "approval"
+    assert tools["knowledge.remove"].permission_tier == "approval"
+    auto_account = {t.name: t for t in build_tools([], user_default_tier="auto_approve")}
+    assert auto_account["knowledge.add"].permission_tier == "approval"
+    off = {t.name for t in build_tools([], enabled_capabilities=_DEFAULT_SWITCHES - {"knowledge_base"})}
+    assert not any(name.startswith("knowledge.") for name in off)
+
+
+# top10:flashcards_quizzes
+def test_the_study_starters_and_the_reminder_undo():
+    tools = {
+        t.name: t
+        for t in build_tools(
+            _connected(("canvas",), write_scopes=False), enabled_capabilities=_EVERY_CAPABILITY
+        )
+    }
+    assert tools["study.save"].starter and tools["study.review"].starter
+    assert not tools["study.delete"].starter and not tools["study.settings"].starter
+    assert UNDO_COMPANIONS["study.settings"] == ("study.progress",)

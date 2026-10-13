@@ -19,12 +19,15 @@ import re
 from typing import Any, Optional
 from urllib.parse import quote
 
+from services.agent import risk
 from services.agent.permissions import ActionCategory
 
 from ..base import ConnectorError, UserConfirmationRequired, path_segment
 from ..definition import ToolSpec, _schema
+from ..documents import is_document_type, read_connector_document
 from ..shaping import clamp_limit
 from .common import (
+    ME,
     GraphBase,
     capped_text,
     choice,
@@ -70,18 +73,25 @@ DRIVE_ACTIONS: tuple[ToolSpec, ...] = (
     ),
     ToolSpec(
         "get_file_text",
-        "Read a text file (txt, md, csv, json, code...) from OneDrive. Office and binary files are refused; long files are truncated.",
+        "Read a text file (txt, md, csv, json, code...) from OneDrive; long files are "
+        "truncated. PDF, Word, PowerPoint and Excel files come back as sections with a "
+        "doc_id: continue those with files.read. Other binary files are refused.",
         ActionCategory.READ,
         _schema(file_id=_ITEM_ID),
         required_scope="files.read",
     ),
     ToolSpec(
         "list_folder",
-        "List the files and folders in a OneDrive folder (default: the root).",
+        "List the files and folders in a OneDrive folder (default: the root); "
+        "newest_first lists the most recently changed first.",
         ActionCategory.READ,
         _schema(
             folder_id={"type": "string", "description": "Folder id (default: OneDrive root)"},
             limit=_LIMIT,
+            newest_first={
+                "type": "boolean",
+                "description": "Most recently changed first (default false)",
+            },
         ),
         required_scope="files.read",
     ),
@@ -96,6 +106,17 @@ DRIVE_ACTIONS: tuple[ToolSpec, ...] = (
             overwrite={"type": "boolean", "description": "Replace an existing file of that name (default false)"},
         ),
         required_scope="files.write",
+        risk="low",
+        # A folder may be shared, and overwriting replaces what was there.
+        risk_check=risk.all_of(
+            risk.unless_value(
+                "folder_id", ("root",), "medium", "it writes into a folder that may be shared"
+            ),
+            risk.when_value(
+                "overwrite", lambda value: value is not False, "medium", "it can replace an existing file"
+            ),
+        ),
+        low_risk_note="save new text files at the top of your OneDrive",
     ),
     ToolSpec(
         "create_folder",
@@ -106,6 +127,11 @@ DRIVE_ACTIONS: tuple[ToolSpec, ...] = (
             parent_folder_id={"type": "string", "description": "Parent folder id (default: OneDrive root)"},
         ),
         required_scope="files.write",
+        risk="low",
+        risk_check=risk.unless_value(
+            "parent_folder_id", ("root",), "medium", "it writes into a folder that may be shared"
+        ),
+        low_risk_note="make new folders at the top of your OneDrive",
     ),
     ToolSpec(
         "move_file",
@@ -207,6 +233,27 @@ class DriveActions(GraphBase):
         label = f"'{info['name'] or fid}'"
         if info["is_folder"] or not isinstance(meta.get("file"), dict):
             raise ConnectorError(f"{label} is a folder, not a file; use list_folder to see inside it.")
+        if is_document_type(info.get("mime_type"), info["name"]):
+            # top10:file_extraction: PDF and Office files are read as
+            # sections. /content answers 302 to a pre-authenticated host;
+            # httpx drops Authorization on that hop and the policy admits
+            # the download host only for a credential-free GET.
+            document = await read_connector_document(
+                download=lambda cap: self._request_bytes(
+                    "GET", f"{ME}{_item_path(fid)}/content", max_bytes=cap, follow_redirects=True
+                ),
+                name=info["name"] or fid,
+                mime=info.get("mime_type"),
+                source="onedrive",
+                size=info["size"],
+            )
+            return {
+                "id": info["id"] or fid,
+                "mime_type": info.get("mime_type"),
+                "size": info["size"],
+                "web_url": info["web_url"],
+                **document,
+            }
         if not is_text_like(info["name"], info.get("mime_type")):
             raise ConnectorError(
                 f"{label} is not a plain-text file ({info.get('mime_type') or 'unknown type'}); "
@@ -237,12 +284,17 @@ class DriveActions(GraphBase):
             **text,
         }
 
-    async def list_folder(self, folder_id: Any = None, limit: Any = None) -> list[dict[str, Any]]:
+    async def list_folder(
+        self, folder_id: Any = None, limit: Any = None, newest_first: Any = None
+    ) -> list[dict[str, Any]]:
         folder = optional_id(folder_id, "folder_id")
         top = clamp_limit(limit)
-        items = await self._graph_list(
-            f"{_folder_path(folder)}/children", {"$top": top, "$select": _ITEM_FIELDS}, limit=top
-        )
+        params: dict[str, Any] = {"$top": top, "$select": _ITEM_FIELDS}
+        if optional_bool(newest_first, "newest_first", default=False):
+            # New files in a big folder show up on the first page (the file
+            # triggers, services/triggers).
+            params["$orderby"] = "lastModifiedDateTime desc"
+        items = await self._graph_list(f"{_folder_path(folder)}/children", params, limit=top)
         return [_item_summary(item) for item in items]
 
     # -- WRITE ------------------------------------------------------------

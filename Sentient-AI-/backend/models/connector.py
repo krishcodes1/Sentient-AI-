@@ -71,6 +71,10 @@ class AuthMethod(str, enum.Enum):
 
 class PermissionTier(str, enum.Enum):
     auto_approve = "auto_approve"
+    # "Allow low-risk changes" (permission tiers, migration 0023): only the
+    # actions graded LOW (services/agent/risk.py) run without a card. Eight
+    # characters, so the SQLite VARCHAR(12) the baseline made still fits it.
+    low_risk = "low_risk"
     user_confirm = "user_confirm"
     admin_only = "admin_only"
     hard_blocked = "hard_blocked"

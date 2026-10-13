@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from .base import AuthenticationError, ConnectorError
+from .base import AuthenticationError, ConnectorError, ConnectorUnreachable, json_object
 from .definition import AuthSpec, ConnectorDefinition, CredentialField, NetworkSpec, ToolSpec
 from .notion_api.common import API, NOTION_VERSION
 from .notion_api.reads import READ_ACTIONS, ReadsMixin
@@ -56,7 +56,7 @@ class NotionConnector(ReadsMixin, WritesMixin):
     def validate_credentials(cls, credentials: dict[str, Any]) -> list[str]:
         token = str(credentials.get("access_token") or "").strip()
         if token and any(char.isspace() for char in token):
-            return ["access_token must be the integration secret on its own, without spaces"]
+            return ["access_token must be the connection's API token on its own, without spaces"]
         return []
 
     async def authenticate(self, credentials: dict[str, Any]) -> bool:
@@ -64,7 +64,7 @@ class NotionConnector(ReadsMixin, WritesMixin):
         token = str(credentials.get("access_token") or "").strip()
         if not token:
             raise AuthenticationError(
-                "Notion needs its internal integration secret. Reconnect Notion in Connectors."
+                "Notion needs its connection API token. Reconnect Notion in Connectors."
             )
         self._token = token
         self._authenticated = True
@@ -82,10 +82,17 @@ class NotionConnector(ReadsMixin, WritesMixin):
     async def health_check(self) -> bool:
         """One cheap authenticated call: the integration's own bot user."""
         try:
-            await self._request("GET", f"{API}/users/me")
-            return True
+            response = await self._request("GET", f"{API}/users/me")
+        except ConnectorUnreachable:
+            self._health_problem = "unreachable"
+            return False
         except ConnectorError:
             return False
+        me = json_object(response)
+        bot = me.get("bot")
+        workspace = bot.get("workspace_name") if isinstance(bot, dict) else None
+        self._remember_identity(account=workspace, user=me.get("name"))
+        return True
 
     async def revoke(self) -> bool:
         # Internal integration secrets have no revoke endpoint (Notion's
@@ -105,19 +112,23 @@ DEFINITION = ConnectorDefinition(
         fields=(
             CredentialField(
                 "access_token",
-                "Internal integration secret",
+                "Connection API token",
                 type="password",
                 required=True,
-                placeholder="Paste the integration secret",
+                placeholder="Paste the connection's API token",
                 hint=(
-                    "Create an internal integration at notion.so/profile/integrations and "
-                    "copy its secret. Then share the pages you want Crawler to see with the "
-                    "integration (page menu, Connections)."
+                    "Create an internal connection, open its Configuration tab and copy the "
+                    "API token. Then share the pages you want Crawler to see with it (page "
+                    "menu, Connections)."
                 ),
             ),
         ),
         token_auth_method="bearer_token",
-        notes="Crawler sees only the pages and databases you share with the integration.",
+        notes="Crawler sees only the pages and databases you share with the connection.",
+        # Notion renamed integrations to connections in 2026; the old
+        # integrations page redirects here.
+        token_url="https://app.notion.com/developers/connections",
+        token_url_label="Create a Notion connection",
     ),
     network=NetworkSpec(
         policy_key="notion",
@@ -137,5 +148,5 @@ DEFINITION = ConnectorDefinition(
     ),
     actions=ACTIONS,
     connector_class=NotionConnector,
-    docs_url="https://www.notion.so/profile/integrations",
+    docs_url="https://developers.notion.com/guides/get-started/internal-connections",
 )

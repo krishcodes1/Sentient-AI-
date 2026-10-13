@@ -1,10 +1,14 @@
 /**
  * Tests for the Stop button on the chat page: it asks the server to stop the task and keeps the
  * stream open, so the saved "Stopped." reply arrives like any other; it cuts the stream itself
- * only when that request fails or the turn has not ended within the fallback time.
+ * only when that request fails or the turn has not ended within the fallback time. Also: nothing
+ * can be sent while the thread is still loading, so a turn never starts under a list its arrival
+ * then replaces.
  *
  * Why it exists: Stop used to abort the stream only, so the server ran the task (browsing,
- * several tools, desktop actions) to its end while the page showed it as stopped.
+ * several tools, desktop actions) to its end while the page showed it as stopped. And a message
+ * sent before the thread loaded vanished from view mid-stream (the cause of these tests failing
+ * now and then on a busy machine).
  */
 
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -22,6 +26,9 @@ vi.mock("@/services/api", async (importOriginal) => ({
   getPendingApprovals: vi.fn(async () => []),
   stopAgent: vi.fn(),
   streamMessage: vi.fn(),
+  // top10:file_extraction
+  uploadFile: vi.fn(),
+  deleteFile: vi.fn(),
   updateConversation: vi.fn(),
 }));
 
@@ -84,6 +91,29 @@ async function startTurn(): Promise<void> {
   fireEvent.keyDown(box, { key: "Enter" });
   await screen.findByRole("button", { name: "Stop generating" });
 }
+
+describe("Sending while the thread loads", () => {
+  beforeEach(() => {
+    Element.prototype.scrollIntoView = vi.fn();
+    vi.mocked(getMe).mockResolvedValue(ME);
+    vi.mocked(getConversations).mockResolvedValue([CONV]);
+  });
+
+  it("keeps the composer disabled until the thread has loaded", async () => {
+    let load: (value: Conversation & { messages: [] }) => void = () => {};
+    vi.mocked(getConversation).mockImplementation(
+      () => new Promise((resolve) => {
+        load = resolve;
+      }),
+    );
+    render(<Chat />);
+    const box = await screen.findByRole("textbox", { name: "Message" });
+    await waitFor(() => expect(getConversation).toHaveBeenCalled());
+    expect(box).toBeDisabled();
+    await act(async () => load({ ...CONV, messages: [] }));
+    await waitFor(() => expect(box).not.toBeDisabled());
+  });
+});
 
 describe("Stop on the chat page", () => {
   beforeEach(() => {

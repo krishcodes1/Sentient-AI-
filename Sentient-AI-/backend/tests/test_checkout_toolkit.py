@@ -31,6 +31,7 @@ from services.tools.browser.checkout import CHECKOUT_RULES, NOTICE
 from services.tools.browser.pagememory import PageMemory
 from services.tools.browser.checkout.ledger import PurchaseLedger
 from services.tools.browser.checkout.toolkit import CARD_KEY, BrowserCheckoutToolkit
+from services.tools.browser.checkout import toolkit as checkout_toolkit
 from services.tools.browser.session import BrowserSessionManager
 from services.tools.system import browser_installed
 from tests.conftest import make_user
@@ -495,10 +496,22 @@ CONTENT_COLUMNS = (
     "connector_name", "action", "endpoint", "scope_used", "status", "reasoning_chain",
     "detection_method", "request_data", "response_summary",
 )
+# The checkout id in request_data is random hex too, so card data is
+# looked for only in the other fields; row_text checks the id is 16 hex
+# characters with a letter in them, so it is neither a card number nor a
+# redacted value.
+_RANDOM_FIELDS = frozenset({"checkout_id"})
 
 
 def row_text(row: AuditLog) -> str:
-    return json.dumps({name: getattr(row, name) for name in CONTENT_COLUMNS}, default=str)
+    content = {name: getattr(row, name) for name in CONTENT_COLUMNS}
+    data = content["request_data"]
+    if isinstance(data, dict):
+        for name in _RANDOM_FIELDS & data.keys():
+            value = data[name]
+            assert isinstance(value, str) and re.fullmatch(r"[0-9a-f]{16}", value) and not value.isdigit(), value
+        content["request_data"] = {k: v for k, v in data.items() if k not in _RANDOM_FIELDS}
+    return json.dumps(content, default=str)
 
 
 def assert_no_card_data(*texts: str) -> None:
@@ -580,6 +593,43 @@ async def test_run_fills_the_card_from_the_vault_and_lands_on_the_confirmation(s
     assert s.toolkit.approval_image(arguments, user_id=s.user_id) is None
     again = await run(s, arguments)
     assert again["rule"] == "unbound_approval" and len(s.posted) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_checkout_id_that_happens_to_hold_the_cvc_digits_is_no_leak(shop, monkeypatch):
+    # A CI run drew the checkout id bc98784d54ccb89f, and "987" is this
+    # file's CVC: the check looked in the whole row and failed with no card
+    # data on the record.
+    monkeypatch.setattr(checkout_toolkit, "secrets", SimpleNamespace(token_hex=lambda nbytes: "bc98784d54ccb89f"))
+    s = shop
+    arguments = await begin(s)
+    assert TEST_CVC in arguments[CARD_KEY]["checkout_id"]
+    assert (await run(s, arguments))["ok"] is True
+    rows = await audit_rows(s)
+    assert {r.request_data["checkout_id"] for r in rows} == {"bc98784d54ccb89f"}
+    assert_no_card_data(*(row_text(r) for r in rows))
+    # The CVC anywhere else in a row, request_data included, still fails the check.
+    rows[-1].request_data = {**rows[-1].request_data, "merchant": f"shop {TEST_CVC}"}
+    with pytest.raises(AssertionError, match=TEST_CVC):
+        assert_no_card_data(row_text(rows[-1]))
+    rows[0].response_summary = f"code {TEST_CVC}"
+    with pytest.raises(AssertionError, match=TEST_CVC):
+        assert_no_card_data(row_text(rows[0]))
+
+
+@pytest.mark.asyncio
+async def test_a_checkout_id_is_never_all_digits(shop, monkeypatch):
+    # About one draw in 1,850 of 16 hex characters is all digits, which the
+    # audit log redacts as a card number: the rows would lose the id that
+    # pairs the approval with its outcome.
+    drawn = iter(["5555555555555555", "bc98784d54ccb89f"])
+    monkeypatch.setattr(checkout_toolkit, "secrets", SimpleNamespace(token_hex=lambda nbytes: next(drawn)))
+    s = shop
+    arguments = await begin(s)
+    assert arguments[CARD_KEY]["checkout_id"] == "bc98784d54ccb89f"
+    assert (await run(s, arguments))["ok"] is True
+    rows = await audit_rows(s)
+    assert {r.request_data["checkout_id"] for r in rows} == {"bc98784d54ccb89f"}
 
 
 @pytest.mark.asyncio
