@@ -15,7 +15,7 @@ is no longer registered is listed with ``available: false`` and never offered.
 """
 
 from __future__ import annotations
-from typing import Any, Callable, Dict, List, Literal, Optional
+from typing import Annotated, Any, Callable, Dict, List, Literal, Optional
 
 import json
 import uuid
@@ -23,12 +23,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel, Field, computed_field
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from pydantic import BaseModel, Field, StringConstraints, computed_field
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api.routes.agent import UserRateLimiter
 from api.routes.oauth import session_factory_dependency
 from core.database import get_db
 from core.security import decrypt_credentials, encrypt_credentials
@@ -48,6 +49,7 @@ from services.agent.tool_registry import connector_scopes, default_read_scopes
 from services.agent.permission_grants import on_connector_updated
 from services.audit import append_auth_event
 from services.auth import get_current_user
+from services.connectors import canvas_schools
 from services.connectors import oauth as oauth_broker
 from services.connectors import registry as connector_registry
 from services.connectors.base import BaseConnector
@@ -298,6 +300,56 @@ async def list_connector_types(
     like every other connector route, though it holds no per-user data.
     """
     return connector_registry.connector_types_payload()
+
+
+# "Find your school" on the Canvas form. A search is a request to
+# Instructure unless it is cached, so each user is held to a typing pace.
+SCHOOL_SEARCHES_PER_MINUTE = 30
+_school_search_limiter = UserRateLimiter()
+
+SchoolQuery = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=2, max_length=100),
+    Query(description="Part of the school's name."),
+]
+
+
+class CanvasSchoolResult(BaseModel):
+    name: str
+    # The school's Canvas host, such as nyit.instructure.com.
+    domain: str
+
+
+@router.get("/canvas/schools", response_model=list[CanvasSchoolResult])
+async def search_canvas_schools(
+    q: SchoolQuery,
+    current_user: User = Depends(get_current_user),
+) -> list[CanvasSchoolResult]:
+    """Canvas schools whose name matches ``q``, from Instructure's public
+    school directory, so the Canvas form can fill in the address.
+
+    Two path segments, so it never reaches ``/{connector_id}``. The
+    directory call, its network policy, filtering and cache live in
+    ``services.connectors.canvas_schools``.
+    """
+    if not _school_search_limiter.allow(str(current_user.id), SCHOOL_SEARCHES_PER_MINUTE):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many school searches. Wait a minute and try again.",
+        )
+    try:
+        schools = await canvas_schools.search_schools(q)
+    except canvas_schools.SchoolSearchError as exc:
+        # The reason and the query's length only, never the user's text.
+        logger.warning("canvas_school_search_failed", reason=str(exc), query_length=len(q))
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=(
+                "School search is not working right now. "
+                "Type your school's Canvas address instead."
+            ),
+        ) from None
+    return [CanvasSchoolResult(name=school.name, domain=school.domain) for school in schools]
 
 
 HealthStatus = Literal["healthy", "degraded", "unhealthy"]
@@ -771,6 +823,10 @@ async def delete_connector(
 class ConnectorTestResult(BaseModel):
     ok: bool
     detail: str
+    # Who the health check found ("Connected to <account> as <user>"), on
+    # success only and only for connectors whose check reports it.
+    account: Optional[str] = None
+    user: Optional[str] = None
 
 
 @router.post("/{connector_id}/test", response_model=ConnectorTestResult)
@@ -813,7 +869,7 @@ async def test_connector(
         return ConnectorTestResult(
             ok=False,
             detail=(
-                "Stored credentials could not be decrypted — the server's "
+                "Stored credentials could not be decrypted: the server's "
                 "encryption key has changed since they were saved. Re-enter "
                 "them to fix."
             ),
@@ -890,15 +946,38 @@ async def test_connector(
         await connector.authenticate(credentials)
         healthy = await connector.health_check()
         if healthy:
-            return ConnectorTestResult(ok=True, detail="Connection verified.")
+            identity = connector.identity()
+            return ConnectorTestResult(
+                ok=True,
+                detail="Connection verified.",
+                account=(identity.account or None) if identity else None,
+                user=(identity.user or None) if identity else None,
+            )
+        # The check could tell the service never answered, or that something
+        # else answered at the address: say so, so nobody makes a new code to
+        # fix an address or a network problem.
+        problem = connector.health_problem()
+        if problem == "unreachable":
+            return ConnectorTestResult(
+                ok=False,
+                detail=(
+                    "Could not reach the service. Check the address and the "
+                    "internet connection, then try again."
+                ),
+            )
+        if problem == "wrong_address":
+            return ConnectorTestResult(
+                ok=False,
+                detail="The address answered, but not like this service. Check the address.",
+            )
         # Token-based connectors (Canvas, Google) store the token without a
         # round-trip to the service, so reaching here means the stored
-        # credentials did not pass the live health check — most often they are
+        # credentials did not pass the live health check: most often they are
         # invalid or expired. Do not claim the credentials "authenticated".
         return ConnectorTestResult(
             ok=False,
             detail=(
-                "Service health check failed — the stored credentials may be "
+                "Service health check failed. The stored credentials may be "
                 "invalid or expired. Re-enter them to fix."
             ),
         )

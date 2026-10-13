@@ -34,6 +34,7 @@ vi.mock("@/services/api", () => {
     getMe: vi.fn(async () => ({ default_permission_tier: "user_confirm" })),
     getOAuthStatus: vi.fn(),
     getSlackLinkStatus: vi.fn(),
+    searchCanvasSchools: vi.fn(),
     startDeviceOAuth: vi.fn(),
     startOAuth: vi.fn(),
     testConnector: vi.fn(),
@@ -52,6 +53,7 @@ import {
   getMe,
   getOAuthStatus,
   getSlackLinkStatus,
+  searchCanvasSchools,
   startDeviceOAuth,
   startOAuth,
   testConnector,
@@ -125,7 +127,7 @@ const CANVAS = entry({
     provider: null,
     oauth_configured: false,
     token_auth_method: "bearer_token",
-    notes: "base_url is your school's Canvas instance.",
+    notes: "Your school's Canvas address, for example https://myschool.instructure.com",
     token_url: "{base_url}/profile/settings",
     token_url_label: "Open your Canvas token page",
   },
@@ -298,7 +300,14 @@ vi.setConfig({ testTimeout: 15_000 });
 
 beforeEach(() => {
   vi.mocked(getSlackLinkStatus).mockResolvedValue({ linked: false, channel_running: true });
+  // The check that runs once a new connector is saved.
+  vi.mocked(testConnector).mockResolvedValue({ ok: true, detail: "Connection verified." });
 });
+
+/** Open the connect dialog's folded "More settings" (name, approval policy, rate limit). */
+async function openMoreSettings(user: ReturnType<typeof userEvent.setup>, dialog: HTMLElement) {
+  await user.click(within(dialog).getByRole("button", { name: "More settings" }));
+}
 
 afterEach(() => {
   vi.useRealTimers();
@@ -310,18 +319,20 @@ afterEach(() => {
 
 describe("Connectors catalog", () => {
   it("renders a card per catalog entry plus MCP, with icons and an unknown-icon fallback", async () => {
-    setup([CANVAS, MYSTERY]);
+    setup([CANVAS, { ...MYSTERY, docs_url: "https://mystery.example/doc" }]);
 
     const canvas = await screen.findByRole("article", { name: "Canvas LMS" });
     expect(canvas.querySelector("svg.lucide-graduation-cap")).not.toBeNull();
     expect(within(canvas).getByText("Canvas LMS description.")).toBeInTheDocument();
-    const docs = within(canvas).getByRole("link", { name: /setup guide/i });
-    expect(docs).toHaveAttribute("href", "https://canvas.example.edu/doc/api");
-    expect(docs).toHaveAttribute("target", "_blank");
-    expect(docs.getAttribute("rel")).toContain("noopener");
+    // A guided service walks through its pages in the dialog, so its card has no links.
+    expect(within(canvas).queryByRole("link")).not.toBeInTheDocument();
 
     const mystery = screen.getByRole("article", { name: "Mystery Box" });
     expect(mystery.querySelector("svg.lucide-plug")).not.toBeNull();
+    const docs = within(mystery).getByRole("link", { name: /setup guide/i });
+    expect(docs).toHaveAttribute("href", "https://mystery.example/doc");
+    expect(docs).toHaveAttribute("target", "_blank");
+    expect(docs.getAttribute("rel")).toContain("noopener");
 
     const mcp = screen.getByRole("article", { name: "MCP server" });
     expect(mcp.querySelector("svg.lucide-server")).not.toBeNull();
@@ -339,26 +350,45 @@ describe("Connectors catalog", () => {
   });
 });
 
-describe("pasted-token connect", () => {
-  it("posts auth_method, credentials from the fields, and read scopes preselected with write opt-in", async () => {
+describe("guided connect", () => {
+  it("finds the school, links its Canvas settings, posts the credentials and says who it connected as", async () => {
     const { user } = setup([CANVAS]);
+    vi.mocked(searchCanvasSchools).mockResolvedValue([
+      { name: "NYIT", domain: "nyit.instructure.com" },
+      { name: "Sneaky", domain: "javascript:alert(1)" },
+    ]);
     vi.mocked(createConnector).mockImplementation(async (body) =>
       row({ id: "c-new", connector_type: body.connector_type, display_name: body.display_name }),
     );
+    vi.mocked(testConnector).mockResolvedValue({
+      ok: true,
+      detail: "Connection verified.",
+      account: "nyit.instructure.com",
+      user: "Rafi Hossain",
+    });
     const dialog = await openConnect(user, "Canvas LMS");
-    const submit = within(dialog).getByRole("button", { name: "Create connector" });
+    expect(within(dialog).getByRole("list", { name: "Steps to connect Canvas" })).toBeInTheDocument();
+    const submit = within(dialog).getByRole("button", { name: "Connect" });
+    expect(within(dialog).getByText("Find your school in step 1 first. The button appears here.")).toBeInTheDocument();
+    // The steps stand in for the catalog's note.
+    expect(within(dialog).queryByText(/for example https:\/\/myschool/)).not.toBeInTheDocument();
 
-    await fill(user, within(dialog).getByLabelText("Display name"), "School");
-    const url = within(dialog).getByLabelText("Canvas URL");
-    await fill(user, url, "not a url");
-    expect(within(dialog).getByText(/Enter a full web address/)).toBeInTheDocument();
-    expect(url).toHaveAttribute("aria-invalid", "true");
-    await user.clear(url);
-    await fill(user, url, "https://school.instructure.com");
-    const token = within(dialog).getByLabelText("Access token");
-    expect(token).toHaveAttribute("type", "password");
+    await fill(user, within(dialog).getByLabelText("School name"), "nyit");
+    const pick = await within(dialog).findByRole("button", { name: /nyit\.instructure\.com/ });
+    expect(searchCanvasSchools).toHaveBeenCalledWith("nyit");
+    // A result whose domain is not a plain host name is never offered.
+    expect(within(dialog).queryByRole("button", { name: /Sneaky/ })).not.toBeInTheDocument();
+    await user.click(pick);
+
+    const link = within(dialog).getByRole("link", { name: "Open my Canvas settings (opens in a new tab)" });
+    expect(link).toHaveAttribute("href", "https://nyit.instructure.com/profile/settings");
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link.getAttribute("rel")).toContain("noopener");
+    const code = within(dialog).getByLabelText("Canvas code");
+    expect(code).toHaveAttribute("type", "password");
     expect(submit).toBeDisabled();
-    await fill(user, token, "canvas-test-token");
+    await fill(user, code, "1234~abcdefghijklmnopqrstuvwxyz");
+    expect(within(dialog).getByText("Looks like a Canvas code.")).toBeInTheDocument();
 
     expect(within(dialog).getByRole("button", { name: /courses\.read/ })).toHaveAttribute("aria-pressed", "true");
     expect(within(dialog).getByRole("button", { name: /grades\.read/ })).toHaveAttribute("aria-pressed", "true");
@@ -372,21 +402,218 @@ describe("pasted-token connect", () => {
 
     expect(createConnector).toHaveBeenCalledWith({
       connector_type: "canvas",
-      display_name: "School",
+      display_name: "Canvas (NYIT)",
       auth_method: "bearer_token",
-      credentials: { base_url: "https://school.instructure.com", access_token: "canvas-test-token" },
+      credentials: { base_url: "https://nyit.instructure.com", access_token: "1234~abcdefghijklmnopqrstuvwxyz" },
       granted_scopes: ["courses.read", "grades.read", "submissions.write"],
       permission_tier: "user_confirm",
       rate_limit_per_minute: 30,
     });
-    expect(await screen.findByRole("article", { name: "School" })).toBeInTheDocument();
+    expect(testConnector).toHaveBeenCalledWith("c-new");
+    expect(await within(dialog).findByText("Connected to NYIT as Rafi Hossain")).toBeInTheDocument();
+    expect(screen.getByRole("article", { name: "Canvas (NYIT)" })).toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole("button", { name: "Done" }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    // The page keeps the news once the dialog is gone.
+    expect(screen.getByText("Connected to NYIT as Rafi Hossain")).toBeInTheDocument();
+  });
+
+  it("takes a typed address for a school the search does not have, and folds the extras away", async () => {
+    const { user } = setup([CANVAS]);
+    vi.mocked(searchCanvasSchools).mockResolvedValue([]);
+    const dialog = await openConnect(user, "Canvas LMS");
+
+    await fill(user, within(dialog).getByLabelText("School name"), "tiny college");
+    expect(
+      await within(dialog).findByText("No schools found. Try another spelling, or use your school's own address."),
+    ).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "My school uses its own address" }));
+
+    const url = within(dialog).getByLabelText("Your school's Canvas address");
+    await fill(user, url, "javascript:alert(1)");
+    expect(within(dialog).getByText(/Enter a full web address/)).toBeInTheDocument();
+    expect(url).toHaveAttribute("aria-invalid", "true");
+    expect(within(dialog).queryByRole("link", { name: /Open my Canvas settings/ })).not.toBeInTheDocument();
+    await user.clear(url);
+    // A page address pasted from the browser bar still links to the settings page.
+    await fill(user, url, "https://canvas.school.edu/courses?x=1");
+    expect(within(dialog).getByRole("link", { name: /Open my Canvas settings/ })).toHaveAttribute(
+      "href",
+      "https://canvas.school.edu/profile/settings",
+    );
+
+    // The renewal extras stay folded until asked for.
+    expect(within(dialog).queryByLabelText(/Refresh code/)).not.toBeInTheDocument();
+    const advanced = within(dialog).getByRole("button", { name: "Advanced (optional)" });
+    expect(advanced).toHaveAttribute("aria-expanded", "false");
+    await user.click(advanced);
+    expect(advanced).toHaveAttribute("aria-expanded", "true");
+    expect(within(dialog).getByLabelText(/Refresh code/)).toHaveAttribute("type", "password");
+  });
+
+  it("says when the school search is down and offers the address field", async () => {
+    const { user } = setup([CANVAS]);
+    vi.mocked(searchCanvasSchools).mockRejectedValue(
+      new Error("School search is not working right now. Type your school's Canvas address instead."),
+    );
+    const dialog = await openConnect(user, "Canvas LMS");
+    await fill(user, within(dialog).getByLabelText("School name"), "nyit");
+    expect(await within(dialog).findByText(/School search is not working right now/)).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "My school uses its own address" }));
+    expect(within(dialog).getByLabelText("Your school's Canvas address")).toBeInTheDocument();
+  });
+
+  it("explains a refused code plainly and saves the fix to the same connector", async () => {
+    const { user } = setup([{ ...GITHUB, auth: { ...GITHUB.auth, oauth_configured: false } }]);
+    vi.mocked(createConnector).mockImplementation(async (body) =>
+      row({ id: "c-gh", connector_type: body.connector_type, display_name: body.display_name }),
+    );
+    vi.mocked(updateConnector).mockImplementation(async (id, body) =>
+      row({ id, connector_type: "github", display_name: body.display_name ?? "GitHub" }),
+    );
+    vi.mocked(testConnector)
+      .mockResolvedValueOnce({ ok: false, detail: "Authentication failed: Bad credentials" })
+      .mockResolvedValueOnce({ ok: true, detail: "Connection verified.", user: "octocat" });
+    const dialog = await openConnect(user, "GitHub");
+    expect(within(dialog).getByRole("link", { name: "Open the GitHub form (opens in a new tab)" })).toHaveAttribute(
+      "href",
+      GITHUB_TOKEN_URL,
+    );
+
+    const code = within(dialog).getByLabelText("GitHub code");
+    await fill(user, code, "xoxb-not-github");
+    expect(within(dialog).getByText("This looks like a Slack bot code, not one from GitHub.")).toBeInTheDocument();
+    await user.clear(code);
+    await fill(user, code, "github_pat_first");
+    expect(within(dialog).getByText("Looks like a GitHub code.")).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Connect" }));
+
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "GitHub did not accept that code. Make a new one with the form in step 1 and paste it.",
+    );
+    expect(within(dialog).getByText("What GitHub said: Authentication failed: Bad credentials")).toBeInTheDocument();
+    // Saved anyway: its card is on the page behind the dialog.
+    expect(screen.getByRole("button", { name: "Edit GitHub" })).toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole("button", { name: "Change what I entered" }));
+    const again = within(dialog).getByLabelText("GitHub code");
+    expect(again).toHaveValue("github_pat_first");
+    expect(within(dialog).getByLabelText("Service")).toBeDisabled();
+    await user.clear(again);
+    await fill(user, again, "github_pat_second");
+    await user.click(within(dialog).getByRole("button", { name: "Save and check again" }));
+
+    expect(createConnector).toHaveBeenCalledTimes(1);
+    expect(updateConnector).toHaveBeenCalledWith("c-gh", {
+      display_name: "GitHub",
+      credentials: { access_token: "github_pat_second" },
+      granted_scopes: ["repos.read"],
+      permission_tier: "user_confirm",
+      rate_limit_per_minute: 30,
+    });
+    expect(await within(dialog).findByText("Connected to GitHub as octocat")).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Edit GitHub" })).toHaveLength(1);
+  });
+
+  it("closing after a failed check leaves the connector saved and says what to do", async () => {
+    const { user } = setup([{ ...GITHUB, auth: { ...GITHUB.auth, oauth_configured: false } }]);
+    vi.mocked(createConnector).mockResolvedValue(row({ id: "c-gh", connector_type: "github", display_name: "GitHub" }));
+    vi.mocked(testConnector).mockRejectedValue(new Error("The check could not reach GitHub."));
+    const dialog = await openConnect(user, "GitHub");
+    await fill(user, within(dialog).getByLabelText("GitHub code"), "github_pat_abc");
+    await user.click(within(dialog).getByRole("button", { name: "Connect" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "Crawler could not reach GitHub. Check your internet connection, then try again.",
+    );
+    await user.click(within(dialog).getByRole("button", { name: "Close for now" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByText(/GitHub is saved, but the check with GitHub did not pass/)).toBeInTheDocument();
+  });
+
+  it("closing while the check runs leaves no stale message and reports the real result later", async () => {
+    const { user } = setup([{ ...GITHUB, auth: { ...GITHUB.auth, oauth_configured: false } }]);
+    vi.mocked(createConnector).mockResolvedValue(row({ id: "c-gh", connector_type: "github", display_name: "GitHub" }));
+    const pending = deferred<Awaited<ReturnType<typeof testConnector>>>();
+    vi.mocked(testConnector).mockReturnValue(pending.promise);
+    const dialog = await openConnect(user, "GitHub");
+    await fill(user, within(dialog).getByLabelText("GitHub code"), "github_pat_abc");
+    await user.click(within(dialog).getByRole("button", { name: "Connect" }));
+    expect(await within(dialog).findByText(/Checking with GitHub/)).toBeInTheDocument();
+
+    // The dialog's own X; the footer's Close does the same.
+    await user.click(within(dialog).getAllByRole("button", { name: "Close" })[0]);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.queryByText(/is saved/)).not.toBeInTheDocument();
+
+    await act(async () => pending.resolve({ ok: true, detail: "Connection verified.", user: "octocat" }));
+    expect(await screen.findByText("Connected to GitHub as octocat")).toBeInTheDocument();
+  });
+
+  it("locks the way to connect once a code is saved, so a retry fixes that connector", async () => {
+    const { user } = setup([GITHUB]);
+    vi.mocked(createConnector).mockResolvedValue(row({ id: "c-gh", connector_type: "github", display_name: "GitHub" }));
+    vi.mocked(testConnector).mockResolvedValue({ ok: false, detail: "Authentication failed: Bad credentials" });
+    const dialog = await openConnect(user, "GitHub");
+    await user.click(within(dialog).getByRole("radio", { name: "Paste a code" }));
+    await fill(user, within(dialog).getByLabelText("GitHub code"), "github_pat_abc");
+    await user.click(within(dialog).getByRole("button", { name: "Connect" }));
+    await user.click(await within(dialog).findByRole("button", { name: "Change what I entered" }));
+
+    // Focus stays in the dialog, on what went wrong.
+    expect(document.activeElement).toHaveTextContent("GitHub did not accept that code");
+    expect(within(dialog).getByRole("radio", { name: "Sign in with a code" })).toBeDisabled();
+    expect(within(dialog).getByRole("radio", { name: "Paste a code" })).toBeChecked();
+  });
+
+  it("keeps the school, focus and typed values when going back after a failed check", async () => {
+    const { user } = setup([CANVAS]);
+    vi.mocked(searchCanvasSchools).mockResolvedValue([{ name: "NYIT", domain: "nyit.instructure.com" }]);
+    vi.mocked(createConnector).mockResolvedValue(row({ id: "c-c", connector_type: "canvas", display_name: "Canvas (NYIT)" }));
+    vi.mocked(testConnector).mockResolvedValue({
+      ok: false,
+      detail: "The address answered, but not like this service. Check the address.",
+    });
+    const dialog = await openConnect(user, "Canvas LMS");
+    await fill(user, within(dialog).getByLabelText("School name"), "nyit");
+    expect(await within(dialog).findByText("1 school found. Pick yours.")).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: /nyit\.instructure\.com/ }));
+    // The picked school replaces the result that was clicked; focus moves with it.
+    expect(within(dialog).getByRole("button", { name: "Change school" })).toHaveFocus();
+    await fill(user, within(dialog).getByLabelText("Canvas code"), "1234~abcdefghijklmnopqrstuvwxyz");
+    await user.click(within(dialog).getByRole("button", { name: "Connect" }));
+
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "That address is not your school's Canvas. Find your school again in step 1, or check the address you typed.",
+    );
+    await user.click(within(dialog).getByRole("button", { name: "Change what I entered" }));
+    expect(within(dialog).getByText("NYIT")).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Canvas code")).toHaveValue("1234~abcdefghijklmnopqrstuvwxyz");
+
+    await user.click(within(dialog).getByRole("button", { name: "Change school" }));
+    expect(within(dialog).getByLabelText("School name")).toHaveFocus();
+    await user.click(within(dialog).getByRole("button", { name: "My school uses its own address" }));
+    expect(within(dialog).getByLabelText("Your school's Canvas address")).toHaveFocus();
+  });
+
+  it("keeps a custom name and the approval policy under More settings", async () => {
+    const { user } = setup([CANVAS]);
+    const dialog = await openConnect(user, "Canvas LMS");
+    expect(within(dialog).queryByLabelText("Approval policy")).not.toBeInTheDocument();
+    await openMoreSettings(user, dialog);
+    expect(within(dialog).getByLabelText(/Name in Crawler/)).toHaveAttribute("placeholder", "Canvas LMS");
+    expect(within(dialog).getByLabelText("Approval policy")).toHaveValue("user_confirm");
+    expect(within(dialog).getByRole("link", { name: "Technical guide for Canvas LMS (opens in a new tab)" })).toHaveAttribute(
+      "href",
+      "https://canvas.example.edu/doc/api",
+    );
   });
 
   it("clamps the rate limit to 1 to 600", async () => {
     const { user } = setup([CANVAS]);
     const dialog = await openConnect(user, "Canvas LMS");
-    const rate = within(dialog).getByLabelText("Rate limit (/min)");
+    await openMoreSettings(user, dialog);
+    const rate = within(dialog).getByLabelText("Most actions per minute");
     expect(rate).toHaveValue(30);
     await user.clear(rate);
     await user.type(rate, "1000");
@@ -395,121 +622,80 @@ describe("pasted-token connect", () => {
 });
 
 describe("token links", () => {
-  it("links the Canvas token page under the Canvas URL once a valid address is typed", async () => {
-    const { user } = setup([CANVAS]);
-    const card = await screen.findByRole("article", { name: "Canvas LMS" });
-    // The card cannot know the school's address, so it keeps the guide.
-    expect(within(card).queryByRole("link", { name: /token page/ })).not.toBeInTheDocument();
-
-    const dialog = await openConnect(user, "Canvas LMS");
-    const linkName = /Open your Canvas token page/;
-    expect(within(dialog).queryByRole("link", { name: linkName })).not.toBeInTheDocument();
-    expect(
-      within(dialog).getByText("Enter your Canvas URL above to get a direct link to your token page."),
-    ).toBeInTheDocument();
-
-    const url = within(dialog).getByLabelText("Canvas URL");
-    await fill(user, url, "javascript:alert(1)");
-    expect(within(dialog).queryByRole("link", { name: linkName })).not.toBeInTheDocument();
-    await user.clear(url);
-    await fill(user, url, "https://school.instructure.com/");
-
-    const link = within(dialog).getByRole("link", { name: linkName });
-    expect(link).toHaveAttribute("href", "https://school.instructure.com/profile/settings");
-    expect(link).toHaveAttribute("target", "_blank");
-    expect(link.getAttribute("rel")).toContain("noopener");
-    expect(within(dialog).getByText("Follow the steps there, then fill in the rest of this form.")).toBeInTheDocument();
-    expect(link).toHaveAccessibleName("Open your Canvas token page (opens in a new tab)");
-    expect(within(dialog).queryByText(/to get a direct link/)).not.toBeInTheDocument();
-    // Right under the field it is built from, before the token field.
-    const tokenField = within(dialog).getByLabelText("Access token");
-    expect(url.compareDocumentPosition(link) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(link.compareDocumentPosition(tokenField) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(within(dialog).getByRole("link", { name: /Setup guide/ })).toHaveAttribute(
-      "href",
-      "https://canvas.example.edu/doc/api",
-    );
-  });
-
-  it("puts the GitHub token link on the card only while pasting a token is the way in", async () => {
-    setup([{ ...GITHUB, auth: { ...GITHUB.auth, oauth_configured: false } }]);
-    const card = await screen.findByRole("article", { name: "GitHub" });
-    expect(
-      within(card).getByRole("link", { name: "Create a GitHub token (opens in a new tab)" }),
-    ).toHaveAttribute("href", GITHUB_TOKEN_URL);
-  });
-
-  it("keeps the guide on the card when sign-in is ready, and links the token atop the token form", async () => {
+  it("keeps the GitHub card plain and opens the prefilled form from the paste step", async () => {
     const { user } = setup([{ ...GITHUB, docs_url: "https://docs.github.com/pat" }]);
     const card = await screen.findByRole("article", { name: "GitHub" });
-    expect(within(card).queryByRole("link", { name: /Create a GitHub token/ })).not.toBeInTheDocument();
-    expect(within(card).getByRole("link", { name: "Setup guide for GitHub (opens in a new tab)" })).toHaveAttribute(
-      "href",
-      "https://docs.github.com/pat",
-    );
+    expect(within(card).queryByRole("link")).not.toBeInTheDocument();
 
     const dialog = await openConnect(user, "GitHub");
-    // Device sign-in is the default method: no token form, no token link.
-    expect(within(dialog).queryByRole("link", { name: /Create a GitHub token/ })).not.toBeInTheDocument();
-    await user.click(within(dialog).getByRole("radio", { name: "Paste a token" }));
-    expect(within(dialog).getByRole("link", { name: /Create a GitHub token/ })).toHaveAttribute(
+    // Device sign-in is the default method: no paste step, no link to the form.
+    expect(within(dialog).queryByRole("link", { name: /Open the GitHub form/ })).not.toBeInTheDocument();
+    await user.click(within(dialog).getByRole("radio", { name: "Paste a code" }));
+    expect(within(dialog).getByRole("link", { name: /Open the GitHub form/ })).toHaveAttribute(
       "href",
       GITHUB_TOKEN_URL,
     );
   });
 
-  it("points the owner at the sign-in client page when sign-in is not set up", async () => {
+  it("tells people sign-in needs the owner's setup, with the owner's steps one click away", async () => {
     const { user } = setup([microsoft(false), google(false)]);
     const ms = await screen.findByRole("article", { name: "Microsoft 365" });
     expect(within(ms).getByRole("button", { name: "Connect Microsoft 365" })).toBeDisabled();
+    expect(within(ms).getByText("Needs a one-time setup by whoever runs this Crawler.")).toBeInTheDocument();
+    expect(within(ms).queryByRole("link")).not.toBeInTheDocument();
+    await user.click(within(ms).getByRole("button", { name: "How to set it up" }));
     expect(
-      within(ms).getByRole("link", { name: "Register the sign-in app for Microsoft 365 (opens in a new tab)" }),
+      within(ms).getByRole("link", { name: "Register a sign-in app for Microsoft 365 (opens in a new tab)" }),
     ).toHaveAttribute("href", MICROSOFT_CLIENT_SETUP_URL);
-    // The card is all the owner sees (Connect is disabled), so it says where the id goes.
-    expect(within(ms).getByText(/not set up on this server/)).toHaveTextContent(
-      "Register the sign-in app, then add its client ID to backend/.env as MICROSOFT_OAUTH_CLIENT_ID, and restart the backend.",
+    expect(within(ms).getByText(/Add its client ID to/)).toHaveTextContent(
+      "Add its client ID to backend/.env as MICROSOFT_OAUTH_CLIENT_ID.",
     );
+    expect(within(ms).getByText("Restart the backend.")).toBeInTheDocument();
 
-    // Google has no working sign-in here, so pasting a token is the way in and the card links it.
+    // Google can still be connected with a code, so its card stays plain.
     const gw = screen.getByRole("article", { name: "Google Workspace" });
-    expect(within(gw).getByRole("link", { name: /Get a token in the OAuth Playground/ })).toHaveAttribute(
+    expect(within(gw).queryByRole("link")).not.toBeInTheDocument();
+
+    const dialog = await openConnect(user, "Google Workspace");
+    expect(within(dialog).getByText(/needs a one-time setup/)).toHaveTextContent(
+      "Sign-in with Google needs a one-time setup by whoever runs this Crawler. Until then, connect with a code from Google below.",
+    );
+    await user.click(within(dialog).getByRole("button", { name: "How to set it up" }));
+    expect(within(dialog).getByText(/Add its client ID and secret/)).toHaveTextContent(
+      "Add its client ID and secret to backend/.env as GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET.",
+    );
+    expect(
+      within(dialog).getByRole("link", { name: "Register a sign-in app for Google Workspace (opens in a new tab)" }),
+    ).toHaveAttribute("href", "https://console.cloud.google.com/auth/clients");
+    expect(within(dialog).getByRole("link", { name: "Open Google's test page (opens in a new tab)" })).toHaveAttribute(
       "href",
       GOOGLE_PLAYGROUND_URL,
     );
-
-    const dialog = await openConnect(user, "Google Workspace");
-    const note = within(dialog).getByText(/not set up on this server/);
-    expect(note).toHaveTextContent(
-      "add its client ID and secret to backend/.env as GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET, and restart the backend. You can paste a token instead.",
-    );
-    expect(
-      within(note).getByRole("link", { name: "Register the sign-in app for Google Workspace (opens in a new tab)" }),
-    ).toHaveAttribute("href", "https://console.cloud.google.com/auth/clients");
   });
 
-  it("does not lead with the OAuth Playground when Google sign-in is ready", async () => {
+  it("does not lead with Google's test page when Google sign-in is ready", async () => {
     const signedIn = row({ id: "c-g", connector_type: "google_workspace", auth_method: "oauth2", display_name: "Mail" });
     const { user } = setup([google()], [signedIn]);
     const card = await screen.findByRole("article", { name: "Google Workspace" });
-    expect(within(card).queryByRole("link", { name: /OAuth Playground/ })).not.toBeInTheDocument();
+    expect(within(card).queryByRole("link")).not.toBeInTheDocument();
 
-    // Editing a signed-in row: the advice is Reconnect, so the token link is a small inline link.
+    // Editing a signed-in row: the advice is Reconnect, so the code link is a small inline link.
     await user.click(screen.getByRole("button", { name: "Edit Mail" }));
     const dialog = screen.getByRole("dialog");
     expect(within(dialog).getByText(/use Reconnect on the card instead/)).toBeInTheDocument();
-    const link = within(dialog).getByRole("link", { name: /Get a token in the OAuth Playground/ });
+    const link = within(dialog).getByRole("link", { name: /Open Google's test page/ });
     expect(link).toHaveAttribute("href", GOOGLE_PLAYGROUND_URL);
     expect(link).toHaveClass("underline");
     expect(within(dialog).queryByText(/Follow the steps there/)).not.toBeInTheDocument();
   });
 
-  it("Edit links the Canvas token page once the replacement address is typed", async () => {
+  it("Edit links the Canvas settings page once the replacement address is typed", async () => {
     const { user } = setup([CANVAS], [row({ id: "c-canvas", connector_type: "canvas", display_name: "School" })]);
     await user.click(await screen.findByRole("button", { name: "Edit School" }));
     const dialog = screen.getByRole("dialog");
-    expect(within(dialog).queryByRole("link", { name: /Open your Canvas token page/ })).not.toBeInTheDocument();
-    await fill(user, within(dialog).getByLabelText("Canvas URL"), "http://canvas.school.test");
-    expect(within(dialog).getByRole("link", { name: /Open your Canvas token page/ })).toHaveAttribute(
+    expect(within(dialog).queryByRole("link", { name: /Open my Canvas settings/ })).not.toBeInTheDocument();
+    await fill(user, within(dialog).getByLabelText("Your school's Canvas address"), "http://canvas.school.test");
+    expect(within(dialog).getByRole("link", { name: /Open my Canvas settings/ })).toHaveAttribute(
       "href",
       "http://canvas.school.test/profile/settings",
     );
@@ -686,7 +872,7 @@ describe("browser sign-in (OAuth)", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "Continue to Google Workspace" }));
     await flush();
     expect(within(dialog).getByLabelText("Service")).toBeDisabled();
-    expect(within(dialog).getByRole("radio", { name: "Paste a token" })).toBeDisabled();
+    expect(within(dialog).getByRole("radio", { name: "Paste a code" })).toBeDisabled();
 
     pendingStart.resolve({
       flow_id: "flow-1",
@@ -796,25 +982,31 @@ describe("browser sign-in (OAuth)", () => {
     );
 
     const ms = await screen.findByRole("article", { name: "Microsoft 365" });
-    expect(within(ms).getByText(/not set up on this server/)).toBeInTheDocument();
+    expect(within(ms).getByText(/one-time setup/)).toBeInTheDocument();
     expect(within(ms).getByRole("button", { name: "Connect Microsoft 365" })).toBeDisabled();
 
     const dialog = await openConnect(user, "Google Workspace");
-    expect(within(dialog).getByText(/not set up on this server/)).toHaveTextContent("You can paste a token instead.");
+    expect(within(dialog).getByText(/needs a one-time setup/)).toHaveTextContent(
+      "Until then, connect with a code from Google below.",
+    );
     expect(within(dialog).queryByRole("radio")).not.toBeInTheDocument();
-    await fill(user, within(dialog).getByLabelText("Display name"), "Mail");
-    await fill(user, within(dialog).getByLabelText("OAuth access token"), "ya29.test-token");
-    await user.click(within(dialog).getByRole("button", { name: "Create connector" }));
+    await openMoreSettings(user, dialog);
+    await fill(user, within(dialog).getByLabelText(/Name in Crawler/), "Mail");
+    await fill(user, within(dialog).getByLabelText("Google code"), "ya29.test-token");
+    expect(within(dialog).getByText("Looks like a Google code.")).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Connect" }));
 
     expect(startOAuth).not.toHaveBeenCalled();
     expect(createConnector).toHaveBeenCalledWith(
       expect.objectContaining({
         connector_type: "google_workspace",
         auth_method: "oauth2",
+        display_name: "Mail",
         credentials: { access_token: "ya29.test-token" },
         granted_scopes: ["gmail.read", "calendar.read"],
       }),
     );
+    expect(await within(dialog).findByText("Connected to Google")).toBeInTheDocument();
   });
 });
 
@@ -865,9 +1057,9 @@ describe("device sign-in", () => {
   it("offers the token form as the other method", async () => {
     const { user } = setup([GITHUB]);
     const dialog = await openConnect(user, "GitHub");
-    await user.click(within(dialog).getByRole("radio", { name: "Paste a token" }));
-    expect(within(dialog).getByLabelText("Personal access token")).toHaveAttribute("type", "password");
-    expect(within(dialog).getByRole("button", { name: "Create connector" })).toBeDisabled();
+    await user.click(within(dialog).getByRole("radio", { name: "Paste a code" }));
+    expect(within(dialog).getByLabelText("GitHub code")).toHaveAttribute("type", "password");
+    expect(within(dialog).getByRole("button", { name: "Connect" })).toBeDisabled();
   });
 });
 
@@ -934,7 +1126,7 @@ describe("existing rows", () => {
     const noAuth = screen.getByRole("article", { name: "No sign-in mail" });
     expect(within(noAuth).getByText("needs reconnect")).toBeInTheDocument();
     expect(within(noAuth).queryByText(/Press Reconnect/)).not.toBeInTheDocument();
-    expect(within(noAuth).getByText(/ask the administrator/)).toBeInTheDocument();
+    expect(within(noAuth).getByText(/needs a one-time setup by whoever runs this Crawler; ask them/)).toBeInTheDocument();
   });
 
   it("testing a signed-in row reloads the list, so a refused refresh shows needs reconnect", async () => {
@@ -1049,7 +1241,7 @@ describe("existing rows", () => {
       row({ id: "c-ms", connector_type: "microsoft", auth_method: "oauth2", display_name: "Outlook" }),
     ]);
     const mail = await screen.findByRole("article", { name: "Mail" });
-    expect(within(mail).getByText(/pasting a new token in Edit/)).toBeInTheDocument();
+    expect(within(mail).getByText(/entering a new code in Edit/)).toBeInTheDocument();
     expect(within(mail).queryByText(/cannot be renewed from here/)).not.toBeInTheDocument();
     expect(within(mail).queryByRole("button", { name: "Reconnect Mail" })).not.toBeInTheDocument();
 
@@ -1069,7 +1261,7 @@ describe("existing rows", () => {
     ]);
     await user.click(await screen.findByRole("button", { name: "Edit Outlook" }));
     const dialog = screen.getByRole("dialog");
-    expect(within(dialog).queryByText(/Replace credentials/)).not.toBeInTheDocument();
+    expect(within(dialog).queryByText(/Replace saved codes/)).not.toBeInTheDocument();
     expect(within(dialog).queryByRole("button", { name: /mail\.send/ })).not.toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: /mail\.read/ })).toHaveAttribute("aria-pressed", "true");
   });
@@ -1084,9 +1276,9 @@ describe("existing rows", () => {
     await user.click(await screen.findByRole("button", { name: "Edit School" }));
     const dialog = screen.getByRole("dialog");
     const save = within(dialog).getByRole("button", { name: "Save changes" });
-    await fill(user, within(dialog).getByLabelText("Access token"), "new-test-token");
+    await fill(user, within(dialog).getByLabelText("Canvas code"), "new-test-token");
     expect(save).toBeDisabled();
-    await fill(user, within(dialog).getByLabelText("Canvas URL"), "https://school.instructure.com");
+    await fill(user, within(dialog).getByLabelText("Your school's Canvas address"), "https://school.instructure.com");
     await user.click(save);
     expect(updateConnector).toHaveBeenCalledWith("c-canvas", {
       display_name: "School",
@@ -1100,27 +1292,56 @@ describe("existing rows", () => {
 });
 
 describe("Slack", () => {
-  it("links the create-app page and the token guide, and explains the three tokens", async () => {
+  it("walks through the Slack app, sorts pasted codes into their fields and says what each adds", async () => {
     const { user } = setup([SLACK]);
+    vi.mocked(createConnector).mockImplementation(async (body) =>
+      row({ id: "c-slack", connector_type: body.connector_type, display_name: body.display_name }),
+    );
+    vi.mocked(testConnector).mockResolvedValue({ ok: true, detail: "Connection verified.", account: "Acme", user: "crawler" });
     const card = await screen.findByRole("article", { name: "Slack" });
-    expect(
-      within(card).getByRole("link", { name: "Create the Crawler Slack app (opens in a new tab)" }),
-    ).toHaveAttribute("href", "https://api.slack.com/apps?new_app=1");
+    expect(within(card).queryByRole("link")).not.toBeInTheDocument();
+
     const dialog = await openConnect(user, "Slack");
-    expect(within(dialog).getByText(/app-level token/)).toBeInTheDocument();
-    expect(within(dialog).getByText("Create the Crawler Slack app", { selector: "strong" })).toBeInTheDocument();
-    expect(within(dialog).getByRole("link", { name: /Create the Crawler Slack app/ })).toHaveAttribute(
+    expect(within(dialog).getByRole("link", { name: "Open Slack app setup (opens in a new tab)" })).toHaveAttribute(
       "href",
       "https://api.slack.com/apps?new_app=1",
     );
-    expect(within(dialog).getByRole("link", { name: /Setup guide/ })).toHaveAttribute(
-      "href",
-      "https://docs.slack.dev/authentication/tokens/",
-    );
-    expect(within(dialog).queryByText(/manifest link/)).not.toBeInTheDocument();
-    // One set of instructions: Slack's own note stands in for auth.notes.
+    // One set of instructions: the steps stand in for auth.notes.
     expect(within(dialog).queryByText("Slack notes from the catalog.")).not.toBeInTheDocument();
     expect(within(dialog).getByText(/Invite the app to a channel/)).toBeInTheDocument();
+
+    const box = within(dialog).getByLabelText("Slack codes");
+    expect(box).toHaveAttribute("type", "password");
+    const found = within(dialog).getByRole("list", { name: "Codes found" });
+    expect(found).toHaveTextContent("Bot code needed (xoxb-)");
+    expect(found).toHaveTextContent("App code (optional): chat in Slack DMs");
+    // The fixture's catalog has no user code field, so the box does not offer one.
+    expect(found).not.toHaveTextContent("User code");
+
+    // A password box drops line breaks, so two codes pasted on two lines arrive run together.
+    await fill(user, box, "xoxb-1-bot-codexapp-1-A1-app-code");
+    expect(found).toHaveTextContent("Bot code added");
+    expect(found).toHaveTextContent("App code added: chat in Slack DMs");
+    await user.click(within(dialog).getByRole("button", { name: "Connect" }));
+
+    expect(createConnector).toHaveBeenCalledWith(
+      expect.objectContaining({
+        connector_type: "slack",
+        display_name: "Slack",
+        credentials: { bot_token: "xoxb-1-bot-code", app_token: "xapp-1-A1-app-code" },
+      }),
+    );
+    expect(await within(dialog).findByText("Connected to Acme as crawler")).toBeInTheDocument();
+  });
+
+  it("warns about pasted text that is not a Slack code, and about a second code of a kind", async () => {
+    const { user } = setup([SLACK]);
+    const dialog = await openConnect(user, "Slack");
+    const box = within(dialog).getByLabelText("Slack codes");
+    await fill(user, box, "hello xoxb-1-first xoxb-2-second");
+    expect(within(dialog).getByText(/Part of what you pasted is not a Slack code/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/the first one is used/)).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Connect" })).toBeEnabled();
   });
 
   it("links Slack DMs with a one-time code, polls until linked, and unlinks", async () => {
@@ -1220,7 +1441,7 @@ describe("Slack", () => {
     });
     setup([SLACK], [row({ id: "c-slack", connector_type: "slack", display_name: "Team" })]);
     const card = await screen.findByRole("article", { name: "Team" });
-    expect(await within(card).findByText(/Add an app-level token \(xapp-\) in Edit/)).toBeInTheDocument();
+    expect(await within(card).findByText(/Add Slack's app code \(it starts with xapp-\) in Edit/)).toBeInTheDocument();
     expect(within(card).queryByRole("button", { name: "Link Slack DMs" })).not.toBeInTheDocument();
     expect(createSlackLink).not.toHaveBeenCalled();
   });
@@ -1235,7 +1456,7 @@ describe("Slack", () => {
 
     fireEvent.click(linkButton);
     expect(await within(card).findByRole("alert")).toHaveTextContent("no app-level token");
-    expect(within(card).getByText(/Add an app-level token \(xapp-\) in Edit/)).toBeInTheDocument();
+    expect(within(card).getByText(/Add Slack's app code \(it starts with xapp-\) in Edit/)).toBeInTheDocument();
     expect(within(card).queryByRole("button", { name: "Link Slack DMs" })).not.toBeInTheDocument();
     expect(within(card).queryByLabelText("Slack link code")).not.toBeInTheDocument();
   });
@@ -1257,18 +1478,19 @@ describe("MCP", () => {
     const dialog = await openConnect(user, "MCP server");
     expect(within(dialog).getByText(/MCP servers are third-party tools/)).toBeInTheDocument();
 
-    await fill(user, within(dialog).getByLabelText("Display name"), "Tools");
+    await openMoreSettings(user, dialog);
+    await fill(user, within(dialog).getByLabelText(/Name in Crawler/), "Tools");
     await fill(user, within(dialog).getByLabelText("Server URL"), "https://mcp.example.com/mcp");
     const headers = within(dialog).getByLabelText(/Headers \(optional JSON\)/);
     await user.click(headers);
     await user.paste("{bad json");
-    await user.click(within(dialog).getByRole("button", { name: "Create connector" }));
+    await user.click(within(dialog).getByRole("button", { name: "Connect" }));
     expect(within(dialog).getByRole("alert")).toHaveTextContent("Headers must be valid JSON.");
     expect(createConnector).not.toHaveBeenCalled();
 
     await user.clear(headers);
     await user.paste('{"X-Test": "1"}');
-    await user.click(within(dialog).getByRole("button", { name: "Create connector" }));
+    await user.click(within(dialog).getByRole("button", { name: "Connect" }));
     expect(createConnector).toHaveBeenCalledWith({
       connector_type: "mcp",
       display_name: "Tools",
@@ -1278,6 +1500,8 @@ describe("MCP", () => {
       permission_tier: "user_confirm",
       rate_limit_per_minute: 30,
     });
+    // MCP is checked once saved too.
+    expect(await within(dialog).findByText("Connected to MCP server")).toBeInTheDocument();
   });
 });
 
@@ -1374,6 +1598,7 @@ describe("Allow low-risk changes (permission tiers)", () => {
     vi.mocked(getMe).mockResolvedValue({ default_permission_tier: "low_risk" } as never);
     const { user } = setup([LOW_GITHUB]);
     const dialog = await openConnect(user, "GitHub");
+    await openMoreSettings(user, dialog);
     const policy = within(dialog).getByLabelText("Approval policy");
     expect(within(policy).getByRole("option", { name: "Allow low-risk changes" })).toBeInTheDocument();
 
@@ -1391,6 +1616,7 @@ describe("Allow low-risk changes (permission tiers)", () => {
     vi.mocked(getMe).mockResolvedValue({ default_permission_tier: "user_confirm" } as never);
     const { user } = setup([LOW_GITHUB]);
     const dialog = await openConnect(user, "GitHub");
+    await openMoreSettings(user, dialog);
 
     await user.selectOptions(within(dialog).getByLabelText("Approval policy"), "low_risk");
 
@@ -1403,6 +1629,7 @@ describe("Allow low-risk changes (permission tiers)", () => {
     vi.mocked(getMe).mockResolvedValue({ default_permission_tier: "auto_approve" } as never);
     const { user } = setup([CANVAS]);
     const dialog = await openConnect(user, "Canvas LMS");
+    await openMoreSettings(user, dialog);
 
     await user.selectOptions(within(dialog).getByLabelText("Approval policy"), "low_risk");
 
@@ -1434,6 +1661,8 @@ const ROBINHOOD = entry({
       { key: "api_secret", label: "Private key (base64)", type: "password", required: true, placeholder: "", hint: "" },
     ],
     token_auth_method: "api_key",
+    token_url: "https://robinhood.com/account/crypto",
+    token_url_label: "Open Robinhood crypto API keys",
   },
   scopes: { read: [scope("crypto.read")], write: [] },
 });
@@ -1448,35 +1677,53 @@ describe("Robinhood key pair", () => {
       row({ id: "c-rh", connector_type: body.connector_type, display_name: body.display_name }),
     );
     const dialog = await openConnect(user, "Robinhood (read-only)");
-    const secret = within(dialog).getByLabelText<HTMLInputElement>("Private key (base64)");
     expect(within(dialog).queryByLabelText("Public key for Robinhood")).not.toBeInTheDocument();
+    // Someone with their own key pair can paste its private key; it starts folded away.
+    expect(within(dialog).queryByLabelText("Private key")).not.toBeInTheDocument();
 
     await user.click(within(dialog).getByRole("button", { name: "Generate a key pair" }));
 
     const publicKey = await within(dialog).findByLabelText<HTMLInputElement>("Public key for Robinhood");
     expect(publicKey.value).toMatch(BASE64_KEY);
     expect(publicKey).toHaveAttribute("readonly");
+    expect(within(dialog).getByRole("button", { name: "Copy public key" })).toBeInTheDocument();
+    expect(
+      within(dialog).getByRole("link", { name: "Open Robinhood crypto settings (opens in a new tab)" }),
+    ).toHaveAttribute("href", "https://robinhood.com/account/crypto");
+
+    await user.click(within(dialog).getByRole("button", { name: "I already have a key pair" }));
+    const secret = within(dialog).getByLabelText<HTMLInputElement>("Private key");
     expect(secret.value).toMatch(BASE64_KEY);
     expect(secret.value).not.toBe(publicKey.value);
     expect(secret).toHaveAttribute("type", "password");
-    expect(within(dialog).getByRole("button", { name: "Copy public key" })).toBeInTheDocument();
-    expect(within(dialog).getByRole("link", { name: /robinhood\.com\/account\/crypto/ })).toHaveAttribute(
-      "href",
-      "https://robinhood.com/account/crypto",
-    );
     const generated = secret.value;
 
-    await fill(user, within(dialog).getByLabelText("Display name"), "Crypto");
-    await fill(user, within(dialog).getByLabelText("API key"), "rh-api-test");
-    await user.click(within(dialog).getByRole("button", { name: "Create connector" }));
+    await fill(user, within(dialog).getByLabelText("Robinhood API key"), "rh-api-test");
+    await user.click(within(dialog).getByRole("button", { name: "Connect" }));
 
     expect(createConnector).toHaveBeenCalledWith(
       expect.objectContaining({
         connector_type: "robinhood",
+        display_name: "Robinhood (read-only)",
         auth_method: "api_key",
         credentials: { api_key: "rh-api-test", api_secret: generated },
       }),
     );
+  });
+
+  it("still shows the public key that was registered after a failed check", async () => {
+    const { user } = setup([ROBINHOOD]);
+    vi.mocked(createConnector).mockResolvedValue(row({ id: "c-rh", connector_type: "robinhood", display_name: "Crypto" }));
+    vi.mocked(testConnector).mockResolvedValue({ ok: false, detail: "Authentication failed: Robinhood rejected the API key." });
+    const dialog = await openConnect(user, "Robinhood (read-only)");
+    await user.click(within(dialog).getByRole("button", { name: "Generate a key pair" }));
+    const publicKey = (await within(dialog).findByLabelText<HTMLInputElement>("Public key for Robinhood")).value;
+    await fill(user, within(dialog).getByLabelText("Robinhood API key"), "rh-api-wrong");
+    await user.click(within(dialog).getByRole("button", { name: "Connect" }));
+    await user.click(await within(dialog).findByRole("button", { name: "Change what I entered" }));
+
+    expect(within(dialog).getByLabelText<HTMLInputElement>("Public key for Robinhood").value).toBe(publicKey);
+    expect(within(dialog).getByRole("button", { name: "Copy public key" })).toBeInTheDocument();
   });
 
   it("hides the public key once the private key is edited by hand", async () => {
@@ -1485,7 +1732,8 @@ describe("Robinhood key pair", () => {
     await user.click(within(dialog).getByRole("button", { name: "Generate a key pair" }));
     expect(await within(dialog).findByLabelText("Public key for Robinhood")).toBeInTheDocument();
 
-    await fill(user, within(dialog).getByLabelText("Private key (base64)"), "x");
+    await user.click(within(dialog).getByRole("button", { name: "I already have a key pair" }));
+    await fill(user, within(dialog).getByLabelText("Private key"), "x");
 
     expect(within(dialog).queryByLabelText("Public key for Robinhood")).not.toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: "Generate a key pair" })).toBeInTheDocument();
@@ -1501,7 +1749,8 @@ describe("Robinhood key pair", () => {
       await user.click(within(dialog).getByRole("button", { name: "Generate a key pair" }));
 
       expect(await within(dialog).findByRole("alert")).toHaveTextContent("cannot make Ed25519 keys");
-      expect(within(dialog).getByLabelText("Private key (base64)")).toHaveValue("");
+      await user.click(within(dialog).getByRole("button", { name: "I already have a key pair" }));
+      expect(within(dialog).getByLabelText("Private key")).toHaveValue("");
     } finally {
       spy.mockRestore();
     }
@@ -1517,7 +1766,7 @@ describe("Robinhood key pair", () => {
     await user.click(within(dialog).getByRole("button", { name: "Generate a key pair" }));
 
     expect(await within(dialog).findByLabelText("Public key for Robinhood")).toBeInTheDocument();
-    expect(within(dialog).getByLabelText<HTMLInputElement>("Private key (base64)").value).toMatch(BASE64_KEY);
+    expect(within(dialog).getByLabelText<HTMLInputElement>("Private key").value).toMatch(BASE64_KEY);
     // A new pair needs the new API key Robinhood issues for it.
     expect(within(dialog).getByRole("button", { name: "Save changes" })).toBeDisabled();
 

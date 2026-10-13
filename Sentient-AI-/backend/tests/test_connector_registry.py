@@ -702,12 +702,14 @@ OLD_CREDENTIAL_REQUIREMENTS = {
     "canvas": {
         "required": ["base_url", "access_token"],
         "optional": ["client_id", "client_secret", "refresh_token"],
-        "notes": "base_url is your school's Canvas instance, e.g. https://myschool.instructure.com",
+        # Reworded in plain language for the guided connect flow.
+        "notes": "Your school's Canvas address, for example https://myschool.instructure.com",
     },
     "google_workspace": {
         "required": ["access_token"],
         "optional": ["refresh_token", "client_id", "client_secret"],
-        "notes": "OAuth access token with the Gmail/Calendar scopes you intend to grant.",
+        # Reworded in plain language for the guided connect flow.
+        "notes": "A Google access code with the Gmail and Calendar permissions you plan to allow.",
     },
     "robinhood": {
         "required": ["api_key", "api_secret"],
@@ -934,8 +936,15 @@ def _literal_network_policies(monkeypatch) -> dict[str, Any]:
 
 
 def test_literal_network_policies_are_subsets_of_the_registry_ones(monkeypatch):
+    from core.network_security import CANVAS_SCHOOL_SEARCH_POLICY
+
     literal = _literal_network_policies(monkeypatch)
     derived = registry.network_policies()
+    # The school search is not a connector: the registry neither derives
+    # nor replaces it, and the live table keeps the literal entry.
+    school_search = literal.pop(CANVAS_SCHOOL_SEARCH_POLICY)
+    assert CANVAS_SCHOOL_SEARCH_POLICY not in derived
+    assert vars(DEFAULT_POLICIES[CANVAS_SCHOOL_SEARCH_POLICY]) == vars(school_search)
     assert set(literal) <= set(derived)
     for key, old in literal.items():
         new = derived[key]

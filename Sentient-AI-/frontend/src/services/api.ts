@@ -18,6 +18,7 @@ import type {
   ApprovalDecisionResponse,
   AppApproval,
   PermissionGrant,
+  CanvasSchool,
   Connector,
   ConnectorHealthEntry,
   ConnectorTestResult,
@@ -663,6 +664,13 @@ export async function getConnectorHealth(): Promise<ConnectorHealthEntry[]> {
  * from (one entry per registered connector; MCP is not in it). */
 export async function getConnectorTypes(): Promise<ConnectorTypeInfo[]> {
   return request<ConnectorTypeInfo[]>("/connectors/types");
+}
+
+/** Schools whose name matches `query`, with their Canvas address, for the Canvas connect form.
+ * The backend asks Instructure's public school search, so the browser never calls it. */
+export async function searchCanvasSchools(query: string): Promise<CanvasSchool[]> {
+  const params = new URLSearchParams({ q: query });
+  return request<CanvasSchool[]>(`/connectors/canvas/schools?${params.toString()}`);
 }
 
 // OAuth broker. `provider` is a catalog entry's `auth.provider`.

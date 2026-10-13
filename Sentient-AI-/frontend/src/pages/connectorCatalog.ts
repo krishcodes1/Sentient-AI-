@@ -144,7 +144,7 @@ export function signInMethods(entry: ConnectorTypeInfo): SignInKind[] {
 export function methodLabel(kind: ConnectorAuthKind, entry: ConnectorTypeInfo): string {
   if (kind === "oauth") return `Sign in with ${entry.label}`;
   if (kind === "device") return "Sign in with a code";
-  return entry.key === MCP_TYPE ? "Server details" : "Paste a token";
+  return entry.key === MCP_TYPE ? "Server details" : "Paste a code";
 }
 
 // ---------------------------------------------------------------------------
@@ -386,7 +386,7 @@ export function tokenLink(entry: ConnectorTypeInfo, values: FieldValues = {}): s
 
 /** The token link's text. */
 export function tokenLinkLabel(entry: ConnectorTypeInfo): string {
-  return entry.auth.token_url_label?.trim() || "Get your token";
+  return entry.auth.token_url_label?.trim() || "Get your code";
 }
 
 // ---------------------------------------------------------------------------

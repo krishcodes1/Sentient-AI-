@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote
 
-from .base import AuthenticationError, BaseConnector, ConnectorError
+from .base import AuthenticationError, BaseConnector, ConnectorError, ConnectorUnreachable
 from .definition import AuthSpec, ConnectorDefinition, CredentialField, NetworkSpec, ToolSpec
 from .slack_api.client import API_BASE, TOKEN_PREFIXES, UPLOAD_HOST, UPLOAD_PATH_PREFIX
 from .slack_api.reads import READ_ACTIONS, SlackReadsMixin
@@ -118,10 +118,15 @@ class SlackConnector(SlackReadsMixin, SlackWritesMixin, BaseConnector):
 
     async def health_check(self) -> bool:
         try:
-            await self._call("auth.test")
-            return True
+            data = await self._call("auth.test")
+        except ConnectorUnreachable:
+            self._health_problem = "unreachable"
+            return False
         except ConnectorError:
             return False
+        # auth.test names the workspace and the bot user the token belongs to.
+        self._remember_identity(account=data.get("team"), user=data.get("user"))
+        return True
 
     async def revoke(self) -> bool:
         """Revoke the bot and user tokens with ``auth.revoke`` (best effort).

@@ -37,6 +37,7 @@ PROTECTED_ROUTES = [
     ("POST", "/api/connectors/"),
     ("GET", "/api/connectors/health"),
     ("GET", "/api/connectors/types"),
+    ("GET", "/api/connectors/canvas/schools?q=nyit"),
     ("GET", f"/api/connectors/{SOME_ID}"),
     ("PATCH", f"/api/connectors/{SOME_ID}"),
     ("DELETE", f"/api/connectors/{SOME_ID}"),
