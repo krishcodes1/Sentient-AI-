@@ -242,3 +242,31 @@ async def test_append_audit_log_stores_redacted_arguments_and_summary(session_fa
         assert secret not in stored
     assert row.request_data == {"channel": "C123", "text": f"token is {REDACTED}"}
     assert row.response_summary == f"echoed {REDACTED}"
+
+
+# ── formats the shared detector added (services/security) ─────────────────
+
+NEW_FORMATS = {
+    "anthropic": "sk-ant-api03-" + "FAKEfake0000" * 3,
+    "openai_project": "sk-proj-" + "FAKEfake_0000-" * 3,
+    "google_api_key": "AIza" + "FAKEfake" * 4 + "000",
+    "telegram_bot": "123456789:" + "AAFAKE_fake-" * 2 + "FAKEfake000",
+    # top10:flashcards_quizzes: a study export link's one-time token.
+    "study_export_token": "cse_" + "FAKEfake0000" * 3 + "FAKEfak",
+}
+
+
+@pytest.mark.parametrize("name", sorted(NEW_FORMATS))
+def test_provider_keys_and_bot_tokens_are_now_redacted(name: str) -> None:
+    token = NEW_FORMATS[name]
+    assert _sanitize({"note": f"key {token} end"}) == {"note": f"key {REDACTED} end"}
+
+
+def test_a_stated_password_and_an_ssn_are_redacted() -> None:
+    assert _sanitize("password is Tr0ub4dor&3") == f"password is {REDACTED}"
+    assert _sanitize("SSN 123-45-6789 on file") == f"SSN {REDACTED} on file"
+
+
+def test_contact_details_are_kept() -> None:
+    text = "mail prof.lee@uni.edu, call (212) 555-0100, 1600 Pennsylvania Avenue NW"
+    assert _sanitize(text) == text

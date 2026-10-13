@@ -1,7 +1,8 @@
 /**
  * Pure helpers for the catalog-driven Connectors page: the local MCP entry, which connect methods
  * a catalog entry can use on this server, scope grouping and default selections, credential form
- * validation and building, how an existing row may be managed, and polling timings.
+ * validation and building, the direct link to a service's token page, how an existing row may be
+ * managed, and polling timings.
  *
  * Why it exists: the page renders every card and form from GET /connectors/types, and these rules
  * (read scopes preselected, write scopes opt-in, rate limit 1 to 600, sign-in only when the server
@@ -21,6 +22,7 @@ import type {
 
 export const MCP_TYPE = "mcp";
 export const SLACK_TYPE = "slack";
+export const ROBINHOOD_TYPE = "robinhood";
 
 /** Backend bounds for rate_limit_per_minute (POST, PATCH and the OAuth draft). */
 export const DEFAULT_RATE_LIMIT = 30;
@@ -73,7 +75,15 @@ export const MCP_ENTRY: ConnectorTypeInfo = {
       "MCP servers are third-party tools. Every tool call they expose requires your explicit approval, and tools that look financial are blocked entirely.",
   },
   scopes: { read: [], write: [] },
+  // Every MCP tool call asks: nothing there is ever low-risk.
+  low_risk: [],
 };
+
+/** What "Allow low-risk changes" lets a connector do without asking, as its notes ("star or
+ *  label emails"); empty for one with no low-risk actions (or a server that predates them). */
+export function lowRiskNotes(entry: ConnectorTypeInfo | undefined): string[] {
+  return (entry?.low_risk ?? []).map((item) => item.note);
+}
 
 /** The entries the page offers: every creatable catalog entry, then MCP. */
 export function catalogEntries(types: readonly ConnectorTypeInfo[]): ConnectorTypeInfo[] {
@@ -134,7 +144,7 @@ export function signInMethods(entry: ConnectorTypeInfo): SignInKind[] {
 export function methodLabel(kind: ConnectorAuthKind, entry: ConnectorTypeInfo): string {
   if (kind === "oauth") return `Sign in with ${entry.label}`;
   if (kind === "device") return "Sign in with a code";
-  return entry.key === MCP_TYPE ? "Server details" : "Paste a token";
+  return entry.key === MCP_TYPE ? "Server details" : "Paste a code";
 }
 
 // ---------------------------------------------------------------------------
@@ -336,6 +346,47 @@ export function buildCredentials(
 export function clampRateLimit(value: number): number {
   const n = Math.trunc(Number(value)) || MIN_RATE_LIMIT;
   return Math.max(MIN_RATE_LIMIT, Math.min(MAX_RATE_LIMIT, n));
+}
+
+// ---------------------------------------------------------------------------
+// Token links (the page where the user creates the token they paste)
+// ---------------------------------------------------------------------------
+
+/** A `{field_key}` at the very start of auth.token_url (backend registry rule). */
+const LEADING_PLACEHOLDER = /^\{([A-Za-z_][A-Za-z0-9_]*)\}/;
+
+/** The "url" field a token_url template fills its leading `{key}` from (Canvas: the Canvas
+ *  URL), or null when the link needs nothing typed, or there is no link. */
+export function tokenLinkWaitsFor(entry: ConnectorTypeInfo): ConnectorCredentialField | null {
+  const match = LEADING_PLACEHOLDER.exec(entry.auth.token_url ?? "");
+  if (!match) return null;
+  return entry.auth.fields.find((f) => f.key === match[1] && f.type === "url") ?? null;
+}
+
+/**
+ * The token page to link, or null. A template's leading `{key}` becomes the origin (scheme, host,
+ * port) of what the user typed in that field, so an address pasted from the browser bar with a
+ * path or query still links to the token page; a blank or invalid value gives no link. The result
+ * must be an absolute http(s) URL on that same host, so a typed `javascript:` never renders and a
+ * template can never send the user elsewhere.
+ */
+export function tokenLink(entry: ConnectorTypeInfo, values: FieldValues = {}): string | null {
+  const template = entry.auth.token_url ?? "";
+  if (!template) return null;
+  const match = LEADING_PLACEHOLDER.exec(template);
+  if (!match) return externalUrl(template);
+  const field = tokenLinkWaitsFor(entry);
+  if (!field) return null;
+  const raw = values[field.key] ?? "";
+  if (!raw.trim() || fieldError(field, raw) !== null) return null;
+  const base = new URL(raw.trim());
+  const href = externalUrl(base.origin + template.slice(match[0].length));
+  return href && new URL(href).host === base.host ? href : null;
+}
+
+/** The token link's text. */
+export function tokenLinkLabel(entry: ConnectorTypeInfo): string {
+  return entry.auth.token_url_label?.trim() || "Get your code";
 }
 
 // ---------------------------------------------------------------------------

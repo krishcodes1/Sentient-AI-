@@ -22,13 +22,17 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote
 
-from .base import AuthenticationError, BaseConnector, ConnectorError
+from .base import AuthenticationError, BaseConnector, ConnectorError, ConnectorUnreachable
 from .definition import AuthSpec, ConnectorDefinition, CredentialField, NetworkSpec, ToolSpec
 from .slack_api.client import API_BASE, TOKEN_PREFIXES, UPLOAD_HOST, UPLOAD_PATH_PREFIX
 from .slack_api.reads import READ_ACTIONS, SlackReadsMixin
 from .slack_api.writes import WRITE_ACTIONS, SlackWritesMixin
 
 ACTIONS: tuple[ToolSpec, ...] = READ_ACTIONS + WRITE_ACTIONS
+
+# Where a file shared in a DM is downloaded from with the bot token
+# (url_private_download; top10:file_extraction).
+FILES_PRIVATE_PREFIX = "/files-pri/"
 
 # Why each Slack scope in slack_manifest.json is there (JSON has no comments):
 # Bot token (xoxb-):
@@ -114,10 +118,15 @@ class SlackConnector(SlackReadsMixin, SlackWritesMixin, BaseConnector):
 
     async def health_check(self) -> bool:
         try:
-            await self._call("auth.test")
-            return True
+            data = await self._call("auth.test")
+        except ConnectorUnreachable:
+            self._health_problem = "unreachable"
+            return False
         except ConnectorError:
             return False
+        # auth.test names the workspace and the bot user the token belongs to.
+        self._remember_identity(account=data.get("team"), user=data.get("user"))
+        return True
 
     async def revoke(self) -> bool:
         """Revoke the bot and user tokens with ``auth.revoke`` (best effort).
@@ -158,8 +167,7 @@ DEFINITION = ConnectorDefinition(
                 "bot_token",
                 "Bot token (xoxb-...)",
                 placeholder="xoxb-...",
-                hint="Create the app from the manifest link, install it, then copy "
-                "OAuth & Permissions, Bot User OAuth Token.",
+                hint="After you install the app: OAuth & Permissions, Bot User OAuth Token.",
             ),
             CredentialField(
                 "app_token",
@@ -178,14 +186,20 @@ DEFINITION = ConnectorDefinition(
         ),
         token_auth_method="bearer_token",
         notes=(
-            "Open the manifest link to create the Crawler Slack app, install it to your "
-            "workspace and paste its tokens. Invite the app to a channel before asking "
-            "Crawler to read it."
+            'Open "Create the Crawler Slack app" to make the app from its manifest, '
+            "install it to your workspace and paste its tokens. Invite the app to a "
+            "channel before asking Crawler to read it."
         ),
+        # Slack's "create app from manifest" page, prefilled with the manifest.
+        token_url=MANIFEST_URL,
+        token_url_label="Create the Crawler Slack app",
     ),
     network=NetworkSpec(
         policy_key="slack",
-        hosts={"slack.com": ("/api/",), UPLOAD_HOST: (UPLOAD_PATH_PREFIX,)},
+        # files.slack.com: uploads (/upload/v1/) and, for the DM channel's
+        # file intake (top10:file_extraction), the bot-token download of a
+        # file shared in a DM (/files-pri/).
+        hosts={"slack.com": ("/api/",), UPLOAD_HOST: (UPLOAD_PATH_PREFIX, FILES_PRIVATE_PREFIX)},
         https_only=True,
         # Socket Mode hosts for the DM channel (checked by check_websocket_policy):
         # the two apps.connections.open returns in practice, plus the one
@@ -194,5 +208,5 @@ DEFINITION = ConnectorDefinition(
     ),
     actions=ACTIONS,
     connector_class=SlackConnector,
-    docs_url=MANIFEST_URL,
+    docs_url="https://docs.slack.dev/authentication/tokens/",
 )

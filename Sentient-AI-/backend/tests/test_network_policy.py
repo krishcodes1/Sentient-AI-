@@ -44,6 +44,7 @@ def no_dns(monkeypatch):
 async def test_robinhood_real_request_urls_all_pass_policy(no_dns):
     """Every URL the connector actually requests is allowlisted."""
     from services.connectors.robinhood import RobinhoodConnector
+    from tests.test_connectors_behavior import RH_PRIVATE_KEY
 
     seen: list[str] = []
 
@@ -51,14 +52,14 @@ async def test_robinhood_real_request_urls_all_pass_policy(no_dns):
         seen.append(str(request.url))
         return httpx.Response(200, json={})
 
-    connector = RobinhoodConnector(api_key="k", api_secret="s")
+    connector = RobinhoodConnector(api_key="k", api_secret=RH_PRIVATE_KEY)
     connector._http_client = httpx.AsyncClient(
         transport=httpx.MockTransport(handler), base_url=connector.BASE_URL
     )
 
     try:
         # Exercises the credential-check URL too.
-        await connector.authenticate({"api_key": "k", "api_secret": "s"})
+        await connector.authenticate({"api_key": "k", "api_secret": RH_PRIVATE_KEY})
         await connector.get_crypto_portfolio(user_confirmed=True)
         await connector.get_crypto_prices(["BTC", "ETH"], user_confirmed=True)
         await connector.get_crypto_holdings(user_confirmed=True)
@@ -102,6 +103,9 @@ def test_canvas_policy_allows_api_and_token_endpoint_only(no_dns):
         "https://school.instructure.com/api/v1/courses",
         # OAuth code exchange + refresh endpoint used by the connector.
         "https://school.instructure.com/login/oauth2/token",
+        # A course file's download address (canvas.get_file_text;
+        # top10:file_extraction).
+        "https://school.instructure.com/files/1/download",
     ):
         result = check_network_policy(url, "canvas")
         assert result.safe, f"{url} blocked: {result.reason}"
@@ -110,7 +114,7 @@ def test_canvas_policy_allows_api_and_token_endpoint_only(no_dns):
         # Interactive login surfaces stay blocked.
         "https://school.instructure.com/login/oauth2/auth",
         "https://school.instructure.com/login/session",
-        "https://school.instructure.com/files/1/download",
+        "https://school.instructure.com/courses/1/files",
         # Token path on a foreign host.
         "https://evil.example.com/login/oauth2/token",
     ):
@@ -126,6 +130,7 @@ def test_canvas_policy_allows_the_configured_self_hosted_host(no_dns):
     for url in (
         "https://canvas.myschool.edu/api/v1/courses",
         "https://canvas.myschool.edu/login/oauth2/token",
+        "https://canvas.myschool.edu/files/1/download",
     ):
         result = check_network_policy(url, "canvas", extra_hosts=configured)
         assert result.safe, f"{url} blocked: {result.reason}"
@@ -134,7 +139,7 @@ def test_canvas_policy_allows_the_configured_self_hosted_host(no_dns):
         # Same host, outside the API surface: a configured host does not
         # widen which paths are reachable.
         "https://canvas.myschool.edu/login/oauth2/auth",
-        "https://canvas.myschool.edu/files/1/download",
+        "https://canvas.myschool.edu/courses/1/files",
         # A sibling host is not implied by the configured one.
         "https://mail.myschool.edu/api/v1/courses",
         "https://evil.example.com/api/v1/courses",

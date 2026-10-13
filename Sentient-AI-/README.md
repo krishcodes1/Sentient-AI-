@@ -426,10 +426,10 @@ permissions you granted.
 | **Google Workspace** | Gmail, Google Calendar, Drive, Docs, Sheets and Contacts (44 actions) | **Sign in with Google** (needs the server setup below), or paste an OAuth access token (add a refresh token plus client id and secret so it renews itself) |
 | **Microsoft 365** | Outlook mail and calendar, OneDrive files, Microsoft To Do and contacts (34 actions); work, school and personal accounts | **Sign in with Microsoft**, or **Sign in with a code** on a machine without a browser (both need the server setup below) |
 | **GitHub** | Repositories, files, issues, pull requests, Actions runs and failed logs, notifications, releases and gists (41 actions) | **Sign in with a code** (device flow, needs the server setup below), or paste a fine-grained personal access token |
-| **Slack** | Read channels, history, threads, users and files, search messages; post, reply, schedule, react, upload, set your status and manage channels (17 actions). Optional: chat with Crawler in a Slack DM | Open **Create the Slack app from its manifest** on the card, install the app to your workspace, and paste its bot token (`xoxb-`). Add the app-level token (`xapp-`) for DMs and the user token (`xoxp-`) for search and status |
-| **Notion** | Search, read and edit the pages and databases you share with the integration, comments (15 actions) | Create an internal integration at notion.so/profile/integrations, paste its secret, then share pages with it (page menu, Connections) |
-| **Canvas LMS** | Courses, assignments, grades, calendar events and submissions, and submitting an assignment (6 actions) | Paste your school's Canvas URL and an access token |
-| **Robinhood Crypto** | Read-only portfolio, holdings and prices (3 actions); trading is permanently blocked | Paste read-only API credentials |
+| **Slack** | Read channels, history, threads, users and files, search messages; post, reply, schedule, react, upload, set your status and manage channels (17 actions). Optional: chat with Crawler in a Slack DM | Open **Create the Crawler Slack app** on the card, install the app to your workspace, and paste its bot token (`xoxb-`). Add the app-level token (`xapp-`) for DMs and the user token (`xoxp-`) for search and status |
+| **Notion** | Search, read and edit the pages and databases you share with the connection, comments (15 actions) | Open **Create a Notion connection** on the card, copy the connection's API token, then share pages with it (page menu, Connections) |
+| **Canvas LMS** | Courses, assignments, grades, calendar events and submissions, and submitting an assignment (6 actions) | Paste your school's Canvas URL, then use **Open your Canvas token page** to make an access token and paste it |
+| **Robinhood Crypto** | Read-only portfolio, holdings and prices (3 actions); trading is permanently blocked | Generate a key pair on the card, add its public key as an API credential at robinhood.com/account/crypto, then paste the API key Robinhood gives you |
 | **MCP servers** | The tools of any Streamable HTTP MCP server you register; every call needs approval | Server URL (and optional headers) |
 
 **Server setup for sign-in (owner, once per install).** "Sign in with
@@ -516,6 +516,11 @@ it already has.
 | `TOKEN_EXPIRE_MINUTES` | No | JWT lifetime (default 60) |
 | `SESSION_MAX_HOURS` | No | Ceiling on how long refreshing can extend one session, measured from login (default 12) |
 | `APPROVAL_TTL_MINUTES` | No | How long a pending tool approval stays actionable (default 15) |
+| `CRAWLER_TIMEZONE` | Recommended (Docker) | IANA time zone (e.g. `America/New_York`) that scheduled tasks and reminders use when neither the task nor the user has one. A container's clock is UTC; unset, the assistant asks the user for their time zone before scheduling. |
+| `KB_EMBEDDINGS` | No | How "Search saved documents by meaning" embeds passages: unset follows the install-wide provider (Gemini, OpenAI or Ollama), `ollama` uses Ollama on this computer whatever the provider, `off` never builds the meaning index (keyword search still works). |
+| `OLLAMA_EMBED_MODEL`, `GEMINI_EMBED_MODEL`, `OPENAI_EMBED_MODEL` | No | The embedding model per backend (defaults `nomic-embed-text`, `gemini-embedding-001`, `text-embedding-3-small`). |
+| `KB_EMBED_DIMS` | No | Numbers kept per vector, 8-3072 (default 256). Changing it re-embeds every saved document. |
+| `CRAWLER_SPEECH_MODEL_DIR` | No | Where the local voice-note speech model is kept once installed (default: inside the backend's Python environment). |
 | `CORS_ORIGINS` | No | Allowed browser origins (default localhost dev ports) |
 | `ALLOW_REGISTRATION` | No | Leave unset to manage open registration from the wizard/Settings (the switch on the Summary step, then in Settings — see [First run: the setup wizard](#first-run-the-setup-wizard) — which defaults to **closed**). Set `false` to lock it closed whatever that switch says. `true` opens nothing by itself; it only seeds the switch as open when an existing install is carried past the wizard on upgrade. The first account always comes from the wizard's owner step. |
 | `PASSWORD_MIN_LENGTH` | No | Minimum password length, floor 8 (default 8) |

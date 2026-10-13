@@ -24,6 +24,7 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 
 from core.config import settings
+from services.security.policies import LOG_KEY_NAMES
 
 # ── Password hashing ─────────────────────────────────────────────────────────
 
@@ -157,29 +158,16 @@ def compute_audit_hash_legacy(payload: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-_SENSITIVE_KEYS = frozenset(
-    {
-        "password",
-        "secret",
-        "token",
-        "api_key",
-        "apikey",
-        "authorization",
-        "credentials",
-        "credit_card",
-        "ssn",
-        "encryption_key",
-        "secret_key",
-        "access_token",
-        "refresh_token",
-    }
-)
+# The key names whose values the logs mask, shared with the structlog
+# processor and the stdlib log filter (services.security.policies.LOGS).
+_SENSITIVE_KEYS = LOG_KEY_NAMES
 
 
 def sanitize_for_logging(data: dict[str, Any]) -> dict[str, Any]:
     """Return a shallow copy of *data* with sensitive values replaced by ``'***'``.
 
-    Keys are compared case-insensitively against a built-in deny-list.
+    Keys are compared case-insensitively against the shared log key list
+    (``services.security.policies.LOG_KEY_NAMES``).
     """
     sanitized: dict[str, Any] = {}
     for key, value in data.items():

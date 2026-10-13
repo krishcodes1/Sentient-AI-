@@ -814,3 +814,44 @@ async def test_the_memory_api_reports_an_agent_memory_as_proposed_by_the_assista
     assert memory["id"] == stored["memory_id"]
     assert memory["source"] == "agent" and memory["category"] == "preference"
     assert memory["content"] == GOOD["content"]
+
+
+# ---------------------------------------------------------------------------
+# The shared detector (services/security, policy MEMORY)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "My SSN is 123-45-6789",
+        "My IBAN is GB82 WEST 1234 5698 7654 32",
+        "Passport number: X12345678",
+        "Groq key gsk_" + "FAKEfake" * 5,
+    ],
+)
+def test_bank_and_id_numbers_are_refused(content):
+    assert looks_like_secret(content) is True
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "Their phone is (212) 555-0100",
+        "Their email is prof.lee@uni.edu",
+        "Lives at 1600 Pennsylvania Avenue NW",
+    ],
+)
+def test_contact_details_are_allowed(content):
+    assert looks_like_secret(content) is False
+
+
+@pytest.mark.asyncio
+async def test_an_ssn_is_refused_before_any_card(session_factory):
+    user, _ = await make_user(session_factory, email="mem-ssn@example.com")
+    params = {"content": "My SSN is 123-45-6789", "category": "fact"}
+    assert await MemoryToolkit(session_factory).precheck("remember", params, str(user.id)) == {
+        "ok": False,
+        "error": SECRET_ERROR,
+        "rule": "secret",
+    }

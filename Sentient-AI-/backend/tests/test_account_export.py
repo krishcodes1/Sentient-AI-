@@ -109,7 +109,17 @@ async def test_export_is_valid_json_and_contains_the_account(client, session_fac
     data = json.loads(resp.text)  # would raise on malformed streamed JSON
     assert data["account"]["email"] == "exporter@example.com"
     assert data["exported_at"]
-    assert {"conversations", "memories", "connectors", "audit_logs"} <= set(data)
+    assert {"conversations", "memories", "connectors", "audit_logs", "scheduled_tasks"} <= set(data)
+    # top10:event_triggers
+    assert "event_triggers" in data
+    # top10:file_extraction
+    assert "files" in data
+    # top10:knowledge_base
+    assert {"knowledge_collections", "knowledge_documents"} <= set(data)
+    # top10:flashcards_quizzes
+    assert {"study_decks", "study_items", "study_quiz_attempts", "study_reviews"} <= set(data)
+    # top10:video_transcripts
+    assert "media_transcripts" in data
 
 
 @pytest.mark.asyncio
@@ -202,3 +212,80 @@ async def test_export_with_an_empty_account_is_still_valid_json(client):
         "account_created",
         "login",
     }
+
+
+@pytest.mark.asyncio
+async def test_export_includes_tutor_state_and_the_locks_that_apply(client, session_factory):
+    """Each conversation carries its tutor mode state, and the owner's tutor
+    locks that apply to this account (its own and the every-account ones)
+    come along read-only; another account's lock does not."""
+    import uuid as _uuid
+
+    from sqlalchemy import select, update
+
+    from models.conversation import Conversation
+    from models.tutor_lock import TutorLock
+    from models.user import User
+    from services.tutor.state import TutorState
+
+    headers = await _account(client, "tutored@example.com")
+    conv_id = await _seed(client, headers, session_factory, messages=1)
+    other = await _account(client, "someone-else@example.com")
+    stored = TutorState(user_on=True, user_set_at="2026-09-30T12:00:00+00:00").to_stored()
+    async with session_factory() as session:
+        me = (await session.execute(select(User).where(User.email == "tutored@example.com"))).scalar_one()
+        them = (
+            await session.execute(select(User).where(User.email == "someone-else@example.com"))
+        ).scalar_one()
+        await session.execute(
+            update(Conversation).where(Conversation.id == _uuid.UUID(conv_id)).values(tutor_state=stored)
+        )
+        session.add_all(
+            [
+                TutorLock(user_id=me.id, scope="course", label="MATH 221", course_code="MATH 221"),
+                TutorLock(user_id=None, scope="account", label="every account"),
+                TutorLock(user_id=them.id, scope="course", label="CHEM 101", course_code="CHEM 101"),
+            ]
+        )
+        await session.commit()
+
+    data = json.loads((await client.get("/api/auth/export", headers=headers)).text)
+
+    assert data["conversations"][0]["tutor_state"] == stored
+    assert sorted(lock["label"] for lock in data["tutor_locks"]) == ["MATH 221", "every account"]
+    assert {lock["applies_to"] for lock in data["tutor_locks"]} == {"this account", "every account"}
+    assert "created_by" not in json.dumps(data["tutor_locks"])
+    theirs = json.loads((await client.get("/api/auth/export", headers=other)).text)
+    assert sorted(lock["label"] for lock in theirs["tutor_locks"]) == ["CHEM 101", "every account"]
+
+
+# top10:flashcards_quizzes
+@pytest.mark.asyncio
+async def test_export_includes_study_decks_items_reviews_and_quizzes(client, session_factory):
+    from sqlalchemy import select
+
+    from models.user import User
+    from services.tools.study import StudyToolkit
+
+    headers = await _account(client, "studier@example.com")
+    async with session_factory() as session:
+        user = (await session.execute(select(User).where(User.email == "studier@example.com"))).scalar_one()
+    kit = StudyToolkit(session_factory, default_timezone=lambda: "UTC")
+    saved = await kit.execute(
+        "save", {"title": "Spanish vocab", "items": [{"front": "el perro", "back": "the dog"}]}, str(user.id)
+    )
+    await kit.execute("review", {"action": "grade", "item_id": saved["added_ids"][0], "rating": "good"}, str(user.id))
+    await kit.execute("quiz", {"action": "start", "deck_id": saved["deck_id"]}, str(user.id))
+
+    data = json.loads((await client.get("/api/auth/export", headers=headers)).text)
+
+    assert [d["title"] for d in data["study_decks"]] == ["Spanish vocab"]
+    [item] = data["study_items"]
+    assert (item["front"], item["back"], item["repetitions"], item["deck_id"]) == (
+        "el perro",
+        "the dog",
+        1,
+        saved["deck_id"],
+    )
+    assert [r["rating"] for r in data["study_reviews"]] == [3]
+    assert [q["status"] for q in data["study_quiz_attempts"]] == ["active"]

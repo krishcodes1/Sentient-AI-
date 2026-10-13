@@ -17,12 +17,20 @@ base class.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping, Optional
 
 from services.agent.permissions import ActionCategory, PermissionTier
 
 if TYPE_CHECKING:
     from services.connectors.base import BaseConnector
+
+
+# An action's argument check (``ToolSpec.risk_check``): given the call's
+# arguments, ``(level, reason)`` to escalate its risk grade ("medium" or
+# "high", with a fixed reason that never quotes an argument), or None. It
+# can only raise the grade (services/agent/risk.py); a check that raises
+# grades the call HIGH.
+RiskCheck = Callable[[Mapping[str, Any]], Optional[tuple[str, str]]]
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +58,23 @@ class ToolSpec:
 
     ``starter`` marks an everyday read that is offered to the model up
     front; every other action is reachable through ``tools.find``.
+
+    Risk grading (services/agent/risk.py; permission tiers):
+
+    - ``risk="low"`` opts a WRITE into the LOW grade: a small, undoable
+      change to the owner's own account that nobody else sees (a draft, a
+      star, a private event). Only a WRITE without ``always_confirm`` may
+      declare it, and it needs ``low_risk_note``. Every other WRITE is
+      MEDIUM; reads are LOW; deletes, runs, payments and always-confirm
+      actions are HIGH.
+    - ``risk_check`` reads the arguments and can only escalate the grade
+      (TRASH on a Gmail label change, guests on an event). One that raises
+      grades the call HIGH.
+    - ``ref_args`` names the arguments that carry an object id (a message
+      id). On a LOW call, an id the same connection returned this turn is
+      not treated as copied from untrusted content.
+    - ``low_risk_note`` says in a few words what the LOW action does, for
+      the tier's help text and the grant card (at most 80 characters).
     """
 
     action: str
@@ -60,6 +85,10 @@ class ToolSpec:
     required_scope: Optional[str] = None
     always_confirm: bool = False
     starter: bool = False
+    risk: Optional[str] = None
+    risk_check: Optional[RiskCheck] = None
+    ref_args: tuple[str, ...] = ()
+    low_risk_note: str = ""
 
 
 def _schema(**props: dict[str, Any]) -> dict[str, Any]:
@@ -121,6 +150,10 @@ class OAuthSpec:
     scopes that grant it. ``base_scopes`` are always requested (for example
     ``offline_access`` so Microsoft returns a refresh token).
     ``authorize_params`` are extra consent-URL parameters.
+
+    ``client_setup_url`` is the provider page where the server owner
+    registers the sign-in client whose id goes in ``backend/.env`` (an
+    https URL). The Connectors page links it while sign-in is not set up.
     """
 
     provider: str
@@ -134,6 +167,7 @@ class OAuthSpec:
     base_scopes: tuple[str, ...] = ()
     authorize_params: Mapping[str, str] = field(default_factory=dict)
     pkce: bool = True
+    client_setup_url: str = ""
 
     def provider_scopes(self, catalog_scopes: tuple[str, ...] | list[str]) -> tuple[str, ...]:
         """Provider scopes for the given catalog scopes, in a stable order.
@@ -156,6 +190,16 @@ class AuthSpec:
     ``token_auth_method`` is the ``AuthMethod`` value stored on a
     pasted-token row (``api_key`` or ``bearer_token``); broker-created rows
     are always ``oauth2``.
+
+    ``token_url`` is the provider page where the user creates the
+    credential they paste (it needs the ``token`` method). It is an https
+    URL, or a template that starts with one ``{field_key}`` placeholder
+    naming a ``url`` field and followed by a path, query or nothing: the UI
+    fills it with the origin (scheme, host, port) of what the user typed
+    there, so a pasted page address still links to the right page (Canvas:
+    ``{base_url}/profile/settings``).
+    ``token_url_label`` is that link's text (at most 60 characters); the UI
+    falls back to "Get your token".
     """
 
     methods: tuple[AuthKind, ...]
@@ -163,6 +207,8 @@ class AuthSpec:
     oauth: Optional[OAuthSpec] = None
     token_auth_method: Literal["api_key", "bearer_token", "oauth2"] = "bearer_token"
     notes: str = ""
+    token_url: str = ""
+    token_url_label: str = ""
 
     @property
     def required_credentials(self) -> tuple[str, ...]:

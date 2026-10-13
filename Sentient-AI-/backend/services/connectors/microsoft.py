@@ -205,6 +205,10 @@ DEFINITION = ConnectorDefinition(
                 "tasks.write": ("Tasks.ReadWrite",),
                 "contacts.read": ("Contacts.Read",),
             },
+            client_setup_url=(
+                "https://entra.microsoft.com/"
+                "#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade"
+            ),
         ),
         token_auth_method="oauth2",
         notes=(

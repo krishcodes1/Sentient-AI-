@@ -943,6 +943,7 @@ async def _finish_flow(
                 requested=flow.requested,
                 previous=previous if previous.get("oauth_provider") == spec.provider else None,
             )
+            old_tier, old_scopes = config.permission_tier, list(config.granted_scopes or [])
             config.encrypted_credentials = encrypt_credentials(json.dumps(credentials))
             config.auth_method = AuthMethod.oauth2
             config.granted_scopes = granted
@@ -953,6 +954,20 @@ async def _finish_flow(
                 config.permission_tier = PermissionTier(draft["permission_tier"])
             if draft.get("rate_limit_per_minute"):
                 config.rate_limit_per_minute = int(draft["rate_limit_per_minute"])
+            # A reconnect replaces the credentials: the connection's low-risk
+            # grants end (permission tiers), audited in this transaction.
+            from services.agent.permission_grants import on_connector_updated
+
+            await on_connector_updated(
+                session,
+                user_id=flow.user_id,
+                connector=config,
+                connector_type=definition.key,
+                old_tier=old_tier,
+                old_scopes=old_scopes,
+                credentials_changed=True,
+                endpoint=_audit_endpoint(flow),
+            )
         else:
             credentials = credentials_from_tokens(spec, tokens, requested=flow.requested)
             config = ConnectorConfig(

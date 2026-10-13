@@ -71,6 +71,20 @@ A bad definition stops the app at import with a list of every problem.
     `always_confirm`: it then gets an approval card under every tier.
   - Mark 2 to 4 everyday reads `starter=True` (at most 4, READ only).
   - No parameter is named `url`, `action` or `user_confirmed`.
+  - **Risk grades** (permission tiers, `services/agent/risk.py`). Reads grade
+    LOW; deletes, runs, payments and `always_confirm` actions HIGH; every
+    other WRITE MEDIUM unless it declares `risk="low"`: a small, undoable
+    change to the owner's own account that nobody else sees (a draft, a
+    star, a private event). `risk="low"` is refused on anything but a WRITE
+    without `always_confirm`, and needs a `low_risk_note` of at most 80
+    characters ("star or label emails") that the Connectors page and the
+    grant card show. `risk_check` reads the arguments and may only escalate
+    (`risk.when_given`, `risk.unless_value`, `risk.when_value`,
+    `risk.all_of`): guests on an event are HIGH, a parent folder MEDIUM. A
+    check that raises grades the call HIGH. `ref_args` names the arguments
+    that carry an object id (`message_id`); only a LOW action may declare
+    them, and each must be a schema property. The set of LOW actions is
+    pinned by `tests/test_risk_grading.py`: adding one is a reviewed change.
 - **Dispatch parity.** Every non-FINANCIAL action is a public coroutine on the
   connector class, and `_ACTIONS` (or a legacy `_ACTION_MAP`) lists exactly
   those names. The coroutine's keyword parameters equal the schema
@@ -90,6 +104,30 @@ A bad definition stops the app at import with a list of every problem.
   id or secret) and whose `scope_map` maps every catalog scope and nothing
   else. `oauth` also needs an https `authorize_url`, `device` a
   `device_code_url`. An `OAuthSpec` without either method is refused.
+- **Links.** `docs_url` is the setup guide (a how-to page). `AuthSpec.token_url`
+  is where the user creates the token they paste; the Connectors page shows it
+  as the main call to action, labelled `token_url_label` (at most 60
+  characters, no em or en dash; "Get your token" when empty). It needs the
+  `token` method and is either an https URL or a template that starts with
+  one `{field_key}` placeholder naming a `url` field, which the page fills
+  with the origin (scheme, host, port) of what the user typed there. Only a
+  path, query, fragment or nothing may follow the placeholder, so the link
+  stays on the user's own server. No other brace may appear, and the filled
+  URL must be https with a host.
+  `OAuthSpec.client_setup_url` (https) is where the server owner registers
+  the sign-in client whose id goes in `backend/.env`; the page links it while
+  sign-in is not set up. For example:
+
+  ```python
+  auth=AuthSpec(
+      methods=("oauth", "token"),
+      fields=(CredentialField("base_url", "Server URL", type="url"),
+              CredentialField("access_token", "Access token")),
+      oauth=OAuthSpec(..., client_setup_url="https://example.com/developers/apps/new"),
+      token_url="{base_url}/settings/tokens",
+      token_url_label="Open your Example token page",
+  )
+  ```
 - **Permissions.** Generated rows: READ auto-approve, WRITE/DELETE/EXECUTE
   user-confirm, FINANCIAL hard-blocked. `policy_overrides` may only name the
   connector's own policy keys, never use ADMIN_ONLY (the runtime adapter

@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import json
 import re
 from typing import Any, Optional
 
@@ -30,6 +31,11 @@ from services.connectors.base import (
     path_segment,
 )
 from services.connectors.definition import ToolSpec, _schema
+from services.connectors.documents import (
+    MAX_DOCUMENT_BYTES,
+    is_document_type,
+    read_connector_document,
+)
 from services.connectors.shaping import cap_text, clamp_limit
 
 from .client import (
@@ -87,6 +93,39 @@ _REPLY_TARGET = (
 )
 
 _MESSAGE_ID = {"type": "string", "description": "Gmail message id", "required": True}
+
+# Labels a low-risk change may add or remove (permission tiers): starring,
+# marking important, and the owner's own labels (ids "Label_<n>"). Touching
+# INBOX or UNREAD archives or marks mail read, which can hide an alert, and a
+# CATEGORY_ label moves mail between tabs: MEDIUM in v1. TRASH and SPAM are a
+# side-door delete: HIGH.
+_LOW_RISK_LABELS = frozenset({"STARRED", "IMPORTANT"})
+_HIGH_RISK_LABELS = frozenset({"TRASH", "SPAM"})
+
+
+def label_change_risk(arguments: Any) -> Optional[tuple[str, str]]:
+    """risk_check of modify_labels: HIGH for TRASH or SPAM, MEDIUM for any
+    label that is not a star, IMPORTANT or the owner's own, None otherwise."""
+    labels: list[Any] = []
+    for key in ("add_label_ids", "remove_label_ids"):
+        value = arguments.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, list):
+            return "medium", "its labels are not a list"
+        labels.extend(value)
+    if not labels:
+        return "medium", "it names no label to change"
+    worst: Optional[tuple[str, str]] = None
+    for label in labels:
+        name = label.strip().upper() if isinstance(label, str) else ""
+        if name in _HIGH_RISK_LABELS:
+            return "high", "it moves mail to or from Trash or Spam"
+        if name in _LOW_RISK_LABELS or name.startswith("LABEL_"):
+            continue
+        worst = ("medium", "it archives, marks read or changes a system label")
+    return worst
+
 
 GMAIL_ACTIONS: tuple[ToolSpec, ...] = (
     ToolSpec(
@@ -150,9 +189,11 @@ GMAIL_ACTIONS: tuple[ToolSpec, ...] = (
     ),
     ToolSpec(
         "get_attachment_text",
-        "Read a text attachment (txt, csv, json, ...) of a Gmail message. Use the part_id "
-        "from get_message's attachments list, or its body_part_id and next_offset to read "
-        "on in a long body. Binary files (PDF, images) are refused.",
+        "Read an attachment of a Gmail message. Use the part_id from get_message's "
+        "attachments list, or its body_part_id and next_offset to read on in a long body. "
+        "Text attachments (txt, csv, json, ...) come back as text; PDF, Word, PowerPoint "
+        "and Excel attachments come back as sections with a doc_id: continue those with "
+        "files.read. Other binary files (images) are refused.",
         ActionCategory.READ,
         _schema(
             message_id=_MESSAGE_ID,
@@ -204,6 +245,8 @@ GMAIL_ACTIONS: tuple[ToolSpec, ...] = (
         ),
         policy_key="gmail",
         required_scope="gmail.compose",
+        risk="low",
+        low_risk_note="save email drafts (nothing is sent)",
     ),
     ToolSpec(
         "send_draft",
@@ -226,6 +269,10 @@ GMAIL_ACTIONS: tuple[ToolSpec, ...] = (
         ),
         policy_key="gmail",
         required_scope="gmail.modify",
+        risk="low",
+        risk_check=label_change_risk,
+        ref_args=("message_id",),
+        low_risk_note="star, mark important or apply your own labels to emails",
     ),
     ToolSpec(
         "trash_message",
@@ -413,6 +460,16 @@ class GmailActions(GoogleBase):
             raise ConnectorError(f"Message {mid} has no part '{pid}'; use get_message to list attachments.")
         filename = scalar(part.get("filename")) or ""
         mime_type = scalar(part.get("mimeType")) or ""
+        if is_document_type(mime_type, filename):
+            # top10:file_extraction: a PDF or Office attachment is read as
+            # sections (size checked before the fetch); files.read continues.
+            return {
+                "message_id": mid,
+                "part_id": pid,
+                "filename": filename,
+                "mime_type": mime_type,
+                **await self._attachment_document(mid, pid, part, filename, mime_type),
+            }
         if not is_text_like(mime_type, filename):
             raise ConnectorError(
                 f"Attachment '{filename or pid}' is {mime_type or 'an unknown type'}, not text; "
@@ -446,6 +503,51 @@ class GmailActions(GoogleBase):
             "mime_type": mime_type,
             **text_window(text, start, ATTACHMENT_TEXT_CHARS, action="get_attachment_text"),
         }
+
+    async def _attachment_document(
+        self, mid: str, pid: str, part: dict[str, Any], filename: str, mime_type: str
+    ) -> dict[str, Any]:
+        """A PDF or Office attachment read as a document (top10:file_extraction).
+        Its declared size is checked before anything is fetched; the
+        attachment endpoint's JSON (base64url, about 4/3 of the file) is
+        read under a bound derived from MAX_DOCUMENT_BYTES."""
+        body = as_dict(part.get("body"))
+        size = body.get("size")
+
+        async def download(cap: int) -> bytes:
+            encoded = body.get("data")
+            if not isinstance(encoded, str) or not encoded:
+                attachment_id = body.get("attachmentId")
+                if not isinstance(attachment_id, str) or not attachment_id:
+                    raise ConnectorError(f"Attachment '{filename or pid}' has no content.")
+                fetched = await self._request_bytes(
+                    "GET",
+                    f"{GMAIL_API}/messages/{path_segment(mid)}/attachments/{path_segment(attachment_id)}",
+                    max_bytes=cap * 4 // 3 + 65536,
+                )
+                if fetched.truncated:
+                    raise ConnectorError(
+                        f"Attachment '{filename or pid}' is too large to read (the limit is "
+                        f"{MAX_DOCUMENT_BYTES // (1024 * 1024)} MB)."
+                    )
+                try:
+                    encoded = json.loads(fetched.content).get("data")
+                except (ValueError, AttributeError):
+                    raise ConnectorError(f"Attachment '{filename or pid}' could not be decoded.") from None
+                if not isinstance(encoded, str):
+                    raise ConnectorError(f"Attachment '{filename or pid}' has no content.")
+            try:
+                return base64.urlsafe_b64decode(encoded + "==")
+            except (binascii.Error, ValueError):
+                raise ConnectorError(f"Attachment '{filename or pid}' could not be decoded.") from None
+
+        return await read_connector_document(
+            download=download,
+            name=filename or f"attachment-{pid}",
+            mime=mime_type,
+            source="gmail",
+            size=size if isinstance(size, int) else None,
+        )
 
     # -- WRITE -----------------------------------------------------------------
 

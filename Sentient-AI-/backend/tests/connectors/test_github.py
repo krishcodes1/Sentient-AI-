@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import time
 from typing import Any, Callable
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pytest
@@ -32,6 +33,7 @@ from services.connectors import factory, registry
 from services.connectors.base import (
     AuthenticationError,
     ConnectorError,
+    ConnectorIdentity,
     RateLimitExceededError,
     UserConfirmationRequired,
 )
@@ -183,9 +185,26 @@ def test_no_dashes_in_user_facing_strings():
         DEFINITION.description,
         DEFINITION.auth.notes,
         DEFINITION.auth.fields[0].hint,
+        DEFINITION.auth.token_url_label,
     ]
     for text in texts:
         assert chr(0x2014) not in text and chr(0x2013) not in text
+
+
+def test_token_link_prefills_a_read_only_fine_grained_token():
+    url = urlsplit(DEFINITION.auth.token_url)
+    assert (url.scheme, url.netloc, url.path) == (
+        "https", "github.com", "/settings/personal-access-tokens/new",
+    )
+    query = parse_qs(url.query)
+    assert query["name"] == ["Crawler AI"] and query["expires_in"] == ["90"]
+    for permission in ("contents", "issues", "pull_requests", "actions", "statuses", "metadata"):
+        assert query[permission] == ["read"], permission
+    assert DEFINITION.auth.token_url_label == "Create a GitHub token"
+    assert DEFINITION.docs_url.startswith("https://docs.github.com/")
+    oauth = DEFINITION.auth.oauth
+    assert oauth is not None
+    assert oauth.client_setup_url == "https://github.com/settings/applications/new"
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +260,18 @@ async def test_health_check_is_false_on_any_connector_error():
     connector, seen = make_connector(ok({"message": "Bad credentials"}, status=401))
     assert await connector.health_check() is False
     assert len(seen) == 1
+    assert connector.identity() is None
+
+
+@pytest.mark.asyncio
+async def test_health_check_remembers_the_login_not_the_display_name():
+    connector, seen = make_connector(ok({"login": "octocat", "name": "The Octocat"}))
+    assert await connector.health_check() is True
+    assert connector.identity() == ConnectorIdentity(user="octocat")
+    assert len(seen) == 1
+    connector, _ = make_connector(ok(["not", "a", "user"]))
+    assert await connector.health_check() is True
+    assert connector.identity() is None
 
 
 @pytest.mark.asyncio

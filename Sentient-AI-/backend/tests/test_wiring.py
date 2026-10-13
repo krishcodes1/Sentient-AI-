@@ -342,7 +342,7 @@ async def test_system_capabilities_reports_the_permission_switches(wired_app):
         "system.capabilities", {}, "u1"
     )
     assert result["ok"] is True
-    assert [c["name"] for c in result["capabilities"]] == ["browser"]
+    assert [c["name"] for c in result["capabilities"]] == ["browser", "speech_to_text"]
     by_key = {p["key"]: p for p in result["permissions"]}
     assert set(by_key) == set(capability_registry.keys())
     assert by_key["screen"]["enabled"] is False
@@ -441,9 +441,10 @@ async def test_offer_and_permissions_block_come_from_one_report(session_factory)
 
     user, _ = await make_user(session_factory, "wiring-offer@example.com")
     async with session_factory() as db:
-        tools, _memory, permissions = await _build_tools_and_memory(
+        built = await _build_tools_and_memory(
             None, user, db, FakeInstallation(screen=True, reminders=False)
         )
+    tools, permissions = built.tools, built.permissions_text
     offered = {t.name for t in tools}
     assert "desktop.screenshot" in offered
     assert not any(
@@ -464,7 +465,8 @@ async def test_unwired_offer_uses_registry_defaults(session_factory):
 
     user, _ = await make_user(session_factory, "wiring-defaults@example.com")
     async with session_factory() as db:
-        tools, _memory, permissions = await _build_tools_and_memory(None, user, db)
+        built = await _build_tools_and_memory(None, user, db)
+    tools, permissions = built.tools, built.permissions_text
     assert "desktop.screenshot" not in {t.name for t in tools}
     assert "- See my screen: off" in permissions
 

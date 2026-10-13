@@ -1014,7 +1014,13 @@ async def test_connection_test_refreshes_and_persists_a_rotated_broker_token(
 
     response = await wired.post(f"/api/connectors/{config_id}/test", headers=auth_headers(token))
 
-    assert response.json() == {"ok": True, "detail": "Connection verified."}
+    # Microsoft's probe names no account, so the identity stays empty.
+    assert response.json() == {
+        "ok": True,
+        "detail": "Connection verified.",
+        "account": None,
+        "user": None,
+    }
     assert [r.url.path for r in provider.requests] == [MS_TOKEN_PATH, MS_PROBE_PATH]
     assert provider.bearers(MS_PROBE_PATH) == ["Bearer ms-access-new-test"]
     saved = await stored(session_factory, config_id)
@@ -1034,7 +1040,12 @@ async def test_connection_test_with_a_refused_refresh_reports_reconnect_without_
 
     response = await wired.post(f"/api/connectors/{config_id}/test", headers=auth_headers(token))
 
-    assert response.json() == {"ok": False, "detail": f"Authentication failed: {RECONNECT}"}
+    assert response.json() == {
+        "ok": False,
+        "detail": f"Authentication failed: {RECONNECT}",
+        "account": None,
+        "user": None,
+    }
     assert provider.to(MS_PROBE_PATH) == []
     assert await stored(session_factory, config_id) == {**creds, broker.NEEDS_RECONNECT_KEY: True}
 

@@ -8,6 +8,7 @@
 
 import { useEffect, useId, useState, type ReactNode } from "react";
 import { ArrowRight, CheckCircle2, Loader2 } from "lucide-react";
+import ExternalAnchor from "@/components/ExternalAnchor";
 import { ErrorAlert, ResultLine } from "@/components/FormFeedback";
 import {
   errorText,
@@ -31,6 +32,26 @@ import type { ProviderChoice, SetupProvider, SetupProviders } from "@/types";
 // Same order as Settings > LLM provider, so the two screens read alike.
 // Providers the server offers but this list does not know go last.
 const PROVIDER_ORDER = ["anthropic", "openai", "gemini", "grok", "deepseek", "groq", "mistral", "ollama"];
+
+// Where each provider's API keys are created, linked under the key field so
+// nobody has to hunt for the console. Ollama (no key) and providers this
+// list does not know get no link.
+const KEY_PAGES: Record<string, { name: string; url: string }> = {
+  anthropic: { name: "Anthropic", url: "https://platform.claude.com/settings/keys" },
+  openai: { name: "OpenAI", url: "https://platform.openai.com/api-keys" },
+  gemini: { name: "Gemini", url: "https://aistudio.google.com/apikey" },
+  grok: { name: "Grok", url: "https://console.x.ai/team/default/api-keys" },
+  deepseek: { name: "DeepSeek", url: "https://platform.deepseek.com/api_keys" },
+  groq: { name: "Groq", url: "https://console.groq.com/keys" },
+  mistral: { name: "Mistral", url: "https://console.mistral.ai/api-keys" },
+};
+
+/** The key page link ("Get an OpenAI API key"), or null for a provider without one. */
+function keyPageLink(provider: string): { text: string; url: string } | null {
+  if (!Object.prototype.hasOwnProperty.call(KEY_PAGES, provider)) return null;
+  const page = KEY_PAGES[provider];
+  return { text: `Get ${/^[aeiou]/i.test(page.name) ? "an" : "a"} ${page.name} API key`, url: page.url };
+}
 
 // The 409 PUT /setup/provider answers while stored keys cannot be
 // decrypted. Its fix is the same "Clear stored keys" the status flag
@@ -125,6 +146,7 @@ export default function ProviderForm({
   // Ollama runs on the user's own machine and has no key at all.
   const takesKey = !!selected && !selected.key_from_env && selected.name !== "ollama";
   const keyRequired = takesKey && !selected?.key_stored;
+  const keyLink = selected ? keyPageLink(selected.name) : null;
 
   const choice: ProviderChoice = {
     provider: name,
@@ -383,6 +405,11 @@ export default function ProviderForm({
                 spellCheck={false}
                 placeholder={selected.key_stored ? "A key is saved — leave blank to keep it" : "Paste your key"}
               />
+              {keyLink && (
+                <p className="mt-1.5">
+                  <ExternalAnchor href={keyLink.url}>{keyLink.text}</ExternalAnchor>
+                </p>
+              )}
             </div>
           ) : null}
 

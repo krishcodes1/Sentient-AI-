@@ -16,6 +16,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
+from services.agent import risk
 from services.agent.permissions import ActionCategory
 from services.connectors.base import ConnectorError, UserConfirmationRequired, path_segment
 from services.connectors.definition import ToolSpec, _schema
@@ -45,6 +46,27 @@ _DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+
 _EVENT_ID = {"type": "string", "description": "Calendar event id", "required": True}
 _CALENDAR_ID = {"type": "string", "description": "Calendar id (default: primary)"}
 _WHEN = "RFC 3339 date-time (2026-09-25T10:00:00-04:00) or all-day date (2026-09-25)"
+
+# The event fields a low-risk create_event may set (permission tiers): a
+# private event on the owner's own calendar. Guests get an invitation (HIGH);
+# anything else (visibility, conference links, recurrence, guest settings) is
+# not checked and stays MEDIUM.
+_LOW_RISK_EVENT_KEYS = frozenset(
+    {"summary", "description", "location", "start", "end", "reminders", "colorId", "transparency"}
+)
+
+
+def event_data_risk(arguments: Any) -> Optional[tuple[str, str]]:
+    """risk_check of create_event: HIGH with attendees, MEDIUM with any field
+    outside ``_LOW_RISK_EVENT_KEYS``, None otherwise."""
+    data = arguments.get("event_data")
+    if not isinstance(data, dict):
+        return None
+    if data.get("attendees"):
+        return "high", "it invites other people"
+    if any(key not in _LOW_RISK_EVENT_KEYS for key in data):
+        return "medium", "it sets event fields other people may see"
+    return None
 
 CALENDAR_ACTIONS: tuple[ToolSpec, ...] = (
     ToolSpec(
@@ -77,6 +99,9 @@ CALENDAR_ACTIONS: tuple[ToolSpec, ...] = (
         ),
         policy_key="google_calendar",
         required_scope="calendar.write",
+        risk="low",
+        risk_check=event_data_risk,
+        low_risk_note="add private events with no guests to your calendar",
     ),
     ToolSpec(
         "list_calendars",
@@ -104,6 +129,8 @@ CALENDAR_ACTIONS: tuple[ToolSpec, ...] = (
         ),
         policy_key="google_calendar",
         required_scope="calendar.write",
+        # Changing the guest list invites or removes other people.
+        risk_check=risk.when_given("attendees", "high", "it invites or removes other people"),
     ),
     ToolSpec(
         "respond_to_invite",
@@ -116,6 +143,8 @@ CALENDAR_ACTIONS: tuple[ToolSpec, ...] = (
         ),
         policy_key="google_calendar",
         required_scope="calendar.write",
+        # The answer goes to the organizer: it speaks for the user.
+        always_confirm=True,
     ),
     ToolSpec(
         "delete_event",

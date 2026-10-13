@@ -64,8 +64,12 @@ def test_registry_claims_checkout_for_purchases_read_for_browser_control_act_for
 def test_settings_defaults_are_the_purchase_caps_and_nothing_else():
     assert registry.settings_defaults("purchases") == {"per_purchase_cap_usd": 25, "per_day_cap_usd": 50}
     assert registry.settings_defaults("purchases") is not purchases.PURCHASE_SETTINGS_DEFAULTS
+    # scheduled_tasks carries the unattended budgets (scheduler_briefing),
+    # knowledge_base its limits (top10:knowledge_base),
+    # video_transcripts its minute caps and retention (video_transcripts).
+    with_settings = {"purchases", "scheduled_tasks", "knowledge_base", "video_transcripts"}
     for key in registry.keys():
-        if key != "purchases":
+        if key not in with_settings:
             assert registry.settings_defaults(key) == {}, key
     assert registry.settings_defaults("nope") == {}
 

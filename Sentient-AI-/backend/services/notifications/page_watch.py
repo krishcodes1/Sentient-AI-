@@ -48,6 +48,7 @@ from urllib.parse import urlsplit
 import structlog
 from sqlalchemy import select, update
 
+from services.notifications.sweeper import SweepLoop, backoff_minutes, gate_open
 from services.tools.watch import (
     EXCERPT_CHARS,
     EXCERPT_CUT_MARK,
@@ -279,6 +280,7 @@ class PageWatchService:
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         scan: Optional[Callable[[str], bool]] = None,
         audit: bool = True,
+        on_change: Optional[Callable[[str, str, str, str], Awaitable[Any]]] = None,
     ) -> None:
         self._session_factory = session_factory
         self.send = send
@@ -289,41 +291,32 @@ class PageWatchService:
         self._clock = clock
         self._scan = scan
         self._audit_enabled = audit
-        self._task: Optional[asyncio.Task[None]] = None
+        # top10:event_triggers
+        # Told (user id, watch id, label, host) after each recorded change:
+        # the page.changed triggers (TriggerService.enqueue_page_change).
+        # Never given page text. main.py sets it; None does nothing.
+        self.on_change = on_change
+        # The shared poll loop (services/notifications/sweeper.py). The gate
+        # is read inside sweep_once, before the claim and again before every
+        # check, so the loop itself runs ungated.
+        self._sweeper = SweepLoop(
+            name="page_watch", interval_seconds=interval_seconds, sweep=self.sweep_once
+        )
+
+    @property
+    def _task(self) -> Optional[asyncio.Task[None]]:
+        """The running loop's task, None once stopped."""
+        return self._sweeper.task
 
     async def start(self) -> None:
-        self._task = asyncio.create_task(self._loop(), name="page-watch-sweeper")
-        logger.info("page_watch_sweeper_started", interval=self._interval)
+        await self._sweeper.start()
 
     async def stop(self) -> None:
-        if self._task is not None:
-            self._task.cancel()
-            try:
-                await self._task
-            except (asyncio.CancelledError, Exception):
-                pass
-            self._task = None
-
-    async def _loop(self) -> None:
-        while True:
-            try:
-                await self.sweep_once()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                # Type only: a message can quote a URL with a token in it.
-                logger.warning("page_watch_sweep_failed", error_type=type(exc).__name__)
-            await asyncio.sleep(self._interval)
+        await self._sweeper.stop()
 
     async def _is_enabled(self) -> bool:
-        if self._enabled is None:
-            return True
-        try:
-            return (await self._enabled()) is True
-        except Exception as exc:
-            # A switch that cannot be read is off: nothing is fetched.
-            logger.warning("page_watch_gate_failed", error_type=type(exc).__name__)
-            return False
+        # A switch that cannot be read is off: nothing is fetched.
+        return await gate_open(self._enabled, "page_watch")
 
     async def sweep_once(self) -> int:
         """Check every due watch (up to ``MAX_CHECKS_PER_SWEEP``). Returns how many were checked."""
@@ -467,6 +460,20 @@ class PageWatchService:
         delivered = await self._deliver(claim, text)
         logger.info("page_watch_changed", watch_id=str(claim.id), delivered=delivered)
         await self._audit(claim, "changed", {"delivered": delivered})
+        # top10:event_triggers
+        await self._tell_triggers(claim)
+
+    async def _tell_triggers(self, claim: _Claim) -> None:
+        """Hand a recorded change to the page.changed triggers: the ids, the
+        label and the host only. A failure there never affects the watch."""
+        if self.on_change is None:
+            return
+        try:
+            await self.on_change(str(claim.user_id), str(claim.id), claim.label, _host(claim.url))
+        except Exception as exc:
+            logger.warning(
+                "page_watch_trigger_hook_failed", watch_id=str(claim.id), error_type=type(exc).__name__
+            )
 
     async def _record_failure(self, claim: _Claim, reason: str) -> None:
         from models.page_watch import ERROR_MAX_CHARS, PageWatchStatus
@@ -483,10 +490,7 @@ class PageWatchService:
         if stopped:
             values["status"] = PageWatchStatus.error
         else:
-            backoff = min(
-                claim.interval_minutes * 2**failures,
-                max(MAX_BACKOFF_MINUTES, claim.interval_minutes),
-            )
+            backoff = backoff_minutes(claim.interval_minutes, failures, MAX_BACKOFF_MINUTES)
             values["next_check_at"] = now + timedelta(minutes=backoff)
         logger.info(
             "page_watch_check_failed",

@@ -100,6 +100,7 @@ OAUTH = OAuthSpec(
         "include_granted_scopes": "true",
         "prompt": "consent",
     },
+    client_setup_url="https://console.cloud.google.com/auth/clients",
 )
 
 _DEFAULT_REDIRECT_BASE = "http://127.0.0.1:3000"
@@ -415,7 +416,9 @@ DEFINITION = ConnectorDefinition(
         # The value the connector form has always stored for a pasted
         # Google token.
         token_auth_method="oauth2",
-        notes="OAuth access token with the Gmail/Calendar scopes you intend to grant.",
+        notes="A Google access code with the Gmail and Calendar permissions you plan to allow.",
+        token_url="https://developers.google.com/oauthplayground/",
+        token_url_label="Get a token in the OAuth Playground",
     ),
     network=NetworkSpec(
         policy_key="google",

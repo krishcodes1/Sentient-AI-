@@ -195,6 +195,92 @@ _DEFAULT_POLICIES: dict[tuple[str, ActionCategory], PermissionTier] = {
     ("github", ActionCategory.DELETE): PermissionTier.USER_CONFIRM,  # every DELETE is always_confirm
     ("github", ActionCategory.EXECUTE): PermissionTier.USER_CONFIRM,
     ("github", ActionCategory.FINANCIAL): PermissionTier.HARD_BLOCKED,
+    # top10:secret_pii_redaction
+
+    # top10:file_extraction
+    # Built-in files — reading an uploaded or opened document (files.read)
+    # and listing uploads (files.list, metadata only) are reads. Forgetting
+    # an upload deletes its stored text: DELETE, behind the approval card
+    # every time. Nothing here writes, runs or pays.
+    ("files", ActionCategory.READ): PermissionTier.AUTO_APPROVE,
+    ("files", ActionCategory.WRITE): PermissionTier.HARD_BLOCKED,
+    ("files", ActionCategory.DELETE): PermissionTier.USER_CONFIRM,
+    ("files", ActionCategory.EXECUTE): PermissionTier.HARD_BLOCKED,
+    ("files", ActionCategory.FINANCIAL): PermissionTier.HARD_BLOCKED,
+
+    # top10:scheduler_briefing
+    # Built-in scheduled tasks — a task runs a prompt (or the briefing) on
+    # the owner's behalf until deleted, so making, changing, pausing and
+    # deleting one is behind the card; listing them is a read. Nothing here
+    # runs commands, and money never moves.
+    ("schedule", ActionCategory.READ): PermissionTier.AUTO_APPROVE,
+    ("schedule", ActionCategory.WRITE): PermissionTier.USER_CONFIRM,
+    ("schedule", ActionCategory.DELETE): PermissionTier.USER_CONFIRM,
+    ("schedule", ActionCategory.EXECUTE): PermissionTier.HARD_BLOCKED,
+    ("schedule", ActionCategory.FINANCIAL): PermissionTier.HARD_BLOCKED,
+
+    # top10:tutor_mode
+    # Built-in tutor mode (services/tutor) — tutor.start (WRITE) turns tutor
+    # mode on for the turn's own conversation. It only makes the assistant
+    # stricter and takes no arguments, so it runs without a card; nothing in
+    # the family reads, deletes, runs or pays.
+    ("tutor", ActionCategory.READ): PermissionTier.HARD_BLOCKED,
+    ("tutor", ActionCategory.WRITE): PermissionTier.AUTO_APPROVE,
+    ("tutor", ActionCategory.DELETE): PermissionTier.HARD_BLOCKED,
+    ("tutor", ActionCategory.EXECUTE): PermissionTier.HARD_BLOCKED,
+    ("tutor", ActionCategory.FINANCIAL): PermissionTier.HARD_BLOCKED,
+
+    # top10:knowledge_base
+    # Built-in knowledge base — searching, reading and listing the user's saved
+    # documents are reads. Saving (WRITE) changes what every later search
+    # returns and removing (DELETE) deletes passages, so both are behind the
+    # approval card every time. Nothing here runs commands, and money never
+    # moves.
+    ("knowledge", ActionCategory.READ): PermissionTier.AUTO_APPROVE,
+    ("knowledge", ActionCategory.WRITE): PermissionTier.USER_CONFIRM,
+    ("knowledge", ActionCategory.DELETE): PermissionTier.USER_CONFIRM,
+    ("knowledge", ActionCategory.EXECUTE): PermissionTier.HARD_BLOCKED,
+    ("knowledge", ActionCategory.FINANCIAL): PermissionTier.HARD_BLOCKED,
+
+    # top10:flashcards_quizzes
+    # Built-in study (flashcards and practice quizzes) — listing decks, progress
+    # and a one-time export link are reads. Saving, editing, reviewing, quizzing
+    # and the review settings write only to the caller's own bounded store and
+    # send nothing anywhere, so they run without a card (like reminders.create).
+    # Deleting decks or items with their history is a DELETE behind the card
+    # every time. Nothing here runs commands, and money never moves.
+    ("study", ActionCategory.READ): PermissionTier.AUTO_APPROVE,
+    ("study", ActionCategory.WRITE): PermissionTier.AUTO_APPROVE,
+    ("study", ActionCategory.DELETE): PermissionTier.USER_CONFIRM,
+    ("study", ActionCategory.EXECUTE): PermissionTier.HARD_BLOCKED,
+    ("study", ActionCategory.FINANCIAL): PermissionTier.HARD_BLOCKED,
+
+    # top10:event_triggers
+    # Built-in app triggers (services/tools/triggers.py) — a trigger reads an
+    # app and messages the owner (or runs a task) until deleted, so creating,
+    # changing and deleting one is behind the card; list and history are
+    # reads. Nothing here runs commands, and money never moves.
+    ("triggers", ActionCategory.READ): PermissionTier.AUTO_APPROVE,
+    ("triggers", ActionCategory.WRITE): PermissionTier.USER_CONFIRM,
+    ("triggers", ActionCategory.DELETE): PermissionTier.USER_CONFIRM,
+    ("triggers", ActionCategory.EXECUTE): PermissionTier.HARD_BLOCKED,
+    ("triggers", ActionCategory.FINANCIAL): PermissionTier.HARD_BLOCKED,
+
+    # top10:permission_tiers
+
+    # top10:voice_notes
+
+    # top10:video_transcripts
+    # Built-in video — reading a video's, lecture's or podcast's transcript
+    # (video.transcript) and listing the user's saved ones (video.list) only
+    # read public pages and the user's own cache. Nothing here writes,
+    # deletes, runs or pays, so every other category is hard-blocked.
+    ("video", ActionCategory.READ): PermissionTier.AUTO_APPROVE,
+    ("video", ActionCategory.WRITE): PermissionTier.HARD_BLOCKED,
+    ("video", ActionCategory.DELETE): PermissionTier.HARD_BLOCKED,
+    ("video", ActionCategory.EXECUTE): PermissionTier.HARD_BLOCKED,
+    ("video", ActionCategory.FINANCIAL): PermissionTier.HARD_BLOCKED,
+
 }
 
 # Policy keys whose FINANCIAL row is consulted instead of being blocked

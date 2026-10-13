@@ -77,6 +77,9 @@ services:
       context: ../backend
       dockerfile: ../docker/Dockerfile.backend
       target: prod
+      # Optional local speech-to-text for voice notes (~250 MB; top10:voice_notes).
+      args:
+        WITH_SPEECH_TO_TEXT: ${WITH_SPEECH_TO_TEXT:-0}
     restart: unless-stopped
     <<: *logging
     # Give in-flight agent turns time to finish and persist on redeploy;

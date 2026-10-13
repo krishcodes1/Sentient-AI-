@@ -22,6 +22,7 @@ from typing import Any, Iterable, Mapping, Optional
 from urllib.parse import urlparse
 
 from core.network_security import DEFAULT_POLICIES, NetworkPolicy, match_host_pattern
+from services.agent import risk as risk_grading
 from services.agent.permissions import (
     ActionCategory,
     PermissionTier,
@@ -31,6 +32,7 @@ from services.agent.permissions import (
 from services.connectors.base import BaseConnector
 from services.connectors.definition import (
     CATEGORY_TIERS,
+    AuthSpec,
     ConnectorDefinition,
     ToolSpec,
 )
@@ -80,6 +82,35 @@ RESERVED_KEYS: frozenset[str] = frozenset(
         "memory",
         "mcp",
         "custom",
+        # top10:secret_pii_redaction
+
+        # top10:file_extraction
+        "files",
+
+        # top10:scheduler_briefing
+        "schedule",
+
+        # top10:tutor_mode
+        "tutor",
+
+        # top10:knowledge_base
+        "knowledge",
+
+        # top10:flashcards_quizzes
+        "study",
+
+        # top10:event_triggers
+        "triggers",
+        # The page-watch built-in's family, missing until now.
+        "watch",
+
+        # top10:permission_tiers
+
+        # top10:voice_notes
+
+        # top10:video_transcripts
+        "video",
+
     }
 )
 
@@ -104,6 +135,13 @@ _GLOB_LABEL_RE = re.compile(r"^[a-z0-9-]*\*[a-z0-9-]*$")
 _AUTH_KINDS = frozenset({"token", "oauth", "device"})
 _FIELD_TYPES = frozenset({"text", "password", "url"})
 _TOKEN_AUTH_METHODS = frozenset({"api_key", "bearer_token", "oauth2"})
+# A ``{field_key}`` placeholder in AuthSpec.token_url.
+_PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+# Stands in for a user's typed address when checking a token_url template.
+_PLACEHOLDER_SAMPLE = "https://example.test"
+_TOKEN_LABEL_MAX = 60
+# House style: no em or en dash in text the UI shows (U+2014, U+2013).
+_DASHES = (chr(0x2014), chr(0x2013))
 
 # delete > execute > write > read, for the scope risk shown in the UI.
 _CATEGORY_RISK: Mapping[ActionCategory, int] = {
@@ -247,6 +285,8 @@ def _action_problems(d: ConnectorDefinition) -> list[str]:
             )
         if spec.category == ActionCategory.DELETE and not spec.always_confirm:
             problems.append(f"action '{name}' is a DELETE and must set always_confirm")
+        # risk='low', risk_check, ref_args and low_risk_note (permission tiers).
+        problems.extend(risk_grading.spec_problems(spec))
         if spec.starter:
             starters += 1
             if spec.category != ActionCategory.READ:
@@ -454,6 +494,7 @@ def _auth_problems(d: ConnectorDefinition) -> list[str]:
         problems.append("auth declares no sign-in method")
     if len(set(methods)) != len(methods) or not set(methods) <= _AUTH_KINDS:
         problems.append(f"auth methods {list(methods)} must be distinct values of {sorted(_AUTH_KINDS)}")
+    problems.extend(_token_link_problems(auth))
     if auth.token_auth_method not in _TOKEN_AUTH_METHODS:
         problems.append(f"token_auth_method '{auth.token_auth_method}' is not an AuthMethod")
     if "token" in methods and not auth.fields:
@@ -484,6 +525,8 @@ def _auth_problems(d: ConnectorDefinition) -> list[str]:
         problems.append("the 'oauth' method needs an https authorize_url")
     if "device" in methods and not oauth.device_code_url:
         problems.append("the 'device' method needs a device_code_url")
+    if oauth.client_setup_url and not oauth.client_setup_url.startswith("https://"):
+        problems.append("OAuth client_setup_url must be an https:// URL")
     catalog_scopes = {
         s.required_scope
         for s in d.actions
@@ -495,6 +538,58 @@ def _auth_problems(d: ConnectorDefinition) -> list[str]:
     stale = sorted(set(oauth.scope_map) - catalog_scopes)
     if stale:
         problems.append(f"OAuth scope_map maps scopes no action uses: {stale}")
+    return problems
+
+
+def _token_link_problems(auth: AuthSpec) -> list[str]:
+    """Rules for ``token_url`` (the page where the user creates the token
+    they paste) and its ``token_url_label``.
+
+    The URL is https, or starts with exactly one ``{field_key}`` placeholder
+    naming a ``url`` credential field (the UI fills it with the origin of
+    what the user typed), followed by a path, query, fragment or nothing so
+    the link stays on that host, and is an https URL once a sample address
+    is put in its place. No other brace may appear.
+    """
+    problems: list[str] = []
+    label = auth.token_url_label
+    if len(label) > _TOKEN_LABEL_MAX:
+        problems.append(f"token_url_label must be at most {_TOKEN_LABEL_MAX} characters")
+    if any(dash in label for dash in _DASHES):
+        problems.append("token_url_label must not contain an em or en dash")
+    url = auth.token_url
+    if not url:
+        return problems
+    if "token" not in auth.methods:
+        problems.append("token_url needs the 'token' method")
+    found = list(_PLACEHOLDER_RE.finditer(url))
+    if not found:
+        if "{" in url or "}" in url:
+            problems.append("token_url has a '{' or '}' that is not a {field_key} placeholder")
+        elif not url.startswith("https://"):
+            problems.append("token_url must be an https:// URL or start with a {field_key} placeholder")
+        return problems
+    if len(found) > 1:
+        problems.append("token_url may hold at most one {field_key} placeholder")
+        return problems
+    match = found[0]
+    rest = url[match.end():]
+    if match.start() != 0:
+        problems.append("token_url's {field_key} placeholder must come first")
+    elif "{" in rest or "}" in rest:
+        problems.append("token_url has a '{' or '}' that is not a {field_key} placeholder")
+    elif match.group(1) not in {f.key for f in auth.fields if f.type == "url"}:
+        problems.append(
+            f"token_url placeholder '{{{match.group(1)}}}' must name a credential field of type 'url'"
+        )
+    elif rest and rest[0] not in "/?#":
+        # "{base_url}@other.test/x" or "{base_url}.other.test/x" would turn
+        # the typed address into userinfo or a subdomain of another host.
+        problems.append("token_url's placeholder must be followed by '/', '?', '#' or nothing")
+    else:
+        parsed = urlparse(_PLACEHOLDER_SAMPLE + rest)
+        if parsed.scheme != "https" or not parsed.hostname:
+            problems.append("token_url is not an https URL once its placeholder is filled")
     return problems
 
 
@@ -653,6 +748,11 @@ def connector_types_payload() -> list[dict[str, Any]]:
             "oauth_configured": bool,        # client id (and any secret) set
             "token_auth_method": "bearer_token"|"api_key"|"oauth2",
             "notes": str,
+            "token_url": str,         # page where the user creates the token
+            "token_url_label": str,   # that link's text
+            "client_setup_url": str,  # owner's sign-in client page ("" without OAuth)
+            "client_id_setting": str,      # backend/.env name of the client id
+            "client_secret_setting": str,  # ... and of its secret ("" if none)
           },
           "scopes": {
             "read":  [{"scope", "category": "read", "always_confirm": bool,
@@ -660,6 +760,7 @@ def connector_types_payload() -> list[dict[str, Any]]:
             "write": [{"scope", "category": "write"|"execute"|"delete",
                        "always_confirm": bool, "actions": [...]}],
           },
+          "low_risk": [{"action", "note"}],   # LOW-eligible actions
         }
 
     A scope's ``category`` is the most dangerous category among the actions
@@ -667,6 +768,11 @@ def connector_types_payload() -> list[dict[str, Any]]:
     true when any of them is. FINANCIAL actions and their scopes never
     appear: they cannot be granted. ``token_auth_method`` is the
     ``auth_method`` to send when creating a pasted-token connector.
+    ``token_url`` is an https URL or a template whose leading
+    ``{field_key}`` the UI fills with the origin of that ``url`` field's
+    typed value (validated by ``_token_link_problems``). The two
+    ``client_*_setting`` values are setting names, never their values, so
+    the page can tell the owner which ``backend/.env`` entries to fill.
     """
     return [
         {
@@ -693,8 +799,16 @@ def connector_types_payload() -> list[dict[str, Any]]:
                 "oauth_configured": _oauth_configured(d),
                 "token_auth_method": d.auth.token_auth_method,
                 "notes": d.auth.notes,
+                "token_url": d.auth.token_url,
+                "token_url_label": d.auth.token_url_label,
+                "client_setup_url": d.auth.oauth.client_setup_url if d.auth.oauth else "",
+                "client_id_setting": d.auth.oauth.client_id_setting if d.auth.oauth else "",
+                "client_secret_setting": d.auth.oauth.client_secret_setting if d.auth.oauth else "",
             },
             "scopes": _scope_payload(d),
+            # What "Allow low-risk changes" lets this connector do without a
+            # card: [{"action", "note"}] (services/agent/risk.py).
+            "low_risk": risk_grading.low_risk_notes(d.actions),
         }
         for d in REGISTRY
     ]
