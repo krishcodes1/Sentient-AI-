@@ -240,7 +240,8 @@ async def test_allow_for_7_days_then_calendar_needs_no_more_cards_from_this_chat
         # The resumed turn scrolled with no card and answered.
         assert fake.events == [("open_app", "Calendar"), ("scroll", "down", 5)]
         assert _texts(fake_api)[-1].startswith(ANSWER.content)
-        assert "Calendar is allowed for 7 days, until" in _edits(fake_api)[-1]
+        assert "I can scroll and click around in Calendar without asking until" in _edits(fake_api)[-1]
+        assert _edits(fake_api)[-1].endswith("Send /apps to undo that.")
 
         # A new message from the same chat: Calendar acts at once.
         await _say(service, 9302, "and the 16th?")
@@ -332,13 +333,13 @@ async def test_apps_lists_the_allowed_apps_and_revokes_one(
     async with wired(session_factory, RecordingProvider([]), calendar_desktop()) as service:
         await _say(service, 9306, "/apps")
         [listing] = [m for m in fake_api.sent_messages() if m.get("reply_markup")]
-        assert "Calendar — from this chat, until" in listing["text"]
-        assert "Notes — from the web app, until" in listing["text"]
+        assert "Calendar, allowed from this chat until" in listing["text"]
+        assert "Notes, allowed from the web app until" in listing["text"]
         buttons = [row[0] for row in listing["reply_markup"]["inline_keyboard"]]
-        assert buttons[0] == {"text": "Revoke Calendar", "callback_data": "rva:" + here.id}
+        assert buttons[0] == {"text": "Turn off for Calendar", "callback_data": "rva:" + here.id}
 
         await _tap(service, "rva:" + here.id, 9306)
-        assert "Calendar is no longer allowed" in _texts(fake_api)[-1]
+        assert "I'll ask you first again before doing anything in Calendar" in _texts(fake_api)[-1]
         # A second tap on the same button: already ended, nothing else.
         await _tap(service, "rva:" + here.id, 9306)
 
@@ -357,7 +358,7 @@ async def test_apps_with_nothing_allowed_says_how_to_allow_one(
     touched.add(str(user.id))
     async with wired(session_factory, RecordingProvider([]), calendar_desktop()) as service:
         await _say(service, 9307, "/apps")
-    assert "No apps are allowed for a week" in _texts(fake_api)[-1]
+    assert "You haven't let me use any app without asking" in _texts(fake_api)[-1]
 
 
 @pytest.mark.asyncio

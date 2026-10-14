@@ -271,7 +271,7 @@ async def test_override_without_a_key_names_the_provider(monkeypatch):
     with pytest.raises(ProviderNotConfigured) as excinfo:
         await rt._resolve_provider("openai", "gpt-4o")
     message = str(excinfo.value)
-    assert "openai" in message and "not configured" in message
+    assert "OpenAI" in message and "isn't set up" in message
     assert excinfo.value.reason == "user_provider_unavailable"
 
 
@@ -574,7 +574,7 @@ async def test_stream_chat_marks_an_unavailable_user_provider(monkeypatch):
     ]
     [error] = [e for e in events if e["type"] == "error"]
     assert error["data"]["code"] == "user_provider_unavailable"
-    assert "openai" in error["data"]["reason"]
+    assert "OpenAI" in error["data"]["reason"]
 
 
 @pytest.mark.asyncio
@@ -852,7 +852,7 @@ async def test_send_message_with_an_unavailable_user_provider_is_409_pointing_at
         assert detail["code"] == "user_provider_unavailable"
         assert detail["settings_url"] == "/settings"
         assert "setup_url" not in detail
-        assert "openai" in detail["message"]
+        assert "OpenAI" in detail["message"]
     finally:
         app.dependency_overrides.pop(agent_routes.get_runtime, None)
 
@@ -999,7 +999,7 @@ async def test_channel_chat_with_an_unavailable_user_provider_points_at_settings
     assert outcome["code"] == "user_provider_unavailable"
     assert outcome["settings_url"] == "/settings"
     assert "setup_url" not in outcome
-    assert "openai" in outcome["error"]
+    assert "OpenAI" in outcome["error"]
 
 
 # ---------------------------------------------------------------------------

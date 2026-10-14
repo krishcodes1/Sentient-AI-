@@ -32,11 +32,10 @@ from services.notifications.sweeper import gate_open
 logger = structlog.get_logger(__name__)
 
 USAGE = (
-    "To save a document to your knowledge base, send the file with the caption "
-    "/kb <collection>, e.g. /kb CS101."
+    "To save a document to your knowledge base, send the file with /kb and a "
+    "collection name as its caption, for example /kb CS101."
 )
-NOT_READY = "The knowledge base is not available right now."
-HELP_LINE = "/kb <collection> — as a file's caption: save it to your knowledge base"
+NOT_READY = "The knowledge base isn't available right now."
 
 
 @dataclass(frozen=True)
@@ -71,7 +70,8 @@ def reply_line(outcome: AddOutcome, collection: str) -> str:
         return f'Saved "{title}" to {collection}: {", ".join(parts)}.'
     if outcome.status == "duplicate":
         return f'"{title}" is already in {collection}.'
-    return f'⚠️ Could not save "{title}": {outcome.error or "it could not be read."}'
+    reason = outcome.error or "it couldn't be read."
+    return f'⚠️ I couldn\'t save "{title}": {reason}'
 
 
 async def save_files(user_id: str, rest: str, files: Sequence[Any]) -> str:
@@ -95,7 +95,7 @@ async def save_files(user_id: str, rest: str, files: Sequence[Any]) -> str:
             outcome = await backend.toolkit.save_inbound(user_id, collection, inbound, max_bytes=TELEGRAM_MAX_BYTES)
         except Exception as exc:  # noqa: BLE001 - one file's failure is its line
             logger.warning("knowledge_telegram_save_failed", error_type=type(exc).__name__)
-            outcome = AddOutcome("error", "the file", error="it could not be saved.")
+            outcome = AddOutcome("error", "the file", error="something went wrong. Please try again.")
         name = outcome.collection.name if outcome.collection is not None else collection
         lines.append(reply_line(outcome, name))
         await _audit(backend, user_id, outcome)

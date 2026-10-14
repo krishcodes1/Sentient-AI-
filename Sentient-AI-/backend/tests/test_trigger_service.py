@@ -334,7 +334,7 @@ async def test_a_removed_or_inactive_connector_counts_as_a_failure(session_facto
     await sweep(service(session_factory, executor))
     trig = await trigger_row(session_factory, trigger_id)
     assert executor.calls == [] and trig.consecutive_errors == 1
-    assert trig.last_error == "The account this trigger reads was turned off or removed."
+    assert trig.last_error == "The account this trigger checks was turned off or removed."
 
 
 @pytest.mark.asyncio
@@ -359,7 +359,7 @@ async def test_failures_back_off_and_the_fifth_stops_the_trigger_with_one_messag
     trig = await trigger_row(session_factory, trigger_id)
     assert trig.status == "error"
     [(_uid, text)] = outbox.sent
-    assert text.startswith('⚠️ Stopped trigger "Prof emails": Crawler could not read Gmail.')
+    assert text.startswith('⚠️ I turned off the trigger "Prof emails": Crawler could not read Gmail.')
     assert "abc" not in text
     clock.now += timedelta(days=2)
     await sweep(svc)
@@ -376,7 +376,7 @@ async def test_a_check_past_its_deadline_is_a_failure(session_factory):
     executor = FakeExecutor(gmail(mail("m1")))
     executor.delay = 0.5
     await sweep(service(session_factory, executor, check_deadline_s=0.05))
-    assert (await trigger_row(session_factory, trigger_id)).last_error == "The app did not answer in time."
+    assert (await trigger_row(session_factory, trigger_id)).last_error == "The app didn't answer in time."
 
 
 # -- notify ---------------------------------------------------------------------------
@@ -399,9 +399,39 @@ async def test_notices_are_defanged_withhold_flagged_subjects_and_say_and_n_more
     lines = text.split("\n")
     assert len(lines) == 6 and lines[-1] == "…and 3 more."
     assert "evil․example∕login ＠admin" in lines[0]
-    withheld = "(The subject is not shown: it looked like instructions aimed at an AI assistant.)"
+    withheld = "(The subject is hidden because it looked like instructions meant for me.)"
     assert lines[1].endswith(withheld) and lines[2].endswith(withheld)
     assert "http" not in text and "SECRET BODY" not in text
+
+
+def test_notice_lines_say_times_the_way_people_read_them():
+    from zoneinfo import ZoneInfo
+
+    def safe(_text: str) -> bool:
+        return True
+
+    now = datetime(2026, 10, 20, 17, 45, tzinfo=timezone.utc)
+    ny = ZoneInfo("America/New_York")
+    event = {"title": "Team sync", "start": "2026-10-20T18:00:00Z", "location": "Room 4"}
+    assert shape.item_line("calendar.starting_soon", "Soon", event, tz=ny, now=now, scan=safe) == (
+        "\U0001f4c5 In 15 minutes: Team sync at 2:00 PM, Room 4"
+    )
+    one = {"title": "Call", "start": "2026-10-20T17:46:00Z"}
+    assert shape.item_line("calendar.starting_soon", "Soon", one, now=now, scan=safe) == (
+        "\U0001f4c5 In 1 minute: Call at 5:46 PM UTC"
+    )
+    started = {**one, "start": "2026-10-20T17:40:00Z"}
+    assert shape.item_line("calendar.starting_soon", "Soon", started, now=now, scan=safe) == (
+        "\U0001f4c5 Starting now: Call at 5:40 PM UTC"
+    )
+    assert shape.item_line("calendar.starting_soon", "Soon", {"title": "Call"}, now=now, scan=safe) == (
+        "\U0001f4c5 Starting soon: Call"
+    )
+    due = {"course": "CS101", "title": "Homework 3", "due_at": "2026-10-21T03:59:00Z"}
+    assert shape.item_line("canvas.assignment", "Work", due, tz=ny, now=now, scan=safe) == (
+        "\U0001f4dd New assignment in CS101: Homework 3, due Tue, Oct 20 at 11:59 PM"
+    )
+    assert shape.item_line("other.source", "Mine", {}, scan=safe) == "\U0001f514 Mine has something new"
 
 
 @pytest.mark.asyncio
@@ -472,7 +502,7 @@ async def test_a_run_task_trigger_hands_one_batch_to_the_shared_runner(session_f
     [(_uid, text)] = outbox.sent
     assert text.startswith("⚡ Prof emails\nProf Smith moved the exam to Friday.")
     assert "evil․example" in text and "token=1" not in text
-    assert "1 action is waiting for your approval (/pending; Slack: reply \"pending\")." in text
+    assert '1 action is waiting for your approval. Send /pending in Telegram or "pending" in Slack to see it.' in text
     assert "tokens" in text or "$" in text
     assert {e.status for e in await events(session_factory, trigger_id)} == {"ran"}
     trig = await trigger_row(session_factory, trigger_id)
@@ -502,7 +532,7 @@ async def test_with_task_runs_off_the_notice_goes_out_instead(session_factory):
     await sweep(service(session_factory, FakeExecutor(gmail(mail("m1"))), outbox, runner=runner, runs=False))
     assert runner.requests == []
     [(_uid, text)] = outbox.sent
-    assert text.endswith("(Task runs are off, so only this notice was sent.)")
+    assert text.endswith("(Running tasks from triggers is turned off, so I only sent this notice.)")
     [event] = await events(session_factory, trigger_id)
     assert event.status == "notified" and event.note == "runs_off"
 
@@ -516,7 +546,7 @@ async def test_a_provider_that_is_not_set_up_falls_back_to_the_notice(session_fa
     await sweep(service(session_factory, FakeExecutor(gmail(mail("m1"))), outbox, runner=FakeRunner("not_configured")))
     [(_uid, text)] = outbox.sent
     assert text.startswith("\U0001f4ec Prof emails: new email from Prof Smith")
-    assert text.endswith("Crawler could not run your task: the AI provider is not set up.")
+    assert text.endswith("I couldn't run your task because no AI service is connected yet.")
     [event] = await events(session_factory, trigger_id)
     assert event.status == "failed" and event.note == "not_configured"
 

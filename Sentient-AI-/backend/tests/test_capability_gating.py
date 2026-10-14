@@ -295,9 +295,9 @@ async def test_switched_on_but_not_installed_is_blocked_not_off():
     adapter = RuntimePermissionAdapter(capability_gate=gate)
     assert await adapter.check("u1", "web.screenshot", {}) == "blocked"
     reason = await adapter.get_block_reason("u1", "web.screenshot", {})
-    assert "not installed" in reason
+    assert "isn't installed yet" in reason
     assert reason != cap.when_denied and "turned off" not in reason.lower()
-    assert reason.endswith("The owner can install it from Settings → Permissions.")
+    assert reason.endswith("You can install it from Settings → Permissions.")
     assert await adapter.get_policy_name("u1", "web.screenshot") == CAPABILITY_BLOCKED_POLICY
 
     web = TripwireWebToolkit()
@@ -861,7 +861,7 @@ async def test_executor_refuses_browser_read_when_browser_control_is_off_or_bloc
         browser_toolkit=kit,
     )
     result = await blocked.execute("browser.read", {"action": "open", "url": "x"}, user_id="u1")
-    assert result["state"] == "blocked" and "Playwright" in result["error"]
+    assert result["state"] == "blocked" and "web browser add-on" in result["error"]
     assert kit.calls == []
 
 

@@ -100,7 +100,7 @@ async def test_a_submission_card_cannot_be_approved_after_tutor_on(client, sessi
     blocked = [a for a in audit if a.reasoning_chain.get("policy") == "tutor_mode"]
     assert len(blocked) == 1 and blocked[0].reasoning_chain["event"] == "tool_blocked"
     assert blocked[0].reasoning_chain["action_id"] == card.action_id
-    assert messages[-1].startswith("[Refused] The pending action 'canvas.submit_assignment' was not executed.")
+    assert messages[-1].startswith("I didn't hand in an assignment. Tutor mode is on")
     second = await client.post(f"/api/agent/approvals/{card.action_id}", json={"approved": True}, headers=headers)
     assert second.status_code == 404 and executor.calls == []
 

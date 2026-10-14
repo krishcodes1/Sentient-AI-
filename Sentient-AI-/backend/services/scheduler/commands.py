@@ -26,11 +26,41 @@ logger = structlog.get_logger(__name__)
 # pause, resume.
 TELEGRAM_BUTTONS = {"scn:": "run", "scp:": "pause", "scr:": "resume"}
 _VERBS = ("run", "pause", "resume")
-_NOT_AVAILABLE = "Scheduled tasks are not available right now."
+_NOT_AVAILABLE = "Scheduled tasks aren't available right now."
 _NO_TASKS = (
-    "You have no scheduled tasks yet. Ask Crawler to set one up, e.g. “every weekday "
-    "at 8am, summarise what's due on Canvas”, or “send me a daily briefing at 7:30”."
+    "You have no scheduled tasks yet. Ask me to set one up, for example “every weekday "
+    "at 8am, summarise what's due on Canvas” or “send me a daily briefing at 7:30”."
 )
+# A task's state and its last run in the owner's words. The stored codes
+# (services/notifications/schedules.py) never reach the chat: a code missing
+# here is left out rather than shown raw.
+_STATUS_WORDS = {"paused": "paused", "error": "stopped after problems", "done": "finished"}
+_LAST_RUN_WORDS = {
+    "ok": "done",
+    "card_parked": "waiting for your OK",
+    "over_budget": "stopped at its spending limit",
+    "timed_out": "took too long",
+    "failed": "didn't work",
+    "not_configured": "no AI service set up",
+    "stopped": "stopped",
+    "skipped_late": "skipped (I wasn't running at the time)",
+    "skipped_gate": "skipped (its feature was turned off)",
+    "skipped_busy": "skipped (I was busy)",
+    "skipped_budget": "skipped (daily budget used up)",
+    "skipped_empty": "nothing to send",
+}
+
+
+def _on_slack(endpoint: str) -> bool:
+    """Whether a reply goes to Slack: every endpoint names its channel
+    ("telegram:/schedules", "slack:schedules")."""
+    return endpoint.startswith("slack:")
+
+
+def _send(endpoint: str, words: str) -> str:
+    """How the owner sends *words* in this chat: "send /schedules" on
+    Telegram, 'reply "schedules"' in Slack (where "/" is Slack's own)."""
+    return f'reply "{words}"' if _on_slack(endpoint) else f"send /{words}"
 
 
 @dataclass
@@ -99,20 +129,22 @@ async def task_rows(user_id: str) -> Optional[list[dict[str, Any]]]:
 
 
 def list_text(rows: list[dict[str, Any]], *, how: str) -> str:
-    """The numbered list; *how* says how to act on a number."""
+    """The numbered list; *how* says how to act on a number. States and
+    last runs are shown in plain words (_STATUS_WORDS, _LAST_RUN_WORDS)."""
     if not rows:
         return _NO_TASKS
     lines = ["Your scheduled tasks:"]
     for index, row in enumerate(rows, start=1):
         status = str(row.get("status") or "")
-        line = f"{index}. {_defang(str(row.get('label') or ''))} — {row.get('schedule')} ({row.get('timezone')})"
-        if status != "active":
-            line += f" · {status}"
+        line = f"{index}. {_defang(str(row.get('label') or ''))}: {row.get('schedule')} ({row.get('timezone')})"
+        if status != "active" and _STATUS_WORDS.get(status):
+            line += f" · {_STATUS_WORDS[status]}"
         details = []
         if row.get("next_run_local"):
             details.append(f"next {row['next_run_local']}")
-        if row.get("last_status"):
-            details.append(f"last run: {row['last_status']}")
+        last = _LAST_RUN_WORDS.get(str(row.get("last_status") or ""))
+        if last:
+            details.append(f"last time: {last}")
         if details:
             line += "\n   " + " · ".join(details)
         lines.append(line)
@@ -143,21 +175,21 @@ async def act(user_id: str, verb: str, ref: str, *, endpoint: str) -> str:
         return _NOT_AVAILABLE
     row = _resolve(rows, ref)
     if row is None:
-        return "No such task. Send /schedules (Slack: schedules) for the list."
+        return f"No such task. {_send(endpoint, 'schedules').capitalize()} to see the list."
     label = _defang(str(row.get("label") or "the task"))
     if verb == "run":
         result = await backend.service.run_now(user_id, row["id"])
         if not result.get("ok"):
-            return str(result.get("error") or "Could not run it now.")
+            return str(result.get("error") or "I couldn't run it right now.")
         await _audit(user_id, "run_now", endpoint, {"task_id": row["id"]})
-        return f"Running “{label}” now; the result follows here."
+        return f"Running “{label}” now. I'll send the result here."
     paused = verb == "pause"
     result = await backend.toolkit.set_paused(user_id, row["id"], paused)
     if not result.get("ok"):
-        return str(result.get("error") or "Could not change it.")
+        return str(result.get("error") or "I couldn't change it right now.")
     await _audit(user_id, "pause" if paused else "resume", endpoint, {"task_id": row["id"]})
     if paused:
-        return f"Paused “{label}”. It does not run until you resume it."
+        return f"Paused “{label}”. It won't run until you turn it back on."
     nxt = result.get("next_run_local")
     return f"Resumed “{label}”." + (f" Next run: {nxt}." if nxt else "")
 
@@ -170,14 +202,15 @@ async def briefing_now(user_id: str, *, endpoint: str) -> str:
     row = next((r for r in rows if r.get("kind") == "briefing"), None)
     if row is None:
         return (
-            "You have no daily briefing yet. Ask Crawler, e.g. “send me a daily briefing "
+            "You have no daily briefing yet. Ask me, for example “send me a daily briefing "
             "at 7:30 with Canvas and my calendar”."
         )
     return await act(user_id, "run", row["id"], endpoint=endpoint)
 
 
 async def timezone_reply(user_id: str, argument: str, *, endpoint: str) -> str:
-    """Show the saved zone, or save a new one (an IANA name)."""
+    """Show the saved zone, or save a new one (an IANA name, which the
+    replies call "a region and city")."""
     from models.user import User
     from services.scheduler.timezones import parse_zone
 
@@ -190,9 +223,12 @@ async def timezone_reply(user_id: str, argument: str, *, endpoint: str) -> str:
         if user is None:
             return _NOT_AVAILABLE
         if not argument.strip():
+            slack = _on_slack(endpoint)
             if user.timezone:
-                return f"Your time zone: {user.timezone}. Change it with /timezone Europe/London (Slack: timezone Europe/London)."
-            return "No time zone saved yet. Send /timezone America/Chicago (an IANA name; Slack: timezone America/Chicago)."
+                how = 'reply "timezone Europe/London"' if slack else "send /timezone Europe/London"
+                return f"Your time zone: {user.timezone}. To change it, {how} with your own region and city."
+            how = 'Reply "timezone America/Chicago"' if slack else "Send /timezone America/Chicago"
+            return f"No time zone saved yet. {how} with your own region and city."
         zone, error = parse_zone(argument.strip())
         if zone is None:
             return str(error)

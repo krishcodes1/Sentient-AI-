@@ -32,7 +32,8 @@ CAPABILITY = Capability(
     default_enabled=True,
     risk="medium",
     when_denied=(
-        "Low-risk changes without asking are turned off, so every change needs an "
-        "approval card. The owner can turn this on in Settings → Permissions."
+        "Every change asks for your OK first, since making low-risk changes without "
+        "asking is turned off. You can turn on 'Make low-risk changes without asking' "
+        "in Settings → Permissions."
     ),
 )

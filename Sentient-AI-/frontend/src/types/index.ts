@@ -238,11 +238,27 @@ export interface TurnImage {
   data_url: string;
 }
 
+/** One labelled value an approval card shows ("To", "priya@acme.com"), in everyday words. A value
+ *  on several lines keeps every line, joined with line breaks. */
+export interface ApprovalDetail {
+  label: string;
+  value: string;
+}
+
 export interface PendingApproval {
   action_id: string;
+  /** The tool id ("google_workspace.send_email"). Never shown on the card itself, only under its
+   *  "Technical details". */
   tool_name: string;
   arguments: Record<string, unknown>;
+  /** The card's plain first sentence ("Send an email to priya@acme.com from your Gmail"). */
   reason: string;
+  /** Every value the action will use, labelled in everyday words, in order, nothing cut (spec
+   *  F3). Absent from an older server: the card then labels `arguments` itself. */
+  details?: ApprovalDetail[];
+  /** "6d3b dfca 7bf8 cfc5": the same check code the Telegram and Slack cards for this request end
+   *  with, so the owner can see two cards are the same request. */
+  check_code?: string | null;
   expires_at?: string | null;
   // Present on GET /agent/approvals so Chat can scope cards to the open
   // conversation; approvals without it are shown everywhere.
@@ -286,6 +302,9 @@ export interface BlockedAction {
   tool_name: string;
   reason: string;
   policy: string;
+  /** What the skipped step would have done ("send an email"), so the chat can say so without
+   *  naming the tool. Absent from an older server. */
+  phrase?: string | null;
 }
 
 export interface AgentTurnResponse {

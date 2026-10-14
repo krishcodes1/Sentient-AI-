@@ -37,7 +37,7 @@ CAPABILITY = Capability(
     default_enabled=False,
     risk="medium",
     when_denied=(
-        "App triggers are turned off. The owner can turn on 'Tell me when something "
+        "Alerts from your apps are turned off. You can turn on 'Tell me when something "
         "happens in my apps' in Settings → Permissions."
     ),
     availability=availability,

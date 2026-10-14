@@ -40,8 +40,8 @@ CAPABILITY = Capability(
     default_enabled=False,
     risk="medium",
     when_denied=(
-        "Sending voice notes to the AI provider for transcription is turned off. The "
-        "owner can turn it on in Settings → Permissions, or use 'Voice notes, "
+        "Sending voice notes to the AI provider for transcription is turned off. You "
+        "can turn it on in Settings → Permissions, or use 'Voice notes, "
         "transcribed on this computer'."
     ),
     availability=availability,

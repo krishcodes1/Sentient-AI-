@@ -217,23 +217,26 @@ def _counts(row: Any, window: str) -> tuple[int, int, int, int]:
 
 
 def _format_cost(cost: Optional[float]) -> str:
+    # Words, not math signs: "about $0.42", "under $0.01".
     if cost is None:
         return "cost unknown"
     if cost == 0:
-        return "~$0.00"
+        return "about $0.00"
     if cost < 0.01:
-        return "<$0.01"
-    return f"~${cost:,.2f}"
+        return "under $0.01"
+    return f"about ${cost:,.2f}"
 
 
 def _format_window(label: str, window: dict[str, Any]) -> str:
     line = (
         f"{label}: {window['total_tokens']:,} tokens "
-        f"({window['input_tokens']:,} in · {window['output_tokens']:,} out) "
-        f"· {_format_cost(window['estimated_cost_usd'])}"
+        f"({window['input_tokens']:,} read, {window['output_tokens']:,} written), "
+        f"{_format_cost(window['estimated_cost_usd'])}"
     )
-    if window["unpriced_turns"] and window["estimated_cost_usd"] is not None:
-        line += f" (excludes {window['unpriced_turns']} unpriced turn(s))"
+    unpriced = window["unpriced_turns"]
+    if unpriced and window["estimated_cost_usd"] is not None:
+        replies = "reply" if unpriced == 1 else "replies"
+        line += f" (not counting {unpriced} {replies} with no known price)"
     return line
 
 
@@ -251,14 +254,14 @@ def _format_turn_cost(cost: Optional[float]) -> str:
     # One reply usually costs a fraction of a cent, which the two-decimal
     # _format_cost of the /usage totals would flatten to "<$0.01".
     if cost is None:
-        return "cost n/a"
+        return "cost unknown"
     if cost == 0:
         return "$0"
     if cost < 0.001:
-        return "<$0.001"
+        return "under $0.001"
     if cost < 0.1:
-        return f"≈${cost:.3f}"
-    return f"≈${cost:,.2f}"
+        return f"about ${cost:.3f}"
+    return f"about ${cost:,.2f}"
 
 
 def format_turn_usage_line(
@@ -267,12 +270,12 @@ def format_turn_usage_line(
     model: Optional[str],
     served_model: Optional[str] = None,
 ) -> str:
-    """One reply's footer, e.g. ``5.3k tokens · ≈$0.002``.
+    """One reply's footer, e.g. ``5.3k tokens · about $0.002``.
 
     ``usage`` is that turn's own summed counts (every model call of its
     tool loop, nothing else); the cost prices them on the model that ran
-    the turn via services/usage/pricing.py. "cost n/a" means the model has
-    no listed price, never that it was free.
+    the turn via services/usage/pricing.py. "cost unknown" means the model
+    has no listed price, never that it was free.
     """
     counts = usage or {}
     total = sum(
@@ -289,12 +292,13 @@ def format_usage_text(summary: dict[str, Any]) -> str:
 
     A chat channel has no way to learn the reader's timezone and accounts
     store none, so the summary behind this is computed in UTC and the label
-    says so rather than letting "today" silently mean someone else's day.
+    says so ("Since midnight UTC") rather than letting "today" silently
+    mean someone else's day.
     """
     windows = summary["windows"]
     return (
-        "Token usage (costs are estimates)\n\n"
-        + _format_window("Today (UTC)", windows["today"])
+        "What I've used (costs are rough estimates)\n\n"
+        + _format_window("Since midnight UTC", windows["today"])
         + "\n"
         + _format_window("Last 30 days", windows["last_30_days"])
     )

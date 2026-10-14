@@ -25,6 +25,7 @@ from services.tutor.locks import CourseLock
 from services.tutor.state import TutorState, TutorTurn
 from tests.test_computer_precheck import calls
 from tests import test_low_risk_runtime as low_risk
+from services.agent.risk import ran_without_asking_line
 from tests.test_low_risk_runtime import DONE, EVENT, FINAL, MID, MID2, PRIVATE_EVENT, STAR
 
 # The fixtures of the low-risk runtime tests, shared here.
@@ -61,7 +62,7 @@ async def test_fence_tutor_secret_guard_tiers_taint_and_cards_in_canonical_order
     assert trash.arguments["add_label_ids"] == ["TRASH"]
     assert "Trash or Spam" in trash.reason and trash.risk_note is None
     assert trash.low_risk_account is None  # the tier already covers LOW calls
-    assert response.content.endswith(DONE + "1 × google_workspace.modify_labels on School Gmail.")
+    assert response.content.endswith(ran_without_asking_line([(STAR, "School Gmail")]))
     ran = [e for e in world.audit.entries if e["event"] == "tool_executed"]
     assert [(e["tool"], e["approval"]) for e in ran] == [(STAR, "low_risk")]
 

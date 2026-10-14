@@ -33,10 +33,16 @@ logger = structlog.get_logger(__name__)
 
 MAX_CONCURRENT_RUNS = 2
 CARD_TTL_MINUTES = 180
+# What a run's reply says when there is no answer to show. It becomes the
+# body of the chat message and the web conversation's reply, so it is the
+# owner's words, never a provider's error. _STOPPED_REPLY is the same text
+# api/routes/agent.py stores for a stopped chat turn.
 _STOPPED_REPLY = "[Stopped before the reply was finished.]"
-_TIMED_OUT_REPLY = "[This scheduled run took too long and was stopped.]"
-_FAILED_REPLY = "[No reply: the model provider returned an error.]"
-_NOT_CONFIGURED_REPLY = "[No reply: no AI provider is set up for this account.]"
+_TIMED_OUT_REPLY = "[This took too long, so I stopped it.]"
+_FAILED_REPLY = "[I couldn't finish this because your AI service had a problem.]"
+_NOT_CONFIGURED_REPLY = "[I couldn't do this because no AI service is set up for your account.]"
+_NOT_READY_REPLY = "[I couldn't do this because I wasn't fully started yet.]"
+_INACTIVE_REPLY = "[I didn't do this because your account is turned off.]"
 
 # (user, db, conversation) -> the turn context (_build_tools_and_memory).
 BuildContext = Callable[[Any, Any, Any], Awaitable[Any]]
@@ -130,7 +136,7 @@ class UnattendedTurnRunner:
             return UnattendedOutcome(status="skipped_budget", run_id=req.run_id, budget_usd=max_usd)
         runtime = self._runtime()
         if runtime is None:
-            return UnattendedOutcome(status="failed", reply="The assistant is not available.", run_id=req.run_id)
+            return UnattendedOutcome(status="failed", reply=_NOT_READY_REPLY, run_id=req.run_id)
         max_usd = min(max_usd, max(budget.usd_left, 0.0))
         owner = uuid.UUID(req.user_id)
         run_id = req.run_id or str(uuid.uuid4())
@@ -138,7 +144,7 @@ class UnattendedTurnRunner:
         async with self._session_factory() as db:
             user = (await db.execute(select(User).where(User.id == owner))).scalar_one_or_none()
             if user is None or not user.is_active:
-                return UnattendedOutcome(status="failed", reply="The account is not active.", run_id=run_id)
+                return UnattendedOutcome(status="failed", reply=_INACTIVE_REPLY, run_id=run_id)
             if user.timezone:
                 when_local = _local_now(self._clock(), user.timezone) or when_local
             conversation = await ensure_conversation(

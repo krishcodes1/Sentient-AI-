@@ -15,9 +15,13 @@ from __future__ import annotations
 
 from services.capabilities.base import Availability, Capability, ReportContext
 
+# Shown on the Permissions page and in the model's <permissions> block, so
+# it names no setting or environment variable (an install that wants
+# Ollama embeddings with another chat provider still sets KB_EMBEDDINGS;
+# see services/knowledge/embeddings.py).
 NO_BACKEND_REASON = (
-    "Your AI provider has no embedding model Crawler can use; keyword search still works. "
-    "Use Gemini, OpenAI or Ollama, or set KB_EMBEDDINGS=ollama."
+    "Your AI provider can't search by meaning; keyword search still works. "
+    "Switching to Gemini, OpenAI or Ollama turns it on."
 )
 
 
@@ -40,8 +44,8 @@ CAPABILITY = Capability(
     risk="medium",
     requires=("knowledge_base",),
     when_denied=(
-        "Smarter knowledge search is off, so knowledge.search uses keywords only. The owner "
-        "can turn it on in Settings → Permissions."
+        "Smarter knowledge search is off, so searching your documents only matches "
+        "exact words. You can turn it on in Settings → Permissions."
     ),
     availability=availability,
 )

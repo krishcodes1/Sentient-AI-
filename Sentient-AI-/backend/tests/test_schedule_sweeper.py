@@ -338,6 +338,9 @@ async def test_five_failures_in_a_row_stop_the_task_with_one_message(session_fac
     assert len(await runs(session_factory, task_id)) == ERROR_LIMIT
     paused = [t for _c, _u, t in outbox.sent if "Paused your scheduled task" in t]
     assert len(paused) == 1
+    # Plain words, and only this chat's own command.
+    assert "Last problem: Something went wrong while running it." in paused[0]
+    assert "send /schedules" in paused[0] and "Slack" not in paused[0]
 
 
 @pytest.mark.asyncio
@@ -592,7 +595,7 @@ async def test_a_nudge_whose_renderer_is_gone_is_stopped_not_left_due(session_fa
     runner, outbox = FakeRunner(), Outbox()
     assert await sweep(service(session_factory, runner, outbox, keys=frozenset({"flashcards", "scheduled_tasks"}))) == 0
     row = await task_row(session_factory, task_id)
-    assert row.status == "error" and row.last_error == "This reminder's feature is no longer available."
+    assert row.status == "error" and row.last_error == "The feature behind this reminder was removed, so the reminder stopped."
     assert outbox.sent == [] and await runs(session_factory, task_id) == []
 
 

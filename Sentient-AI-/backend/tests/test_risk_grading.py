@@ -454,10 +454,39 @@ def test_the_done_without_asking_line_is_built_from_facts():
         ]
     )
     assert line == (
-        "Done without asking (low-risk changes you allowed): 3 × google_workspace.modify_labels "
-        "on School Gmail; 1 × microsoft.create_task on Personal."
+        "I made these small changes without asking, as you allowed:\n"
+        f"- {risk.action_phrase('google_workspace.modify_labels')} (School Gmail), 3 times\n"
+        f"- {risk.action_phrase('microsoft.create_task')} (Personal)"
     )
+    # Plain words only: never a tool id or a code-like sign.
+    assert "google_workspace" not in line and "microsoft." not in line and "×" not in line
     assert ran_without_asking_line([]) == ""
+
+
+def test_the_action_phrase_never_shows_a_tool_id_and_never_raises():
+    for tool in ("google_workspace.modify_labels", "microsoft.create_task", "x", "", None, 42):
+        phrase = risk.action_phrase(tool)
+        assert isinstance(phrase, str) and phrase
+        assert "." not in phrase and "_" not in phrase
+        assert phrase[:1] == phrase[:1].upper()
+
+
+def test_the_card_note_is_one_plain_sentence_pair():
+    grade = risk.RiskGrade(Risk.HIGH, risk.REASON_DELETE)
+    assert risk.card_note(grade) == (
+        "I'm asking first because it deletes something. What you let me do on this "
+        "account without asking doesn't cover that."
+    )
+    # A reason with a trailing period, or none at all, still reads right.
+    assert "something.." not in risk.card_note(risk.RiskGrade(Risk.HIGH, "it deletes something."))
+    assert risk.card_note(risk.RiskGrade(Risk.HIGH, "")).startswith("I'm asking first because it ")
+
+
+def test_reasons_use_no_code_words_or_dashes():
+    reasons = [value for name, value in vars(risk).items() if name.startswith("REASON_")]
+    for reason in reasons:
+        for word in ("argument", "object", "graded", "\u2014", "\u2013"):
+            assert word not in reason, (reason, word)
 
 
 def test_the_connector_types_payload_lists_each_connectors_low_actions():

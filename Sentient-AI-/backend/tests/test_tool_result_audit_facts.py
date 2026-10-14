@@ -144,7 +144,7 @@ async def test_schedule_rows_keep_ids_and_status_never_the_prompt_or_topic(sessi
     tasks = {t["kind"]: t for t in facts["tasks"]}
     task = tasks["prompt"]
     assert task["id"] == created["task_id"] and task["status"] == "active"
-    assert task["schedule"] == "Weekdays at 08:00" and task["tools"] == ["canvas.get_upcoming"]
+    assert task["schedule"] == "Weekdays at 8:00 AM" and task["tools"] == ["canvas.get_upcoming"]
     assert (
         "prompt" not in task
         and "label" not in task

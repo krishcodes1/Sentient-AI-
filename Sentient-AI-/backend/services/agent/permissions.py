@@ -309,6 +309,27 @@ _HARD_BLOCKED_ACTIONS: set[str] = {
 }
 
 
+# The reasons a refused call carries. The runtime shows a blocked call's
+# reason to the owner (the web chat lists refused actions) and gives it to
+# the model as the call's result, which passes it on in chat, so each is a
+# plain sentence with no action, connector or tier names
+# (docs/bot-message-style.md). The audit row keeps the tool and the policy
+# key, so nothing is lost there. The reasons for allowed or approval-gated
+# decisions below are never shown to anyone and keep their technical form.
+MONEY_BLOCKED_REASON = (
+    "I can't move money or make trades for you. You can do this yourself in that "
+    "account's own app or website."
+)
+ADMIN_ONLY_REASON = (
+    "I'm not allowed to make this kind of change. You can do it yourself in that "
+    "account's own app or website."
+)
+HARD_BLOCKED_REASON = (
+    "I'm never allowed to do this. You can do it yourself in that account's own app "
+    "or website."
+)
+
+
 def is_hard_blocked_action(action: str) -> bool:
     """True when the action name is on the unconditional financial
     hard-block list. Used by callers (e.g. the tool registry) that must
@@ -357,8 +378,7 @@ class PermissionEngine:
                 allowed=False,
                 tier=PermissionTier.HARD_BLOCKED,
                 requires_approval=False,
-                reason=f"Financial action '{action}' is unconditionally blocked. "
-                       f"Users must perform financial transactions directly.",
+                reason=MONEY_BLOCKED_REASON,
             )
 
         if action_lower in _HARD_BLOCKED_ACTIONS:
@@ -366,7 +386,7 @@ class PermissionEngine:
                 allowed=False,
                 tier=PermissionTier.HARD_BLOCKED,
                 requires_approval=False,
-                reason=f"Action '{action}' is a financial transaction and is unconditionally blocked.",
+                reason=MONEY_BLOCKED_REASON,
             )
 
         tier = self._get_default_policy(connector_type, scope)
@@ -439,7 +459,7 @@ class PermissionEngine:
                 allowed=False,
                 tier=tier,
                 requires_approval=False,
-                reason=f"Action '{action}' on '{connector_type}' ({scope.value}) is restricted to admins.",
+                reason=ADMIN_ONLY_REASON,
             )
 
         # HARD_BLOCKED
@@ -447,7 +467,7 @@ class PermissionEngine:
             allowed=False,
             tier=PermissionTier.HARD_BLOCKED,
             requires_approval=False,
-            reason=f"Action '{action}' on '{connector_type}' ({scope.value}) is unconditionally blocked.",
+            reason=HARD_BLOCKED_REASON,
         )
 
 

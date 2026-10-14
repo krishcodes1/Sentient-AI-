@@ -49,6 +49,12 @@ import {
 } from "@/services/api";
 import ApprovalPicture from "@/components/ApprovalPicture";
 import PurchaseApproval from "@/components/PurchaseApproval";
+import {
+  ApprovalAsk,
+  ApprovalCheckCode,
+  ApprovalDetailList,
+  ApprovalTechnicalDetails,
+} from "@/components/ApprovalDetails";
 import WeeklyAppButton, {
   WeeklyAllowedNote,
   type ApprovalDecision,
@@ -63,8 +69,8 @@ import UsagePanel from "@/components/UsagePanel";
 import { formatCost, formatTokens } from "@/components/usageFormat";
 // Countdown logic lives beside Chat's ApprovalCard so both approval queues
 // expire in lockstep with the server-side TTL.
-import { formatCountdown, useCountdown } from "@/pages/approvalCountdown";
-import { ACT_PICTURE_ALT, PURCHASE_TOOL, isSentenceCard, shownArguments } from "@/pages/approvalArguments";
+import { useCountdown } from "@/pages/approvalCountdown";
+import { ACT_PICTURE_ALT, PURCHASE_TOOL, isDetailsCard, isSentenceCard } from "@/pages/approvalArguments";
 import { useResolvedColors } from "@/hooks/useResolvedColors";
 
 const FEED_LIMIT = 6;
@@ -133,8 +139,13 @@ function ApprovalRow({
         opacity: expired ? 0.75 : 1,
       }}
     >
+      {/* The card's one plain sentence, verb first ("Send an email to
+          priya@acme.com from your Gmail"): never a tool id. */}
+      <p className="text-sm font-medium mb-2" style={{ color: "var(--text-primary)" }}>
+        {approval.reason}
+      </p>
       {/* Backend-flagged risk: the request was shaped by external/untrusted
-          content. Danger colors, ABOVE the action row — placing it below the
+          content. Danger colors, ABOVE the action row: placing it below the
           buttons meant the reader reached Approve before the warning. */}
       {approval.risk_note && (
         <div
@@ -150,7 +161,7 @@ function ApprovalRow({
           />
           <div className="min-w-0">
             <div className="eyebrow" style={{ color: "var(--accent-danger)" }}>
-              Risk warning
+              Check this first
             </div>
             <p className="text-xs mt-1" style={{ color: "var(--text-secondary)" }}>
               {approval.risk_note}
@@ -162,28 +173,18 @@ function ApprovalRow({
       {/* A browser.act step is approved on the page it will run on: the
           picture taken when the card was made, its target outlined in red. */}
       {isSentenceCard(approval) && <ApprovalPicture approval={approval} alt={ACT_PICTURE_ALT} className="mb-3" />}
+      {/* Every value the action will use, labelled, whole (spec F3). A
+          purchase shows its page's facts and a browser.act step its
+          sentence and picture instead. */}
+      {isDetailsCard(approval) && (
+        <ApprovalDetailList
+          approval={approval}
+          className="mb-3"
+          boxStyle={{ background: "var(--bg-primary)", border: "1px solid var(--border-subtle)" }}
+        />
+      )}
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="min-w-0">
-          <p className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
-            <span className="mono-tag">{approval.tool_name}</span>
-            {remaining !== null && (
-              <span
-                className="mono-tag inline-flex items-center gap-1 ml-2"
-                style={{
-                  color: expired ? "var(--accent-danger)" : "var(--accent-warning)",
-                }}
-              >
-                <Clock className="w-3 h-3" />
-                {expired ? "expired" : `expires in ${formatCountdown(remaining)}`}
-              </span>
-            )}
-          </p>
-          <p className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>
-            {expired
-              ? "This request expired without a decision. Ask the agent again if the action is still needed."
-              : approval.reason}
-          </p>
-        </div>
+        <ApprovalAsk remaining={remaining} className="min-w-0" />
         <div className="flex items-center gap-2 shrink-0">
           <button
             type="button"
@@ -214,20 +215,6 @@ function ApprovalRow({
           </button>
         </div>
       </div>
-      {/* A browser.act card is its sentence (the reason line above): its
-          arguments are refs and typed text, never shown as JSON. */}
-      {!isPurchase && !isSentenceCard(approval) && Object.keys(shownArguments(approval)).length > 0 && (
-        <pre
-          className="text-xs mt-2 p-2 rounded-[8px] overflow-x-auto"
-          style={{
-            background: "var(--bg-primary)",
-            color: "var(--text-secondary)",
-            border: "1px solid var(--border-subtle)",
-          }}
-        >
-          {JSON.stringify(shownArguments(approval), null, 2)}
-        </pre>
-      )}
       <WeeklyAppButton
         approval={approval}
         disabled={pending || expired}
@@ -243,6 +230,8 @@ function ApprovalRow({
           {error}
         </p>
       )}
+      <ApprovalCheckCode approval={approval} className="mt-3" />
+      <ApprovalTechnicalDetails approval={approval} showArguments={isDetailsCard(approval)} className="mt-2" />
     </div>
   );
 }
@@ -469,10 +458,9 @@ export default function Dashboard() {
             className="text-sm mt-1.5 max-w-2xl"
             style={{ color: "var(--text-secondary)" }}
           >
-            Live agent activity, blocked actions, pending approvals, and
-            connector health — everything the agent does flows through the
-            policy layer and lands here. Refreshes every{" "}
-            {POLL_INTERVAL_MS / 1000}s.
+            What Crawler is doing, what's waiting for your OK, what your
+            safety settings stopped, and how your connected apps are doing.
+            Updates every {POLL_INTERVAL_MS / 1000} seconds.
           </p>
         </div>
         <button
@@ -540,7 +528,7 @@ export default function Dashboard() {
           <div className="flex items-center gap-2 mb-1">
             <ShieldQuestion className="w-4 h-4" style={{ color: "var(--accent-warning)" }} />
             <div className="eyebrow" style={{ color: "var(--accent-warning)" }}>
-              Awaiting your approval
+              Waiting for your OK
             </div>
           </div>
           <h2 className="mb-1">
@@ -548,8 +536,8 @@ export default function Dashboard() {
             {approvals.length === 1 ? "s" : ""} a decision
           </h2>
           <p className="text-xs mb-4" style={{ color: "var(--text-muted)" }}>
-            The agent will not run these until you approve them. Undecided
-            requests expire automatically.
+            Crawler won't do any of these until you say yes. If you don't
+            decide, they run out of time on their own.
           </p>
           <div className="space-y-3">
             {approvals.map((approval) => (

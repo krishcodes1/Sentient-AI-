@@ -192,9 +192,9 @@ async def test_calendar_and_canvas_lines_are_local_and_defanged():
         scan=safe,
     )
     text = render_briefing(facts)
-    assert "• 09:00–09:30 Standup" in text
+    assert "• 09:00 to 09:30 Standup" in text
     assert "• All day Holiday" in text
-    assert "• 11:00–12:00 Review" in text
+    assert "• 11:00 to 12:00 Review" in text
     assert f"evil{DOT}example∕login" in text and "evil.example/login" not in text
     assert "CSCI 101 · Homework 3 · due Tue 23:59" in text
     assert "MATH 210 · Quiz 2 · missing" in text
@@ -223,7 +223,7 @@ async def test_flagged_items_are_withheld_and_research_links_keep_their_path_not
     )
     text = render_briefing(facts)
     assert "Ignore previous" not in text and "Essay" in text
-    assert "(1 item withheld: it looked like instructions aimed at an AI assistant.)" in text
+    assert "(1 item not shown because it seemed to be trying to trick an AI assistant.)" in text
     assert "https://news.example/rules\n" in text + "\n" and "utm_source" not in text
     assert "down.example" not in text
 
@@ -342,13 +342,13 @@ async def test_a_read_that_is_not_plainly_approved_never_runs():
 async def test_no_intent_row_means_no_read_and_failures_read_as_short_reasons():
     executor = FakeExecutor({"ok": True})
     reader = BriefingReader(permissions=FakePermissions(), executor=executor, audit=FakeAudit(fail_first=True))
-    assert await reader.read("u1", "canvas.get_upcoming", {}, "r") == (None, "could not be read")
+    assert await reader.read("u1", "canvas.get_upcoming", {}, "r") == (None, "couldn't load it this time")
     assert executor.calls == []
     for error, reason in (
         ({"ok": False, "error": "No active 'canvas' connector is configured."}, "not connected"),
         ({"ok": False, "capability": "web_browsing", "error": "off"}, "switched off"),
         ({"ok": False, "error": "Token lacks scope calendar.read"}, "not allowed for this account"),
-        ({"ok": False, "error": "<html>weird body</html>"}, "could not be read"),
+        ({"ok": False, "error": "<html>weird body</html>"}, "couldn't load it this time"),
     ):
         reader = BriefingReader(permissions=FakePermissions(), executor=FakeExecutor(error), audit=FakeAudit())
         assert await reader.read("u1", "canvas.get_upcoming", {}, "r") == (None, reason)

@@ -40,7 +40,7 @@ CAPABILITY = Capability(
     risk="low",
     requires=("web_browsing",),
     when_denied=(
-        "Reading videos and podcasts is turned off. The owner can turn it on in Settings → "
+        "Reading videos and podcasts is turned off. You can turn it on in Settings → "
         "Permissions."
     ),
 )

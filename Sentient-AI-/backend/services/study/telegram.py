@@ -169,7 +169,7 @@ def _run(service: Any, chat_id: int, work: Callable[[], Awaitable[None]]) -> Non
                 await work()
             except Exception as exc:  # a failed review step must not kill the poller's task set
                 logger.error("telegram_study_failed", chat_id=chat_id, error_type=type(exc).__name__)
-                await service._api("sendMessage", chat_id=chat_id, text="That did not work; try again.")
+                await service._api("sendMessage", chat_id=chat_id, text="Something went wrong there. Please try again.")
 
     service._track(chat_id, locked(), name=f"telegram-study-{chat_id}")
 
@@ -241,7 +241,7 @@ def register_telegram(service: Any) -> None:
         filename, data, media_type = made
         caption = "Anki: File → Import this file." if fmt == "anki" else "Open it in a spreadsheet."
         if not await send_document(service, chat_id, filename, data, media_type, caption):
-            await service._api("sendMessage", chat_id=chat_id, text="The file could not be sent; try again shortly.")
+            await service._api("sendMessage", chat_id=chat_id, text="I couldn't send the file. Please try again in a minute.")
 
     service._commands["/decks"] = command(decks)
     service._commands["/review"] = command(review)
@@ -295,7 +295,7 @@ async def _press(
     elif prefix == "sqe:" and len(parts) == 1:
         screens = [await study.quiz_end(key, user_id, parts[0])]
     if not screens:
-        await answer("Unknown action.")
+        await answer("That button doesn't work anymore. Send /review to start again.")
         return
     first, rest = screens[0], screens[1:]
     await answer(first.notice)

@@ -27,8 +27,8 @@ CAPABILITY = Capability(
     default_enabled=False,
     risk="high",
     when_denied=(
-        "Running tasks from triggers is off. The owner can turn on 'Run a task when "
-        "something happens in my apps' in Settings → Permissions."
+        "Running a task when something happens in your apps is off. You can turn on "
+        "'Run a task when something happens in my apps' in Settings → Permissions."
     ),
     requires=("event_triggers",),
 )

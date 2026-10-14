@@ -218,7 +218,7 @@ async def test_tainted_arguments_park_with_a_risk_note():
     assert approvals, "tainted write should have been parked for approval"
     note = approvals[0].risk_note
     assert note, "a tainted action must carry a risk_note"
-    assert "external content" in note
+    assert note.startswith("Check this before you approve: ")
     assert "attacker@evil.com" in note
 
 
@@ -255,7 +255,7 @@ async def test_stored_arguments_are_rescanned_at_approval_time():
     result = await runtime.approve_action(stored.action_id, "u1")
 
     assert "error" in result
-    assert "security policy" in result["error"]
+    assert result["error"].startswith("I didn't do this.")
     assert executor.calls == []
     assert any(
         e.get("event") == "tool_blocked" and "re-scan" in str(e.get("reason", ""))

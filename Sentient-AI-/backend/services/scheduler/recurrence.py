@@ -30,6 +30,8 @@ FREQS = ("once", "daily", "weekdays", "weekly", "monthly")
 DAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 _LONG_DAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 _SHORT_DAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+# Fixed English month names (calendar.month_abbr follows the process locale).
+_MONTH_NAMES = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 # A once task's date may be at most this far ahead.
 ONCE_HORIZON_DAYS = 365
 # How many local dates next_after looks at before giving up. Every rule but
@@ -247,9 +249,54 @@ def _join(words: list[str]) -> str:
     return ", ".join(words[:-1]) + " and " + words[-1]
 
 
+def clock(hour: int, minute: int) -> str:
+    """A time of day as people in the US read it: "8:00 AM", "12:30 PM".
+    Cards, lists and chat commands show times this way; a task's stored
+    rule keeps its 24-hour "HH:MM"."""
+    try:
+        hour, minute = int(hour) % 24, int(minute) % 60
+    except (TypeError, ValueError):
+        return ""
+    return f"{hour % 12 or 12}:{minute:02d} {'AM' if hour < 12 else 'PM'}"
+
+
+def ordinal(number: int) -> str:
+    """1st, 2nd, 3rd, 4th, 11th, 12th, 13th, 21st... Never raises: what is
+    not a whole number comes back as its own text."""
+    if isinstance(number, bool) or not isinstance(number, int):
+        return str(number)
+    if 10 <= number % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(number % 10, "th")
+    return f"{number}{suffix}"
+
+
+def every_words(minutes: Any) -> str:
+    """How often something repeats, as a card says it: "every 90 minutes",
+    "every hour", "every 2 hours", "every day", "every week". Used for page
+    watches and triggers too, so every card counts time the same way."""
+    if isinstance(minutes, bool) or not isinstance(minutes, int) or minutes <= 0:
+        return "regularly"
+    for size, unit in ((10080, "week"), (1440, "day"), (60, "hour"), (1, "minute")):
+        if minutes % size == 0:
+            count = minutes // size
+            return f"every {unit}" if count == 1 else f"every {count} {unit}s"
+    return "regularly"
+
+
+def day_words(day: date, *, long: bool = False) -> str:
+    """A date with its weekday, month and year: "Tue, Oct 20, 2026" (or
+    "Tuesday, Oct 20, 2026" inside a sentence). Never the ISO form."""
+    names = _LONG_DAY_NAMES if long else _SHORT_DAY_NAMES
+    return f"{names[day.weekday()]}, {_MONTH_NAMES[day.month - 1]} {day.day}, {day.year}"
+
+
 def phrase(rule: Recurrence) -> str:
-    """The rule as the middle of a sentence: "every weekday at 08:00"."""
-    at = f"at {rule.time}"
+    """The rule as the middle of a sentence: "every weekday at 8:00 AM",
+    "on the 15th of every month at 9:00 AM", "once on Tuesday, Oct 20,
+    2026 at 2:30 PM"."""
+    at = f"at {clock(rule.hour, rule.minute)}"
     if rule.freq == "daily":
         return f"every day {at}"
     if rule.freq == "weekdays":
@@ -259,28 +306,31 @@ def phrase(rule: Recurrence) -> str:
     if rule.freq == "monthly":
         if rule.day_of_month == -1:
             return f"on the last day of every month {at}"
-        return f"on day {rule.day_of_month} of every month {at}"
+        return f"on the {ordinal(rule.day_of_month or 1)} of every month {at}"
     if rule.freq == "once" and rule.on_date is not None:
-        return f"once on {rule.on_date.isoformat()} {at}"
+        return f"once on {day_words(rule.on_date, long=True)} {at}"
     return at
 
 
 def describe(rule: Recurrence) -> str:
-    """The rule in a few words for lists: "Weekdays at 08:00"."""
-    at = f"at {rule.time}"
+    """The rule in a few words for lists (schedule.list, the schedules page,
+    /schedules in Telegram and Slack): "Weekdays at 8:00 AM", "Mon and Wed
+    at 6:00 PM", "The 15th of each month at 9:00 AM", "Once on Fri, Oct 2,
+    2026 at 6:00 AM"."""
+    at = f"at {clock(rule.hour, rule.minute)}"
     if rule.freq == "daily":
         return f"Every day {at}"
     if rule.freq == "weekdays":
         return f"Weekdays {at}"
     if rule.freq == "weekly":
-        return f"{', '.join(_SHORT_DAY_NAMES[d] for d in rule.days)} {at}"
+        return f"{_join([_SHORT_DAY_NAMES[d] for d in rule.days])} {at}"
     if rule.freq == "monthly":
         if rule.day_of_month == -1:
             return f"Last day of the month {at}"
-        return f"Day {rule.day_of_month} of the month {at}"
+        return f"The {ordinal(rule.day_of_month or 1)} of each month {at}"
     if rule.freq == "once" and rule.on_date is not None:
-        return f"Once on {rule.on_date.isoformat()} {at}"
-    return at
+        return f"Once on {day_words(rule.on_date)} {at}"
+    return at[:1].upper() + at[1:]
 
 
 def local_label(instant: Optional[datetime], tz: ZoneInfo) -> Optional[str]:

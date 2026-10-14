@@ -446,8 +446,8 @@ async def test_unconfigured_user_provider_returns_409_pointing_at_settings(
         )
         assert response.status_code == 409
         detail = response.json()["detail"]
-        assert "openai" in detail["message"]
-        assert "not configured" in detail["message"]
+        assert "OpenAI" in detail["message"]
+        assert "isn't set up" in detail["message"]
         assert detail["code"] == "user_provider_unavailable"
         assert detail["settings_url"] == "/settings"
     finally:
@@ -510,8 +510,9 @@ async def test_approving_action_persists_result_message(client, session_factory)
         assert len(fetched["messages"]) == 1
         message = fetched["messages"][0]
         assert message["role"] == "assistant"
-        assert "[Approved] Executed 'google_workspace.send_email'" in message["content"]
-        assert "email sent to x@y.com" in message["content"]
+        assert message["content"] == "You approved my request to send an email, and it's done."
+        # The result stays with the row, under its tool call, not in the words.
+        assert "email sent to x@y.com" in str(message["tool_calls"][0]["result"])
         assert message["tool_calls"][0]["approved"] is True
         # Activity timestamp bumped.
         assert fetched["updated_at"] > conv["updated_at"]
@@ -558,15 +559,17 @@ async def test_denying_action_persists_denial_message(client, session_factory):
             )
         ).json()
         assert len(fetched["messages"]) == 1
-        assert "[Denied]" in fetched["messages"][0]["content"]
-        assert "canvas.submit_assignment" in fetched["messages"][0]["content"]
+        assert fetched["messages"][0]["content"] == (
+            "You denied my request to hand in an assignment, so I didn't do it."
+        )
     finally:
         app.dependency_overrides.pop(agent_routes.get_runtime, None)
 
 
 @pytest.mark.asyncio
 async def test_approval_result_message_is_compressed(client, session_factory):
-    """A huge tool result is stored as a compact (~2000 char) rendering."""
+    """A huge tool result never lands in the row's words: the decision row
+    is one plain sentence (the result stays under its tool call)."""
     from api.routes import agent as agent_routes
     from main import app
     from services.agent.approvals import DbApprovalStore
@@ -603,7 +606,7 @@ async def test_approval_result_message_is_compressed(client, session_factory):
             )
         ).json()
         content = fetched["messages"][0]["content"]
-        assert "chars truncated" in content
-        assert len(content) < 3000
+        assert content == "You approved my request to send an email, and it's done."
+        assert "Z" * 100 not in content
     finally:
         app.dependency_overrides.pop(agent_routes.get_runtime, None)

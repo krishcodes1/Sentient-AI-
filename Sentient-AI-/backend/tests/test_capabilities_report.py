@@ -334,7 +334,13 @@ def test_render_permissions_block_lists_every_state(monkeypatch):
     assert "- Browse the web: on" in text
     assert "- Reminders: off" in text
     assert "- See my screen: blocked" in text
-    assert "system.install_capability(name='browser')" in text
+    # The model gets the exact tool and value to call, told to ask in plain
+    # words, and no call syntax it could paste into a reply.
+    assert "call system.install_capability with name='browser'" in text
+    assert "a one-time download of about 150 to 300 MB" in text
+    assert "Never show them the tool name" in text
+    assert "install_capability(" not in text
+    assert "\u2014" not in text and "\u2013" not in text
 
 
 def test_render_permissions_block_offers_no_install_when_installs_is_off():
@@ -522,7 +528,7 @@ def test_default_context_container_has_no_channel(monkeypatch):
         (
             {"playwright_installed": False, "browser_channel": "chrome", "browser_installed": True},
             False,
-            "Playwright",
+            "web browser add-on isn't installed",
         ),
         (
             {"playwright_installed": True, "browser_channel": "chrome", "browser_installed": False},
@@ -537,7 +543,7 @@ def test_default_context_container_has_no_channel(monkeypatch):
         (
             {"playwright_installed": True, "browser_channel": "", "browser_installed": False},
             False,
-            "Chromium",
+            "Install Google Chrome or Microsoft Edge",
         ),
     ],
 )
@@ -580,7 +586,9 @@ def test_report_context_carries_the_embedding_backend_with_a_safe_default():
     plain = ReportContext(in_container=False, platform="darwin", telegram_configured=False, browser_installed=False)
     assert plain.embedding_backend == ""
     blocked = by_key(capabilities.report({"knowledge_semantic": True}, plain, use_cache=False))["knowledge_semantic"]
-    assert blocked.effective == "blocked" and "KB_EMBEDDINGS=ollama" in blocked.reason
+    assert blocked.effective == "blocked" and "keyword search still works" in blocked.reason
+    # Plain words: no setting or environment variable names.
+    assert "KB_EMBEDDINGS" not in blocked.reason and "embedding" not in blocked.reason
     ready = ctx(embedding_backend="ollama")
     on = by_key(capabilities.report({"knowledge_semantic": True}, ready, use_cache=False))["knowledge_semantic"]
     assert on.effective == "on"

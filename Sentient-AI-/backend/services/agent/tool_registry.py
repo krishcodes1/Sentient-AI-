@@ -83,6 +83,7 @@ from urllib.parse import urlsplit
 
 import structlog
 
+from services import action_text
 from services.agent import cancel as agent_cancel
 from services.agent import risk as risk_grading
 from services.agent.permission_grants import (
@@ -139,6 +140,15 @@ from services.tools.web import MAX_PAGE_CHARS as WEB_MAX_PAGE_CHARS
 from services.tools.web import BrowserPage, WebToolkit
 
 logger = structlog.get_logger(__name__)
+
+
+def _refused_text(tool_name: str) -> str:
+    """The reason a precheck refusal gives when its toolkit wrote no error
+    text of its own, in plain words and never by tool id: "I couldn't set a
+    reminder, so nothing happened." (action_text.short_phrase; the same
+    sentence as services/agent/runtime.AgentRuntime._bind_refusal). The web
+    shows a rule refusal's reason on its blocked chip. Never raises."""
+    return f"I couldn't {action_text.short_phrase(tool_name)}, so nothing happened."
 
 
 _EMPTY_SCHEMA: dict[str, Any] = {"type": "object", "properties": {}, "required": []}
@@ -326,9 +336,11 @@ CONNECTOR_CATALOG: dict[str, list[ToolSpec]] = {
             "If a tool reports a missing capability (e.g. web.screenshot says "
             "the browser is not installed: 'browser'; 'speech_to_text' for "
             "voice notes), call this with its name; the user "
-            "will be asked to approve the install first, so tell them what it "
-            "is for and wait for the result. Only the listed names work: this "
-            "cannot install arbitrary packages.",
+            "will be asked to approve the install first, so tell them in "
+            "plain words what it adds and about how big the download is "
+            "(never this tool's name or its arguments) and wait for the "
+            "result. Only the listed names work: this cannot install "
+            "arbitrary packages.",
             ActionCategory.WRITE,
             _schema(
                 name={
@@ -1391,7 +1403,7 @@ def _study_precheck(toolkit: StudyToolkit, action: str, params: Mapping[str, Any
     if result is None:
         return None
     return PrecheckRefusal(
-        reason=str(result.get("error") or f"study.{action} was refused."),
+        reason=str(result.get("error") or _refused_text(f"study.{action}")),
         policy=STUDY_RULE_POLICY,
         result=result,
         rule=str(result.get("rule") or "invalid_arguments"),
@@ -1941,7 +1953,7 @@ def _blocked_reason(status: CapabilityStatus) -> str:
     if status.fix_steps:
         reason += f" To fix: {status.fix_steps[0]}"
     if status.install:
-        reason += " The owner can install it from Settings → Permissions."
+        reason += " You can install it from Settings → Permissions."
     return reason
 
 
@@ -2346,8 +2358,8 @@ class RuntimePermissionAdapter:
             if mcp_decision == "blocked":
                 return (
                     "blocked",
-                    "MCP tool name matches a financial pattern; money-moving "
-                    "actions are permanently blocked.",
+                    "This looks like it moves money, and I never do that. "
+                    "Please do it yourself.",
                     "mcp:financial-pattern",
                 )
             return (
@@ -2358,7 +2370,9 @@ class RuntimePermissionAdapter:
         resolved = resolve_tool(tool_name)
         if resolved is None:
             # Default-deny unknown tools.
-            return "blocked", f"Unknown tool '{tool_name}' is denied by default.", "default-deny"
+            # Plain words, no tool id: the runtime hides a made-up name's
+            # refusal from the owner, but any other caller may show it.
+            return "blocked", "I don't know how to do that, so nothing happened.", "default-deny"
         for cap in _capabilities_of(resolved.connector_type, resolved.action):
             refusal = await _gate_refusal(self._capability_gate, cap)
             if refusal is not None:
@@ -3194,7 +3208,7 @@ class ConnectorToolExecutor:
                 "ok": False,
                 "refused": True,
                 "rule": "cancelled",
-                "error": "Stopped by the user before this purchase was checked.",
+                "error": "You pressed Stop before I checked this purchase, so nothing was paid.",
             }
         if CHECKOUT_CARD_KEY in arguments:
             return {
@@ -3292,7 +3306,7 @@ class ConnectorToolExecutor:
         if result is None:
             return None
         return PrecheckRefusal(
-            reason=str(result.get("error") or f"{tool_name} was refused."),
+            reason=str(result.get("error") or _refused_text(tool_name)),
             policy=policy,
             result=dict(result),
             rule=_toolkit_rule(result),
@@ -3308,7 +3322,7 @@ class ConnectorToolExecutor:
         if rule in _MEMORY_REFUSAL_RULES:
             result = {**result, "refused": True}
         return PrecheckRefusal(
-            reason=str(result.get("error") or "memory.remember was refused."),
+            reason=str(result.get("error") or _refused_text("memory.remember")),
             policy=MEMORY_RULE_POLICY,
             result=result,
             rule=rule,
@@ -3324,7 +3338,7 @@ class ConnectorToolExecutor:
         if result is None:
             return None
         return PrecheckRefusal(
-            reason=str(result.get("error") or f"watch.{action} was refused."),
+            reason=str(result.get("error") or _refused_text(f"watch.{action}")),
             policy=WATCH_RULE_POLICY,
             result=result,
             rule="invalid_arguments",
@@ -3360,7 +3374,7 @@ class ConnectorToolExecutor:
         if result is None:
             return None
         return PrecheckRefusal(
-            reason=str(result.get("error") or f"files.{action} was refused."),
+            reason=str(result.get("error") or _refused_text(f"files.{action}")),
             policy=FILES_RULE_POLICY,
             result=result,
             rule=str(result.get("rule") or "invalid_arguments"),
@@ -3391,7 +3405,7 @@ class ConnectorToolExecutor:
         if result is None:
             return None
         return PrecheckRefusal(
-            reason=str(result.get("error") or f"schedule.{action} was refused."),
+            reason=str(result.get("error") or _refused_text(f"schedule.{action}")),
             policy=SCHEDULE_RULE_POLICY,
             result=result,
             rule=str(result.get("rule") or "invalid_arguments"),
@@ -3482,7 +3496,7 @@ class ConnectorToolExecutor:
         if result is None:
             return None
         return PrecheckRefusal(
-            reason=str(result.get("error") or f"knowledge.{action} was refused."),
+            reason=str(result.get("error") or _refused_text(f"knowledge.{action}")),
             policy=KNOWLEDGE_RULE_POLICY,
             result=result,
             rule=str(result.get("rule") or "invalid_arguments"),
@@ -3553,7 +3567,7 @@ class ConnectorToolExecutor:
         if result is None:
             return None
         return PrecheckRefusal(
-            reason=str(result.get("error") or f"triggers.{action} was refused."),
+            reason=str(result.get("error") or _refused_text(f"triggers.{action}")),
             policy=TRIGGER_RULE_POLICY,
             result=result,
             rule=str(result.get("rule") or "invalid_arguments"),

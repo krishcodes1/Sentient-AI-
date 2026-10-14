@@ -1046,7 +1046,7 @@ async def test_a_stop_while_the_card_waited_runs_the_action_then_stops_the_resum
     assert "resume_stop_mark" not in decided.json()["result"]
     assert executor.calls == ["google_workspace.send_email"] and executor.saw_stop == [False]
     assert provider.calls == []
-    assert "[Approved] Executed" in messages[0]["content"]
+    assert messages[0]["content"].startswith("You approved my request to send an email")
     assert messages[1]["content"] == "Stopped. I didn't finish the task."
 
 
@@ -1089,7 +1089,7 @@ async def test_a_stop_pressed_while_the_approved_action_runs_ends_the_resumed_tu
     # The Stop pressed while the action ran ended the resumed turn before it
     # asked the model anything.
     assert provider.calls == []
-    assert "[Approved] Executed" in messages[0]["content"]
+    assert messages[0]["content"].startswith("You approved my request to send an email")
     assert messages[1]["content"] == "Stopped. I didn't finish the task."
     assert cancel.is_cancelled(uid) is True
 

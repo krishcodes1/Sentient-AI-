@@ -25,7 +25,7 @@ from services.files.limits import (
 # file_reading's when_denied, repeated here so this module stays free of the
 # capability registry (tests hold the two equal).
 SWITCHED_OFF = (
-    "Reading files is turned off. The owner can turn on 'Read files and documents' "
+    "Reading files is turned off. You can turn on 'Read files and documents' "
     "in Settings → Permissions."
 )
 
@@ -50,9 +50,9 @@ def _megabytes(size: int, limit: Optional[int] = None) -> str:
 def too_large(size: Optional[int], limit: int = UPLOAD.max_bytes) -> str:
     cap = f"{limit // MB} MB"
     if size is None:
-        return f"That file is too large; Crawler reads files up to {cap}. Send a smaller file or a link to it."
+        return f"That file is too large. Crawler reads files up to {cap}. Send a smaller file or a link to it."
     return (
-        f"That file is {_megabytes(size, limit)} MB; Crawler reads files up to {cap}. "
+        f"That file is {_megabytes(size, limit)} MB, and Crawler reads files up to {cap}. "
         "Send a smaller file or a link to it."
     )
 
@@ -66,8 +66,8 @@ def unsupported(extension: str = "") -> str:
 
 
 LEGACY_OFFICE = (
-    "This is an older Office format (.doc/.xls/.ppt). Save it as .docx/.xlsx/.pptx or PDF "
-    "and send it again."
+    "This file uses an older Office format (.doc, .xls or .ppt). Save it as a newer Word, "
+    "Excel or PowerPoint file, or as a PDF, and send it again."
 )
 ENCRYPTED = (
     "This file is password-protected. Save a copy without a password and send it again. "
@@ -85,13 +85,13 @@ EMPTY_SCANS = (
     "No text was found in this file: its pages are scans (pictures of text) that this "
     "computer can't read."
 )
-BUSY = "Crawler is reading other files right now; try again in a minute."
+BUSY = "Crawler is reading other files right now. Try again in a minute."
 QUOTA_FULL = (
-    f"Your file space is full ({MAX_FILES_PER_USER} files / "
-    f"{MAX_STORED_BYTES_PER_USER // MB} MB). Ask Crawler to forget files you no longer need."
+    f"Your file space is full ({MAX_FILES_PER_USER} files or "
+    f"{MAX_STORED_BYTES_PER_USER // MB} MB). Ask Crawler to forget files you don't need anymore."
 )
 RATE_LIMITED = (
-    f"You've sent {MAX_UPLOADS_PER_HOUR} files in the last hour; try again a bit later."
+    f"You've sent {MAX_UPLOADS_PER_HOUR} files in the last hour. Try again a bit later."
 )
 
 
@@ -99,7 +99,7 @@ def timeout(pages_read: int) -> str:
     if pages_read <= 0:
         return "This file took too long to read."
     unit = "page was" if pages_read == 1 else "pages were"
-    return f"This file took too long to read; the first {pages_read} {unit} read."
+    return f"This file took too long to read, so only the first {pages_read} {unit} read."
 
 
 def for_code(code: str) -> str:

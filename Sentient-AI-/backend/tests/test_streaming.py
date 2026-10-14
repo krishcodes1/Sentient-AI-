@@ -22,7 +22,7 @@ import pytest
 from core.config import settings
 from services.agent.approvals import InMemoryApprovalStore
 from services.agent.providers import LLMResponse, ToolCall
-from services.agent.runtime import AgentRuntime
+from services.agent.runtime import GUARD_INPUT_REPLY, AgentRuntime
 from services.agent.tool_registry import (
     ConnectorSpec,
     RuntimePermissionAdapter,
@@ -148,7 +148,7 @@ async def test_stream_chat_input_injection_blocks_before_provider():
     assert done["type"] == "done"
     # The security refusal is delivered as the (safe) content.
     text = "".join(e["data"].get("text", "") for e in events if e["type"] == "content_delta")
-    assert "security policy" in text
+    assert text == GUARD_INPUT_REPLY
     assert done["data"]["blocked_actions"]
 
 

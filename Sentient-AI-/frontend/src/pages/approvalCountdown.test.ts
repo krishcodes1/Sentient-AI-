@@ -1,6 +1,7 @@
 /**
- * Tests for useCountdown and formatCountdown: they prove the label format, whole-second ticking,
- * clamping at zero, stopping the timer, and restarting on a new deadline.
+ * Tests for useCountdown, formatCountdown and expiresInWords: they prove the label formats (the
+ * card's "This expires in 14 minutes." words among them), whole-second ticking, clamping at zero,
+ * stopping the timer, and restarting on a new deadline.
  *
  * Why it exists: Guards against a countdown that never reaches zero (every late click 404s) or
  * reaches it early (a valid approval becomes un-actionable).
@@ -8,7 +9,7 @@
 
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { formatCountdown, useCountdown } from "@/pages/approvalCountdown";
+import { expiresInWords, formatCountdown, useCountdown } from "@/pages/approvalCountdown";
 
 /**
  * These two helpers drive the "expires in m:ss" label *and* the `expired`
@@ -37,6 +38,24 @@ describe("formatCountdown", () => {
     expect(formatCountdown(3600)).toBe("1:00:00");
     expect(formatCountdown(3725)).toBe("1:02:05");
     expect(formatCountdown(3599)).toBe("59:59");
+  });
+});
+
+describe("expiresInWords", () => {
+  it("says the time left the way the chat cards do", () => {
+    expect(expiresInWords(14 * 60 + 30)).toBe("14 minutes");
+    expect(expiresInWords(60)).toBe("1 minute");
+    expect(expiresInWords(89 * 60)).toBe("89 minutes");
+    expect(expiresInWords(90 * 60)).toBe("about 2 hours");
+    expect(expiresInWords(3 * 3600)).toBe("about 3 hours");
+    expect(expiresInWords(72 * 3600)).toBe("about 3 days");
+  });
+
+  it("counts the last minute in seconds and never goes below zero", () => {
+    expect(expiresInWords(40)).toBe("40 seconds");
+    expect(expiresInWords(1)).toBe("1 second");
+    expect(expiresInWords(-5)).toBe("0 seconds");
+    expect(expiresInWords(Number.NaN)).toBe("0 seconds");
   });
 });
 

@@ -33,7 +33,7 @@ import pytest
 from core.config import settings
 from services.agent.approvals import DbApprovalStore
 from services.agent.providers import LLMResponse, ToolCall
-from services.agent.runtime import AgentRuntime
+from services.agent.runtime import ACTION_EXPIRED_ERROR, ACTION_GONE_ERROR, AgentRuntime
 from services.agent.tool_registry import (
     ConnectorSpec,
     RuntimePermissionAdapter,
@@ -221,7 +221,7 @@ async def test_two_concurrent_approvals_execute_the_tool_exactly_once(session_fa
     assert len(winners) == 1
     assert len(losers) == 1
     assert winners[0]["tool"] == SEND_EMAIL
-    assert "already processed" in losers[0]["error"]
+    assert losers[0]["error"] == ACTION_GONE_ERROR
     assert len(executor.calls) == 1
     assert executor.calls[0]["approved"] is True
 
@@ -304,7 +304,7 @@ async def test_approving_an_expired_action_reports_expiry_and_never_executes(
 
     result = await runtime.approve_action(action.action_id, str(user.id))
 
-    assert result == {"error": "Action expired before a decision was made"}
+    assert result == {"error": ACTION_EXPIRED_ERROR}
     assert executor.calls == []
     assert any(e["event"] == "tool_expired" for e in audit.entries)
 

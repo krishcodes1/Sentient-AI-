@@ -861,7 +861,7 @@ async def test_telegram_usage_command(session_factory, monkeypatch):
         text = api.sent_messages()[-1]["text"]
         assert "estimate" in text.lower()
         # Telegram cannot learn the reader's zone, so it says whose day it is.
-        assert "Today (UTC): 1,234 tokens (1,200 in · 34 out)" in text
+        assert "Since midnight UTC: 1,234 tokens (1,200 read, 34 written)" in text
         assert "Last 30 days: 103,234 tokens" in text
         assert "$" in text
 

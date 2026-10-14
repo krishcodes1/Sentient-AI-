@@ -77,6 +77,21 @@ _ARGUMENTS = frozenset({"content", "category"})
 # (the same margin as services/tools/watch.py).
 _REASON_CHARS = 300
 _CARD_ARGUMENT_CHARS = 690
+# How long a memory may be and still be quoted in the sentence: 300 less
+# the sentence's first wording ('Save to memory (<category>), used in every
+# future conversation: "' and the closing quote), which was 55 characters
+# plus the category's name. Kept as a number so rewording the sentence
+# never changes which memories are refused as too long for the card; every
+# wording _quote_prefix gives must stay within it (a test checks).
+_QUOTE_BUDGET = _REASON_CHARS - 56
+
+# How the sentence names each kind of memory.
+_CATEGORY_WORDS = {
+    MemoryCategory.profile: "this about you",
+    MemoryCategory.preference: "this preference",
+    MemoryCategory.project: "this about your work",
+    MemoryCategory.fact: "this fact",
+}
 
 # What memory.remember refuses as a secret is policy MEMORY of the shared
 # detector (services/security): every key and token format, card numbers
@@ -119,15 +134,26 @@ def _error(message: str, rule: str, **extra: Any) -> dict[str, Any]:
     return {"ok": False, "error": message, "rule": rule, **extra}
 
 
+def _remember_words(category: MemoryCategory) -> str:
+    """'Remember this preference for future chats', the sentence's start."""
+    return f"Remember {_CATEGORY_WORDS.get(category, 'this')} for future chats"
+
+
 def _quote_prefix(category: MemoryCategory) -> str:
-    return f'Save to memory ({category.value}), used in every future conversation: "'
+    return f'{_remember_words(category)}: "'
+
+
+def _quote_limit(category: MemoryCategory) -> int:
+    """The longest memory the sentence quotes whole (see _QUOTE_BUDGET)."""
+    return _QUOTE_BUDGET - len(category.value)
 
 
 def _quoted_sentence(content: str, category: MemoryCategory) -> Optional[str]:
     """The card's sentence quoting the whole memory, or None when it would
-    be longer than the runtime keeps."""
-    sentence = f'{_quote_prefix(category)}{content}"'
-    return sentence if len(sentence) <= _REASON_CHARS else None
+    be longer than _quote_limit allows."""
+    if len(content) > _quote_limit(category):
+        return None
+    return f'{_quote_prefix(category)}{content}"'
 
 
 def _card_problem(content: str, category: MemoryCategory) -> Optional[str]:
@@ -140,8 +166,7 @@ def _card_problem(content: str, category: MemoryCategory) -> Optional[str]:
     card = json.dumps({"content": content, "category": category.value}, indent=2)
     if content.isascii() and len(card) <= _CARD_ARGUMENT_CHARS:
         return None
-    limit = _REASON_CHARS - len(_quote_prefix(category)) - 1
-    return CARD_TOO_LONG_ERROR.format(limit=limit)
+    return CARD_TOO_LONG_ERROR.format(limit=_quote_limit(category))
 
 
 @dataclass(frozen=True)
@@ -241,12 +266,9 @@ class MemoryToolkit:
         quoted = _quoted_sentence(proposal.content, proposal.category)
         if quoted is not None:
             return quoted
-        # Only plain ASCII the card's arguments show uncut gets here
+        # Only plain ASCII the card's details show uncut gets here
         # (_card_problem).
-        return (
-            f"Save a {len(proposal.content)}-character memory ({proposal.category.value}), "
-            "used in every future conversation; the exact text is in the arguments."
-        )
+        return f"{_remember_words(proposal.category)}. The full text is below."
 
     # -- The one action --------------------------------------------------------
 

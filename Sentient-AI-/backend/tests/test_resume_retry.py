@@ -138,11 +138,11 @@ async def test_a_hiccup_in_the_resumed_turn_is_run_again_and_answers(
     # is fenced with a fresh one-time token each time, so compare its shape).
     first, second = provider.calls[1], provider.calls[2]
     assert [m["role"] for m in first] == [m["role"] for m in second]
-    assert first[-1]["content"].startswith("[Approved] Executed 'desktop.act'")
-    assert second[-1]["content"].startswith("[Approved] Executed 'desktop.act'")
+    assert first[-1]["content"].startswith("The owner approved 'desktop.act'")
+    assert second[-1]["content"].startswith("The owner approved 'desktop.act'")
     rows = await _transcript(session_factory)
     assert rows[-1].content == ANSWER.content
-    assert not any(r.content.startswith("[No reply") for r in rows)
+    assert not any(r.content.startswith("[I couldn't finish this") for r in rows)
 
 
 # ── not run again ────────────────────────────────────────────────────────────
@@ -168,7 +168,7 @@ async def test_a_turn_that_already_ran_a_tool_is_not_run_again(session_factory, 
         "Send 'continue' to try again."
     )
     rows = await _transcript(session_factory)
-    assert rows[-1].content == "[No reply: the model provider returned an error.]"
+    assert rows[-1].content == "[I couldn't finish this because your AI service had a problem.]"
 
 
 @pytest.mark.asyncio

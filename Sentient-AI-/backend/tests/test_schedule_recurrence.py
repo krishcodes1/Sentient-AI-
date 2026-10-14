@@ -17,9 +17,12 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from services.scheduler.recurrence import (
+    clock,
     describe,
+    every_words,
     local_label,
     next_after,
+    ordinal,
     parse_recurrence,
     phrase,
     recurrence_from_stored,
@@ -176,16 +179,40 @@ def test_a_naive_after_counts_as_utc():
 
 
 def test_describe_and_phrase():
-    assert describe(rule(freq="weekdays", time="08:00")) == "Weekdays at 08:00"
-    assert describe(rule(freq="daily", time="07:30")) == "Every day at 07:30"
-    assert describe(rule(freq="weekly", time="18:00", days=["mon", "wed"])) == "Mon, Wed at 18:00"
-    assert describe(rule(freq="monthly", time="09:00", day_of_month=-1)) == "Last day of the month at 09:00"
-    assert describe(rule(freq="monthly", time="09:00", day_of_month=15)) == "Day 15 of the month at 09:00"
-    assert describe(rule(freq="once", time="06:00", date="2026-10-02")) == "Once on 2026-10-02 at 06:00"
-    assert phrase(rule(freq="weekdays", time="08:00")) == "every weekday at 08:00"
+    assert describe(rule(freq="weekdays", time="08:00")) == "Weekdays at 8:00 AM"
+    assert describe(rule(freq="daily", time="07:30")) == "Every day at 7:30 AM"
+    assert describe(rule(freq="weekly", time="18:00", days=["mon", "wed"])) == "Mon and Wed at 6:00 PM"
+    assert describe(rule(freq="monthly", time="09:00", day_of_month=-1)) == "Last day of the month at 9:00 AM"
+    assert describe(rule(freq="monthly", time="09:00", day_of_month=15)) == "The 15th of each month at 9:00 AM"
+    assert describe(rule(freq="once", time="06:00", date="2026-10-02")) == "Once on Fri, Oct 2, 2026 at 6:00 AM"
+    assert phrase(rule(freq="weekdays", time="08:00")) == "every weekday at 8:00 AM"
     assert phrase(rule(freq="weekly", time="18:00", days=["mon", "wed", "fri"])) == (
-        "every Monday, Wednesday and Friday at 18:00"
+        "every Monday, Wednesday and Friday at 6:00 PM"
     )
+    assert phrase(rule(freq="monthly", time="00:05", day_of_month=22)) == (
+        "on the 22nd of every month at 12:05 AM"
+    )
+    assert phrase(rule(freq="once", time="12:30", date="2026-10-20")) == (
+        "once on Tuesday, Oct 20, 2026 at 12:30 PM"
+    )
+
+
+def test_every_words():
+    assert [every_words(m) for m in (1, 15, 30, 60, 90, 120, 1440, 2880, 10080, 20160)] == [
+        "every minute", "every 15 minutes", "every 30 minutes", "every hour", "every 90 minutes",
+        "every 2 hours", "every day", "every 2 days", "every week", "every 2 weeks",
+    ]
+    assert [every_words(m) for m in (0, -5, None, "60", True)] == ["regularly"] * 5
+
+
+def test_clock_and_ordinal_words():
+    assert [clock(h, 0) for h in (0, 1, 11, 12, 13, 23)] == [
+        "12:00 AM", "1:00 AM", "11:00 AM", "12:00 PM", "1:00 PM", "11:00 PM",
+    ]
+    assert clock("x", None) == ""  # never raises on odd input
+    assert [ordinal(n) for n in (1, 2, 3, 4, 11, 12, 13, 21, 22, 23, 31)] == [
+        "1st", "2nd", "3rd", "4th", "11th", "12th", "13th", "21st", "22nd", "23rd", "31st",
+    ]
 
 
 def test_local_labels():

@@ -793,12 +793,17 @@ async def test_screenshot_without_playwright_explains_the_install():
 
     assert result["ok"] is False
     assert result["playwright_available"] is False
-    assert "playwright install chromium" in result["install"]
     assert "Playwright" in result["error"]
     # The error names the capability so the model reaches for the
-    # approval-gated installer rather than telling the user to run pip.
+    # approval-gated installer rather than telling the user to run pip,
+    # and tells it to ask in plain words. No shell command reaches the
+    # model at all, so none can be pasted into a reply.
     assert result["capability"] == "browser"
-    assert "system.install_capability" in result["error"]
+    assert "call system.install_capability with name='browser'" in result["error"]
+    assert "Ask them in plain words" in result["error"]
+    assert "install" not in result
+    assert "pip" not in str(result) and "python -m" not in str(result)
+    assert "\u2014" not in result["error"] and "\u2013" not in result["error"]
 
 
 @pytest.mark.asyncio

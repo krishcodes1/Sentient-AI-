@@ -31,7 +31,7 @@ CAPABILITY = Capability(
     default_enabled=True,
     risk="low",
     when_denied=(
-        "Reading files is turned off. The owner can turn on 'Read files and documents' "
+        "Reading files is turned off. You can turn on 'Read files and documents' "
         "in Settings → Permissions."
     ),
 )

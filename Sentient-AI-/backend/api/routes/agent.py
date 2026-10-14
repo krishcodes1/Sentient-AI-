@@ -49,13 +49,15 @@ from models.conversation import Conversation, Message, MessageRole
 from models.memory import Memory
 from models.pending_action import PendingAction
 from models.user import User
+from services import action_text
 from services import capabilities as capability_registry
 from services.auth import get_current_user
 from services.capabilities.prompt import render_permissions_block
 from services.memory import render_memory_block
+from services.notifications import cards as approval_cards
+from services.notifications.progress import phrase_for as progress_phrase
 from services.agent import cancel as agent_cancel
 from services.agent.app_approvals import DEVICE_HEADER, Channel
-from services.agent.context_manager import compress_tool_result
 from services.agent.providers import ProviderError, ProviderNotConfigured
 from services.agent.runtime import (
     AgentRuntime,
@@ -246,7 +248,7 @@ def get_runtime(request: Request) -> AgentRuntime:
     if runtime is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Agent runtime is not available. Check the server logs.",
+            detail="Crawler isn't ready yet. Try again in a minute.",
         )
     return runtime
 
@@ -444,11 +446,31 @@ class TurnImageOut(BaseModel):
     data_url: str
 
 
+class ApprovalDetailOut(BaseModel):
+    """One labelled value an approval card shows ("To", "priya@acme.com"),
+    in everyday words (services.notifications.cards.detail_pairs). A value
+    on several lines keeps every line, joined with "\\n"."""
+
+    label: str
+    value: str
+
+
 class PendingApprovalOut(BaseModel):
     action_id: str
     tool_name: str
     arguments: Dict[str, Any] = {}
+    # ``reason`` is the card's plain first sentence ("Send an email to
+    # priya@acme.com from your Gmail"), built by the runtime.
     reason: str
+    # Every value the action will use, as plain labelled lines in the
+    # arguments' own order, nothing dropped or cut (spec F3): what the web
+    # card lists instead of a JSON dump of ``arguments``. Empty when they
+    # could not be worked out; the card then labels ``arguments`` itself.
+    details: list[ApprovalDetailOut] = []
+    # The card's "Check code 6d3b dfca 7bf8 cfc5": the same code the
+    # Telegram and Slack cards for this call end with, so the owner can see
+    # they describe the same request. None when it could not be worked out.
+    check_code: Optional[str] = None
     expires_at: Optional[str] = None
     conversation_id: Optional[str] = None
     # Warning surfaced on the approval card when the action's arguments were
@@ -473,6 +495,108 @@ class BlockedActionOut(BaseModel):
     tool_name: str
     reason: str
     policy: str
+    # What the skipped step would have done, as a lower-case verb phrase
+    # ("send an email", services.action_text.short_phrase), so the web chat
+    # can say "I didn't send an email" without naming the tool.
+    phrase: Optional[str] = None
+
+
+def _approval_card_fields(tool_name: Any, arguments: Any) -> dict[str, Any]:
+    """``details`` and ``check_code`` for one web approval card, as plain
+    JSON values (the REST models and the SSE frames share them).
+
+    Both come from the arguments the card already carries, as the chat
+    cards show them (``cards.card_arguments``: a desktop.act card leaves
+    out its reserved "_" keys), so the check code equals the one the
+    Telegram and Slack cards for the same call end with. The web card shows
+    the owner's own values, as the JSON it replaced did, so nothing is
+    masked here. Never raises: a part that cannot be worked out is left
+    empty (no details, no check code) and the card falls back to labelling
+    the arguments itself."""
+    details: list[dict[str, str]] = []
+    code: Optional[str] = None
+    try:
+        shown = approval_cards.card_arguments(tool_name, arguments)
+    except Exception as exc:  # pragma: no cover - card_arguments never raises today
+        logger.warning("approval_card_fields_failed", error_type=type(exc).__name__)
+        return {"details": details, "check_code": code}
+    try:
+        details = [
+            {"label": str(label), "value": str(value)}
+            for label, value in approval_cards.detail_pairs(str(tool_name or ""), shown)
+        ]
+    except Exception as exc:
+        logger.warning("approval_details_failed", error_type=type(exc).__name__)
+        details = []
+    try:
+        code = approval_cards.check_code(shown)
+    except Exception as exc:
+        logger.warning("approval_check_code_failed", error_type=type(exc).__name__)
+        code = None
+    return {"details": details, "check_code": code}
+
+
+def _pending_approval_out(pa: Any) -> PendingApprovalOut:
+    """The REST shape of one pending approval (the runtime's
+    ``PendingApproval``), with the card's plain details and check code."""
+    return PendingApprovalOut(
+        action_id=pa.action_id,
+        tool_name=pa.tool_name,
+        arguments=pa.arguments,
+        reason=pa.reason,
+        expires_at=pa.expires_at,
+        conversation_id=pa.conversation_id,
+        risk_note=pa.risk_note,
+        image=pa.image,
+        weekly_app=pa.weekly_app,
+        low_risk_account=pa.low_risk_account,
+        **_approval_card_fields(pa.tool_name, pa.arguments),
+    )
+
+
+def _blocked_phrase(tool_name: Any) -> Optional[str]:
+    """``action_text.short_phrase`` of a skipped step's tool ("send an
+    email"); None when there is no tool name to phrase. Never raises."""
+    if not isinstance(tool_name, str) or not tool_name:
+        return None
+    try:
+        return action_text.short_phrase(tool_name)
+    except Exception:  # pragma: no cover - short_phrase never raises today
+        return None
+
+
+def _with_card_fields(frame: Any) -> Any:
+    """A streamed ``pending_approval`` frame's data (or one entry of the
+    ``done`` frame's ``pending_approvals``) with the card's ``details`` and
+    ``check_code`` added, so a streamed card reads like the listed one.
+    Anything that is not a mapping is passed on as it is."""
+    if not isinstance(frame, dict):
+        return frame
+    return {**frame, **_approval_card_fields(frame.get("tool_name"), frame.get("arguments"))}
+
+
+def _with_blocked_phrase(frame: Any) -> Any:
+    """A streamed ``blocked`` frame's data (the tool under ``tool``) or one
+    entry of the ``done`` frame's ``blocked_actions`` (under ``tool_name``)
+    with its plain ``phrase`` added."""
+    if not isinstance(frame, dict):
+        return frame
+    phrase = _blocked_phrase(frame.get("tool_name") or frame.get("tool"))
+    return {**frame, "phrase": phrase} if phrase else frame
+
+
+def _with_progress_phrase(frame: Any, event: Any) -> Any:
+    """A streamed ``tool_call`` frame's data with the progress line the
+    chat channels show for it ("Searching the web…",
+    services.notifications.progress.phrase_for), so the web chat's status
+    line never names the tool. Left as it is when the step has no line."""
+    if not isinstance(frame, dict):
+        return frame
+    try:
+        phrase = progress_phrase(event)
+    except Exception:  # pragma: no cover - phrase_for never raises today
+        phrase = None
+    return {**frame, "phrase": phrase} if phrase else frame
 
 
 class AgentTurnResponse(BaseModel):
@@ -1253,26 +1377,13 @@ async def send_message(
             )
             for tc in agent_response.tool_calls
         ],
-        pending_approvals=[
-            PendingApprovalOut(
-                action_id=pa.action_id,
-                tool_name=pa.tool_name,
-                arguments=pa.arguments,
-                reason=pa.reason,
-                expires_at=pa.expires_at,
-                conversation_id=pa.conversation_id,
-                risk_note=pa.risk_note,
-                image=pa.image,
-                weekly_app=pa.weekly_app,
-                low_risk_account=pa.low_risk_account,
-            )
-            for pa in agent_response.pending_approvals
-        ],
+        pending_approvals=[_pending_approval_out(pa) for pa in agent_response.pending_approvals],
         blocked_actions=[
             BlockedActionOut(
                 tool_name=ba.tool_name,
                 reason=ba.reason,
                 policy=ba.policy,
+                phrase=_blocked_phrase(ba.tool_name),
             )
             for ba in agent_response.blocked_actions
         ],
@@ -1514,6 +1625,26 @@ async def stream_message(
                                 **data,
                                 **await _not_configured_info(code, installation),
                             }
+                    # Plain words for the web chat, added here so the
+                    # runtime's events stay channel-neutral: a step's
+                    # progress line, a skipped step's phrase, and an
+                    # approval card's labelled details and check code.
+                    if etype == "tool_call":
+                        data = _with_progress_phrase(data, event)
+                    elif etype == "blocked":
+                        data = _with_blocked_phrase(data)
+                    elif etype == "pending_approval":
+                        data = _with_card_fields(data)
+                    elif etype == "done" and isinstance(data, dict):
+                        data = dict(data)
+                        if isinstance(data.get("pending_approvals"), list):
+                            data["pending_approvals"] = [
+                                _with_card_fields(pa) for pa in data["pending_approvals"]
+                            ]
+                        if isinstance(data.get("blocked_actions"), list):
+                            data["blocked_actions"] = [
+                                _with_blocked_phrase(ba) for ba in data["blocked_actions"]
+                            ]
                     if etype == "done":
                         final_content = data.get("content", "")
                         tool_calls_payload = data.get("tool_calls", []) or []
@@ -1533,7 +1664,7 @@ async def stream_message(
             except GeneratorExit:
                 raise
             except Exception:  # pragma: no cover - defensive
-                yield _sse("error", {"reason": "The assistant failed to respond."})
+                yield _sse("error", {"reason": "Something went wrong and I couldn't finish my reply. Try again."})
                 yield _sse("done", {})
                 return
 
@@ -1759,21 +1890,7 @@ async def list_pending_approvals(
 ) -> list[PendingApprovalOut]:
     """Return the authenticated user's currently-pending approval requests."""
     pending = await runtime.list_pending_approvals(str(current_user.id))
-    return [
-        PendingApprovalOut(
-            action_id=p.action_id,
-            tool_name=p.tool_name,
-            arguments=p.arguments,
-            reason=p.reason,
-            expires_at=p.expires_at,
-            conversation_id=p.conversation_id,
-            risk_note=p.risk_note,
-            image=p.image,
-            weekly_app=p.weekly_app,
-            low_risk_account=p.low_risk_account,
-        )
-        for p in pending
-    ]
+    return [_pending_approval_out(p) for p in pending]
 
 
 # Most messages a Telegram turn (or a resume after an approval) reads back.
@@ -1787,7 +1904,8 @@ CHANNEL_HISTORY_LIMIT = 60
 # chat, or failed after some model calls were already billed). It keeps the
 # transcript alternating user/assistant and carries the billed tokens.
 _STOPPED_REPLY = "[Stopped before the reply was finished.]"
-_FAILED_REPLY = "[No reply: the model provider returned an error.]"
+# The same words services/automation/turns.py stores for a failed run.
+_FAILED_REPLY = "[I couldn't finish this because your AI service had a problem.]"
 
 
 async def _recent_messages(
@@ -1947,9 +2065,9 @@ async def _resume_after_approval(
     The model gets the tool output it was waiting on as the last, user-role
     message of its history: the approved call's result whole, in the
     runtime's tool-result envelope (``AgentRuntime.approved_call_message``),
-    in place of the transcript's "[Approved] Executed ... Result:" row. That
-    row is cut at 2000 characters (a desktop.act's fresh outline is mostly
-    gone by then), and as the newest row it would end the history on an
+    in place of the transcript's decision row ("You approved my request to
+    send an email, and it's done."). That row is one plain sentence with no
+    result in it, and as the newest row it would end the history on an
     assistant turn, which a provider reads as a continuation of the model's
     own words rather than something to answer (Gemini returns an empty
     completion for one). Without ``approved`` the rows are sent as they are.
@@ -2068,22 +2186,42 @@ async def _resume_after_approval(
     )
 
 
+def _decision_phrase(tool_name: Any) -> str:
+    """The plain verb phrase a decision row names its action by ("send an
+    email", services.action_text.short_phrase); "do that step" when there
+    is nothing better. Never raises."""
+    return _blocked_phrase(tool_name) or action_text.GENERIC_PHRASE
+
+
+def _result_failed(result: Any) -> bool:
+    """Whether an approved call's result reports a failure: an ``error``
+    or ``ok: false`` (the toolkits' and the runtime's error shapes)."""
+    if not isinstance(result, dict):
+        return False
+    return bool(result.get("error")) or result.get("ok") is False
+
+
 def _render_decision_message(
     approved: bool, tool_name: str, result: Optional[Dict[str, Any]]
 ) -> tuple[str, Optional[list]]:
     """Build the assistant Message content (and tool_calls payload) that
-    records an approval decision in the conversation transcript."""
+    records an approval decision in the conversation transcript.
+
+    The content is one plain sentence the owner reads in the web chat
+    ("You approved my request to send an email, and it's done."), naming
+    the action by its phrase, never its tool id, and holding no JSON
+    (docs/bot-message-style.md). The model reads it back as its own past
+    reply, so it also stops the model from copying a log style. The call's
+    whole result stays in the row's ``tool_calls`` (the web chat's step
+    chip shows it under "Technical details"), and the resumed turn gets it
+    whole as well (``AgentRuntime.approved_call_message``)."""
+    phrase = _decision_phrase(tool_name)
     if not approved:
-        return (
-            f"[Denied] The pending action '{tool_name}' was not executed.",
-            None,
-        )
-    try:
-        rendered = json.dumps(result, default=str, indent=2)
-    except (TypeError, ValueError):
-        rendered = str(result)
-    rendered = compress_tool_result(rendered, 2000)
-    content = f"[Approved] Executed '{tool_name}'.\n\nResult:\n{rendered}"
+        return (f"You denied my request to {phrase}, so I didn't do it.", None)
+    if _result_failed(result):
+        content = f"You approved my request to {phrase}, but it didn't work."
+    else:
+        content = f"You approved my request to {phrase}, and it's done."
     try:
         safe_result = json.loads(json.dumps(result, default=str))
     except (TypeError, ValueError):
@@ -2271,15 +2409,16 @@ async def _finish_origin_card(
     db: AsyncSession, result: Dict[str, Any], conversation: Optional[Conversation]
 ) -> Dict[str, Any]:
     """Close an approved card that an unattended run parked: one line,
-    "Done: <tool> ran.", in the run's conversation and as the channel's
-    reply. Nothing else runs: the scheduled turn that proposed the call is
-    over, and an approval unlocks that one call, not a new turn."""
-    tool = str(result.get("tool") or "the action")
-    outcome = result.get("result")
-    failed = isinstance(outcome, dict) and (
-        outcome.get("ok") is False or bool(outcome.get("error"))
-    )
-    line = f"Not done: {tool} reported an error." if failed else f"Done: {tool} ran."
+    "Done. It went through." (or, when the call reported a failure, that it
+    didn't work), in the run's conversation and as the channel's reply. It
+    follows the card (or the transcript's decision row), which already
+    names the action, so it never names the tool. Nothing else runs: the
+    scheduled turn that proposed the call is over, and an approval unlocks
+    that one call, not a new turn."""
+    if _result_failed(result.get("result")):
+        line = "It didn't work. Ask me to try again if you still want it done."
+    else:
+        line = "Done. It went through."
     if conversation is not None:
         db.add(Message(conversation_id=conversation.id, role=MessageRole.assistant, content=line))
         conversation.updated_at = datetime.now(timezone.utc)
@@ -2447,7 +2586,7 @@ async def _refuse_in_tutor_mode(
                 Message(
                     conversation_id=conversation.id,
                     role=MessageRole.assistant,
-                    content=f"[Refused] The pending action '{tool_name}' was not executed. {reason}",
+                    content=f"I didn't {_decision_phrase(tool_name)}. {reason}",
                 )
             )
             conversation.updated_at = datetime.now(timezone.utc)

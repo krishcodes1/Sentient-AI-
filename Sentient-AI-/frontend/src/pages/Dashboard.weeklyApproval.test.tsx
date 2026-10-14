@@ -37,7 +37,7 @@ import { ThemeProvider } from "@/theme";
 const UNTIL = "2026-10-02T15:14:00Z";
 const ALLOW = "Allow Calendar for 7 days";
 const HELPER =
-  "Crawler then scrolls and clicks around in Calendar without asking, for requests from this browser, for 7 days. Typing, and buttons that change or send something, still ask. Revoke in Settings.";
+  "For the next 7 days I'll scroll and click around in Calendar without asking, for requests from this browser. I'll still ask before typing or pressing anything that sends or changes something. You can turn this off in Settings.";
 
 // A desktop.act card as the backend parks it, offered for a week.
 const CALENDAR: PendingApproval = {

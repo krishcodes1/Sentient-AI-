@@ -41,6 +41,7 @@ import structlog
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
+from services.scheduler.recurrence import every_words
 from services.triggers import RUNS_CAPABILITY, TRIGGER_RULE_POLICY
 from services.triggers import facts as shape
 from services.triggers import sources as src
@@ -106,6 +107,11 @@ _IMMUTABLE_KEYS = frozenset({"source", "account", "mode", "folder", "watch_id"})
 _UPDATE_FILTERS = ("senders", "subject_contains", "course_ids", "show_score", "lead_minutes")
 _ACCOUNT_RE = re.compile(r"^([a-z][a-z0-9_]{1,31}?)(?:__([0-9a-f]{8}))?$")
 _LINE_SEPARATORS = (chr(0x2028), chr(0x2029))
+# Outlook's well-known mail folder names a trigger may watch, as a card's
+# sentence says them. Any other folder is an id that means nothing to the
+# owner, so the sentence says "a specific folder" (the card's details show
+# the id).
+_MAIL_FOLDER_WORDS = {"inbox": "your Inbox", "archive": "your Archive folder"}
 # Rules that are a refusal the owner should see as blocked (not the model's
 # own mistake, which it fixes by asking the user or calling again).
 _REFUSAL_RULES = frozenset(
@@ -709,10 +715,17 @@ class TriggerToolkit:
                 watch_label=str(extra.get("watch") or ""),
             )
         before = _before if isinstance((_before := params.get(TRIGGER_KEY)), Mapping) else None
-        name = f'"{shape.clean_line(before.get("label"), 80)}"' if before else f"trigger {params.get('trigger_id')}"
+        label = shape.clean_line(before.get("label"), 80) if before else ""
+        # Without the snapshot bind read, the sentence names no id (the
+        # card's details show it).
+        name = f'the trigger "{label}"' if label else "this trigger"
         if action == "delete":
-            what = f" ({src.SPECS[before['source']].phrase})" if before and before.get("source") in src.SPECS else ""
-            return f"Delete the trigger {name}{what} and its queued events. Its conversation is kept."
+            spec = src.SPECS.get(before.get("source")) if before and isinstance(before.get("source"), str) else None
+            what = f", which reacts to {spec.phrase}" if spec is not None else ""
+            return (
+                f"Delete {name}{what}. Anything it noticed but hasn't sent yet is dropped, and "
+                "its past messages stay in your chat history."
+            )
         if action == "update":
             return describe_update(name, params, before)
         return None
@@ -1184,88 +1197,163 @@ def describe_rule(
     watch_label: str = "",
 ) -> str:
     """One plain sentence stating the whole rule, e.g. 'When a new email
-    from smith@univ.edu arrives in Gmail (School), run "Summarise it" and
-    message you the result. Checks every 15 min, at most 6 runs a day,
-    read-only.'"""
+    from smith@univ.edu arrives in Gmail (School), do this and send you
+    the result: "Summarise it". It checks every 15 minutes, runs at most 6
+    times a day and can't change anything.'
+
+    Course and folder ids mean nothing to the owner, so the sentence counts
+    the courses and says "a specific folder" instead (or "your Inbox",
+    "your main folder" for the folders that have a name); describing reads
+    nothing, so it cannot look the names up. The card's details below it
+    show every value, the ids and the whole instructions included."""
     app = src.source_app(source, connector_type)
     where = f"{app} ({account_label})" if account_label else app
-    courses = list(filters.get("course_ids") or [])
-    in_courses = f" in course{'s' if len(courses) > 1 else ''} {', '.join(courses)}" if courses else ""
+    courses = filters.get("course_ids") if isinstance(filters.get("course_ids"), (list, tuple)) else []
+    in_courses = ""
+    if len(courses) == 1:
+        in_courses = " for one of your courses"
+    elif courses:
+        in_courses = f" for {len(courses)} of your courses"
     if source == "email.new":
-        senders = list(filters.get("senders") or [])
+        senders = [str(s) for s in filters.get("senders") or [] if s] if isinstance(filters.get("senders"), (list, tuple)) else []
         when = "When a new email"
         if senders:
             when += f" from {_join(senders)}"
         if filters.get("subject_contains"):
             when += f" with \"{filters['subject_contains']}\" in the subject"
-        when += f" arrives in {where}"
-        if filters.get("folder"):
-            when += f" (folder {filters['folder']})"
+        folder = filters.get("folder")
+        if isinstance(folder, str) and folder.strip():
+            words = _MAIL_FOLDER_WORDS.get(folder.strip().lower(), "a specific folder")
+            when += f" arrives in {words} in {where}"
+        else:
+            when += f" arrives in {where}"
     elif source == "canvas.announcement":
         when = f"When a new announcement is posted in {where}{in_courses}"
     elif source == "canvas.assignment":
         when = f"When a new assignment shows up in {where}{in_courses}"
     elif source == "canvas.grade":
-        score = "with the score" if filters.get("show_score") else "without the score"
-        when = f"When a grade is posted in {where}{in_courses} ({score})"
+        when = f"When a grade is posted in {where}{in_courses}"
     elif source == "calendar.starting_soon":
-        when = f"{filters.get('lead_minutes', 15)} minutes before each event on {where} starts"
+        when = f"{filters.get('lead_minutes', 15)} minutes before each event in {where} starts"
     elif source == "files.new_in_folder":
-        when = f"When a new file lands in folder {filters.get('folder')} of {where}"
+        root = str(filters.get("folder") or "").strip().lower() == "root"
+        folder = "your main folder" if root else "a specific folder"
+        when = f"When a new file is added to {folder} in {where}"
     else:
-        when = f"When your page watch \"{watch_label or filters.get('watch_id')}\" sees a change"
+        when = (
+            f'When the page you\'re watching, "{watch_label}", changes'
+            if watch_label
+            else "When one of the pages you're watching changes"
+        )
+    # A long prompt is cut in the sentence; the card's details show it whole.
+    cut = False
     if mode == "run_task":
-        short = shape.clean_line(prompt or "", 160)
-        does = f', run "{short}" and message you the result'
+        short = shape.clean_line(prompt, 160)
+        cut = short != shape.clean_line(prompt, PROMPT_MAX_CHARS + 1)
+        does = f', do this and send you the result: "{short}"'
     else:
-        does = ", message you on Telegram or Slack"
+        does = ", send you a message"
+        # Only the message says the score or not. A task run is given the
+        # grade with its score either way, so its sentence leaves the
+        # setting to the card's details.
+        if source == "canvas.grade":
+            does += " with the score" if filters.get("show_score") else " without the score"
     tail: list[str] = []
     if source != "page.changed":
-        tail.append(f"Checks every {interval} min")
+        tail.append(f"checks {every_words(interval)}")
     if mode == "run_task":
-        tail.append(f"at most {max_runs} runs a day")
-        tail.append(
-            "any change it wants waits for your approval" if allow_writes else "read-only"
-        )
+        tail.append(f"runs at most {_times(max_runs)} a day")
+        tail.append("asks you before it changes anything" if allow_writes else "can't change anything")
     sentence = f"{when}{does}."
     if tail:
-        text = ", ".join(tail)
-        sentence += f" {text[0].upper()}{text[1:]}."
+        sentence += f" It {_join(tail)}."
+    if cut:
+        sentence += " The full instructions are below."
     return sentence
 
 
-def _value(value: Any) -> str:
-    if isinstance(value, bool):
-        return "yes" if value else "no"
+def _times(count: Any) -> str:
+    """'once', 'twice', '6 times'."""
+    if count == 1:
+        return "once"
+    if count == 2:
+        return "twice"
+    return f"{count} times"
+
+
+def _change_value(value: Any) -> str:
+    """A changed value as an update card's sentence quotes it."""
     if isinstance(value, (list, tuple)):
-        return ", ".join(str(v) for v in value) or "none"
-    if value is None or value == "":
-        return "none"
-    return shape.clean_line(str(value), 120)
+        return _join([shape.clean_line(str(v), 120) for v in value])
+    return shape.clean_line(str(value), 120) if value is not None else ""
+
+
+def _change_words(key: str, new: Any, old: Any) -> str:
+    """One change on an update card, as a plain phrase: 'rename it to
+    "Smith mail"', 'check every 30 minutes instead of every 15 minutes'.
+    *old* is the value before (None when the card has no snapshot)."""
+    had = old is not None and old != ""
+    if key == "label":
+        return f'rename it to "{_change_value(new)}"'
+    if key == "prompt":
+        return "change its instructions (the new ones are below)"
+    if key == "allow_writes":
+        return "let it ask you before changing things" if new else "stop it from changing anything"
+    if key == "interval_minutes":
+        before = f" instead of {every_words(old)}" if had and old != new else ""
+        return f"check {every_words(new)}{before}"
+    if key == "max_runs_per_day":
+        before = f" instead of {_times(old)}" if had and old != new else ""
+        return f"run at most {_times(new)} a day{before}"
+    if key == "lead_minutes":
+        before = f" instead of {old}" if had and old != new else ""
+        return f"message you {new} minutes before each event{before}"
+    if key == "show_score":
+        return "tell you the score" if new else "leave the score out"
+    if key == "senders":
+        if not new:
+            return "watch for email from anyone"
+        before = f" (before: {_change_value(old)})" if had and old else ""
+        return f"only watch for email from {_change_value(new)}{before}"
+    if key == "subject_contains":
+        if not new:
+            return "watch for email with any subject"
+        return f'only watch for email with "{_change_value(new)}" in the subject'
+    if key == "course_ids":
+        count = len(new) if isinstance(new, (list, tuple)) else 0
+        if count == 0:
+            return "watch all your courses"
+        return "only watch one of your courses" if count == 1 else f"only watch {count} of your courses"
+    return "change one of its settings"
 
 
 def describe_update(name: str, params: Mapping[str, Any], before: Optional[Mapping[str, Any]]) -> str:
-    """The update card's sentence: pause, resume, or each change as
-    before -> after."""
+    """The update card's sentence: pause, turn back on, or each change as
+    a plain phrase ('rename it to "Smith mail"', 'check every 30 minutes
+    instead of every 15 minutes'). *name* is 'the trigger "<label>"' or
+    'this trigger'. The card's details below it show every new value in
+    full."""
     if params.get("paused") is True and not any(k for k in params if k not in ("trigger_id", "paused", TRIGGER_KEY)):
-        return f"Pause the trigger {name}; nothing is checked or sent until you resume it."
+        return f"Pause {name}. It won't check or send anything until you turn it back on."
     changes: list[str] = []
-    old_filters = dict(before.get("filters") or {}) if before else {}
+    old_filters = dict(before.get("filters") or {}) if before and isinstance(before.get("filters"), Mapping) else {}
     for key in ("label", "prompt", "allow_writes", "interval_minutes", "max_runs_per_day"):
         if params.get(key) is not None:
             old = before.get(key) if before else None
-            changes.append(f"{key.replace('_', ' ')}: {_value(old)} → {_value(params[key])}")
+            changes.append(_change_words(key, params[key], old))
     for key in _UPDATE_FILTERS:
         if params.get(key) is not None:
-            changes.append(f"{key.replace('_', ' ')}: {_value(old_filters.get(key))} → {_value(params[key])}")
-    head = f"Change the trigger {name}"
-    if params.get("paused") is True:
-        head += " and pause it"
-    elif params.get("paused") is False:
-        head = (
-            f"Resume the trigger {name} (checks start again now, its error count is cleared, "
-            "and what arrived meanwhile is not sent)"
-        )
+            changes.append(_change_words(key, params[key], old_filters.get(key) if before else None))
+    if params.get("paused") is False:
+        head = f"Turn {name} back on"
         if changes:
-            head += " and change it"
-    return head + (": " + "; ".join(changes) + "." if changes else ".")
+            head += f" and change it: {_join(changes)}"
+        return (
+            f"{head}. It starts checking again now and skips anything that came in while it "
+            "was off."
+        )
+    if params.get("paused") is True:
+        changes.append("pause it")
+    if not changes:
+        return f"Change {name}."
+    return f"Change {name}: {_join(changes)}."

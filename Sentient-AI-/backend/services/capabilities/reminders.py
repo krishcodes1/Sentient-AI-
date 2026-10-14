@@ -22,5 +22,5 @@ CAPABILITY = Capability(
     tools=("reminders.",),
     default_enabled=True,
     risk="low",
-    when_denied="Reminders are turned off. The owner can turn them on in Settings → Permissions.",
+    when_denied="Reminders are turned off. You can turn them on in Settings → Permissions.",
 )

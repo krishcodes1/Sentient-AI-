@@ -423,7 +423,7 @@ class KnowledgeService:
             return KnowledgeError(
                 "document_limit",
                 f"The knowledge base holds at most {limits.documents} documents and has "
-                f"{usage.documents}. Remove some first (knowledge.list, knowledge.remove).",
+                f"{usage.documents}. Remove some first.",
             )
         if usage.chars + chars > limits.text_chars or usage.chars >= limits.text_chars:
             return KnowledgeError(
@@ -450,12 +450,12 @@ class KnowledgeService:
         owner = self._owner(user_id)
         name = clean_collection_name(collection)
         if name is None:
-            return AddOutcome("error", source.title, error="The collection name must be 1-80 characters.", code="invalid")
+            return AddOutcome("error", source.title, error="A collection name needs 1 to 80 characters.", code="invalid")
         try:
             prepared = await asyncio.to_thread(prepare, source)
         except Exception as exc:  # noqa: BLE001 - a bad document is one item's error
             logger.warning("knowledge_prepare_failed", error_type=type(exc).__name__)
-            return AddOutcome("error", source.title, error="The document could not be indexed.", code="index_failed")
+            return AddOutcome("error", source.title, error="Something went wrong while getting it ready for search. Please try again.", code="index_failed")
         if not prepared.passages:
             return AddOutcome("error", source.title, error="No text could be read from this document.", code="empty")
         async with self._lock(owner):
@@ -468,7 +468,7 @@ class KnowledgeService:
                 duplicate = await self._duplicate_of(owner, name, prepared.text_sha256)
                 if duplicate is not None:
                     return duplicate
-                return AddOutcome("error", source.title, error="The document could not be saved; try again.", code="conflict")
+                return AddOutcome("error", source.title, error="It couldn't be saved just now. Please try again.", code="conflict")
             finally:
                 self.vector_cache.invalidate(owner)
 

@@ -31,8 +31,8 @@ export default function PurchaseApproval({ approval }: { approval: PendingApprov
     // without it cannot be judged, so say so rather than show an empty form.
     return (
       <p role="alert" className="text-xs mb-3" style={{ color: "var(--accent-danger)" }}>
-        This purchase request carries no page details. Deny it and ask Crawler
-        to check out again.
+        This purchase request is missing the checkout page's details, so it
+        can't be checked. Deny it and ask Crawler to check out again.
       </p>
     );
   }
@@ -43,7 +43,7 @@ export default function PurchaseApproval({ approval }: { approval: PendingApprov
         <ApprovalPicture approval={approval} alt={`The checkout page on ${card.host}, as Crawler sees it`} />
       ) : (
         <p className="text-xs" style={{ color: "var(--text-muted)" }}>
-          No screenshot came with this request — look at the browser window
+          No screenshot came with this request. Look at the browser window
           before you approve.
         </p>
       )}

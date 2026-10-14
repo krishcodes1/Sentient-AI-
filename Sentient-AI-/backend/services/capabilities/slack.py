@@ -22,18 +22,18 @@ def availability(ctx: ReportContext) -> Availability:
         return Availability(True)
     return Availability(
         False,
-        "No Slack DM channel is running. Add an app-level token (xapp-) to a Slack "
-        "connector in Connectors.",
+        "Slack chat isn't set up yet. Open your Slack connector in Connectors and "
+        "follow the steps to turn on chat.",
     )
 
 
 CAPABILITY = Capability(
     key="slack",
     label="Slack chat and approvals",
-    description="Chat with Crawler in a Slack DM and approve actions from Slack.",
+    description="Chat with Crawler in Slack direct messages and approve actions from Slack.",
     tools=(),
     default_enabled=True,
     risk="medium",
-    when_denied="Slack DMs are turned off. The owner can turn them on in Settings, Permissions.",
+    when_denied="Slack chat is turned off. You can turn it on in Settings → Permissions.",
     availability=availability,
 )

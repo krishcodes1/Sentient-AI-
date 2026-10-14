@@ -18,7 +18,7 @@ from services.capabilities.base import Availability, Capability, ReportContext
 def availability(ctx: ReportContext) -> Availability:
     if ctx.browser_installed:
         return Availability(True)
-    return Availability(False, "The hidden browser is not installed yet (about 150–300 MB).")
+    return Availability(False, "The web browser add-on isn't installed yet (about 150 to 300 MB).")
 
 
 CAPABILITY = Capability(
@@ -28,7 +28,7 @@ CAPABILITY = Capability(
     tools=("web.screenshot",),
     default_enabled=True,
     risk="low",
-    when_denied="Website screenshots are turned off. The owner can turn them on in Settings → Permissions.",
+    when_denied="Website screenshots are turned off. You can turn them on in Settings → Permissions.",
     availability=availability,
     install="browser",
 )

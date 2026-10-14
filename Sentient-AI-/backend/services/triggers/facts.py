@@ -22,6 +22,8 @@ from email.utils import parseaddr
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 from urllib.parse import urlsplit
 
+from services.scheduler.recurrence import clock
+
 # Per-item caps (characters) and the whole item's serialised size.
 LINE_CHARS = 200
 NAME_CHARS = 80
@@ -44,11 +46,13 @@ LIGHTNING = "\u26a1"
 WARNING = "\u26a0\ufe0f"
 PAUSE = "\u23f8"
 
-RUNS_OFF_LINE = "(Task runs are off, so only this notice was sent.)"
-RUNNER_MISSING_LINE = "(Task runs are not available right now, so only this notice was sent.)"
-NOT_CONFIGURED_LINE = "Crawler could not run your task: the AI provider is not set up."
-RUN_FAILED_LINE = "Crawler could not run your task this time, so only this notice was sent."
-_WITHHELD = "(The {what} is not shown: it looked like instructions aimed at an AI assistant.)"
+# Lines added under a trigger's message when its task did not run. Crawler
+# speaks as "I" in chat (docs/bot-message-style.md).
+RUNS_OFF_LINE = "(Running tasks from triggers is turned off, so I only sent this notice.)"
+RUNNER_MISSING_LINE = "(I can't run tasks right now, so I only sent this notice.)"
+NOT_CONFIGURED_LINE = "I couldn't run your task because no AI service is connected yet."
+RUN_FAILED_LINE = "I couldn't run your task this time, so I only sent this notice."
+_WITHHELD = "(The {what} is hidden because it looked like instructions meant for me.)"
 # The connector's own guard (services/connectors/base.PromptGuard) leaves
 # this where it cut an injection out; such text is withheld too.
 _REDACTED_MARK = "[REDACTED]"
@@ -354,11 +358,13 @@ def _shown(value: Any, what: str, scan: Scan) -> str:
 
 
 def _local(moment: Optional[datetime], tz: Optional[tzinfo]) -> str:
+    """A day and time as the owner reads it: "Tue, Oct 20 at 11:59 PM" in
+    *tz*, or "... UTC" when the owner's zone is unknown."""
     if moment is None:
         return "an unknown time"
-    if tz is None:
-        return moment.astimezone(timezone.utc).strftime("%a %b %d %H:%M UTC")
-    return moment.astimezone(tz).strftime("%a %b %d %H:%M")
+    local = moment.astimezone(tz or timezone.utc)
+    zone = "" if tz is not None else " UTC"
+    return f"{local:%a, %b} {local.day} at {clock(local.hour, local.minute)}{zone}"
 
 
 def _link(url: Any) -> Optional[str]:
@@ -417,22 +423,30 @@ def item_line(
         return line
     if source == "calendar.starting_soon":
         start = parse_time(facts.get("start"))
-        minutes = 0
-        if start is not None and now is not None:
-            minutes = max(0, round((start - now).total_seconds() / 60))
         title = _shown(facts.get("title"), "title", scan) or "(untitled)"
         place = _shown(facts.get("location"), "location", scan)
-        at = start.astimezone(tz).strftime("%H:%M") if start is not None and tz else (
-            start.strftime("%H:%M UTC") if start is not None else "soon"
-        )
-        line = f"{CALENDAR} In {minutes} min: {title} at {at}"
+        # "In 15 minutes: Team sync at 2:00 PM" ("... UTC" when the owner's
+        # zone is unknown); "Starting soon" when the start time is not known.
+        if start is None:
+            line = f"{CALENDAR} Starting soon: {title}"
+        else:
+            local = start.astimezone(tz or timezone.utc)
+            at = clock(local.hour, local.minute) + ("" if tz else " UTC")
+            minutes = max(0, round((start - now).total_seconds() / 60)) if now is not None else None
+            if minutes is None:
+                lead = "Starting soon"
+            elif minutes == 0:
+                lead = "Starting now"
+            else:
+                lead = f"In {minutes} minute{'' if minutes == 1 else 's'}"
+            line = f"{CALENDAR} {lead}: {title} at {at}"
         return f"{line}, {place}" if place else line
     if source == "files.new_in_folder":
         file_name = _shown(facts.get("name"), "file name", scan) or "(unnamed)"
         return f"{FOLDER} New file in {name}: {file_name}"
     if source == "page.changed":
         return f"{BELL} {name} changed"
-    return f"{BELL} {name}: something new"
+    return f"{BELL} {name} has something new"
 
 
 def _num(value: float) -> str:
@@ -468,18 +482,23 @@ def notify_text(
 
 
 def stopped_text(label: str, reason: str, failures: int) -> str:
+    """The message when a trigger is turned off after *failures* checks in
+    a row went wrong; *reason* is one plain sentence."""
     return (
-        f"{WARNING} Stopped trigger \"{defang(clean_line(label, NAME_CHARS))}\": {reason}\n"
-        f"The last {failures} checks failed. Resume it with /triggers (Slack: reply "
-        "\"triggers\") once the problem is fixed, or ask Crawler to delete it."
+        f"{WARNING} I turned off the trigger \"{defang(clean_line(label, NAME_CHARS))}\": "
+        f"{reason}\nThe last {failures} checks didn't work. Once that's fixed, send /triggers "
+        "(in Slack, reply \"triggers\") to turn it back on, or ask me to delete it."
     )
 
 
 def limit_text(label: str, reason: str) -> str:
+    """The one message a day when a trigger's task is held back; *reason*
+    finishes the sentence ("it already ran 6 times today, ..."). The
+    count starts over at midnight UTC, which the message says."""
     return (
-        f"{PAUSE} Trigger \"{defang(clean_line(label, NAME_CHARS))}\" did not run its task: "
-        f"{reason} Newer events today are skipped without another message; it runs again "
-        "tomorrow (UTC)."
+        f"{PAUSE} The trigger \"{defang(clean_line(label, NAME_CHARS))}\" didn't run its task: "
+        f"{reason} Anything else that comes in today is skipped without another message. "
+        "It can run again after midnight UTC."
     )
 
 

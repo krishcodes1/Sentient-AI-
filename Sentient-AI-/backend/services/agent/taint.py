@@ -67,6 +67,15 @@ _SEPARATORS = "-_./:"
 # even without opaque shape (a smuggled phrase).
 _MIN_VERBATIM_LEN = 24
 
+# The plain endings of a taint reason. The reason is shown to the owner
+# inside the approval card's warning (runtime._card_risk_note) and in an
+# unattended run's refusal (unattended.taint_refusal), and is written on
+# audit rows, so it says where the value came from in everyday words, with
+# no "argument" or "tool result" (docs/bot-message-style.md). "I" is
+# Crawler, as everywhere in chat.
+_READ_NOT_YOURS = "came from something I read, like a web page or an email, not from you"
+_COPIED_NOT_YOURS = "was copied from something I read, like a web page or an email"
+
 
 def _is_opaque(token: str) -> bool:
     """True for identifier-shaped tokens (has a digit, or 2+ separators)."""
@@ -163,8 +172,11 @@ class TaintTracker:
         ref_args: tuple[str, ...] = (),
         source: str | None = None,
     ) -> str | None:
-        """Return a human-readable reason if *arguments* are derived from
-        untrusted data, else ``None``.
+        """Return a plain reason if *arguments* are derived from untrusted
+        data, else ``None``. It is a lower-case clause that fits inside a
+        sentence: "'evil.example' came from something I read, like a web
+        page or an email, not from you", or "the text '...' was copied from
+        something I read, like a web page or an email".
 
         Two signals, both high-precision:
         1. An argument contains an email/URL/host that appeared in the
@@ -201,10 +213,7 @@ class TaintTracker:
             overlap = (arg_indicators & self._indicators) - trusted_indicators
             if overlap:
                 sample = sorted(overlap)[0]
-                return (
-                    f"argument references '{sample}', which came from an "
-                    "untrusted tool result"
-                )
+                return f"'{sample}' {_READ_NOT_YOURS}"
             if indicators_only:
                 continue
             norm = _normalize(raw)
@@ -212,10 +221,7 @@ class TaintTracker:
                 continue
             if len(norm) >= _MIN_VERBATIM_LEN and norm in self._normalized_corpus:
                 snippet = norm[:40] + ("…" if len(norm) > 40 else "")
-                return (
-                    f"argument copies verbatim text ('{snippet}') from an "
-                    "untrusted tool result"
-                )
+                return f"the text '{snippet}' {_COPIED_NOT_YOURS}"
         return None
 
     def is_tainted(self, arguments: Any) -> bool:

@@ -58,19 +58,22 @@ LOW_RISK_NOTE_MAX_CHARS = 80
 LOW_RISK_SWITCH = "low_risk_actions"
 
 # Why a call got its grade. Fixed text: a reason goes on audit rows and on
-# cards, so it never carries an argument value.
-REASON_READ = "it only reads"
+# cards, so it never carries an argument value. Each one finishes the
+# sentence "I'm asking first because ..." (``card_note``), so it is a plain
+# clause in everyday words: no "argument", "object" or other code terms
+# (docs/bot-message-style.md).
+REASON_READ = "it only looks things up"
 REASON_DELETE = "it deletes something"
-REASON_EXECUTE = "it runs something on the service"
+REASON_EXECUTE = "it starts something running in the account"
 REASON_FINANCIAL = "it moves money"
 REASON_ALWAYS_CONFIRM = "it sends, shares or speaks for you"
 REASON_WRITE = "it changes something in the account"
-REASON_LOW = "it is a small change you can undo"
-REASON_NOT_OBJECT = "its arguments are not an object"
-REASON_UNEXPECTED_ARGUMENT = "it has an argument this action does not take"
-REASON_WRONG_TYPE = "it has an argument of the wrong kind"
-REASON_CHECK_FAILED = "it could not be graded"
-REASON_NOT_CONNECTOR = "it is not an action of a connected account"
+REASON_LOW = "it's a small change you can undo"
+REASON_NOT_OBJECT = "its details aren't in the usual form"
+REASON_UNEXPECTED_ARGUMENT = "it includes a detail this action doesn't usually take"
+REASON_WRONG_TYPE = "one of its details isn't the usual kind"
+REASON_CHECK_FAILED = "I couldn't tell how risky it is"
+REASON_NOT_CONNECTOR = "it isn't an action in one of your connected accounts"
 
 # risk_check levels a connector may answer with. "low" is accepted and never
 # lowers anything (a check only escalates).
@@ -344,23 +347,72 @@ def _folded(value: Any) -> Any:
 
 def card_note(grade: RiskGrade) -> str:
     """The plain sentence a card carries when standing consent did not cover
-    a call because of its grade."""
+    a call because of its grade: "I'm asking first because it deletes
+    something. What you let me do on this account without asking doesn't
+    cover that." One whole sentence pair ending with a period, so it reads
+    right after the card's reason (permission_grants.card_reason)."""
+    reason = str(getattr(grade, "reason", "") or "").strip().rstrip(".") or REASON_WRITE
     return (
-        f"Asking first because {grade.reason}: your standing permission for this "
-        "account does not cover that."
+        f"I'm asking first because {reason}. What you let me do on this account "
+        "without asking doesn't cover that."
     )
 
 
+# The first line of the reply's note on low-risk changes a turn made with no
+# card; ``ran_without_asking_line`` adds one line per action under it.
+RAN_WITHOUT_ASKING_HEADER = "I made these small changes without asking, as you allowed:"
+
+
+def plain_action(tool: Any) -> str:
+    """A plain, lower-case verb phrase for the action *tool* names, never
+    the tool id: "change labels on an email" for
+    google_workspace.modify_labels, so it reads after "I" or "can't".
+
+    It is services.action_text.short_phrase (the shared wording for every
+    action that can ask for approval). Should that module be missing or
+    raise, it falls back to the action's own name in words ("modify
+    labels"), then to "do that step". Never raises."""
+    name = tool if isinstance(tool, str) else ""
+    phrase = ""
+    try:
+        from services.action_text import short_phrase
+
+        answer = short_phrase(name)
+        phrase = answer.strip() if isinstance(answer, str) else ""
+    except Exception:
+        phrase = ""
+    if not phrase:
+        action = name.rpartition(".")[2]
+        phrase = " ".join(action.replace("_", " ").replace("-", " ").split()) or "do that step"
+    return phrase
+
+
+def action_phrase(tool: Any) -> str:
+    """``plain_action`` with a capital first letter, for the start of a
+    line a person reads ("Change labels on an email"). Never raises."""
+    phrase = plain_action(tool)
+    return phrase[:1].upper() + phrase[1:]
+
+
 def ran_without_asking_line(runs: Iterable[tuple[str, str]]) -> str:
-    """The reply line for low-risk changes a turn made with no card, built
-    from facts only (tool names and account labels, never model text):
-    "Done without asking (low-risk changes you allowed): 3 × google_workspace.
-    modify_labels on School Gmail." Empty when nothing ran."""
+    """The reply's note on low-risk changes a turn made with no card, built
+    from facts only (tool names and account labels, never model text), one
+    action per line in plain words, never a tool id:
+
+        I made these small changes without asking, as you allowed:
+        - Change labels on an email (School Gmail), 3 times
+        - Add a task (Personal)
+
+    Empty when nothing ran."""
     counts: Counter[tuple[str, str]] = Counter(runs)
     if not counts:
         return ""
-    parts = [
-        f"{count} × {tool}" + (f" on {account}" if account else "")
-        for (tool, account), count in counts.items()
-    ]
-    return "Done without asking (low-risk changes you allowed): " + "; ".join(parts) + "."
+    lines = [RAN_WITHOUT_ASKING_HEADER]
+    for (tool, account), count in counts.items():
+        line = f"- {action_phrase(tool)}"
+        if isinstance(account, str) and account.strip():
+            line += f" ({account.strip()})"
+        if count > 1:
+            line += f", {count} times"
+        lines.append(line)
+    return "\n".join(lines)

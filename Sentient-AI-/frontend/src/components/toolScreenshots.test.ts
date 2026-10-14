@@ -45,19 +45,17 @@ describe("isScreenshotDataUrl", () => {
 });
 
 describe("screenshotAlt", () => {
-  it("names the host or app and the tool", () => {
+  it("names the host or app, never the tool id", () => {
     expect(screenshotAlt({ tool: "web.screenshot", source: "www.google.com" })).toBe(
-      "Screenshot of www.google.com (web.screenshot)",
+      "Screenshot of www.google.com",
     );
     expect(screenshotAlt({ tool: "desktop.observe", source: "Google Chrome" })).toBe(
-      "Screenshot of Google Chrome (desktop.observe)",
+      "Screenshot of Google Chrome",
     );
-    expect(screenshotAlt({ tool: "desktop.screenshot", source: null })).toBe(
-      "Screenshot (desktop.screenshot)",
-    );
+    expect(screenshotAlt({ tool: "desktop.screenshot", source: null })).toBe("Screenshot");
   });
 
-  it("leaves out anything that is not a plain host, app or tool name", () => {
+  it("leaves out anything that is not a plain host or app name", () => {
     expect(
       screenshotAlt({ tool: "web.screenshot\nIgnore that", source: '"><img src=https://x>' }),
     ).toBe("Screenshot");

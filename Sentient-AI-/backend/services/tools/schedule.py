@@ -35,6 +35,7 @@ import structlog
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
+from services.action_text import app_name
 from services.agent.prompt_guard import _INVISIBLE_CHARS
 from services.scheduler.recurrence import (
     ONCE_HORIZON_DAYS,
@@ -107,10 +108,11 @@ _BRIEFING_KEYS = frozenset(
 )
 _RECURRENCE_KEYS = ("freq", "time", "days", "day_of_month", "date")
 _LINE_SEPARATORS = (chr(0x2028), chr(0x2029))
+# How the briefing card names each section it lists.
 _SECTION_WORDS = {
-    "canvas": "Canvas due items",
+    "canvas": "what's due on Canvas",
     "calendar": "today's calendar",
-    "email": "unread important email (sender and subject only)",
+    "email": "your important unread email (only who sent it and the subject)",
 }
 _CHANNEL_NAMES = {"telegram": "Telegram", "slack": "Slack"}
 
@@ -403,6 +405,33 @@ def channel_words(channels: Any) -> str:
     return _join(names)
 
 
+def app_words(tools: Any) -> list[str]:
+    """The apps *tools* work in, as a card names them ("Canvas", "Gmail",
+    "the web"), each once and in order. A task's card says which apps a
+    run may look at and which it must ask before changing; it never shows
+    a tool name. The names come from services.action_text.app_name, so
+    they match every other card. Never raises."""
+    names: list[str] = []
+    for tool in tools if isinstance(tools, (list, tuple)) else ():
+        name = app_name(str(tool))
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def zone_words(name: Any) -> str:
+    """A time zone as a card says it: "New York time" for America/New_York,
+    "UTC" for UTC; "your local time" when there is none. The card's details
+    still show the zone's full name."""
+    if not isinstance(name, str) or not name.strip():
+        return "your local time"
+    name = name.strip()
+    if name.upper() in ("UTC", "ETC/UTC", "GMT", "ETC/GMT", "Z"):
+        return "UTC"
+    place = " ".join(name.rsplit("/", 1)[-1].replace("_", " ").split())
+    return f"{place} time" if place else "your local time"
+
+
 @dataclass
 class Plan:
     """A validated task with its zone resolved and its first run found."""
@@ -601,9 +630,13 @@ class ScheduleToolkit:
 
     def describe(self, action: str, params: Mapping[str, Any], user_id: str) -> Optional[str]:
         """The approval card's sentence, from the (bound) arguments; None
-        when they do not make a valid call."""
+        when they do not make a valid call. It names the task, when it runs
+        (the zone in everyday words: "New York time"), where the result
+        goes, and which apps a run may look at or must ask before changing;
+        the card's details below it show every argument in full, the
+        instructions and the exact zone included."""
         params = dict(params or {})
-        zone = params.get("timezone") if isinstance(params.get("timezone"), str) else "your time zone"
+        zone = zone_words(params.get("timezone"))
         if action == "create":
             spec, refusal = validate_create(params)
             if spec is None or refusal is not None:
@@ -612,32 +645,44 @@ class ScheduleToolkit:
             send = (
                 f"send the result to {where}" if where else "keep the result in the web app"
             )
-            reads = ", ".join(spec.options.get("tools") or []) or "no tools"
-            writes = ", ".join(spec.options.get("write_tools") or []) or "nothing"
+            reads = app_words(spec.options.get("tools"))
+            writes = app_words(spec.options.get("write_tools"))
+            looks = (
+                f"It can look at {_join(reads)}." if reads else "It doesn't look at any of your apps."
+            )
+            changes = (
+                f"Before it changes anything in {_join(writes)}, it asks you."
+                if writes
+                else "It can't change anything."
+            )
             return (
-                f'Run "{spec.label}" {phrase(spec.rule)} ({zone}) and {send}. '
-                f"Reads with: {reads}. Asks you first before: {writes}. Full prompt below."
+                f'Run "{spec.label}" {phrase(spec.rule)} {zone} and {send}. '
+                f"{looks} {changes} The full instructions are below."
             )
         if action == "briefing":
             spec, refusal = validate_briefing(params)
             if spec is None or refusal is not None:
                 return None
             head = (
-                "Change your daily briefing: send it"
+                "Change your briefing so it comes"
                 if self._briefing_exists.get(str(user_id))
                 else "Send you a briefing"
             )
             where = channel_words(spec.channels)
-            parts = [_SECTION_WORDS[s] for s in spec.options.get("sections") or []]
+            parts = [_SECTION_WORDS[s] for s in spec.options.get("sections") or [] if s in _SECTION_WORDS]
             if spec.options.get("topic"):
-                parts.append(f'news on "{spec.options["topic"]}"')
+                parts.append(f'news about "{spec.options["topic"]}"')
             overview = (
-                "; a short AI overview uses your AI provider" if spec.options.get("summary") else ""
+                " Your AI service writes a short summary at the top."
+                if spec.options.get("summary")
+                else ""
             )
             return (
-                f"{head} {phrase(spec.rule)} ({zone})"
+                f"{head} {phrase(spec.rule)} {zone}"
                 + (f" on {where}" if where else " in the web app")
-                + f" with {_join(parts)}. Built from read-only lookups{overview}."
+                + (f" with {_join(parts)}." if parts else ".")
+                + " It only looks things up and never changes anything."
+                + overview
             )
         if action in ("pause", "delete"):
             task_id = params.get("task_id")
@@ -646,14 +691,16 @@ class ScheduleToolkit:
             except (TypeError, ValueError):
                 return None
             label = self._task_labels.get((str(user_id), task_key))
-            name = f'"{label}"' if label else f"task {task_id}"
+            # Without the label bind read, the sentence names no id (the
+            # card's details show it).
+            name = f'the scheduled task "{label}"' if label else "this scheduled task"
             if action == "delete":
-                return f"Delete the scheduled task {name}. Its conversation is kept."
+                return f"Delete {name}. Its past results stay in your chat history."
             if params.get("paused") is True:
-                return f"Pause the scheduled task {name}; it does not run until you resume it."
+                return f"Pause {name}. It won't run until you turn it back on."
             return (
-                f"Resume the scheduled task {name}; its next run is counted from now "
-                "(missed runs are not made up)."
+                f"Turn {name} back on. It runs at its next scheduled time and skips the "
+                "runs it missed."
             )
         return None
 
@@ -925,7 +972,7 @@ def task_row(row: Any) -> dict[str, Any]:
         "id": str(row.id),
         "kind": row.kind,
         "label": row.label,
-        "schedule": describe(rule) if rule is not None else "unreadable schedule",
+        "schedule": describe(rule) if rule is not None else "a schedule Crawler can't read",
         "timezone": row.timezone,
         "status": row.status,
         "next_run_local": (

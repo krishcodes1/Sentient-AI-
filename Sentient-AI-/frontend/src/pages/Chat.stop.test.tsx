@@ -156,7 +156,7 @@ describe("Stop on the chat page", () => {
     });
 
     expect(await screen.findByText(STOPPED)).toBeInTheDocument();
-    expect(screen.queryByText("— stopped")).not.toBeInTheDocument();
+    expect(screen.queryByText("(stopped)")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Stop generating" })).not.toBeInTheDocument();
     expect(turn.signal.aborted).toBe(false);
   });
@@ -172,7 +172,7 @@ describe("Stop on the chat page", () => {
 
     await waitFor(() => expect(turn.signal.aborted).toBe(true));
     // What streamed so far stays, marked as cut short.
-    expect(await screen.findByText("— stopped")).toBeInTheDocument();
+    expect(await screen.findByText("(stopped)")).toBeInTheDocument();
     expect(screen.getByText(/The office hours are/)).toBeInTheDocument();
   });
 

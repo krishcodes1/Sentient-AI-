@@ -432,13 +432,21 @@ async def test_a_checkout_is_one_card_then_a_purchase_from_the_vault(flow):
     assert flow.executor.approval_image(CHECKOUT, pending.arguments, flow.user_id) is None
     assert "error" in await runtime.approve_action(pending.action_id, flow.user_id)
 
-    # The turn the route resumes sees the decision the way it is recorded
-    # in the transcript, and the model answers from it.
+    # The transcript records the decision in plain words; the turn the
+    # route resumes gets the result whole as its last, user-role message
+    # (runtime.approved_call_message), and the model answers from it.
     content, _payload = _render_decision_message(True, CHECKOUT, redact_binary_for_model(result))
+    assert content == "You approved my request to pay for something on a website, and it's done."
     resumed = await flow.chat(
         runtime,
         LLMResponse(content="Bought it: $23.40, order number 8841."),
-        messages=[ASK, {"role": "assistant", "content": content}],
+        messages=[
+            ASK,
+            {
+                "role": "user",
+                "content": runtime.approved_call_message(CHECKOUT, redact_binary_for_model(result)),
+            },
+        ],
     )
     assert resumed.content.startswith("Bought it")
     assert "Order number 8841" in _text(flow.providers[-1].calls)

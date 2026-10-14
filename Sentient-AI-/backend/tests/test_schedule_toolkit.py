@@ -67,7 +67,7 @@ async def test_create_saves_the_task_and_the_first_run(session_factory):
     user, _ = await make_user(session_factory, "create@example.com")
     result = await toolkit(session_factory).execute("create", create_args(), str(user.id))
     assert result["ok"] is True
-    assert result["schedule"] == "Weekdays at 08:00"
+    assert result["schedule"] == "Weekdays at 8:00 AM"
     assert result["next_run_local"] == "Wed 2026-09-30 08:00"  # 08:00 today has just passed
     [row] = await rows(session_factory, user.id)
     assert (row.kind, row.label, row.timezone, row.status, row.source) == (
@@ -269,7 +269,7 @@ async def test_one_briefing_per_user_and_a_second_call_changes_it(session_factor
     user, _ = await make_user(session_factory, "brief@example.com")
     kit = toolkit(session_factory, "America/New_York")
     first = await kit.execute("briefing", {}, str(user.id))
-    assert first["ok"] and first["label"] == BRIEFING_LABEL and first["schedule"] == "Every day at 07:30"
+    assert first["ok"] and first["label"] == BRIEFING_LABEL and first["schedule"] == "Every day at 7:30 AM"
     [row] = await rows(session_factory, user.id)
     assert row.options == {"sections": ["canvas", "calendar"], "topic": None, "summary": False}
     second = await kit.execute(
@@ -309,7 +309,7 @@ async def test_list_cuts_prompts_and_caps_its_rows(session_factory, monkeypatch)
     listed = await kit.execute("list", {}, str(user.id))
     [row] = listed["tasks"]
     assert len(row["prompt"]) == 200 and row["prompt_truncated"] is True
-    assert row["next_run_local"] == "Wed 2026-09-30 08:00" and row["schedule"] == "Weekdays at 08:00"
+    assert row["next_run_local"] == "Wed 2026-09-30 08:00" and row["schedule"] == "Weekdays at 8:00 AM"
     assert listed["timezone"] == "America/New_York"
     for i in range(5):
         await kit.execute("create", create_args(label=f"L{i}", prompt="q" * 1500), str(user.id))
@@ -374,12 +374,21 @@ async def test_precheck_bind_and_the_card_sentence(session_factory):
     bound = await kit.bind("create", args, str(user.id))
     assert bound["timezone"] == "America/New_York"
     assert kit.describe("create", bound, str(user.id)) == (
-        'Run "Canvas summary" every weekday at 08:00 (America/New_York) and send the result '
-        "to Telegram and Slack. Reads with: canvas.get_upcoming. Asks you first before: "
-        "nothing. Full prompt below."
+        'Run "Canvas summary" every weekday at 8:00 AM New York time and send the result '
+        "to Telegram and Slack. It can look at Canvas. It can't change anything. "
+        "The full instructions are below."
     )
     web_only = kit.describe("create", {**bound, "channels": [], "write_tools": ["reminders.create"]}, str(user.id))
-    assert "keep the result in the web app" in web_only and "Asks you first before: reminders.create" in web_only
+    assert "keep the result in the web app" in web_only
+    assert "Before it changes anything in your reminders, it asks you." in web_only
+    # The sentence never shows a tool name, whatever the task may use.
+    many = kit.describe(
+        "create",
+        {**bound, "tools": ["google_workspace.get_messages", "web.search", "canvas.get_upcoming"]},
+        str(user.id),
+    )
+    assert "It can look at Gmail, the web and Canvas." in many
+    assert "_" not in many and "get_" not in many
     refused = await kit.precheck("create", create_args(tools=["desktop.act"]), str(user.id))
     assert refused["rule"] == "tool_not_allowed"
 
@@ -391,12 +400,15 @@ async def test_the_briefing_card_says_change_when_one_exists(session_factory):
     args = {"freq": "weekdays", "sections": ["canvas", "calendar", "email"], "topic": "AI rules", "summary": True}
     bound = await kit.bind("briefing", args, str(user.id))
     first = kit.describe("briefing", bound, str(user.id))
-    assert first.startswith("Send you a briefing every weekday at 07:30 (America/New_York) on Telegram and Slack")
-    assert "sender and subject only" in first and 'news on "AI rules"' in first
-    assert first.endswith("Built from read-only lookups; a short AI overview uses your AI provider.")
+    assert first.startswith("Send you a briefing every weekday at 7:30 AM New York time on Telegram and Slack")
+    assert "only who sent it and the subject" in first and 'news about "AI rules"' in first
+    assert first.endswith(
+        "It only looks things up and never changes anything. "
+        "Your AI service writes a short summary at the top."
+    )
     await kit.execute("briefing", bound, str(user.id))
     again = kit.describe("briefing", await kit.bind("briefing", args, str(user.id)), str(user.id))
-    assert again.startswith("Change your daily briefing: send it every weekday")
+    assert again.startswith("Change your briefing so it comes every weekday")
 
 
 @pytest.mark.asyncio
@@ -407,7 +419,7 @@ async def test_pause_and_delete_cards_name_the_task(session_factory):
     params = {"task_id": made["task_id"]}
     await kit.bind("delete", params, str(user.id))
     assert kit.describe("delete", params, str(user.id)) == (
-        'Delete the scheduled task "Canvas summary". Its conversation is kept.'
+        'Delete the scheduled task "Canvas summary". Its past results stay in your chat history.'
     )
     assert (await kit.precheck("delete", {"task_id": str(uuid.uuid4())}, str(user.id)))["not_found"]
     assert (await kit.precheck("pause", {"task_id": made["task_id"]}, str(user.id)))["ok"] is False

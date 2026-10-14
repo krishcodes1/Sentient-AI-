@@ -2,15 +2,27 @@
  * Tests for the approval-card helpers: shownArguments leaves the backend's reserved key out of a
  * desktop.act, browser.act or browser.checkout card and shows every other tool's arguments whole;
  * purchaseCard reads a checkout card's `_checkout` facts; approvalImage accepts only a base64
- * raster data URL.
+ * raster data URL; approvalDetails lists every value in everyday words (the server's `details`, or
+ * the arguments labelled here for an older server) and stepLabel names a finished step plainly.
  *
  * Why it exists: Guards against a reserved key cluttering the card a person approves from, against
  * the rule spreading to tools where a key starting with "_" could be a real argument the person
- * would then approve without seeing, and against anything but an image reaching an <img>.
+ * would then approve without seeing, and against anything but an image reaching an <img>. The
+ * person approving is not a developer (docs/bot-message-style.md), so the card must never fall
+ * back to JSON or a tool id, and must still show every value whole (spec F3).
  */
 
 import { describe, expect, it } from "vitest";
-import { approvalImage, purchaseCard, shownArguments } from "@/pages/approvalArguments";
+import {
+  approvalDetails,
+  approvalImage,
+  humanizeKey,
+  isDetailsCard,
+  labelArguments,
+  purchaseCard,
+  shownArguments,
+  stepLabel,
+} from "@/pages/approvalArguments";
 import type { PendingApproval } from "@/types";
 
 function approval(tool_name: string, args: Record<string, unknown>): PendingApproval {
@@ -134,5 +146,87 @@ describe("approvalImage", () => {
     undefined,
   ])("rejects %s", (image) => {
     expect(approvalImage({ ...approval("browser.checkout", {}), image })).toBeNull();
+  });
+});
+
+describe("humanizeKey", () => {
+  it("turns a key into a sentence-case label", () => {
+    expect(humanizeKey("subject")).toBe("Subject");
+    expect(humanizeKey("message_id")).toBe("Message ID");
+    expect(humanizeKey("sendAt")).toBe("Send at");
+    expect(humanizeKey("page_url")).toBe("Page URL");
+    expect(humanizeKey("__")).toBe("Details");
+  });
+});
+
+describe("labelArguments", () => {
+  it("labels every value in order, keeping every line and adding no JSON", () => {
+    const details = labelArguments({
+      to: "priya@acme.com",
+      body: "Hi Priya,\nare we still on for noon?",
+      urgent: false,
+      cc: ["a@acme.com", "b@acme.com"],
+      event: { start: "2026-10-15T12:00", attendees: [{ email: "a@acme.com" }] },
+      note: "",
+      later: null,
+    });
+    expect(details).toEqual([
+      { label: "To", value: "priya@acme.com" },
+      { label: "Body", value: "Hi Priya,\nare we still on for noon?" },
+      { label: "Urgent", value: "No" },
+      { label: "CC", value: "a@acme.com\nb@acme.com" },
+      {
+        label: "Event",
+        value: "Start: 2026-10-15T12:00\nAttendees:\n   1. Email: a@acme.com",
+      },
+      { label: "Note", value: "(empty)" },
+      { label: "Later", value: "(none)" },
+    ]);
+    const text = details.map((d) => `${d.label} ${d.value}`).join(" ");
+    expect(text).not.toMatch(/[{}"]/);
+  });
+
+  it("keeps a long value whole", () => {
+    const long = "word ".repeat(2000).trim();
+    expect(labelArguments({ body: long })[0].value).toBe(long);
+  });
+});
+
+describe("approvalDetails", () => {
+  it("uses the server's labelled details when it sent them", () => {
+    const sent = [{ label: "Email ID", value: "m-1" }];
+    expect(approvalDetails({ ...approval("google_workspace.trash_email", { message_id: "m-1" }), details: sent })).toBe(
+      sent,
+    );
+  });
+
+  it("labels the arguments itself for an older server, leaving reserved keys out", () => {
+    const old = approval("desktop.act", { action: "type", text: "hello", _screen: { app: "Notepad" } });
+    expect(approvalDetails(old)).toEqual([
+      { label: "Action", value: "type" },
+      { label: "Text", value: "hello" },
+    ]);
+    expect(approvalDetails({ ...old, details: [] })).toHaveLength(2);
+    expect(approvalDetails({ ...old, details: [{ label: 1 }] as never })).toHaveLength(2);
+  });
+});
+
+describe("isDetailsCard", () => {
+  it("lists values on every card but a purchase and a browser.act step", () => {
+    expect(isDetailsCard(approval("google_workspace.send_email", {}))).toBe(true);
+    expect(isDetailsCard(approval("desktop.act", {}))).toBe(true);
+    expect(isDetailsCard(approval("browser.checkout", {}))).toBe(false);
+    expect(isDetailsCard(approval("browser.act", {}))).toBe(false);
+  });
+});
+
+describe("stepLabel", () => {
+  it("names a finished step by the app it used, never its tool id", () => {
+    expect(stepLabel("web.search")).toBe("Used the web");
+    expect(stepLabel("google_workspace.send_email")).toBe("Used your Google account");
+    expect(stepLabel("canvas__1f2e3d4c.get_courses")).toBe("Used Canvas");
+    expect(stepLabel("tools.find")).toBe("Looked up what Crawler can do");
+    expect(stepLabel("spotify_player.play")).toBe("Used Spotify player");
+    expect(stepLabel("")).toBe("Finished a step");
   });
 });

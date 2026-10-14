@@ -41,6 +41,6 @@ CAPABILITY = Capability(
     tools=("watch.",),
     default_enabled=False,
     risk="medium",
-    when_denied="Page watching is turned off. The owner can turn it on in Settings → Permissions.",
+    when_denied="Watching pages for changes is turned off. You can turn it on in Settings → Permissions.",
     availability=availability,
 )

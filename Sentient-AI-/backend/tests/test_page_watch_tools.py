@@ -332,7 +332,7 @@ async def test_a_check_refuses_a_name_that_now_resolves_to_a_private_address(mon
         requests.append(str(request.url))
         return httpx.Response(200, html="<p>internal</p>")
 
-    with pytest.raises(WatchFetchError, match="network security policy"):
+    with pytest.raises(WatchFetchError, match="not allowed to open that address"):
         await fetch_snapshot(PAGE, transport=httpx.MockTransport(handler))
     assert requests == []
 
@@ -702,7 +702,7 @@ async def test_fetch_refuses_a_redirect_to_a_private_address():
 
     with pytest.raises(WatchFetchError) as info:
         await fetch_snapshot(PAGE, resolver=PUBLIC_DNS, transport=_transport(handler))
-    assert "network security policy" in str(info.value)
+    assert "not allowed to open that address" in str(info.value)
     assert "127.0.0.1" not in str(info.value)
 
 
@@ -883,8 +883,15 @@ def test_the_card_sentence_names_label_host_and_interval():
     assert sentence is not None
     assert '"Fall schedule"' in sentence and "schedule.example.edu" in sentence
     assert "every 90 minutes" in sentence and "Telegram" in sentence
+    assert sentence.endswith("The full address is below.")
+    hourly = ex.describe_approval(
+        "watch.create", {"url": PAGE, "label": "Fall schedule", "interval_minutes": 120}, "u1"
+    )
+    assert hourly is not None and "every 2 hours" in hourly
     wid = str(uuid.uuid4())
-    assert wid in ex.describe_approval("watch.delete", {"watch_id": wid}, "u1")
+    # The delete card's sentence shows no id (the card's details do).
+    deleted = ex.describe_approval("watch.delete", {"watch_id": wid}, "u1")
+    assert deleted == "Stop checking one of your watched pages for changes."
     # Arguments that could not run get the runtime's generic line.
     assert ex.describe_approval("watch.create", {"url": "ftp://x/y", "label": "P"}, "u1") is None
     assert ex.describe_approval("watch.delete", {"watch_id": "drop table"}, "u1") is None

@@ -190,8 +190,8 @@ async def test_forget_card_states_facts_and_runs_only_approved(session_factory):
     assert await ex.precheck_approval("files.forget", {"file_id": info.id}, str(user.id)) is None
     sentence = ex.describe_approval("files.forget", {"file_id": info.id}, str(user.id))
     assert sentence == (
-        'Forget "syllabus.pdf" (12 pages): delete the text Crawler extracted from it. '
-        "Your original file is not touched."
+        "Forget \"syllabus.pdf\" (12 pages). I'll delete the text I read from it. "
+        "Your own copy of the file stays as it is."
     )
     refused = await ex.execute("files.forget", {"file_id": info.id}, str(user.id))
     assert refused["ok"] is False and refused["requires_approval"] is True

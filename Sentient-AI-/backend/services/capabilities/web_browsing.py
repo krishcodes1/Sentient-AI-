@@ -18,5 +18,5 @@ CAPABILITY = Capability(
     tools=("web.search", "web.fetch_page", "web.research"),
     default_enabled=True,
     risk="low",
-    when_denied="Web browsing is turned off. The owner can turn it on in Settings → Permissions.",
+    when_denied="Web browsing is turned off. You can turn it on in Settings → Permissions.",
 )

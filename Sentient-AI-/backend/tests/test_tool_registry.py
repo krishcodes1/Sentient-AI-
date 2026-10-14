@@ -168,7 +168,7 @@ async def test_adapter_default_denies_unknown_tools():
 async def test_adapter_block_reason_and_policy_name():
     adapter = RuntimePermissionAdapter()
     reason = await adapter.get_block_reason("u", "robinhood.execute_trade", {})
-    assert "block" in reason.lower()
+    assert "money" in reason.lower()
     assert await adapter.get_policy_name("u", "canvas.get_courses") == "canvas:read"
     assert await adapter.get_policy_name("u", "malformed") == "default-deny"
 

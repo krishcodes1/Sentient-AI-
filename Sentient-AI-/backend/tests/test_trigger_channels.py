@@ -123,8 +123,8 @@ async def test_triggers_is_registered_with_its_buttons_and_in_help(backend):
     assert "/triggers" in service._commands and {"tgp:", "tgr:"} <= set(service._callback_routes)
     await service._handle_help(LINKED)
     help_text = texts(sent)[-1]
-    assert "/triggers — your app triggers" in help_text
-    assert help_text.rstrip().endswith("/help — this message")
+    assert "/triggers: what I do when something happens in your apps" in help_text
+    assert help_text.rstrip().endswith("/help: show this list")
     await service._client.aclose()
 
 
@@ -136,9 +136,9 @@ async def test_the_list_has_numbers_details_and_a_button_per_trigger(session_fac
     service, sent = telegram(str(user.id))
     await service._handle_message(telegram_dm(LINKED, "/triggers"))
     [(method, params)] = sent
-    assert "1. Canvas posts — a new Canvas announcement, messages you" in params["text"]
-    assert "2. Prof mail — a new email, runs a task · paused" in params["text"]
-    assert "runs today 0/6" in params["text"]
+    assert "1. Canvas posts: a new Canvas announcement, messages you" in params["text"]
+    assert "2. Prof mail: a new email, runs a task · paused" in params["text"]
+    assert "ran its task 0 of 6 times today" in params["text"]
     buttons = [b["callback_data"] for row in params["reply_markup"]["inline_keyboard"] for b in row]
     assert buttons == [f"tgp:{first}", f"tgr:{second}"]
     assert all(len(b) <= 64 for b in buttons)
@@ -160,7 +160,7 @@ async def test_last_fired_shows_in_the_users_own_time_zone(session_factory, back
     await service._handle_message(telegram_dm(LINKED, "/triggers"))
     [(_method, params)] = sent
     # 12:00 UTC is 08:00 in New York (EDT); never the raw ISO string.
-    assert "last fired Wed Sep 30 08:00" in params["text"]
+    assert "last went off Wed Sep 30 08:00" in params["text"]
     assert "2026-09-30T" not in params["text"]
     await service._client.aclose()
     # Without a saved zone, this computer's zone (never a UTC ISO string).
@@ -182,7 +182,10 @@ async def test_text_fallbacks_pause_resume_and_delete_with_a_yes(session_factory
     assert texts(sent)[-1].startswith("Resumed “Canvas posts”")
     assert await status_of(session_factory, first) == "active"
     await service._handle_message(telegram_dm(LINKED, "/triggers delete 1"))
-    assert texts(sent)[-1] == "Delete “Canvas posts” and its queued events? Send /triggers delete 1 yes to confirm."
+    assert texts(sent)[-1] == (
+        "Delete “Canvas posts”? Anything it found that hasn't been sent yet goes too. "
+        "Send /triggers delete 1 yes to confirm."
+    )
     assert await status_of(session_factory, first) == "active"
     await service._handle_message(telegram_dm(LINKED, "/triggers delete 1 yes"))
     assert texts(sent)[-1].startswith("Deleted “Canvas posts”")
@@ -235,7 +238,7 @@ async def test_without_a_backend_the_command_says_so(session_factory):
     trigger_commands.configure(None)
     service, sent = telegram("u")
     await service._handle_message(telegram_dm(LINKED, "/triggers"))
-    assert texts(sent)[-1] == "Triggers are not available right now."
+    assert texts(sent)[-1] == "Triggers aren't available right now."
     await service._client.aclose()
 
 
@@ -307,7 +310,7 @@ async def test_slack_keywords_list_pause_resume_and_delete(session_factory, back
     # keywords (grants) may follow it.
     assert names.index("_keyword_triggers") > names.index("_keyword_timezone")
     await say(channel, "triggers", 1)
-    assert "1. Canvas posts — a new Canvas announcement" in posted[-1] and 'Reply "triggers pause 2"' in posted[-1]
+    assert "1. Canvas posts: a new Canvas announcement" in posted[-1] and 'Reply "triggers pause 2"' in posted[-1]
     await say(channel, "Triggers Pause 1", 2)
     assert posted[-1].startswith("Paused") and await status_of(session_factory, first) == "paused"
     await say(channel, "triggers resume 1", 3)

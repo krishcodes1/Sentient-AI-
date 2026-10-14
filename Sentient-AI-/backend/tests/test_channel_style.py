@@ -94,8 +94,16 @@ def test_the_block_is_fixed_well_formed_text():
         "anything they asked you to write comes in full",
         "approvals, safety and citing sources",
         "If tutor mode is",
+        # Plain words: a person on a phone never sees tool names or code
+        # (docs/bot-message-style.md).
+        "Never name a tool or function",
+        "never show ids,\n  arguments, settings keys, JSON or code",
+        "I need to add a web browser first.",
+        "Never use em dashes or en dashes",
     ):
         assert rule in block
+    # The block itself shows no tool id or call syntax for the model to copy.
+    assert "system." not in block and "name=" not in block
     # Replies are rendered as Telegram formatting, so nothing forbids bold.
     assert "no Markdown" not in block
 

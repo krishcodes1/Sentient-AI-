@@ -279,16 +279,17 @@ async def test_a_run_sees_the_event_only_as_untrusted_data_and_is_fenced(session
     # The draft: a card with the trigger's origin, the long TTL and the taint note.
     [card] = await env.store.list_pending(str(env.user.id))
     assert card.tool_name == "google_workspace.create_draft" and card.origin == f"trigger:{env.trigger_id}"
-    assert card.risk_note.startswith('Proposed by your trigger "Prof emails" while you were away.')
-    assert "shaped by external content" in card.risk_note
+    assert card.risk_note.startswith('Your trigger "Prof emails" suggested this while you were away.')
+    assert "Check this before you approve: " in card.risk_note
     minutes = (datetime.fromisoformat(card.expires_at) - datetime.fromisoformat(card.created_at)).total_seconds() / 60
     assert round(minutes) == 180
 
     # The owner's message: the result, the pending note.
     [text] = env.outbox.sent
     assert text.startswith("⚡ Prof emails")
-    assert "1 action is waiting for your approval (/pending; Slack: reply \"pending\")." in text
-    assert "Not run (outside this trigger's tools): " in text
+    assert '1 action is waiting for your approval. Send /pending in Telegram or "pending" in Slack to see it.' in text
+    assert "because this trigger isn't set up to do that." in text
+    assert "Not run (outside" not in text and "send_email" not in text
 
 
 @pytest.mark.asyncio
@@ -317,7 +318,7 @@ async def test_approving_the_runs_card_runs_that_call_and_resumes_nothing(sessio
     )
     app = SimpleNamespace(state=SimpleNamespace(agent_runtime=approver, mcp_catalog=None, installation=None))
     outcome = await build_decision_applier(app, session_factory)(str(env.user.id), card.action_id, True)
-    assert outcome["status"] == "approved" and outcome["summary"] == "Done: google_workspace.create_draft ran."
+    assert outcome["status"] == "approved" and outcome["summary"] == "Done. It went through."
     assert [(c["tool"], c["approved"]) for c in env.executor.calls] == [("google_workspace.create_draft", True)]
     async with session_factory() as session:
         contents = [
@@ -328,7 +329,7 @@ async def test_approving_the_runs_card_runs_that_call_and_resumes_nothing(sessio
             .scalars()
             .all()
         ]
-    assert "Done: google_workspace.create_draft ran." in contents
+    assert "Done. It went through." in contents
 
 
 @pytest.mark.asyncio
@@ -342,7 +343,7 @@ async def test_a_provider_that_is_not_set_up_sends_the_notice_with_a_line(sessio
     await env.service.wait_idle()
     [text] = env.outbox.sent
     assert text.startswith("\U0001f4ec Prof emails: new email from Prof Smith (univ․edu): Office hours moved")
-    assert text.endswith("Crawler could not run your task: the AI provider is not set up.")
+    assert text.endswith("I couldn't run your task because no AI service is connected yet.")
     assert "Reply to confirm" not in text
 
 

@@ -417,7 +417,8 @@ export async function sendMessage(
 export interface StreamHandlers {
   onUserMessage?: (message: Message) => void;
   onContentDelta?: (text: string) => void;
-  onToolCall?: (name: string) => void;
+  /** `phrase` is the step's plain progress line ("Searching the web…") when the server sent one. */
+  onToolCall?: (name: string, phrase?: string) => void;
   onToolResult?: (name: string) => void;
   onPendingApproval?: (approval: PendingApproval) => void;
   onBlocked?: (blocked: BlockedAction) => void;
@@ -511,7 +512,11 @@ export async function streamMessage(
         handlers.onContentDelta?.(String(data.text ?? ""));
         break;
       case "tool_call":
-        handlers.onToolCall?.(String(data.name ?? ""));
+        if (typeof data.phrase === "string" && data.phrase) {
+          handlers.onToolCall?.(String(data.name ?? ""), data.phrase);
+        } else {
+          handlers.onToolCall?.(String(data.name ?? ""));
+        }
         break;
       case "tool_result":
         handlers.onToolResult?.(String(data.name ?? ""));
@@ -526,6 +531,7 @@ export async function streamMessage(
           tool_name: String(data.tool_name ?? data.tool ?? ""),
           reason: String(data.reason ?? ""),
           policy: String(data.policy ?? ""),
+          ...(typeof data.phrase === "string" && data.phrase ? { phrase: data.phrase } : {}),
         });
         break;
       case "done":

@@ -13,7 +13,7 @@ import pytest
 from core.config import settings
 from services.agent.approvals import InMemoryApprovalStore
 from services.agent.providers import LLMResponse, ToolCall
-from services.agent.runtime import AgentRuntime, PermissionEngine, Tool
+from services.agent.runtime import _CAP_REPLIES, GENERIC_CLOSING_LINE, AgentRuntime, PermissionEngine, Tool
 from tests.conftest import use_provider
 from tests.test_agent_runtime_vision import RecordingAudit, RecordingGuard, RecordingProvider
 
@@ -186,7 +186,7 @@ async def test_non_browser_rounds_keep_the_generic_closing_line():
     runtime = runtime_with(provider, executor)
     await runtime.chat(messages=[{"role": "user", "content": "go"}], tools=[WEB_TOOL], user_id="u1")
     text = provider.calls[1]["messages"][-1]["content"]
-    assert text.rstrip().endswith("answer the user's most recent request.") and "<task_facts>" not in text
+    assert text.rstrip().endswith(GENERIC_CLOSING_LINE) and "<task_facts>" not in text
 
 
 @pytest.mark.asyncio
@@ -220,13 +220,16 @@ def test_task_facts_block_is_capped_at_two_thousand_chars():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cap", ["actions", "spend"])
 async def test_a_cap_result_ends_the_turn_with_a_continue_question(cap):
+    # The toolkit's hint is written for the model ("Ask the person ..."), so
+    # the reply is fixed plain words per cap and shows no task id.
     hint = f"This task hit the {cap} cap. Ask the person whether to continue."
     executor = RecordingExecutor([{"ok": False, "cap": cap, "resume_hint": hint}])
     provider = RecordingProvider([call("browser.read", action="open", url="http://site/"), LLMResponse(content="never")])
     runtime = runtime_with(provider, executor)
     response = await runtime.chat(messages=[{"role": "user", "content": "go"}], tools=[BROWSER_TOOL], user_id="u1", task_id="msg-1")
     assert len(provider.calls) == 1  # no follow-up round
-    assert response.content == f"{hint}\n\nContinue? (task msg-1)"
+    assert response.content == f'{_CAP_REPLIES[cap]}\n\nWant me to keep going? Send "continue".'
+    assert "msg-1" not in response.content and "Ask the person" not in response.content
 
 
 @pytest.mark.asyncio
@@ -239,7 +242,16 @@ async def test_needs_human_ends_the_turn_and_keeps_the_picture_for_the_channel(k
     runtime = runtime_with(provider, executor)
     response = await runtime.chat(messages=[{"role": "user", "content": "go"}], tools=[BROWSER_TOOL], user_id="u1")
     assert len(provider.calls) == 1
-    assert response.content == "I need you to take over in the browser: Please solve the puzzle (http://site/captcha). Tell me when it is done."
+    # A detected challenge is named in fixed plain words; only a handoff the
+    # model asked for shows its own reason.
+    what = {
+        "captcha": "the site wants you to prove you're a person",
+        "mfa": "the site wants you to confirm your sign-in",
+        "otp": "the site is asking for a one-time code",
+        "unusual_traffic": "the site wants a person to check in",
+        "requested": "Please solve the puzzle",
+    }[kind]
+    assert response.content == f"I need you to take over in the browser: {what} (http://site/captcha). Tell me when you're done."
     assert response.tool_calls[0]["result"]["needs_human"]["user_image"] == pixel
 
 
@@ -360,7 +372,12 @@ async def test_the_spend_cap_trips_at_claude_sonnet_5s_real_spend():
         ("anthropic", "claude-sonnet-5"), {"input_tokens": 25_000, "output_tokens": 1_000}
     )
     assert browser.ran == 5
-    assert response.content.startswith("This task has spent about $0.30 (the cap is $0.25).")
+    # The toolkit's hint (for the model) carries the amount; the person
+    # reads the fixed spend sentence.
+    assert response.tool_calls[-1]["result"]["resume_hint"].startswith(
+        "This task has spent about $0.30 (the cap is $0.25)."
+    )
+    assert response.content.startswith(_CAP_REPLIES["spend"])
     # The round whose read was refused was billed too, and is recorded.
     assert browser.task.spend_usd == pytest.approx(0.36)
 
@@ -388,7 +405,8 @@ async def test_the_spend_cap_trips_early_on_a_model_with_no_price():
     )
     assert browser.ran == 1
     assert browser.task.spend_usd >= 0.25
-    assert response.content.startswith("This task has spent about $")
+    assert response.tool_calls[-1]["result"]["resume_hint"].startswith("This task has spent about $")
+    assert response.content.startswith(_CAP_REPLIES["spend"])
 
 
 @pytest.mark.asyncio

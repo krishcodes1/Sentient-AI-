@@ -461,9 +461,9 @@ async def test_describe_approval_uses_the_toolkits_facts(backend_ready):
     )
     assert ex.describe_approval(
         "desktop.act", {"action": "type", "ref": subject, "text": "x" * 42}, U1
-    ) == 'Type 42 characters into "Subject" in Mail'
+    ) == 'Type 42 characters into "Subject" in Mail. The full text is below.'
     assert ex.describe_approval("desktop.act", {"action": "key", "keys": "cmd+s"}, U1) == (
-        "Press cmd+s in Mail"
+        "Press Cmd+S in Mail"
     )
     assert ex.describe_approval("desktop.act", {"action": "open_app", "app": "Calculator"}, U1) == (
         "Open Calculator"
@@ -618,7 +618,10 @@ async def test_a_describer_that_fails_falls_back_to_the_generic_reason():
         user_id=U1,
     )
     [pending] = response.pending_approvals
-    assert pending.reason == "Tool 'desktop.act' requires explicit user approval"
+    # The describer failed, so the card says what the call will do in plain
+    # words built from its own arguments, never the tool id.
+    assert pending.reason == "Scroll down in an app on your computer"
+    assert "desktop.act" not in pending.reason
 
 
 # ── result budget ────────────────────────────────────────────────────────────
@@ -701,7 +704,7 @@ def test_the_resumed_turn_after_an_approved_act_is_told_to_read_before_acting():
         "then": {"ok": True, "app": "Calendar", "outline": outline, "refs": 129},
     }
     message = runtime.approved_call_message("desktop.act", result)
-    assert message.startswith("[Approved] Executed 'desktop.act'.")
+    assert message.startswith("The owner approved 'desktop.act' and it ran;")
     assert '<tool_result_' in message and 'name="desktop.act"' in message
     # Whole, within the desktop.act budget (the transcript row would have
     # cut it at 2000 characters): the last ref is still there.

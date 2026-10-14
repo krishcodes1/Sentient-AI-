@@ -57,6 +57,7 @@ from sqlalchemy import update
 from core.config import settings
 from core.network_security import check_websocket_policy
 from models.slack_link import SlackChannelLink
+from services import action_text
 from services.agent import cancel as agent_cancel
 from services.connectors.base import AuthenticationError, ConnectorError
 from services.connectors.slack import SlackConnector
@@ -78,9 +79,10 @@ LINK_CODE_TTL_MINUTES = 10
 _LINK_KEY_DOMAIN = b"sentientai.slack.link-code.v1:"
 
 # Longest text per reply message (Slack advises 4,000 characters) and per
-# approval card part (a section block's text is capped at 3,000).
+# approval card part (a section block's text is capped at 3,000, _SECTION_MAX).
 TEXT_CHUNK = 3900
 SECTION_CHARS = 2900
+_SECTION_MAX = 3000
 # Pause between the messages of one multi-part reply: Slack allows about one
 # message per second per channel.
 POST_INTERVAL_S = 1.0
@@ -206,33 +208,62 @@ def link_code_expiry() -> datetime:
 # slack_escape, slack_unescape and the mrkdwn rendering of the model's
 # replies live in slack_format.py.
 
-# How the DM tells the person to list their waiting approval cards.
-_PENDING_HINT = "send pending"
+# How the DM tells the person to list their waiting approval cards. It
+# reads after "or" in a reply note ('or send "pending" to see it again');
+# the quotes mark the word to send, so it never reads as broken English.
+_PENDING_HINT = 'send "pending"'
+
+# What a card part that did not arrive tells the person to do instead.
+_RETRY_HINT = 'Send "pending" to get it again, or answer in the web app.'
 
 
 def _turn_notes(outcome: dict[str, Any]) -> str:
-    """What the turn left for the person (cards.turn_notes), and a note for
-    screenshots a text-only DM cannot show. Each note starts with a blank
-    line; empty when there is none."""
-    notes = cards.turn_notes(outcome, where="DM", pending_hint=_PENDING_HINT)
+    """What the turn left for the person (cards.turn_notes: the requests
+    waiting on their OK and the steps their safety settings skipped, in
+    plain words), and a note for screenshots a text-only Slack chat cannot
+    show. Each note starts with a blank line; empty when there is none."""
+    notes = cards.turn_notes(outcome, pending_hint=_PENDING_HINT)
     images = outcome.get("images") or []
     if images:
         count = len(images)
-        noun = "screenshot" if count == 1 else "screenshots"
-        notes += f"\n\n({count} {noun} not shown: Slack DMs carry text only.)"
+        noun = "a screenshot" if count == 1 else f"{count} screenshots"
+        notes += f"\n\n(I took {noun}, but I can't show pictures here in Slack.)"
     return notes
 
 
 def _section(text: str) -> dict[str, Any]:
     """A section block showing *text* literally: plain text (no markup) with
-    emoji conversion off, so an argument such as ":x:" reads as typed and the
-    approver sees exactly what will run."""
+    emoji conversion off, so a value such as ":x:" reads as typed and the
+    approver sees exactly what will be used."""
     return {"type": "section", "text": {"type": "plain_text", "text": text, "emoji": False}}
 
 
+def _card_sentence(action: Any) -> str:
+    """The plain sentence an approval card starts with and its notification
+    shows ("Send an email to priya@acme.com from your Gmail"): the reason
+    the runtime wrote for the card (services/action_text.py, or the tool's
+    own describer), on one line so no part of it can pass for a line of
+    the details. A card with no usable reason gets the sentence
+    action_text builds from its arguments. Never names the tool, never
+    raises."""
+    reason = getattr(action, "reason", None)
+    sentence = " ".join(reason.split()) if isinstance(reason, str) else ""
+    if sentence:
+        return sentence
+    try:
+        built = action_text.approval_sentence(
+            str(getattr(action, "tool_name", "") or ""), getattr(action, "arguments", None)
+        )
+    except Exception:
+        built = ""
+    if isinstance(built, str) and built.strip():
+        return " ".join(built.split())
+    return action_text.GENERIC_SENTENCE
+
+
 def _decision_buttons(action_id: str, low_risk_account: Optional[str] = None) -> dict[str, Any]:
-    """Approve and Deny, plus "Allow low-risk on <account> · 7 days" when the
-    card offers a low-risk grant."""
+    """Approve and Deny, plus "Allow small changes on <account> for 7 days"
+    when the card offers a low-risk grant (permission tiers)."""
     extra: list[dict[str, Any]] = []
     if low_risk_account:
         label = " ".join("".join(c if c.isprintable() else " " for c in low_risk_account).split())
@@ -242,7 +273,10 @@ def _decision_buttons(action_id: str, low_risk_account: Optional[str] = None) ->
             {
                 "type": "button",
                 "action_id": ACTION_APPROVE_LOW_RISK,
-                "text": {"type": "plain_text", "text": f"Allow low-risk on {label} · 7 days"},
+                "text": {
+                    "type": "plain_text",
+                    "text": f"Allow small changes on {label} for 7 days",
+                },
                 "value": action_id,
             }
         )
@@ -400,7 +434,7 @@ class ButtonPress:
     action_id: str
     approved: bool
     blocks: tuple[dict[str, Any], ...]
-    # "low_risk" for the "Allow low-risk" button (permission tiers).
+    # "low_risk" for the "Allow small changes" button (permission tiers).
     remember: Optional[str] = None
 
 
@@ -416,8 +450,22 @@ _KEYWORD_HANDLER_PREFIX = "_keyword_"
 
 # top10:voice_notes: what a linked sender's audio clip gets instead of a turn.
 SLACK_AUDIO_REPLY = (
-    "🎤 I can't listen to Slack audio clips yet. Please type your message — voice "
-    "notes work in Telegram when the owner has turned them on."
+    "🎤 I can't listen to audio clips in Slack yet, so please type your message. "
+    "Voice notes work in Telegram once they're turned on in Settings → Permissions."
+)
+
+# The reply to "new".
+FRESH_START_TEXT = "Fresh start. Your next message starts a new conversation."
+# What the DM says when a turn failed in a way the person can't fix (the
+# details go to the server log, never to the chat).
+_TURN_FAILED_TEXT = "Something went wrong on my side, so I couldn't finish that. Please try again."
+# What the DM says when a turn ended with no text and no notes.
+_NO_REPLY_TEXT = "I didn't come up with a reply that time. Please ask again."
+# What the DM says when a button press could not be applied (the details
+# go to the server log).
+_DECISION_FAILED_TEXT = (
+    "Something went wrong and your answer didn't go through. Tap the button again, "
+    "or answer in the web app."
 )
 
 _FILES_HOST = "files.slack.com"
@@ -1032,7 +1080,7 @@ class SlackChannel:
         """Apply a tutor command (no model call; off the turn lock, so a turn
         running meanwhile merges its own state over this one when it saves)."""
         if self.tutor is None:
-            await self._post_text(channel, "Tutor mode is not available right now.")
+            await self._post_text(channel, "Tutor mode isn't available right now.")
             return
         try:
             outcome = await self.tutor(
@@ -1040,7 +1088,7 @@ class SlackChannel:
             )
         except Exception as exc:
             logger.warning("slack_tutor_failed", error_type=type(exc).__name__)
-            outcome = {"error": "Tutor mode could not be changed right now."}
+            outcome = {"error": "I couldn't change tutor mode just now. Please try again."}
         if outcome.get("error"):
             if fresh:
                 self._fresh = True
@@ -1049,7 +1097,7 @@ class SlackChannel:
         await self._post_text(channel, str(outcome.get("reply") or "")[:TEXT_CHUNK])
 
     async def _say_fresh_start(self, channel: str) -> None:
-        await self._post_text(channel, "Fresh start: your next message begins a new conversation.")
+        await self._post_text(channel, FRESH_START_TEXT)
 
     # ── audio clips (top10:voice_notes) ──────────────────────────────────
 
@@ -1101,7 +1149,7 @@ class SlackChannel:
                 gate = getattr(self.chat, "file_gate", None)
                 refusal = await gate() if callable(gate) else None
                 if refusal is None and not takes_keyword(self.chat, "files"):
-                    refusal = "This app can't read files yet."
+                    refusal = "I can't read files here yet."
                 if refusal is not None:
                     await self._post_text(channel, f"⚠️ {refusal}"[:TEXT_CHUNK])
                     return
@@ -1122,9 +1170,11 @@ class SlackChannel:
                         )
                     except ConnectorError as exc:
                         logger.warning("slack_file_download_failed", error_type=type(exc).__name__)
-                        await self._post_text(
-                            channel, f"⚠️ I couldn't read {name}: Slack did not hand the file over."[:TEXT_CHUNK]
+                        refused = (
+                            f"⚠️ I couldn't read {name}: Slack wouldn't let me download it. "
+                            "Try sending it again."
                         )
+                        await self._post_text(channel, refused[:TEXT_CHUNK])
                         return
                     if body.truncated:
                         await self._post_text(
@@ -1150,7 +1200,7 @@ class SlackChannel:
                     logger.error(
                         "slack_chat_failed", connector_id=self.connector_id, error_type=type(exc).__name__
                     )
-                    outcome = {"error": "The assistant hit an unexpected error."}
+                    outcome = {"error": _TURN_FAILED_TEXT}
                 finally:
                     await progress.aclose()
                 if outcome.get("error"):
@@ -1243,7 +1293,7 @@ class SlackChannel:
                         connector_id=self.connector_id,
                         error_type=type(exc).__name__,
                     )
-                    outcome = {"error": "The assistant hit an unexpected error."}
+                    outcome = {"error": _TURN_FAILED_TEXT}
                 finally:
                     await progress.aclose()
                 if outcome.get("error"):
@@ -1272,7 +1322,7 @@ class SlackChannel:
         with one footer when anything was hidden."""
         notes = _turn_notes(outcome)
         if not reply and not notes:
-            reply = "(The assistant returned no text.)"
+            reply = _NO_REPLY_TEXT
         masked, hidden = secret_text.mask_text(reply, channel="slack")
         if isinstance(reply, SlackMarkdown):
             body, rehidden = slack_format.render_reply(masked)
@@ -1313,9 +1363,9 @@ class SlackChannel:
             lingering=len(lingering),
         )
         head = (
-            "⏹ Stopped. Nothing more will be sent for that request."
+            "⏹ Stopped. I won't send anything more for that request."
             if not lingering
-            else "⏹ Stopping. Nothing more will be sent for that request."
+            else "⏹ Stopping now. I won't send anything more for that request."
         )
         await self._post_text(channel, head + await self._waiting_cards_note())
 
@@ -1370,7 +1420,7 @@ class SlackChannel:
                 action_id=press.action_id,
                 error_type=type(exc).__name__,
             )
-            outcome = {"error": "Could not apply that decision. See the server logs."}
+            outcome = {"error": _DECISION_FAILED_TEXT}
         finally:
             if progress is not None:
                 await progress.aclose()
@@ -1382,15 +1432,9 @@ class SlackChannel:
             outcome=str(outcome.get("status") or outcome.get("error"))[:80],
         )
         if outcome.get("error"):
-            await self._post_text(press.channel, "⚠️ " + str(outcome["error"])[:180])
+            await self._post_text(press.channel, f"⚠️ {outcome['error']}"[:TEXT_CHUNK])
             return
-        verdict = "✅ Approved" if press.approved else "❌ Denied"
-        low_risk = outcome.get("low_risk")
-        if isinstance(low_risk, dict) and low_risk.get("account"):
-            verdict += f" · low-risk allowed until {_day(low_risk.get('expires_at'))}"
-        elif press.approved and press.remember == _REMEMBER_LOW_RISK:
-            verdict += " (approved once)"
-        await self._freeze_card(press, verdict)
+        await self._freeze_card(press, _verdict(press, outcome))
         summary = outcome.get("summary")
         if summary:
             # The resumed turn's own reply is the model's Markdown; the fact
@@ -1401,13 +1445,14 @@ class SlackChannel:
             await self._send_reply(press.channel, reply, outcome)
 
     async def _freeze_card(self, press: ButtonPress, verdict: str) -> None:
-        """Replace the buttons with the decision so the card cannot be
-        pressed twice from the DM history."""
+        """Replace the buttons with the decision line (``_verdict``) so the
+        card cannot be pressed twice from the DM history. The line is also
+        the message's notification text."""
         blocks = [block for block in press.blocks if block.get("type") != "actions"][:48]
         blocks.append(
             {
                 "type": "context",
-                "elements": [{"type": "plain_text", "text": f"{verdict} from Slack."}],
+                "elements": [{"type": "plain_text", "text": verdict, "emoji": False}],
             }
         )
         try:
@@ -1417,7 +1462,7 @@ class SlackChannel:
                 json_body={
                     "channel": press.channel,
                     "ts": press.message_ts,
-                    "text": f"Approval request: {verdict}",
+                    "text": slack_escape(verdict),
                     "blocks": blocks,
                 },
                 action="freeze_card",
@@ -1452,9 +1497,12 @@ class SlackChannel:
     async def _post_text(self, channel: str, text: str) -> Optional[dict[str, Any]]:
         return await self._post(channel, slack_escape(text))
 
-    async def _post_card_part(self, channel: str, text: str) -> bool:
-        head = slack_escape(text.split("\n", 1)[0][:150])
-        return await self._post(channel, head, [_section(text)]) is not None
+    async def _post_card_part(self, channel: str, text: str, notification: str) -> bool:
+        """Post one message of an approval card: *text* as a literal plain
+        text section (``_section``) and *notification*, escaped, as the
+        message text Slack shows in notifications and previews. True when
+        Slack took it."""
+        return await self._post(channel, slack_escape(notification), [_section(text)]) is not None
 
     async def _linked_dm(self) -> Optional[str]:
         """The DM channel of the linked Slack user, or None when nobody is
@@ -1501,41 +1549,54 @@ class SlackChannel:
 
     async def notify_pending(self, action: Any) -> bool:
         """Push an approval card for *action* (a StoredAction) to the owner's
-        linked DM: every argument in full, split into paced parts when long,
-        the Approve and Deny buttons on the last. True when the buttons went
-        out. Never raises."""
+        linked DM, laid out like Telegram's (cards.layout_card):
+
+            🔐 Post a message in #general on Slack
+
+            Channel: #general
+            Message: Lunch is here
+
+            Okay to go ahead? This expires in 14 minutes.
+            Check code 6d3b dfca 7bf8 cfc5
+
+        The plain sentence (``_card_sentence``) and any risk note, then every
+        value in full as labelled lines (secrets masked), split into paced,
+        labelled parts when long, the Approve and Deny buttons on the last.
+        Every message's notification text is the sentence, never a tool
+        name. True when the buttons went out. Never raises."""
         try:
             if str(action.user_id) != self.user_id or not self.running:
                 return False
             channel = await self._linked_dm()
             if channel is None:
                 return False
-            lines = [
-                "\U0001f510 Approval required",
-                "",
-                f"Tool: {action.tool_name}",
-                f"Why: {action.reason}",
-            ]
-            if getattr(action, "risk_note", None):
-                lines += ["", f"⚠️ {action.risk_note}"]
-            # A LOW action's card may offer "Allow low-risk on <account>".
+            sentence = f"\U0001f510 {_card_sentence(action)}"
+            lines = [sentence]
+            risk_note = getattr(action, "risk_note", None)
+            if isinstance(risk_note, str) and risk_note.strip():
+                # On one line, like the sentence: a value quoted in the note
+                # can't pass for a line of the details.
+                lines += ["", f"⚠️ {' '.join(risk_note.split())}"]
+            # A LOW action's card may offer "Allow small changes on <account>".
             low_risk_account = cards.low_risk_account(action)
             card = cards.layout_card(
                 lines,
                 cards.card_arguments(action.tool_name, action.arguments or {}),
                 tool_name=str(action.tool_name),
                 max_chars=SECTION_CHARS,
+                ask=cards.ask_line(action.expires_at),
             )
+            part_numbers = {part: index for index, part in enumerate(card.leading, start=1)}
 
             async def send_part(text: str) -> bool:
-                return await self._post_card_part(channel, text)
+                # A details part is announced by the sentence and its place;
+                # a notice (a card too long to send, a lost part) by itself.
+                index = part_numbers.get(text)
+                notification = text if index is None else f"{sentence} (part {index} of {card.parts})"
+                return await self._post_card_part(channel, text, notification)
 
             async with self._card_lock:
-                ready = await cards.send_card_parts(
-                    card,
-                    send_part,
-                    retry_hint="Send pending to get it again, or decide in the web app.",
-                )
+                ready = await cards.send_card_parts(card, send_part, retry_hint=_RETRY_HINT)
                 if not ready:
                     logger.warning(
                         "slack_approval_card_withheld",
@@ -1544,15 +1605,18 @@ class SlackChannel:
                         oversized=card.notice is not None,
                     )
                     return False
-                closing = [*card.final_lines, "", f"Expires in {cards.expires_in_text(action.expires_at)}."]
+                text = "\n".join(card.final_lines)
+                blocks = [_section(text)]
                 if low_risk_account:
-                    closing += ["", _low_risk_line(action, low_risk_account)]
-                text = "\n".join(closing)
-                posted = await self._post(
-                    channel,
-                    slack_escape(f"Approval required: {action.tool_name}"),
-                    [_section(text), _decision_buttons(str(action.action_id), low_risk_account)],
-                )
+                    offer = _low_risk_line(action, low_risk_account)
+                    if len(text) + len("\n\n") + len(offer) <= _SECTION_MAX:
+                        blocks = [_section(f"{text}\n\n{offer}")]
+                    else:
+                        # Slack refuses a section over its cap: the offer
+                        # gets its own, just above the buttons.
+                        blocks.append(_section(offer))
+                blocks.append(_decision_buttons(str(action.action_id), low_risk_account))
+                posted = await self._post(channel, slack_escape(sentence), blocks)
             return posted is not None
         except Exception as exc:  # a notification failure never breaks the flow
             logger.warning(
@@ -1562,14 +1626,44 @@ class SlackChannel:
 
 
 def _low_risk_line(action: Any, account: str) -> str:
-    """What a card that offers a low-risk grant says about it."""
+    """What a card that offers a low-risk grant says about it
+    (cards.low_risk_line), with this DM's words for listing and turning
+    them off."""
     from services.agent.risk import low_risk_notes_for_tool
 
     return cards.low_risk_line(
         account,
         low_risk_notes_for_tool(action.tool_name),
-        how='Send "grants" to list them, or "revoke grants" to turn them all off.',
+        how='Send "grants" to see where I can do this, or "revoke grants" to turn it all off.',
     )
+
+
+def _verdict(press: ButtonPress, outcome: dict[str, Any]) -> str:
+    """The line a decided card gets in place of its buttons
+    (cards.decision_line), plus what the "Allow small changes" button did:
+
+        ✅ Approved at 5:25 PM.
+        ❌ Denied at 5:25 PM. I didn't do it.
+        ✅ Approved at 5:25 PM. Until Wed Oct 7, I'll make small changes on
+        School Gmail without asking. Send "revoke grants" to turn that off.
+        ✅ Approved at 5:25 PM. I couldn't turn on the 7 days without
+        asking, so I'll still ask next time.
+    """
+    line = cards.decision_line(press.approved, at=cards.decided_at_text())
+    if not press.approved:
+        return line
+    low_risk = outcome.get("low_risk")
+    account = low_risk.get("account") if isinstance(low_risk, dict) else None
+    if isinstance(account, str) and account.strip():
+        expires = low_risk.get("expires_at")
+        until = f"Until {_day(expires)}" if expires else "For the next 7 days"
+        return (
+            f"{line} {until}, I'll make small changes on {' '.join(account.split())} "
+            'without asking. Send "revoke grants" to turn that off.'
+        )
+    if press.remember == _REMEMBER_LOW_RISK:
+        return f"{line} I couldn't turn on the 7 days without asking, so I'll still ask next time."
+    return line
 
 
 def _day(when: Any) -> str:
@@ -1579,15 +1673,16 @@ def _day(when: Any) -> str:
         if moment.tzinfo is None:
             moment = moment.replace(tzinfo=timezone.utc)
         local = moment.astimezone()
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError, OSError):
         return str(when)
     return f"{local:%a} {local:%b} {local.day}"
 
 
 _LINKED_TEXT = (
-    "✅ Linked. Crawler will chat with you here, and send approval requests "
-    "with Approve and Deny buttons. Send stop to end a running request, new to start "
-    "a fresh conversation, or pending to see what waits for your approval."
+    "✅ Linked. You can chat with me right here. When I need your OK before doing "
+    "something, I'll ask with Approve and Deny buttons.\n\n"
+    'A few words you can send: "stop" ends what I\'m doing, "new" starts a fresh '
+    'conversation, and "pending" shows anything waiting for your OK.'
 )
 
 

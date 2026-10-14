@@ -300,16 +300,19 @@ _MAX_INLINE_IMAGE_BYTES = 4 * 1024 * 1024
 _IMAGE_FORMATS = {"png": "image/png", "jpeg": "image/jpeg"}
 _JPEG_QUALITY = 70
 
-_PLAYWRIGHT_INSTALL_HINT = (
-    "pip install playwright && python -m playwright install chromium"
-)
 # Names the capability the way system.install_capability knows it, so the
-# model connects "the browser is missing" to the sanctioned fix instead of
-# telling the user to run pip themselves.
+# model connects "the browser is missing" to the sanctioned fix, and tells
+# it how to put that to the person: in plain words, never the tool name,
+# what is passed to it or a command to run (docs/bot-message-style.md).
+# There is no pip command here on purpose: the model used to pass it on
+# to people who are not developers. The install card (and the Install
+# button on the Permissions page) is the way to add the browser.
 _MISSING_BROWSER_HINT = (
-    "This is the 'browser' capability: call system.install_capability with "
-    "name='browser' (the user will be asked to approve the install), or "
-    f"install it by hand with: {_PLAYWRIGHT_INSTALL_HINT}"
+    "This is the 'browser' capability. To offer the install, call "
+    "system.install_capability with name='browser'; the person approves it "
+    "first. Ask them in plain words, for example \"I need to add a web browser "
+    "first. It's a one-time download of about 150 to 300 MB. Okay?\" Never show "
+    "them the tool name, what you pass to it or a command to run."
 )
 
 CaptureResult = tuple[bytes, str, int, int]
@@ -959,7 +962,6 @@ class WebToolkit:
                 str(exc),
                 playwright_available=False,
                 capability="browser",
-                install=_PLAYWRIGHT_INSTALL_HINT,
             )
         except WebToolError as exc:
             return _error(str(exc))
@@ -995,7 +997,8 @@ class WebToolkit:
         module = self._playwright_loader()
         if module is None:
             raise PlaywrightUnavailable(
-                f"Screenshots need Playwright, which is not installed. {_MISSING_BROWSER_HINT}"
+                "Screenshots need the web browser add-on (Playwright), which isn't "
+                f"installed yet. {_MISSING_BROWSER_HINT}"
             )
 
         try:
@@ -1020,7 +1023,8 @@ class WebToolkit:
             message = str(exc)
             if "executable doesn't exist" in message.lower():
                 raise PlaywrightUnavailable(
-                    f"Playwright is installed but its browser is not. {_MISSING_BROWSER_HINT}"
+                    "The web browser add-on (Playwright) is only partly installed: its "
+                    f"browser is missing. {_MISSING_BROWSER_HINT}"
                 ) from exc
             logger.warning("web_screenshot_failed", url=url, error=message)
             raise WebToolError(f"Screenshot failed: {type(exc).__name__}") from exc

@@ -12,7 +12,7 @@
 import type { TurnImage } from "@/types";
 
 /** The note that stands in for a screenshot after a reload. */
-export const SCREENSHOT_NOT_KEPT = "Screenshot not kept — ask again to see it";
+export const SCREENSHOT_NOT_KEPT = "Screenshot not kept. Ask again to see it.";
 /** The notes for a screenshot the live reply did not show: one past the per-reply limit, or one
  *  that is not a picture this page shows. Asking again changes neither, so neither says to. */
 export const SCREENSHOT_OVER_LIMIT = "Screenshot not shown (limit of 3 per reply)";
@@ -30,8 +30,7 @@ const SAVED_PLACEHOLDER = "[image captured and delivered to the user separately]
 const SCREENSHOT_URL = /^data:image\/(?:png|jpeg|webp);base64,([A-Za-z0-9+/]+={0,2})$/;
 const MAX_SCREENSHOT_CHARS = "data:image/jpeg;base64,".length + Math.floor((5 * 1024 * 1024 * 4) / 3) + 4;
 
-// The facts alt text may name: a dotted tool name, and a host or an app name.
-const TOOL_NAME = /^[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+$/;
+// The fact alt text may name: a host or an app name.
 const SOURCE_NAME = /^[\p{L}\p{N}_ .&'+()-]{1,253}$/u;
 
 export function isScreenshotDataUrl(url: unknown): url is string {
@@ -40,11 +39,11 @@ export function isScreenshotDataUrl(url: unknown): url is string {
   return match !== null && match[1].length % 4 === 0;
 }
 
-/** "Screenshot of www.google.com (web.screenshot)": facts only, never a page title or model text. */
+/** "Screenshot of www.google.com": facts only, never a page title or model text, and never the
+ *  tool id (a screen reader would read "web.screenshot" out to someone who is not a developer). */
 export function screenshotAlt(image: Pick<TurnImage, "tool" | "source">): string {
   const source = typeof image.source === "string" && SOURCE_NAME.test(image.source) ? image.source : "";
-  const tool = typeof image.tool === "string" && TOOL_NAME.test(image.tool) ? image.tool : "";
-  return `Screenshot${source ? ` of ${source}` : ""}${tool ? ` (${tool})` : ""}`;
+  return `Screenshot${source ? ` of ${source}` : ""}`;
 }
 
 /** Which note stands in for a screenshot that is not shown. `image` is what the live reply sent

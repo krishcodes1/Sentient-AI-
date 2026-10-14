@@ -19,9 +19,12 @@ from __future__ import annotations
 from services.capabilities.base import Availability, Capability, ReportContext
 
 NOT_INSTALLED_REASON = "Local speech-to-text is not installed yet (about 250 MB, once)."
+# A container built without it cannot add it at run time. The rebuild flag
+# (WITH_SPEECH_TO_TEXT=1, docker/Dockerfile.backend) is not named here: this
+# text is shown on the Permissions page and to the model, which passes it on.
 CONTAINER_REASON = (
-    "Local speech-to-text is not part of this Docker image. Rebuild with "
-    "WITH_SPEECH_TO_TEXT=1, or use 'Voice notes, transcribed by your AI provider'."
+    "Turning voice notes into text on this computer isn't available in this setup. "
+    "Use 'Voice notes, transcribed by your AI provider' instead."
 )
 
 
@@ -47,8 +50,8 @@ CAPABILITY = Capability(
     default_enabled=False,
     risk="low",
     when_denied=(
-        "Transcribing voice notes on this computer is turned off. The owner can turn it "
-        "on in Settings → Permissions; until then, type the message."
+        "Transcribing voice notes on this computer is turned off. You can turn it on "
+        "in Settings → Permissions. Until then, type your message."
     ),
     availability=availability,
     install="speech_to_text",

@@ -40,7 +40,7 @@ CAPABILITY = Capability(
     tools=("example.read",),            # exact names, or a family prefix ending in "." ("example.")
     default_enabled=False,              # high-risk capabilities start off
     risk="medium",                      # low | medium | high — shown as a badge
-    when_denied="Example is turned off. The owner can turn it on in Settings → Permissions.",
+    when_denied="Example is turned off. You can turn it on in Settings → Permissions.",
     availability=availability,
     # Wire these only when there is a real OS permission to check and a real
     # prompt or settings pane to open. A probe that can answer "denied" plus

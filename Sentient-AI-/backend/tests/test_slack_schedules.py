@@ -124,7 +124,7 @@ async def test_list_pause_resume_and_run(session_factory, backend):
     )
     channel, posted, _chats = slack(str(user.id))
     await say(channel, "schedules", 1)
-    assert "1. Canvas summary — Every day at 08:00 (UTC)" in posted[-1]
+    assert "1. Canvas summary: Every day at 8:00 AM (UTC)" in posted[-1]
     assert 'Reply "schedules run 2"' in posted[-1]
     await say(channel, "schedules pause 1", 2)
     assert posted[-1].startswith("Paused")

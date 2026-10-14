@@ -30,6 +30,8 @@ from services.tools.triggers import (
     LIST_ROWS_CHARS,
     MAX_TRIGGERS_PER_USER,
     TriggerToolkit,
+    describe_rule,
+    describe_update,
     validate_create,
 )
 from tests.conftest import make_user
@@ -173,13 +175,14 @@ async def test_bind_pins_the_only_account_and_the_card_states_the_rule(session_f
     bound = await kit.bind("create", params, str(user.id))
     assert bound["_account"] == {"connector_id": row, "type": "google_workspace", "label": "School"}
     assert kit.describe("create", bound, str(user.id)) == (
-        'When a new email from smith@univ.edu arrives in Gmail (School), run "Summarise it" and '
-        "message you the result. Checks every 15 min, at most 6 runs a day, read-only."
+        "When a new email from smith@univ.edu arrives in Gmail (School), do this and send you the "
+        'result: "Summarise it". It checks every 15 minutes, runs at most 6 times a day and can\'t '
+        "change anything."
     )
     notify = await kit.bind("create", EMAIL, str(user.id))
     assert kit.describe("create", notify, str(user.id)) == (
-        "When a new email from smith@univ.edu arrives in Gmail (School), message you on Telegram "
-        "or Slack. Checks every 15 min."
+        "When a new email from smith@univ.edu arrives in Gmail (School), send you a message. "
+        "It checks every 15 minutes."
     )
 
 
@@ -274,7 +277,7 @@ async def test_page_changed_needs_page_watch_and_the_callers_own_watch(session_f
     result, bound = await approved_create(kit, user, params)
     assert result["ok"] is True and bound["_account"] is None
     assert kit.describe("create", bound, str(user.id)) == (
-        'When your page watch "Course page" sees a change, message you on Telegram or Slack.'
+        'When the page you\'re watching, "Course page", changes, send you a message.'
     )
     refused = await kit.precheck("create", {**params, "account": "google_workspace"}, str(user.id))
     assert "leave 'account' out" in refused["error"]
@@ -413,8 +416,9 @@ async def test_update_shows_before_and_after_and_resuming_clears_errors(session_
     assert bound["_trigger"]["label"] == "Prof emails"
     sentence = kit.describe("update", bound, uid)
     assert sentence == (
-        'Change the trigger "Prof emails": label: Prof emails → Smith mail; interval minutes: 15 → 30; '
-        "senders: smith@univ.edu → smith@univ.edu, ta@univ.edu."
+        'Change the trigger "Prof emails": rename it to "Smith mail", check every 30 minutes instead '
+        "of every 15 minutes and only watch for email from smith@univ.edu and ta@univ.edu "
+        "(before: smith@univ.edu)."
     )
     result = await kit.execute("update", bound, uid, approved=True)
     assert result["ok"] is True and result["label"] == "Smith mail"
@@ -426,7 +430,7 @@ async def test_update_shows_before_and_after_and_resuming_clears_errors(session_
     assert "Nothing to change" in nothing["error"]
     pause = await kit.bind("update", {"trigger_id": tid, "paused": True}, uid)
     assert kit.describe("update", pause, uid) == (
-        'Pause the trigger "Smith mail"; nothing is checked or sent until you resume it.'
+        'Pause the trigger "Smith mail". It won\'t check or send anything until you turn it back on.'
     )
     assert (await kit.execute("update", pause, uid, approved=True))["status"] == "paused"
     async with session_factory() as session:
@@ -434,7 +438,10 @@ async def test_update_shows_before_and_after_and_resuming_clears_errors(session_
         row.status, row.consecutive_errors, row.last_error = "error", 5, "The app did not answer in time."
         await session.commit()
     resume = await kit.bind("update", {"trigger_id": tid, "paused": False}, uid)
-    assert kit.describe("update", resume, uid).startswith('Resume the trigger "Smith mail"')
+    assert kit.describe("update", resume, uid) == (
+        'Turn the trigger "Smith mail" back on. It starts checking again now and skips anything '
+        "that came in while it was off."
+    )
     assert (await kit.execute("update", resume, uid, approved=True))["status"] == "active"
     async with session_factory() as session:
         row = await session.get(EventTrigger, uuid.UUID(tid))
@@ -468,7 +475,8 @@ async def test_delete_and_foreign_ids_read_as_not_found(session_factory):
     assert (await kit.delete_trigger(str(intruder.id), tid))["not_found"] is True
     bound = await kit.bind("delete", {"trigger_id": tid}, str(owner.id))
     assert kit.describe("delete", bound, str(owner.id)) == (
-        'Delete the trigger "Prof emails" (a new email) and its queued events. Its conversation is kept.'
+        'Delete the trigger "Prof emails", which reacts to a new email. Anything it noticed but '
+        "hasn't sent yet is dropped, and its past messages stay in your chat history."
     )
     assert (await kit.execute("delete", bound, str(owner.id), approved=True))["deleted"] is True
     assert (await kit.execute("list", {}, str(owner.id)))["count"] == 0
@@ -568,3 +576,114 @@ def test_audit_rows_keep_only_the_length_of_the_owners_text():
     assert stored["prompt"] == "<12 characters>" and "smith" not in json.dumps(stored)
     change = redact_tool_arguments("triggers.update", {"trigger_id": "t", "_trigger": {"filters": {"senders": ["a@b.c"]}}})
     assert "a@b.c" not in json.dumps(change)
+
+
+def _rule(source, connector_type="canvas", account_label="", filters=None, mode="notify", **kw):
+    return describe_rule(
+        source,
+        connector_type=connector_type,
+        account_label=account_label,
+        filters=filters or {},
+        mode=mode,
+        prompt=kw.get("prompt"),
+        allow_writes=kw.get("allow_writes", False),
+        interval=kw.get("interval", 60),
+        max_runs=kw.get("max_runs", 6),
+        watch_label=kw.get("watch_label", ""),
+    )
+
+
+def test_the_rule_sentence_never_shows_ids_or_field_names():
+    # Course and folder ids are counted or named, never shown.
+    assert _rule("canvas.announcement", filters={"course_ids": ["48213"]}) == (
+        "When a new announcement is posted in Canvas for one of your courses, send you a message. "
+        "It checks every hour."
+    )
+    assert _rule("canvas.assignment", filters={"course_ids": ["48213", "50122"]}, interval=120) == (
+        "When a new assignment shows up in Canvas for 2 of your courses, send you a message. "
+        "It checks every 2 hours."
+    )
+    assert _rule("canvas.grade", filters={"show_score": True}) == (
+        "When a grade is posted in Canvas, send you a message with the score. It checks every hour."
+    )
+    # A task run gets the grade with its score either way; the sentence
+    # leaves the setting to the card's details.
+    assert _rule("canvas.grade", filters={"show_score": False}, mode="run_task", prompt="Log it", max_runs=1) == (
+        'When a grade is posted in Canvas, do this and send you the result: "Log it". It checks every '
+        "hour, runs at most once a day and can't change anything."
+    )
+    assert _rule("email.new", "microsoft", "Work", {"folder": "AAMkADg3NTQ="}, interval=15) == (
+        "When a new email arrives in a specific folder in Outlook (Work), send you a message. "
+        "It checks every 15 minutes."
+    )
+    assert _rule("email.new", "microsoft", "", {"folder": "Inbox", "subject_contains": "exam"}).startswith(
+        'When a new email with "exam" in the subject arrives in your Inbox in Outlook,'
+    )
+    assert _rule("files.new_in_folder", "google_workspace", "", {"folder": "root"}).startswith(
+        "When a new file is added to your main folder in Google Drive,"
+    )
+    assert _rule("files.new_in_folder", "microsoft", "", {"folder": "01ABCDEF"}).startswith(
+        "When a new file is added to a specific folder in OneDrive,"
+    )
+    assert _rule("calendar.starting_soon", "google_workspace", "", {"lead_minutes": 10}, interval=5) == (
+        "10 minutes before each event in Google Calendar starts, send you a message. "
+        "It checks every 5 minutes."
+    )
+    assert _rule("page.changed", None, "", {"watch_id": str(uuid.uuid4())}) == (
+        "When one of the pages you're watching changes, send you a message."
+    )
+    # A long task is cut in the sentence and shown whole below it.
+    long = _rule("canvas.announcement", mode="run_task", prompt="Summarise it. " * 20, allow_writes=True)
+    assert long.endswith(
+        "It checks every hour, runs at most 6 times a day and asks you before it changes anything. "
+        "The full instructions are below."
+    )
+    assert "…" in long
+    # Odd filters never make the sentence fail.
+    odd = _rule("email.new", "google_workspace", "", {"senders": "x", "course_ids": 5, "folder": 7})
+    assert odd.startswith("When a new email arrives in Gmail,")
+
+
+def test_the_update_sentence_says_each_change_in_plain_words():
+    before = {
+        "label": "Canvas posts",
+        "interval_minutes": 60,
+        "max_runs_per_day": 6,
+        "filters": {"course_ids": ["1"], "lead_minutes": 15},
+    }
+    name = 'the trigger "Canvas posts"'
+    params = {
+        "trigger_id": "t",
+        "prompt": "New words",
+        "allow_writes": False,
+        "interval_minutes": 120,
+        "max_runs_per_day": 2,
+        "course_ids": ["1", "2", "3"],
+        "show_score": True,
+        "lead_minutes": 10,
+        "subject_contains": "",
+        "senders": [],
+    }
+    assert describe_update(name, params, before) == (
+        'Change the trigger "Canvas posts": change its instructions (the new ones are below), stop it '
+        "from changing anything, check every 2 hours instead of every hour, run at most twice a day "
+        "instead of 6 times, watch for email from anyone, watch for email with any subject, only "
+        "watch 3 of your courses, tell you the score and message you 10 minutes before each event "
+        "instead of 15."
+    )
+    # Without the snapshot there is no "instead of".
+    assert describe_update("this trigger", {"trigger_id": "t", "interval_minutes": 30}, None) == (
+        "Change this trigger: check every 30 minutes."
+    )
+    assert describe_update("this trigger", {"trigger_id": "t", "label": "New", "paused": True}, None) == (
+        'Change this trigger: rename it to "New" and pause it.'
+    )
+    assert describe_update("this trigger", {"trigger_id": "t", "allow_writes": True, "paused": False}, None) == (
+        "Turn this trigger back on and change it: let it ask you before changing things. It starts "
+        "checking again now and skips anything that came in while it was off."
+    )
+    # A snapshot of the wrong shape is ignored, never a failure.
+    assert describe_update("this trigger", {"trigger_id": "t", "senders": ["a@b.co"]}, {"filters": "x"}) == (
+        "Change this trigger: only watch for email from a@b.co."
+    )
+    assert describe_update("this trigger", {"trigger_id": "t"}, None) == "Change this trigger."

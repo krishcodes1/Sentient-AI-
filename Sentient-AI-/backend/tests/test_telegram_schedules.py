@@ -105,7 +105,7 @@ async def test_the_three_commands_are_registered_and_in_help(backend):
     help_text = texts(sent)[-1]
     for word in ("/schedules", "/briefing", "/timezone"):
         assert word in help_text
-    assert help_text.rstrip().endswith("/help — this message")
+    assert help_text.rstrip().endswith("/help: show this list")
     await service._client.aclose()
 
 
@@ -117,8 +117,8 @@ async def test_schedules_lists_with_buttons(session_factory, backend):
     service, sent = telegram(str(user.id))
     await service._handle_message(telegram_dm(LINKED, "/schedules"))
     [(method, params)] = sent
-    assert "1. Canvas summary — Weekdays at 08:00 (America/New_York)" in params["text"]
-    assert "2. Daily briefing — Every day at 07:30" in params["text"]
+    assert "1. Canvas summary: Weekdays at 8:00 AM (America/New_York)" in params["text"]
+    assert "2. Daily briefing: Every day at 7:30 AM" in params["text"]
     buttons = [b["callback_data"] for row in params["reply_markup"]["inline_keyboard"] for b in row]
     assert buttons == [f"scn:{first}", f"scp:{first}", f"scn:{second}", f"scp:{second}"]
     assert all(len(b) <= 64 for b in buttons)
@@ -202,7 +202,7 @@ async def test_timezone_shows_saves_and_refuses_bad_names(session_factory, backe
     await service._handle_message(telegram_dm(LINKED, "/timezone"))
     assert texts(sent)[-1].startswith("No time zone saved yet")
     await service._handle_message(telegram_dm(LINKED, "/timezone ../etc"))
-    assert "not a time zone" in texts(sent)[-1]
+    assert "didn't recognize" in texts(sent)[-1] and "IANA" not in texts(sent)[-1]
     await service._handle_message(telegram_dm(LINKED, "/timezone America/Chicago"))
     assert texts(sent)[-1].startswith("Saved: America/Chicago.")
     async with session_factory() as session:
@@ -221,5 +221,5 @@ async def test_without_a_backend_the_commands_say_so(session_factory):
     schedule_commands.configure(None)
     service, sent = telegram("u")
     await service._handle_message(telegram_dm(LINKED, "/schedules"))
-    assert texts(sent)[-1] == "Scheduled tasks are not available right now."
+    assert texts(sent)[-1] == "Scheduled tasks aren't available right now."
     await service._client.aclose()

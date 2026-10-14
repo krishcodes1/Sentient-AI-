@@ -27,6 +27,6 @@ CAPABILITY = Capability(
     tools=(),
     default_enabled=True,
     risk="medium",
-    when_denied="Telegram is turned off. The owner can turn it on in Settings → Permissions.",
+    when_denied="Telegram is turned off. You can turn it on in Settings → Permissions.",
     availability=availability,
 )

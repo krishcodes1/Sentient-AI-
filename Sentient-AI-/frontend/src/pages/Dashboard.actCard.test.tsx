@@ -106,7 +106,7 @@ describe("Dashboard approval rows of a ticket purchase", () => {
     expect(document.querySelectorAll("pre")).toHaveLength(0);
     expect(document.body.textContent).not.toContain("krish@example.com");
     expect(document.body.textContent).not.toContain('"ref"');
-    expect(screen.queryByText("Risk warning")).not.toBeInTheDocument();
+    expect(screen.queryByText("Check this first")).not.toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "Approve" })).toHaveLength(2);
   });
 
@@ -133,7 +133,7 @@ describe("Dashboard approval rows of a ticket purchase", () => {
     fireEvent.click(approvePurchase);
 
     const img = await screen.findByRole("img", {
-      name: "Screenshot of tickets.example.com (browser.checkout)",
+      name: "Screenshot of tickets.example.com",
     });
     expect(img).toHaveAttribute("src", SHOT);
     expect(screen.getByText("After your approval")).toBeInTheDocument();

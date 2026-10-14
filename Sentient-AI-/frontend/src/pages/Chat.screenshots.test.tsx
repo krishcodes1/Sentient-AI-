@@ -42,11 +42,11 @@ import {
 } from "@/services/api";
 
 const PLACEHOLDER = "[image captured and delivered to the user separately]";
-const NOT_KEPT = "Screenshot not kept — ask again to see it";
+const NOT_KEPT = "Screenshot not kept. Ask again to see it.";
 const NOT_SHOWN = "Screenshot not shown";
 const OVER_LIMIT = "Screenshot not shown (limit of 3 per reply)";
 const SHOT = `data:image/png;base64,${"Zm9v".repeat(50)}`;
-const ALT = "Screenshot of www.google.com (web.screenshot)";
+const ALT = "Screenshot of www.google.com";
 const REPLY = "Here are the flights from JFK to LAX.";
 
 const ME = {
@@ -149,8 +149,9 @@ describe("Screenshots in the chat", () => {
     expect(screen.getAllByRole("img")).toHaveLength(1);
     expect(screen.queryByText(NOT_KEPT)).not.toBeInTheDocument();
     expect(screen.queryByText(/image captured/)).not.toBeInTheDocument();
-    // The other tool call still shows its result.
-    expect(screen.getByText('{"ok":true,"results":[]}')).toBeInTheDocument();
+    // The other tool call still has its result, under its technical details.
+    expect(screen.getByText("web.search")).toBeInTheDocument();
+    expect(document.body.textContent).toContain('"results": []');
   });
 
   it("shows the note, not the JSON, when a reloaded thread only has the placeholder", async () => {
@@ -163,7 +164,9 @@ describe("Screenshots in the chat", () => {
     expect(await screen.findByText(NOT_KEPT)).toBeInTheDocument();
     expect(screen.queryByRole("img")).not.toBeInTheDocument();
     expect(screen.queryByText(/image captured/)).not.toBeInTheDocument();
-    expect(screen.getByText("web.screenshot")).toBeInTheDocument();
+    // Each step reads in plain words; the screenshot's own tool id is not shown.
+    expect(screen.getAllByText("Used the web")).toHaveLength(2);
+    expect(screen.queryByText("web.screenshot")).not.toBeInTheDocument();
   });
 
   it.each([
@@ -244,7 +247,7 @@ describe("Screenshots in the chat", () => {
       turn.onSaved?.({ ...SAVED_REPLY, tool_calls: calls });
     });
 
-    const alt = "Screenshot of Google Chrome (desktop.screenshot)";
+    const alt = "Screenshot of Google Chrome";
     expect(await screen.findAllByRole("img", { name: alt })).toHaveLength(3);
     expect(screen.getByText(OVER_LIMIT)).toBeInTheDocument();
     expect(screen.queryByText(NOT_KEPT)).not.toBeInTheDocument();

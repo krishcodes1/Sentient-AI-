@@ -121,13 +121,13 @@ def test_the_too_large_sentence_never_rounds_a_file_down_to_the_limit():
     from services.files.messages import too_large
 
     cap = 15 * MB
-    assert too_large(15_864_875, cap).startswith("That file is 15.1 MB; Crawler reads files up to 15 MB.")
-    assert too_large(cap + 1, cap).startswith("That file is 15.1 MB;")  # rounded up, never "15.0"
-    assert too_large(cap + MB // 10 * 2, cap).startswith("That file is 15.2 MB;")
-    assert too_large(20 * MB, cap).startswith("That file is 20 MB;")
-    assert too_large(int(5.3 * MB), 5 * MB).startswith("That file is 5.3 MB;")
-    assert too_large(5 * MB + 1, 5 * MB).startswith("That file is 5.1 MB;")  # not "5 MB"
-    assert too_large(None, cap).startswith("That file is too large; Crawler reads files up to 15 MB.")
+    assert too_large(15_864_875, cap).startswith("That file is 15.1 MB, and Crawler reads files up to 15 MB.")
+    assert too_large(cap + 1, cap).startswith("That file is 15.1 MB,")  # rounded up, never "15.0"
+    assert too_large(cap + MB // 10 * 2, cap).startswith("That file is 15.2 MB,")
+    assert too_large(20 * MB, cap).startswith("That file is 20 MB,")
+    assert too_large(int(5.3 * MB), 5 * MB).startswith("That file is 5.3 MB,")
+    assert too_large(5 * MB + 1, 5 * MB).startswith("That file is 5.1 MB,")  # not "5 MB"
+    assert too_large(None, cap).startswith("That file is too large. Crawler reads files up to 15 MB.")
 
 
 @pytest.mark.asyncio
@@ -149,7 +149,7 @@ async def test_file_reading_off_answers_with_its_sentence_and_downloads_nothing(
         served.append(str(request.url))
         return httpx.Response(200, content=b.make_pdf(["x"]), headers={"content-type": "application/pdf"})
 
-    off = "Reading files is turned off. The owner can turn on 'Read files and documents' in Settings → Permissions."
+    off = "Reading files is turned off. You can turn on 'Read files and documents' in Settings → Permissions."
     with bind(context(refusal=off)):
         result = await toolkit(handler).fetch_page(URL)
     assert result == {"ok": False, "error": off, "url": URL, "capability": "file_reading"}
