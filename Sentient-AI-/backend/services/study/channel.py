@@ -60,6 +60,12 @@ def _say(key: str, words: str) -> str:
     return f'"{words}"' if _on_slack(key) else f"/{words}"
 
 
+def _cards(count: object) -> str:
+    """"1 card", "3 cards" (and "0 cards" for anything that is not a count)."""
+    n = count if isinstance(count, int) else 0
+    return f"{n} card" if n == 1 else f"{n} cards"
+
+
 def _no_cursor(key: str) -> str:
     return NO_CURSOR_SLACK if _on_slack(key) else NO_CURSOR
 
@@ -164,12 +170,12 @@ class StudyChannel:
     async def decks(self, user_id: str, *, slack: bool = False) -> Screen:
         decks, stats = await self.engine.list_decks(self._owner(user_id))
         if not decks:
-            return Screen("You have no flashcard decks yet. Ask Crawler to make some from your notes or a course file.")
+            return Screen("You have no flashcard decks yet. Ask me to make some from your notes or a course file.")
         lines = [f"{_BOOKS} Your decks:"]
         for number, deck in enumerate(decks, start=1):
             s = stats.get(deck.id, {})
             due = int(s.get("due_now", 0))
-            line = f"{number}. {channel_safe(deck.title)} — {int(s.get('items', 0))} cards"
+            line = f"{number}. {channel_safe(deck.title)}: {_cards(int(s.get('items', 0)))}"
             if due:
                 line += f", {due} due"
             if not deck.in_reviews:
@@ -208,7 +214,7 @@ class StudyChannel:
         if cursor.reviewed >= cursor.limit:
             self._drop(key)
             return Screen(
-                f"Session done: {cursor.reviewed} cards reviewed. Send {_say(key, 'review')} for more, "
+                f"Session done: you reviewed {_cards(cursor.reviewed)}. Send {_say(key, 'review')} for more, "
                 "or take a break."
             )
         queue = await self.engine.queue(owner, limit=1, deck_id=cursor.deck_id)
@@ -216,7 +222,7 @@ class StudyChannel:
             self._drop(key)
             if first:
                 return Screen(f"Nothing is due right now. 🎉 Send {_say(key, 'decks')} to see your decks.")
-            return Screen(f"All caught up: {cursor.reviewed} cards reviewed. Nothing else is due now.")
+            return Screen(f"All caught up: you reviewed {_cards(cursor.reviewed)}. Nothing else is due now.")
         item = queue["items"][0]
         cursor.item_id, cursor.shown = str(item.id), False
         self._keep(key, cursor)
@@ -322,7 +328,7 @@ class StudyChannel:
         if cursor.mode == "quiz" and cursor.attempt_id:
             return await self.quiz_end(key, user_id, cursor.attempt_id)
         return Screen(
-            f"Review ended: {cursor.reviewed} cards reviewed. Send {_say(key, 'review')} to go on.",
+            f"Review ended after {_cards(cursor.reviewed)}. Send {_say(key, 'review')} to keep going.",
             notice="Ended",
         )
 
@@ -528,7 +534,9 @@ class StudyChannel:
         if summary["weakest_tags"]:
             lines.append("To work on: " + ", ".join(channel_safe(t) for t in summary["weakest_tags"]))
         if summary["now_due_for_review"]:
-            lines.append(f"{summary['now_due_for_review']} missed cards are due now: send {_say(key, 'review')}.")
+            due = summary["now_due_for_review"]
+            missed = "1 missed card is" if due == 1 else f"{due} missed cards are"
+            lines.append(f"{missed} due now. Send {_say(key, 'review')} to go over them.")
         return Screen("\n".join(lines), notice="Quiz finished")
 
     # -- text words (Telegram fallbacks, Slack keywords) -------------------------
@@ -547,18 +555,30 @@ class StudyChannel:
                 return [await self.show(key, user_id)]
             if word in srs.RATINGS:
                 if not cursor.shown:
-                    return [Screen("Look at the answer first (show), then grade it.")]
+                    return [Screen(f"Look at the answer first ({_say(key, 'show')}), then grade it.")]
                 return await self.grade(key, user_id, channel, word)
             if word == "skip":
                 return await self.skip(key, user_id, channel)
-            return [Screen("This is a review card: show, then again, hard, good or easy (or skip / end).")]
+            return [
+                Screen(
+                    f"Send {_say(key, 'show')} to see the answer, then {_say(key, 'again')}, "
+                    f"{_say(key, 'hard')}, {_say(key, 'good')} or {_say(key, 'easy')} to grade it. "
+                    f"You can also send {_say(key, 'skip')} or {_say(key, 'end')}."
+                )
+            ]
         if word in {c.lower() for c in LETTERS}:
             return await self.quiz_answer(key, user_id, LETTERS.index(word.upper()))
         if word == "show":
             return [await self.quiz_reveal(key, user_id)]
         if word in ("good", "again"):
             return await self.quiz_self_grade(key, user_id, word == "good")
-        return [Screen("Pick a letter, or show / good / again for a question without choices (end to stop).")]
+        return [
+            Screen(
+                f"Send the letter of your answer, like {_say(key, 'a')}. For a question without "
+                f"choices, send {_say(key, 'show')}, then {_say(key, 'good')} or {_say(key, 'again')}. "
+                f"Send {_say(key, 'end')} to stop."
+            )
+        ]
 
     # -- export ------------------------------------------------------------------
 
@@ -580,7 +600,7 @@ class StudyChannel:
         if self._session_factory is None or not await study_export.record_export(
             self._session_factory, str(user_id), str(deck.id), fmt, len(items), endpoint="telegram:/export"
         ):
-            return None, "The export could not be recorded, so it was not sent. Try again shortly."
+            return None, "Something went wrong getting the file ready, so it wasn't sent. Try again in a minute."
         return (study_export.safe_filename(deck.title, fmt), data, study_export.MEDIA_TYPES[fmt]), ""
 
 

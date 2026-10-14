@@ -116,7 +116,7 @@ def test_cost_line_has_the_specified_format():
     line = format_turn_usage_line(
         {"input_tokens": 5000, "output_tokens": 300}, "gemini", "gemini-3.5-flash-lite"
     )
-    assert line == "5.3k tokens · ≈$0.002"
+    assert line == "5.3k tokens · about $0.002"
 
 
 def test_cost_line_prices_the_model_that_ran_with_its_cache_discount():
@@ -124,36 +124,36 @@ def test_cost_line_prices_the_model_that_ran_with_its_cache_discount():
 
     usage = {"input_tokens": 100_000, "output_tokens": 1000}
     # gemini-3.5-flash: 100k x $1.50 + 1k x $9.00 = $0.159
-    assert format_turn_usage_line(usage, "gemini", "gemini-3.5-flash") == "101k tokens · ≈$0.16"
+    assert format_turn_usage_line(usage, "gemini", "gemini-3.5-flash") == "101k tokens · about $0.16"
     # The same tokens on Flash-Lite cost 5x less: the model decides the price.
     assert format_turn_usage_line(usage, "gemini", "gemini-3.5-flash-lite") == (
-        "101k tokens · ≈$0.033"
+        "101k tokens · about $0.033"
     )
     # 80k of the prompt served from cache bill at $0.15/M, not $1.50/M:
     # 20k x 1.50 + 80k x 0.15 + 1k x 9.00 = $0.051
     cached = {**usage, "cache_read_tokens": 80_000}
-    assert format_turn_usage_line(cached, "gemini", "gemini-3.5-flash") == "101k tokens · ≈$0.051"
+    assert format_turn_usage_line(cached, "gemini", "gemini-3.5-flash") == "101k tokens · about $0.051"
 
 
 def test_cost_line_reads_the_price_table_not_a_hardcoded_rate(monkeypatch):
     from services.usage import format_turn_usage_line, pricing
 
     usage = {"input_tokens": 1_000_000, "output_tokens": 0}
-    assert format_turn_usage_line(usage, "gemini", "gemini-3.5-flash").endswith("≈$1.50")
+    assert format_turn_usage_line(usage, "gemini", "gemini-3.5-flash").endswith("about $1.50")
     monkeypatch.setitem(
         pricing._PRICES, ("gemini", "gemini-3.5-flash"), pricing.ModelPrice(2.0, 0.2, 9.0)
     )
-    assert format_turn_usage_line(usage, "gemini", "gemini-3.5-flash").endswith("≈$2.00")
+    assert format_turn_usage_line(usage, "gemini", "gemini-3.5-flash").endswith("about $2.00")
 
 
 def test_cost_line_never_passes_an_unknown_price_off_as_free():
     from services.usage import format_turn_usage_line
 
     usage = {"input_tokens": 1200, "output_tokens": 30}
-    assert format_turn_usage_line(usage, "gemini", "gemini-9-ultra") == "1.2k tokens · cost n/a"
+    assert format_turn_usage_line(usage, "gemini", "gemini-9-ultra") == "1.2k tokens · cost unknown"
     # A local model really is free per token.
     assert format_turn_usage_line(usage, "ollama", "llama3.2") == "1.2k tokens · $0"
-    assert format_turn_usage_line(None, None, None) == "0 tokens · cost n/a"
+    assert format_turn_usage_line(None, None, None) == "0 tokens · cost unknown"
 
 
 @pytest.mark.asyncio
@@ -175,7 +175,7 @@ async def test_every_normal_reply_ends_with_its_cost_line(session_factory, make_
 
     await service._handle_message(telegram_dm(1001, "short"))
     await asyncio.wait_for(service.wait_for_chats(), _WAIT_S)
-    assert tg_api.sent_messages()[-1]["text"] == "Short answer.\n\n5.3k tokens · ≈$0.002"
+    assert tg_api.sent_messages()[-1]["text"] == "Short answer.\n\n5.3k tokens · about $0.002"
 
     before = len(tg_api.sent_messages())
     await service._handle_message(telegram_dm(1001, "long"))
@@ -183,13 +183,13 @@ async def test_every_normal_reply_ends_with_its_cost_line(session_factory, make_
     chunks = [m["text"] for m in tg_api.sent_messages()[before:]]
     assert len(chunks) >= 3 and all(len(c) <= 4096 for c in chunks)
     # Exactly once, at the very end of the last chunk.
-    assert chunks[-1].endswith("5.3k tokens · ≈$0.002")
+    assert chunks[-1].endswith("5.3k tokens · about $0.002")
     assert sum("tokens ·" in c for c in chunks) == 1
 
     await service._handle_message(telegram_dm(1001, "approval"))
     await asyncio.wait_for(service.wait_for_chats(), _WAIT_S)
     last = tg_api.sent_messages()[-1]["text"]
-    assert "google_workspace.send_email" in last and last.endswith("≈$0.002")
+    assert "I need your OK first to send an email." in last and last.endswith("about $0.002")
 
     # An error is not a normal reply: no cost line on it.
     await service._handle_message(telegram_dm(1001, "boom"))
@@ -212,7 +212,7 @@ async def test_approval_reply_is_sent_whole_with_the_resumed_turns_cost(
     await asyncio.wait_for(service.wait_for_chats(), _WAIT_S)
     replies = [m["text"] for m in tg_api.sent_messages()]
     assert "".join(replies).replace("\n", " ").count("detail") == 800
-    assert replies[-1].endswith("5.3k tokens · ≈$0.002")
+    assert replies[-1].endswith("5.3k tokens · about $0.002")
 
 
 @pytest.mark.asyncio
@@ -1083,7 +1083,7 @@ async def test_stop_during_an_approval_never_loses_the_record_of_the_action(sess
             .scalars()
             .all()
         )
-    assert [r.content.split("\n")[0] for r in rows] == ["[Approved] Executed 'gmail.send'."]
+    assert [r.content for r in rows] == ["You approved my request to use Gmail, and it's done."]
 
 
 def test_hidden_characters_reach_the_model_only_as_visible_codes():

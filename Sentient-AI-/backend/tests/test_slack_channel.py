@@ -919,24 +919,32 @@ async def test_stop_names_the_cards_still_waiting(linked):
     await linked.deliver(dm_event("stop"))
     text = linked.api.posts()[-1]["text"]
     assert text.startswith("Nothing is running")
-    assert "1 action is still waiting for your approval (send pending)." in text
+    assert 'One request is still waiting for your OK (send "pending" to see it).' in text
 
 
 def test_reply_notes_use_the_dm_wording():
     notes = slack_mod._turn_notes(
-        {"pending_approvals": ["gmail.send"], "blocked": ["web.fetch"], "images": ["a", "b"]},
+        {
+            "pending_approvals": ["google_workspace.send_email"],
+            "blocked": ["desktop.act"],
+            "images": ["a", "b"],
+        },
     )
     assert notes.startswith("\n\n")
     assert (
-        "Waiting on your approval for: gmail.send. The request is in this DM, or send pending."
-        in notes
-    )
-    assert "Blocked by security policy: web.fetch" in notes
-    assert "(2 screenshots not shown: Slack DMs carry text only.)" in notes
+        "🔐 I need your OK first to send an email. The request is just above, "
+        'or send "pending" to see it again.'
+    ) in notes
+    assert "⛔ I skipped one step because your safety settings don't allow it: " in notes
+    assert "(I took 2 screenshots, but I can't show pictures here in Slack.)" in notes
+    # Never a tool name.
+    assert "google_workspace" not in notes and "desktop.act" not in notes
+    one = slack_mod._turn_notes({"images": ["a"]})
+    assert one == "\n\n(I took a screenshot, but I can't show pictures here in Slack.)"
     assert slack_mod._turn_notes({}) == ""
-    assert cards.waiting_cards_note(0, pending_hint="send pending") == ""
-    assert "3 actions are still waiting for your approval (send pending). Approving one" in (
-        cards.waiting_cards_note(3, pending_hint="send pending")
+    assert cards.waiting_cards_note(0, pending_hint=slack_mod._PENDING_HINT) == ""
+    assert '3 requests are still waiting for your OK (send "pending" to see them).' in (
+        cards.waiting_cards_note(3, pending_hint=slack_mod._PENDING_HINT)
     )
 
 
@@ -959,7 +967,7 @@ async def test_the_models_reply_is_rendered_as_mrkdwn_and_its_notes_are_not(link
         "*Plan*\n*Done* with the docs (https://e.com/?a=1&amp;b=2) &amp; `x&lt;y`\n• one\n\n"
     )
     # The notes are the app's own text: sent as typed, never rendered.
-    assert "Waiting on your approval for: **tool**." in text
+    assert "I need your OK first to use **tool**." in text
     assert "<" not in text and ">" not in text
     assert "blocks" not in post
 
@@ -1006,7 +1014,7 @@ async def test_approval_cards_stay_plain_text_and_unrendered(linked):
     (post,) = linked.api.posts()
     section = post["blocks"][0]["text"]
     assert section["type"] == "plain_text"
-    assert '"text": "**hi** [x](https://e.com) # not a heading"' in section["text"]
+    assert "Message: **hi** [x](https://e.com) # not a heading" in section["text"]
 
 
 @pytest.mark.asyncio
@@ -1095,10 +1103,17 @@ async def test_approval_card_shows_every_argument_and_carries_the_buttons(linked
     # Shown verbatim: Slack must not turn ":x:" into an emoji on the card.
     assert section["text"]["emoji"] is False
     body = section["text"]["text"]
-    assert "Tool: slack.post_message" in body
-    assert '"text": "<!channel> hi :x:"' in body
-    assert cards.digest_line(arguments) in body
-    assert "Expires in" in body
+    lines = body.split("\n")
+    # The card's plain sentence first, then every value as a labelled line,
+    # then the question and the check code: no tool name, no JSON.
+    assert lines[0] == "🔐 Posting to a channel needs your approval."
+    assert "Channel: C0CHAN001" in lines
+    assert "Message: <!channel> hi :x:" in lines
+    assert lines[-2].startswith("Okay to go ahead? This expires in ")
+    assert lines[-1] == cards.check_code_line(arguments)
+    assert "slack.post_message" not in body and "{" not in body
+    # The notification text is the sentence, escaped, never the tool name.
+    assert posts[0]["text"] == "🔐 Posting to a channel needs your approval."
     assert [e["value"] for e in buttons["elements"]] == [action.action_id, action.action_id]
     assert {e["action_id"] for e in buttons["elements"]} == {
         slack_mod.ACTION_APPROVE,
@@ -1121,6 +1136,38 @@ async def test_a_long_card_goes_out_in_labelled_parts_before_the_buttons(linked)
     assert posts[-1]["blocks"][-1]["type"] == "actions"
     joined = "".join(p["blocks"][0]["text"]["text"] for p in posts[:-1])
     assert joined.count("x") >= 7000
+    # Every message's notification text is the plain sentence (with its
+    # place for a details part), never a tool name or a hex label.
+    total = len(posts)
+    sentence = "🔐 Posting to a channel needs your approval."
+    assert [p["text"] for p in posts] == [
+        *(f"{sentence} (part {i} of {total})" for i in range(1, total)),
+        sentence,
+    ]
+    assert not any("slack.post_message" in p["blocks"][0]["text"]["text"] for p in posts)
+    last = posts[-1]["blocks"][0]["text"]["text"]
+    assert last.startswith(f"{sentence}\n\nThat's ")
+    assert "Okay to go ahead? This expires in " in last
+
+
+@pytest.mark.asyncio
+async def test_a_card_with_no_reason_starts_with_the_sentence_for_its_arguments(linked):
+    action = await park_action(linked.session_factory, linked.user_id, {"channel": "#general"})
+    blank = SimpleNamespace(**{**action.__dict__, "reason": "  "})
+    assert await linked.channel.notify_pending(blank) is True
+    body = linked.api.posts()[-1]["blocks"][0]["text"]["text"]
+    assert body.split("\n")[0] == "🔐 Post a message in #general on Slack"
+
+
+@pytest.mark.asyncio
+async def test_a_reason_or_risk_note_on_several_lines_stays_on_one_line(linked):
+    action = await park_action(linked.session_factory, linked.user_id, {"a": 1})
+    odd = SimpleNamespace(
+        **{**action.__dict__, "reason": "Post this\nTo: x@evil.example", "risk_note": "Check\nthis."}
+    )
+    assert await linked.channel.notify_pending(odd) is True
+    lines = linked.api.posts()[-1]["blocks"][0]["text"]["text"].split("\n")
+    assert lines[:3] == ["🔐 Post this To: x@evil.example", "", "⚠️ Check this."]
 
 
 @pytest.mark.asyncio
@@ -1237,7 +1284,24 @@ async def test_the_linked_user_denies_through_the_decision_applier_and_the_card_
     (update,) = linked.api.calls("chat.update")
     assert update["channel"] == DM and update["ts"] == "1.000100"
     assert [b["type"] for b in update["blocks"]] == ["section", "context"]
-    assert "Denied" in update["blocks"][-1]["elements"][0]["text"]
+    verdict = update["blocks"][-1]["elements"][0]["text"]
+    assert verdict.startswith("❌ Denied at ") and verdict.endswith(". I didn't do it.")
+    assert update["text"] == verdict
+
+
+@pytest.mark.asyncio
+async def test_a_decision_that_fails_says_so_plainly(linked):
+    async def decide(user_id: str, action_id: str, approved: bool, **_: Any) -> dict[str, Any]:
+        raise RuntimeError("database is down")
+
+    linked.channel.decide = decide
+    action = await park_action(linked.session_factory, linked.user_id, {"a": 1})
+    await linked.deliver(press(action.action_id, approve=False))
+    assert linked.api.posts()[-1]["text"] == (
+        "⚠️ Something went wrong and your answer didn't go through. Tap the button again, "
+        "or answer in the web app."
+    )
+    assert linked.api.calls("chat.update") == []
 
 
 @pytest.mark.asyncio
@@ -1387,7 +1451,7 @@ def test_card_helpers_come_from_cards_not_the_telegram_channel():
     assert cards.card_arguments("web.search", ["not", "a", "dict"]) == {}
     assert cards.usage_line({}) is None
     later = (datetime.now(timezone.utc) + timedelta(minutes=12, seconds=30)).isoformat()
-    assert cards.expires_in_text(later) == "12 min"
+    assert cards.expires_in_text(later) == "12 minutes"
     assert cards.expires_in_text("not a time") == "a few minutes"
 
 
@@ -1420,7 +1484,7 @@ async def test_a_linked_senders_audio_clip_gets_the_text_reply_and_no_turn(linke
     await linked.deliver(dm_event("", extra={"subtype": "file_share", "files": [_audio_file()]}))
     assert linked.chat_calls == []
     assert [p["text"] for p in linked.api.posts()] == [slack_mod.SLACK_AUDIO_REPLY]
-    assert "voice notes work in Telegram" in slack_mod.SLACK_AUDIO_REPLY
+    assert "Voice notes work in Telegram" in slack_mod.SLACK_AUDIO_REPLY
     # Nothing was fetched: only the reply went out.
     assert [name for name, _, _ in linked.api.requests if name not in ("auth.test", "apps.connections.open")] == [
         "chat.postMessage"
@@ -1486,10 +1550,14 @@ async def test_a_card_that_offers_a_grant_has_a_third_button_and_says_what_it_al
     ]
     third = buttons["elements"][2]
     assert third["value"] == action.action_id
-    assert third["text"]["text"] == "Allow low-risk on School Gmail · 7 days"
+    assert third["text"]["text"] == "Allow small changes on School Gmail for 7 days"
     body = section["text"]["text"]
-    assert "Or allow low-risk changes on School Gmail for 7 days: " in body
-    assert 'Send "grants" to list them, or "revoke grants" to turn them all off.' in body
+    assert "Or let me make small changes on School Gmail for 7 days without asking" in body
+    assert body.endswith(
+        'Send "grants" to see where I can do this, or "revoke grants" to turn it all off.'
+    )
+    # The offer comes after the question and the check code, by the buttons.
+    assert body.index("Check code ") < body.index("Or let me make small changes")
     plain = await park_low_risk(linked.session_factory, linked.user_id, offer=False)
     assert await linked.channel.notify_pending(plain) is True
     _section, plain_buttons = linked.api.posts()[-1]["blocks"]
@@ -1544,7 +1612,13 @@ async def test_pressing_allow_low_risk_decides_with_remember_and_freezes_with_th
     assert runtime.remembered == ["low_risk"]
     (update,) = linked.api.calls("chat.update")
     verdict = update["blocks"][-1]["elements"][0]["text"]
-    assert verdict.startswith("✅ Approved · low-risk allowed until ")
+    day = slack_mod._day("2026-10-07T12:00:00+00:00")
+    assert verdict.startswith("✅ Approved at ")
+    assert verdict.endswith(
+        f". Until {day}, I'll make small changes on School Gmail without asking. "
+        'Send "revoke grants" to turn that off.'
+    )
+    assert update["text"] == slack_mod.slack_escape(verdict)
 
 
 @pytest.mark.asyncio
@@ -1553,7 +1627,11 @@ async def test_a_low_risk_press_that_made_no_grant_says_approved_once(linked):
     action = await park_low_risk(linked.session_factory, linked.user_id)
     await linked.deliver(low_risk_press(action.action_id))
     (update,) = linked.api.calls("chat.update")
-    assert update["blocks"][-1]["elements"][0]["text"] == "✅ Approved (approved once) from Slack."
+    verdict = update["blocks"][-1]["elements"][0]["text"]
+    assert verdict.startswith("✅ Approved at ")
+    assert verdict.endswith(
+        ". I couldn't turn on the 7 days without asking, so I'll still ask next time."
+    )
 
 
 @pytest.mark.asyncio
@@ -1572,7 +1650,7 @@ async def test_grants_and_revoke_grants_keywords(linked):
     listing = linked.api.posts()[-1]["text"]
     assert "until" in listing and 'Send "revoke grants" to turn them all off.' in listing
     await linked.deliver(dm_event("Revoke  Grants"))
-    assert "Revoked low-risk changes on 1 account" in linked.api.posts()[-1]["text"]
+    assert "I'll ask you first again before making changes on 1 account." in linked.api.posts()[-1]["text"]
     await linked.deliver(dm_event("grants"))
     assert linked.api.posts()[-1]["text"] == NO_GRANTS_TEXT
     await linked.deliver(dm_event("revoke grants"))

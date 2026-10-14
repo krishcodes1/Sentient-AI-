@@ -21,7 +21,6 @@ import {
   Trash2,
   AlertTriangle,
   RefreshCw,
-  Clock,
   Search,
   X,
   PanelLeft,
@@ -57,6 +56,12 @@ import ToolScreenshot from "@/components/ToolScreenshot";
 import { hasDroppedScreenshot } from "@/components/toolScreenshots";
 import ApprovalPicture from "@/components/ApprovalPicture";
 import PurchaseApproval from "@/components/PurchaseApproval";
+import {
+  ApprovalAsk,
+  ApprovalCheckCode,
+  ApprovalDetailList,
+  ApprovalTechnicalDetails,
+} from "@/components/ApprovalDetails";
 import WeeklyAppButton, {
   WeeklyAllowedNote,
   type ApprovalDecision,
@@ -73,6 +78,8 @@ import { DESKTOP_QUERY, useMediaQuery } from "@/hooks/useMediaQuery";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
 
 const CONV_PAGE_SIZE = 50;
+// The status line while a step runs that has no progress line of its own.
+const WORKING_STATUS = "Working on it…";
 const DEFAULT_TITLE = "New Conversation";
 const AUTO_TITLE_MAX = 40;
 // Approvals raised on another device/tab must show up here without a reload,
@@ -90,8 +97,14 @@ const STOP_FALLBACK_MS = 10_000;
 // Countdown helpers live in their own module (shared with Dashboard) so the
 // Dashboard chunk doesn't drag in this whole page. Not re-exported from
 // here: a page module that exports non-components loses Fast Refresh.
-import { formatCountdown, useCountdown } from "./approvalCountdown";
-import { ACT_PICTURE_ALT, PURCHASE_TOOL, isSentenceCard, shownArguments } from "./approvalArguments";
+import { useCountdown } from "./approvalCountdown";
+import {
+  ACT_PICTURE_ALT,
+  PURCHASE_TOOL,
+  isDetailsCard,
+  isSentenceCard,
+  stepLabel,
+} from "./approvalArguments";
 
 // Ids for optimistic bubbles, replaced by the server's ids once the turn is
 // saved. They only have to be unique within this tab, so a counter does the
@@ -155,49 +168,79 @@ function ToolCallBadge({
   // A screenshot shows as the image (live turn) or a note saying why not
   // (reloaded thread, or past the reply's limit), never as its JSON.
   const shot = screenshot !== undefined || hasDroppedScreenshot(tc.result);
-  return (
+  // The step in plain words ("Used the web"); its tool id and raw result
+  // are one click away under "Technical details" for anyone who wants them.
+  const label = (
     <>
-      <div
-        className="mono-tag flex items-center gap-2 px-3 py-2 rounded-[8px]"
-        style={{
-          background: "var(--fill-success)",
-          border: "1px solid var(--border-success)",
-        }}
-      >
-        <CheckCircle2 className="w-3.5 h-3.5" style={{ color: "var(--accent-success)" }} />
-        <span style={{ color: "var(--accent-success)" }} className="font-medium">
-          {tc.name}
-        </span>
-        {!shot && (
-          <>
-            <ChevronRight className="w-3 h-3" style={{ color: "var(--text-muted)" }} />
-            <span className="truncate max-w-[200px]" style={{ color: "var(--text-secondary)" }}>
-              {typeof tc.result === "string" ? tc.result : JSON.stringify(tc.result ?? "")}
-            </span>
-          </>
+      <CheckCircle2 className="w-3.5 h-3.5 shrink-0" style={{ color: "var(--accent-success)" }} aria-hidden />
+      <span style={{ color: "var(--accent-success)" }} className="font-medium">
+        {stepLabel(tc.name)}
+      </span>
+    </>
+  );
+  const chip = {
+    background: "var(--fill-success)",
+    border: "1px solid var(--border-success)",
+  };
+  if (shot) {
+    return (
+      <>
+        <div className="text-xs flex items-center gap-2 px-3 py-2 rounded-[8px] w-fit max-w-full" style={chip}>
+          {label}
+        </div>
+        <ToolScreenshot image={screenshot} turnImages={turnImages} />
+      </>
+    );
+  }
+  let raw: string;
+  try {
+    raw = typeof tc.result === "string" ? tc.result : (JSON.stringify(tc.result ?? "", null, 2) ?? "");
+  } catch {
+    raw = "";
+  }
+  return (
+    <details className="text-xs rounded-[8px] w-fit max-w-full" style={chip}>
+      <summary className="flex items-center gap-2 px-3 py-2 cursor-pointer select-none">
+        {label}
+        <ChevronRight className="w-3 h-3 shrink-0" style={{ color: "var(--text-muted)" }} aria-hidden />
+        <span style={{ color: "var(--text-muted)" }}>Technical details</span>
+      </summary>
+      <div className="px-3 pb-2 space-y-1.5" style={{ color: "var(--text-secondary)" }}>
+        <p>
+          Tool: <span className="mono-tag break-all">{tc.name}</span>
+        </p>
+        {raw && (
+          <pre
+            className="p-2 rounded-[8px] overflow-auto max-h-64 whitespace-pre-wrap break-words"
+            style={{ background: "var(--claw-surface)", border: "1px solid var(--claw-border)" }}
+          >
+            {raw}
+          </pre>
         )}
       </div>
-      {shot && <ToolScreenshot image={screenshot} turnImages={turnImages} />}
-    </>
+    </details>
   );
 }
 
 function BlockedActionBadge({ ba }: { ba: BlockedAction }) {
+  // "I didn't send an email." plus the reason in plain words; the tool id
+  // never shows. A server too old to send the phrase gets a plain stand-in.
+  const phrase = typeof ba.phrase === "string" ? ba.phrase.trim() : "";
+  const reason = typeof ba.reason === "string" ? ba.reason.trim() : "";
   return (
     <div
-      className="mono-tag flex items-center gap-2 px-3 py-2 rounded-[8px]"
+      className="text-xs flex items-start gap-2 px-3 py-2 rounded-[8px]"
       style={{
         background: "var(--fill-danger)",
         border: "1px solid var(--border-danger)",
       }}
     >
-      <XCircle className="w-3.5 h-3.5" style={{ color: "var(--accent-danger)" }} />
-      <span style={{ color: "var(--accent-danger)" }} className="font-medium">
-        {ba.tool_name}
-      </span>
-      <ChevronRight className="w-3 h-3" style={{ color: "var(--text-muted)" }} />
-      <span className="truncate max-w-[240px]" style={{ color: "var(--text-secondary)" }}>
-        Blocked: {ba.reason}
+      <XCircle className="w-3.5 h-3.5 mt-px shrink-0" style={{ color: "var(--accent-danger)" }} aria-hidden />
+      <span className="min-w-0 break-words" style={{ color: "var(--text-secondary)" }}>
+        <span style={{ color: "var(--accent-danger)" }} className="font-medium">
+          {phrase ? `I didn't ${phrase}.` : "I skipped a step."}
+        </span>
+        {reason && ` ${reason}`}
       </span>
     </div>
   );
@@ -238,29 +281,25 @@ function ApprovalCard({
         opacity: expired ? 0.75 : 1,
       }}
     >
-      <div className="flex items-center justify-between gap-2 mb-2">
-        <div className="flex items-center gap-2">
-          <Shield
-            className="w-4 h-4"
-            style={{ color: expired ? "var(--text-muted)" : "var(--accent-warning)" }}
-          />
-          <span
-            className="eyebrow"
-            style={{ color: expired ? "var(--text-muted)" : "var(--accent-warning)" }}
-          >
-            {expired ? "Approval expired" : "Approval required"}
-          </span>
-        </div>
-        {remaining !== null && (
-          <span
-            className="mono-tag inline-flex items-center gap-1 shrink-0"
-            style={{ color: expired ? "var(--accent-danger)" : "var(--accent-warning)" }}
-          >
-            <Clock className="w-3 h-3" />
-            {expired ? "expired" : `expires in ${formatCountdown(remaining)}`}
-          </span>
-        )}
+      <div className="flex items-center gap-2 mb-2">
+        <Shield
+          className="w-4 h-4"
+          style={{ color: expired ? "var(--text-muted)" : "var(--accent-warning)" }}
+        />
+        <span
+          className="eyebrow"
+          style={{ color: expired ? "var(--text-muted)" : "var(--accent-warning)" }}
+        >
+          {expired ? "Ran out of time" : "Needs your OK"}
+        </span>
       </div>
+      {/* The card's one plain sentence, verb first ("Send an email to
+          priya@acme.com from your Gmail"): never a tool id. A browser.act
+          card is this sentence and its picture: what will be typed, chosen
+          or clicked, and on which site, from the toolkit's facts. */}
+      <p className="text-sm font-medium mb-2" style={{ color: "var(--text-primary)" }}>
+        {approval.reason}
+      </p>
       {/* A purchase is judged on what the page says (amount, merchant,
           items, screenshot), so its card shows those instead of the model's
           arguments. */}
@@ -269,34 +308,11 @@ function ApprovalCard({
       ) : isSentenceCard(approval) ? (
         // A browser.act step is approved on the page it will run on: the
         // picture taken when the card was made, its target outlined in red.
-        <ApprovalPicture approval={approval} alt={ACT_PICTURE_ALT} className="mb-2" />
+        <ApprovalPicture approval={approval} alt={ACT_PICTURE_ALT} className="mb-3" />
       ) : (
-        <>
-          <p className="text-xs mb-2" style={{ color: "var(--text-secondary)" }}>
-            Tool <strong>{approval.tool_name}</strong> wants to run.
-          </p>
-          {Object.keys(shownArguments(approval)).length > 0 && (
-            <pre
-              className="text-xs mb-2 p-2 rounded-[8px] overflow-x-auto"
-              style={{
-                background: "var(--claw-surface)",
-                color: "var(--text-secondary)",
-                border: "1px solid var(--claw-border)",
-              }}
-            >
-              {JSON.stringify(shownArguments(approval), null, 2)}
-            </pre>
-          )}
-        </>
+        // Every value the action will use, labelled, whole (spec F3).
+        <ApprovalDetailList approval={approval} className="mb-3" />
       )}
-      {/* A browser.act card is this sentence and nothing else: what will be
-          typed, chosen or clicked, and on which site, from the toolkit's facts. */}
-      <p
-        className={isSentenceCard(approval) ? "text-sm mb-3" : "text-xs mb-3"}
-        style={{ color: isSentenceCard(approval) ? "var(--text-primary)" : "var(--text-muted)" }}
-      >
-        {approval.reason}
-      </p>
       {/* Backend-flagged risk: the request was shaped by external/untrusted
           content. Rendered in danger colors directly above the buttons so it
           cannot be missed on the way to Approve. */}
@@ -314,7 +330,7 @@ function ApprovalCard({
           />
           <div className="min-w-0">
             <div className="eyebrow" style={{ color: "var(--accent-danger)" }}>
-              Risk warning
+              Check this first
             </div>
             <p className="text-xs mt-1" style={{ color: "var(--text-secondary)" }}>
               {approval.risk_note}
@@ -322,12 +338,7 @@ function ApprovalCard({
           </div>
         </div>
       )}
-      {expired && (
-        <p className="text-xs mb-2" style={{ color: "var(--text-muted)" }}>
-          This request expired without a decision. Ask the agent again if the
-          action is still needed.
-        </p>
-      )}
+      <ApprovalAsk remaining={remaining} className="mb-2" />
       {error && (
         <p role="alert" className="text-xs mb-2" style={{ color: "var(--accent-danger)" }}>
           {error}
@@ -371,6 +382,12 @@ function ApprovalCard({
         approval={approval}
         disabled={pending || expired}
         onAllow={() => handle(true, "low_risk")}
+      />
+      <ApprovalCheckCode approval={approval} className="mt-3" />
+      <ApprovalTechnicalDetails
+        approval={approval}
+        showArguments={isDetailsCard(approval)}
+        className="mt-2"
       />
     </div>
   );
@@ -453,7 +470,8 @@ export default function Chat() {
   const [renameError, setRenameError] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Conversation | null>(null);
   const [failedTurn, setFailedTurn] = useState<FailedTurn | null>(null);
-  // Live status line while a turn streams ("Running canvas.get_courses…").
+  // Live status line while a turn streams ("Searching the web…"), in plain
+  // words: never a tool id.
   const [streamStatus, setStreamStatus] = useState<string | null>(null);
   // Below the desktop breakpoint the conversation list is an overlay over
   // the thread rather than a column beside it.
@@ -880,8 +898,11 @@ export default function Chat() {
                   : m,
               ),
             ),
-          onToolCall: (name) => setStreamStatus(`Running ${name}…`),
-          onToolResult: (name) => setStreamStatus(`Finished ${name}`),
+          // The server sends each step's progress line ("Checking your
+          // Canvas courses…", the one the chat channels show); a step without
+          // one, or an older server, gets the plain stand-in.
+          onToolCall: (_name, phrase) => setStreamStatus(phrase || WORKING_STATUS),
+          onToolResult: () => setStreamStatus(WORKING_STATUS),
           onContentDelta: (text) => {
             setStreamStatus(null);
             setMessages((prev) =>
@@ -892,19 +913,16 @@ export default function Chat() {
           },
           onPendingApproval: (approval) => {
             // The runtime emits the full PendingApprovalOut shape, so this is
-            // normally a straight passthrough. The fallbacks stay because an
-            // approval prompt that renders "Tool undefined wants to run." with
-            // no arguments — showing none of what is being approved — is worse
-            // than a generic label; refreshApprovals() below reconciles against
-            // the list endpoint either way.
+            // normally a straight passthrough. The fallbacks stay because a
+            // card with no sentence and no values, showing none of what is
+            // being approved, is worse than a generic one; refreshApprovals()
+            // below reconciles against the list endpoint either way.
             const raw = approval as PendingApproval & { tool?: string };
             const normalized: PendingApproval = {
               ...raw,
-              tool_name: raw.tool_name ?? raw.tool ?? "unknown tool",
+              tool_name: raw.tool_name ?? raw.tool ?? "unknown",
               arguments: raw.arguments ?? {},
-              reason:
-                raw.reason ??
-                "This tool requires your explicit approval before it runs.",
+              reason: raw.reason ?? "Crawler needs your OK before the next step.",
               conversation_id: raw.conversation_id ?? conv,
             };
             setApprovals((prev) => {
@@ -989,7 +1007,7 @@ export default function Chat() {
             .map((m) =>
               m.id === asstTempId
                 ? m.content
-                  ? { ...m, content: `${m.content}\n\n*— stopped*` }
+                  ? { ...m, content: `${m.content}\n\n*(stopped)*` }
                   : null
                 : m,
             )
@@ -1484,7 +1502,7 @@ export default function Chat() {
                       style={{ color: "var(--accent-danger)" }}
                     >
                       <ProviderErrorText
-                        text={msg.content || "The assistant failed to respond."}
+                        text={msg.content || "Something went wrong and I couldn't finish my reply. Try again."}
                         info={msg.provider_error}
                       />
                     </p>

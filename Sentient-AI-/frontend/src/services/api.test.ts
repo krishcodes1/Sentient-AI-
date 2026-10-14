@@ -105,6 +105,35 @@ describe("streamMessage SSE parsing", () => {
     expect(handlers.onError).not.toHaveBeenCalled();
   });
 
+  it("passes on the plain words the server adds to a step and a skipped step", async () => {
+    // The chat shows these instead of the tool ids ("Searching the web…",
+    // "I didn't send an email."); a frame without them still dispatches.
+    mockFetch(() =>
+      sseResponse([
+        'event: tool_call\ndata: {"name":"web.search","phrase":"Searching the web…"}\n\n',
+        'event: tool_call\ndata: {"name":"web.fetch_page"}\n\n',
+        'event: blocked\ndata: {"tool":"google_workspace.send_email","reason":"r","policy":"p","phrase":"send an email"}\n\n',
+        'event: blocked\ndata: {"tool":"desktop.act","reason":"r","policy":"p"}\n\n',
+        DONE_FRAME,
+      ]),
+    );
+    const handlers = recordHandlers();
+
+    await streamMessage("c1", "hi", handlers);
+
+    expect(handlers.onToolCall.mock.calls).toEqual([
+      ["web.search", "Searching the web…"],
+      ["web.fetch_page"],
+    ]);
+    expect(handlers.onBlocked.mock.calls[0][0]).toEqual({
+      tool_name: "google_workspace.send_email",
+      reason: "r",
+      policy: "p",
+      phrase: "send an email",
+    });
+    expect(handlers.onBlocked.mock.calls[1][0]).not.toHaveProperty("phrase");
+  });
+
   it("reassembles a payload spread over multiple data: lines", async () => {
     mockFetch(() =>
       sseResponse([

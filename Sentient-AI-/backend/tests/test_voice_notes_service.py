@@ -152,7 +152,7 @@ async def test_the_cloud_on_with_an_account_pinned_to_anthropic_names_the_provid
     svc = service(session_factory, gate, local=local)
     decision = await svc.precheck(str(user.id), note())
     assert not decision.ok and decision.reason == "provider_cannot_hear"
-    assert decision.refusal.startswith("🎤 Your AI provider (anthropic) can't listen to audio")
+    assert decision.refusal.startswith("🎤 Your AI service (Anthropic) can't listen to audio")
     assert local.calls == []
 
 
@@ -164,8 +164,8 @@ async def test_a_cloud_switch_blocked_by_the_install_default_says_so(session_fac
     svc = service(session_factory, gate, runtime=FakeRuntime(default=("anthropic", "claude-sonnet-5")))
     decision = await svc.precheck(str(user.id), note())
     assert not decision.ok and decision.reason == "cloud_unavailable"
-    assert "“Voice notes, transcribed by your AI provider” can't run here." in decision.refusal
-    assert "(gemini) can't listen" not in decision.refusal
+    assert "“Voice notes, transcribed by your AI provider” can't be used on this computer." in decision.refusal
+    assert "Your AI service (" not in decision.refusal
 
 
 @pytest.mark.asyncio
@@ -214,7 +214,7 @@ async def test_size_and_length_caps_refuse_before_any_engine_or_quota(session_fa
     assert big.reason == "too_large" and big.refusal == voice.TEXT_TOO_BIG
     long = await svc.precheck(str(user.id), note(declared_duration_s=25 * 60))
     assert long.reason == "too_long"
-    assert long.refusal.startswith("🎤 That recording is 25 min long; I transcribe up to 10 minutes")
+    assert long.refusal.startswith("🎤 That recording is 25 minutes long, and I can listen to 10 minutes at most.")
     odd = await svc.precheck(str(user.id), note(declared_mime="video/quicktime"))
     assert odd.reason == "format" and odd.refusal == voice.TEXT_FORMAT
     video = await svc.precheck(str(user.id), note(kind="video_note"))
@@ -228,7 +228,8 @@ async def test_the_provider_engine_refuses_formats_that_need_the_local_one(sessi
     gate = gate_for({"voice_notes_cloud": True}, default_provider="gemini", default_provider_audio=True)
     svc = service(session_factory, gate)
     decision = await svc.precheck(str(user.id), note(kind="audio", declared_mime="audio/mp4", file_name="lecture.m4a"))
-    assert decision.reason == "format_needs_local" and "needs transcription on this computer" in decision.refusal
+    assert decision.reason == "format_needs_local"
+    assert "when “Voice notes, transcribed on this computer” is on" in decision.refusal
 
 
 @pytest.mark.asyncio
@@ -265,7 +266,7 @@ async def test_the_quota_refuses_the_eleventh_note(session_factory):
         ("no_speech", "no_speech", voice.TEXT_NO_SPEECH),
         ("busy", "busy", voice.TEXT_BUSY),
         ("too_long", "too_long", voice.TEXT_TOO_LONG_UNKNOWN),
-        ("timeout", "timeout", "⚠️ I couldn't transcribe that voice note (it took too long). Please type your message."),
+        ("timeout", "timeout", "⚠️ I couldn't turn that voice note into text: it took too long. Please type your message."),
         ("engine_missing", "engine_missing", None),
     ],
 )
@@ -279,7 +280,7 @@ async def test_engine_failures_become_plain_replies(session_factory, code, reaso
     if text is not None:
         assert turn.refusal == text
     else:
-        assert turn.refusal.startswith("⚠️ I couldn't transcribe that voice note (")
+        assert turn.refusal.startswith("⚠️ I couldn't turn that voice note into text: ")
 
 
 # ── trust ───────────────────────────────────────────────────────────────
@@ -312,7 +313,7 @@ async def test_a_forwarded_note_is_fenced_and_the_caption_is_the_instruction(ses
     decision = await svc.precheck(str(user.id), meta)
     turn = await svc.transcribe(str(user.id), meta, OGG, decision)
     assert turn.ok
-    assert turn.echo.startswith("🎧 Transcript of the forwarded voice note (someone else's words;")
+    assert turn.echo.startswith("🎧 Here's what the forwarded voice note says. They're someone else's words")
     assert heard in turn.echo
     assert turn.turn_text.startswith("what does she need from me?\n\n")
     assert untrusted_spans(turn.turn_text) == [heard]
@@ -332,7 +333,7 @@ async def test_an_audio_file_is_someone_elses_words_too(session_factory):
     meta = note(kind="audio", declared_mime="audio/mpeg", file_name="lecture 3.mp3")
     decision = await svc.precheck(str(user.id), meta)
     turn = await svc.transcribe(str(user.id), meta, MP3, decision)
-    assert turn.ok and turn.echo.startswith("🎧 Transcript of lecture 3.mp3 (treated as information, not instructions):")
+    assert turn.ok and turn.echo.startswith("🎧 Here's what lecture 3.mp3 says. I won't do anything it asks:")
     assert untrusted_spans(turn.turn_text) == [SPOKEN]
     assert 'kind="audio file"' in turn.turn_text
     assert turn.attachment["audio_kind"] == "audio" and turn.attachment["media_type"] == "audio/mpeg"

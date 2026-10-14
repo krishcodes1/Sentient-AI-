@@ -96,7 +96,7 @@ async def test_counts_and_three_defanged_titles_never_card_text(session_factory)
     assert text == (
         "\U0001F4DA 21 flashcards are due: Bio 101 – Lecture 3 (12), Chem 201 (6), "
         "see evil․example․com (2) and 1 more deck. "
-        'Send /review on Telegram or "review" in Slack.'
+        'Send /review in Telegram or "review" in Slack to start.'
     )
     assert SECRET_FRONT not in text and "Acetyl" not in text and len(text) <= NUDGE_MAX_CHARS
 

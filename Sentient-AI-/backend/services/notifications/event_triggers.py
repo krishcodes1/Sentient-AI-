@@ -91,15 +91,32 @@ _MORE_RE = re.compile(r"^and ([0-9]{1,6}) more$")
 _TERMINAL = ("notified", "ran", "suppressed", "failed")
 # The notes of events suppressed by a cap (one notice a day covers them).
 _CAP_NOTES = ("daily_limit", "user_daily_limit", "budget")
-_OFFLINE = "The account this trigger reads was turned off or removed."
+# A trigger's last problem, in the owner's words: stored as last_error (the
+# /triggers list's "problem:" and triggers.list) and, after ERROR_LIMIT
+# failures in a row, the reason in the "Stopped trigger" message. Never an
+# exception's name or text (those go to the logs, by type only).
+_OFFLINE = "The account this trigger checks was turned off or removed."
+_NO_ADAPTER = "I can't check this app for this kind of trigger."
+_CHECK_FAILED = "Something went wrong while checking the app."
 _RUN_ERRORS = {
-    "failed": "The run failed.",
-    "timed_out": "The run took too long.",
-    "not_configured": "No AI provider is set up.",
+    "failed": "Something went wrong while running its task.",
+    "timed_out": "Its task took too long, so I stopped it.",
+    "not_configured": "No AI service is set up yet. You can add one in Settings.",
 }
-# One message reaches Telegram and Slack alike, so a command is named for
-# both (Slack keeps "/..." for its own slash commands).
-_PENDING_HINT = '/pending; Slack: reply "pending"'
+# One message reaches Telegram and Slack alike (fan_out_send), so the way to
+# see waiting cards is named for both (Slack keeps "/..." for its own slash
+# commands).
+_PENDING_HINT = 'Send /pending in Telegram or "pending" in Slack to see'
+# Why a trigger did not run its task, completing facts.limit_text's
+# 'Trigger "X" did not run its task: ...' (lower case, one sentence).
+_BUDGET_USED_UP = "today's budget for tasks that run on their own is used up."
+
+
+def _daily_limit_reason(limit: Any) -> str:
+    """'it already ran 6 times today, which is its daily limit.' (and "1
+    time" for a limit of one)."""
+    times = "time" if limit == 1 else "times"
+    return f"it already ran {limit} {times} today, which is its daily limit."
 
 Send = Callable[[str, str], Awaitable[Any]]
 Gate = Callable[[], Awaitable[bool]]
@@ -352,7 +369,7 @@ class TriggerService:
             return
         adapter = src.adapter_for(claim.source, connector_type)
         if adapter is None or self.executor is None:
-            await self._record_failure(claim, "This trigger's app cannot be read here.")
+            await self._record_failure(claim, _NO_ADAPTER)
             return
         target = src.CheckTarget(
             trigger_id=str(claim.id),
@@ -375,13 +392,15 @@ class TriggerService:
         except asyncio.CancelledError:
             raise
         except asyncio.TimeoutError:
-            await self._record_failure(claim, "The app did not answer in time.")
+            await self._record_failure(claim, "The app didn't answer in time.")
             return
         except src.SourceError as exc:
             await self._record_failure(claim, str(exc))
             return
         except Exception as exc:
-            await self._record_failure(claim, f"The check failed ({type(exc).__name__}).")
+            # The type goes to the log only; the owner reads a plain sentence.
+            logger.warning("trigger_check_error", trigger_id=str(claim.id), error_type=type(exc).__name__)
+            await self._record_failure(claim, _CHECK_FAILED)
             return
         try:
             await self._record_success(claim, outcome, now)
@@ -826,16 +845,19 @@ class TriggerService:
                 )
             ).scalar_one() or 0
         if mine >= trig.max_runs_per_day:
-            return (f"it already ran {trig.max_runs_per_day} times today, its daily limit.", "daily_limit")
+            return (_daily_limit_reason(trig.max_runs_per_day), "daily_limit")
         if everyone >= MAX_USER_RUNS_PER_DAY:
-            return (f"your triggers already ran {MAX_USER_RUNS_PER_DAY} tasks today.", "user_daily_limit")
+            return (
+                f"your triggers already ran {MAX_USER_RUNS_PER_DAY} tasks today, the most allowed in a day.",
+                "user_daily_limit",
+            )
         try:
             budget = await self.runner.budget_left(str(trig.user_id))
         except Exception as exc:
             logger.warning("trigger_budget_unreadable", error_type=type(exc).__name__)
-            return ("today's budget for tasks run while you are away could not be read.", "budget")
+            return ("I couldn't check today's budget for tasks that run on their own.", "budget")
         if budget.exhausted:
-            return ("today's budget for tasks run while you are away is used up.", "budget")
+            return (_BUDGET_USED_UP, "budget")
         return None
 
     async def _take_run(self, trig: _Trigger) -> bool:
@@ -931,12 +953,7 @@ class TriggerService:
             await self._notify(trig, events, extra=(shape.RUN_FAILED_LINE,), status="failed", note="no_account")
             return
         if not await self._take_run(trig):
-            await self._suppress(
-                trig,
-                events,
-                f"it already ran {trig.max_runs_per_day} times today, its daily limit.",
-                "daily_limit",
-            )
+            await self._suppress(trig, events, _daily_limit_reason(trig.max_runs_per_day), "daily_limit")
             return
         run_id = await self._ledger.start_run(trig.user_id, trig.origin, "event")
         items = [e.facts for e in events]
@@ -1000,9 +1017,7 @@ class TriggerService:
             await self._give_back_run(trig)
             if run_id is not None:
                 await self._ledger.finish_run(run_id, status="skipped_budget")
-            await self._suppress(
-                trig, events, "today's budget for tasks run while you are away is used up.", "budget"
-            )
+            await self._suppress(trig, events, _BUDGET_USED_UP, "budget")
             return
         if outcome.status in FAILED_STATUSES:
             line = shape.NOT_CONFIGURED_LINE if outcome.status == "not_configured" else shape.RUN_FAILED_LINE
@@ -1059,17 +1074,20 @@ class TriggerService:
 
     @staticmethod
     def _run_notes(outcome: UnattendedOutcome) -> list[str]:
+        """The lines after a task's result, in the owner's words: steps it
+        was not allowed are named by their plain phrase (plain_steps,
+        services/action_text.py), never by tool id."""
+        from services.automation.delivery import pending_note, plain_steps
+
         notes: list[str] = []
-        if outcome.cards == 1:
-            notes.append(f"1 action is waiting for your approval ({_PENDING_HINT}).")
-        elif outcome.cards > 1:
-            notes.append(f"{outcome.cards} actions are waiting for your approval ({_PENDING_HINT}).")
+        if outcome.cards >= 1:
+            notes.append(pending_note(outcome.cards, _PENDING_HINT))
         if outcome.blocked:
-            notes.append("Not run (outside this trigger's tools): " + ", ".join(outcome.blocked) + ".")
+            notes.append(f"I didn't {plain_steps(outcome.blocked)} because this trigger isn't set up to do that.")
         if outcome.status == "over_budget":
-            notes.append("Stopped at this run's budget.")
+            notes.append("I stopped because this task reached its spending limit.")
         elif outcome.status == "stopped":
-            notes.append("Stopped because you asked Crawler to stop.")
+            notes.append("I stopped because you asked me to.")
         return notes
 
     @staticmethod

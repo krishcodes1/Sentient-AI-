@@ -89,13 +89,17 @@ SUMMARY_CHARS = 700
 _COMPARE_LINES = 200
 
 _WITHHELD = (
-    "(The changed text is not shown: it looked like instructions aimed at an "
-    "AI assistant. Open the page to read it.)"
+    "(The changed text is not shown because it looked like it was written to "
+    "trick an AI assistant. Open the page to read it.)"
 )
 _BEYOND_EXCERPT = (
-    "(The change is further down the page than the part Crawler keeps a copy "
-    "of. Open the page to see it.)"
+    "(The change is further down the page than the part I keep a copy of. "
+    "Open the page to see it.)"
 )
+# A changed line is marked in words, not with diff signs (+ and a minus
+# sign that reads like a dash).
+_ADDED, _REMOVED = "Added:", "Removed:"
+_CHECK_FAILED = "Something went wrong while checking the page."
 
 # Telegram draws links for URLs, bare domains, e-mail addresses, @mentions
 # and /commands in plain text. Page text is not allowed any of them: a dot
@@ -104,7 +108,6 @@ _BEYOND_EXCERPT = (
 _DOT_BETWEEN_WORDS = re.compile(r"(?<=\w)\.(?=\w)")
 _ONE_DOT_LEADER = chr(0x2024)
 _DEFANG = str.maketrans({"/": chr(0x2215), "@": chr(0xFF20)})  # DIVISION SLASH, FULLWIDTH AT
-_MINUS = chr(0x2212)
 
 
 def defang(text: str) -> str:
@@ -196,7 +199,8 @@ def change_summary(
     lines: list[str] = []
     size = 0
     for sign, text in shown:
-        line = f"{'+' if sign == '+' else _MINUS} {_cap(defang(text))}"
+        # "Added: ..." / "Removed: ...", the whole line capped.
+        line = _cap(f"{_ADDED if sign == '+' else _REMOVED} {defang(text)}")
         if size + len(line) + 1 > SUMMARY_CHARS:
             break
         lines.append(line)
@@ -207,13 +211,33 @@ def change_summary(
     return "\n".join(lines)
 
 
+def every(minutes: Any) -> str:
+    """How often a watch is checked, in words: "every 15 minutes", "every
+    hour", "every 6 hours", "every day", "every 2 days". Odd input reads as
+    the minutes it holds, never raises."""
+    try:
+        total = int(minutes)
+    except (TypeError, ValueError):
+        return "regularly"
+    if total <= 0:
+        return "regularly"
+    day, hour = 24 * 60, 60
+    if total % day == 0:
+        count, unit = total // day, "day"
+    elif total % hour == 0:
+        count, unit = total // hour, "hour"
+    else:
+        count, unit = total, "minute"
+    return f"every {unit}" if count == 1 else f"every {count} {unit}s"
+
+
 def change_message(label: str, url: str, summary: str, interval_minutes: int) -> str:
     """The Telegram text for a change. Plain text; *url* is its only link."""
     return (
         f"🔔 Page changed: {defang(label)}\n"
         f"{url}\n\n"
         f"What changed:\n{summary}\n\n"
-        f"Crawler checks this page every {interval_minutes} minutes."
+        f"I check this page {every(interval_minutes)}."
     )
 
 
@@ -222,8 +246,8 @@ def stopped_message(label: str, url: str, reason: str, failures: int) -> str:
     return (
         f"⚠️ Stopped watching: {defang(label)}\n"
         f"{url}\n\n"
-        f"The last {failures} checks failed. Last problem: {defang(reason)}\n"
-        "Ask Crawler to delete this watch and create it again once the page works."
+        f"I couldn't check it the last {failures} times. Last problem: {defang(reason)}\n"
+        "Once the page works again, ask me to remove this watch and set it up again."
     )
 
 
@@ -400,13 +424,15 @@ class PageWatchService:
         except asyncio.CancelledError:
             raise
         except asyncio.TimeoutError:
-            await self._record_failure(claim, "The page did not finish loading in time.")
+            await self._record_failure(claim, "The page didn't finish loading in time.")
             return
         except WatchFetchError as exc:
             await self._record_failure(claim, str(exc))
             return
         except Exception as exc:
-            await self._record_failure(claim, f"The check failed ({type(exc).__name__}).")
+            # The type goes to the log only; the owner reads a plain sentence.
+            logger.warning("page_watch_check_error", watch_id=str(claim.id), error_type=type(exc).__name__)
+            await self._record_failure(claim, _CHECK_FAILED)
             return
         try:
             await self._record_success(claim, snapshot)

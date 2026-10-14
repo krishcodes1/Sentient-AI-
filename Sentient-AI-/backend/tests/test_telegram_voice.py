@@ -199,7 +199,7 @@ async def test_an_unlinked_chat_or_a_group_gets_nothing(session_factory, bot):
     ("overrides", "starts"),
     [
         ({"size": 25 * 1024 * 1024}, "🎤 That recording is over the 20 MB limit."),
-        ({"duration": 25 * 60}, "🎤 That recording is 25 min long; I transcribe up to 10 minutes per voice note."),
+        ({"duration": 25 * 60}, "🎤 That recording is 25 minutes long, and I can listen to 10 minutes at most."),
     ],
 )
 async def test_caps_refuse_before_get_file(session_factory, bot, overrides, starts):
@@ -276,7 +276,7 @@ async def test_a_forwarded_note_reaches_the_applier_fenced(session_factory, bot,
     await svc._handle_message(message)
     await svc.wait_for_chats()
     echo = bot.sends()[0]
-    assert echo["text"].startswith("🎧 Transcript of the forwarded voice note") and echo["disable_notification"] is True
+    assert echo["text"].startswith("🎧 Here's what the forwarded voice note says.") and echo["disable_notification"] is True
     ((_, text, extra),) = chat.calls
     assert text.startswith("what does she want?\n\n")
     assert untrusted_spans(text) == [heard]
@@ -294,7 +294,7 @@ async def test_an_audio_file_is_untrusted_and_a_video_note_gets_its_reply(sessio
     await svc.wait_for_chats()
     ((_, text, _extra),) = chat.calls
     assert text.startswith(voice.DEFAULT_INSTRUCTION) and untrusted_spans(text) == [SPOKEN]
-    assert bot.sends()[0]["text"].startswith("🎧 Transcript of lecture 3.mp3")
+    assert bot.sends()[0]["text"].startswith("🎧 Here's what lecture 3.mp3 says.")
     bot.calls.clear()
     await svc._handle_message(voice_message(3007, kind="video_note", file_id="vn1"))
     await svc.wait_for_chats()
@@ -332,7 +332,7 @@ async def test_a_failed_download_logs_no_token(session_factory, bot, caplog):
         await svc._handle_message(voice_message(3009))
         await svc.wait_for_chats()
     assert bot.texts()[-1] == voice.failure_text("download_failed")
-    assert "Telegram did not hand the recording over" in bot.texts()[-1]
+    assert "Telegram didn't send me the recording" in bot.texts()[-1]
     assert TOKEN not in json.dumps(logs, default=str)
     assert TOKEN not in caplog.text
     assert chat.calls == []

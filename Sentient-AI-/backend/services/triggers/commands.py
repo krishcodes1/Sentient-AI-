@@ -29,9 +29,9 @@ logger = structlog.get_logger(__name__)
 # Telegram button prefixes (4 characters, reserved in the plan).
 TELEGRAM_BUTTONS = {"tgp:": "pause", "tgr:": "resume"}
 _VERBS = ("pause", "resume", "delete")
-_NOT_AVAILABLE = "Triggers are not available right now."
+_NOT_AVAILABLE = "Triggers aren't available right now."
 _NO_TRIGGERS = (
-    "You have no triggers yet. Ask Crawler, e.g. “tell me when Professor Smith emails me” "
+    "You have no triggers yet. Ask me, for example “tell me when Professor Smith emails me” "
     "or “ping me when a Canvas announcement is posted”."
 )
 _ACTIONS = {"pause": "trigger_paused", "resume": "trigger_resumed", "delete": "trigger_deleted"}
@@ -142,24 +142,29 @@ def _phrase(source: Any) -> str:
     return spec.phrase if spec is not None else str(source)
 
 
+# A trigger's state in the owner's words (models/event_trigger.py
+# TRIGGER_STATUSES); a state missing here is left out, never shown raw.
+_STATUS_WORDS = {"paused": "paused", "error": "stopped after problems"}
+
+
 def list_text(rows: list[dict[str, Any]], *, how: str, tz: Optional[tzinfo] = None) -> str:
-    """The numbered list (label, source, mode, status, last fired in *tz*
-    or this computer's zone, runs today); *how* says how to act on a
-    number."""
+    """The numbered list (label, source, mode, status, when it last went
+    off in *tz* or this computer's zone, task runs today); *how* says how
+    to act on a number."""
     if not rows:
         return _NO_TRIGGERS
     lines = ["Your triggers:"]
     for index, row in enumerate(rows, start=1):
         mode = "runs a task" if row.get("mode") == "run_task" else "messages you"
-        line = f"{index}. {_defang(str(row.get('label') or ''))} — {_phrase(row.get('source'))}, {mode}"
+        line = f"{index}. {_defang(str(row.get('label') or ''))}: {_phrase(row.get('source'))}, {mode}"
         status = str(row.get("status") or "")
-        if status != "active":
-            line += f" · {status}"
+        if status != "active" and _STATUS_WORDS.get(status):
+            line += f" · {_STATUS_WORDS[status]}"
         details = []
         if row.get("last_fired_at"):
-            details.append(f"last fired {_when(row['last_fired_at'], tz)}")
+            details.append(f"last went off {_when(row['last_fired_at'], tz)}")
         if row.get("mode") == "run_task":
-            details.append(f"runs today {row.get('runs_today', 0)}/{row.get('max_runs_per_day')}")
+            details.append(f"ran its task {row.get('runs_today', 0)} of {row.get('max_runs_per_day')} times today")
         if row.get("last_error"):
             details.append(f"problem: {_defang(str(row['last_error']))}")
         if details:
@@ -193,20 +198,24 @@ async def act(user_id: str, verb: str, ref: str, *, endpoint: str, confirmed: bo
         return _NOT_AVAILABLE
     row = _resolve(rows, ref)
     if row is None:
-        return "No such trigger. Send /triggers (Slack: triggers) for the list."
+        how = 'Reply "triggers"' if endpoint.startswith("slack:") else "Send /triggers"
+        return f"No such trigger. {how} to see the list."
     label = _defang(str(row.get("label") or "the trigger"))
     if verb == "delete":
         if not confirmed:
-            return f"Delete “{label}” and its queued events? Send {how_confirm} to confirm."
+            return (
+                f"Delete “{label}”? Anything it found that hasn't been sent yet goes too. "
+                f"Send {how_confirm} to confirm."
+            )
         result = await backend.toolkit.delete_trigger(user_id, row["id"])
         if not result.get("ok"):
-            return str(result.get("error") or "Could not delete it.")
+            return str(result.get("error") or "I couldn't delete it right now.")
         await _audit(user_id, _ACTIONS["delete"], endpoint, {"trigger_id": row["id"]})
         return f"Deleted “{label}”. Its conversation is kept."
     paused = verb == "pause"
     result = await backend.toolkit.set_paused(user_id, row["id"], paused)
     if not result.get("ok"):
-        return str(result.get("error") or "Could not change it.")
+        return str(result.get("error") or "I couldn't change it right now.")
     await _audit(user_id, _ACTIONS[verb], endpoint, {"trigger_id": row["id"]})
     if paused:
         return f"Paused “{label}”. Nothing is checked or sent until you resume it."

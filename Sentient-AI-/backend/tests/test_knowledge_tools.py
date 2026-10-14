@@ -282,14 +282,15 @@ async def test_the_card_states_facts_the_bind_read(session_factory):
         "source_label": "the web page at catalog.example.edu",
     }
     assert toolkit.describe("add", bound, user_id) == (
-        'Save the web page at catalog.example.edu to your knowledge base collection "CS101" (new collection).'
+        'Save the web page at catalog.example.edu to "CS101" in your knowledge base (a new collection). '
+        "The full address is below."
     )
 
     saved = await toolkit.service.add_document(user_id, "CS101", from_text(SYLLABUS, "Syllabus"))
     drive = {"collection": "cs101", "connector": "google_workspace", "ids": ["a1", "b2", "c3"]}
     bound = await toolkit.bind("add", drive, user_id)
     assert toolkit.describe("add", bound, user_id) == (
-        'Save 3 files from Google Drive (school) to your knowledge base collection "CS101".'
+        'Save 3 files from Google Drive (school) to "CS101" in your knowledge base.'
     )
     notion = await toolkit.bind("add", {"collection": "CS101", "connector": "notion", "ids": ["p1"]}, user_id)
     assert toolkit.describe("add", notion, user_id).startswith("Save 1 page from Notion to")
@@ -298,11 +299,12 @@ async def test_the_card_states_facts_the_bind_read(session_factory):
 
     doc = await toolkit.bind("remove", {"document_id": saved.document_id}, user_id)
     assert toolkit.describe("remove", doc, user_id) == (
-        'Delete "Syllabus" (2 passages) from your knowledge base collection "CS101".'
+        'Remove "Syllabus" from "CS101" in your knowledge base. '
+        "I won't be able to look things up in it anymore."
     )
     whole = await toolkit.bind("remove", {"collection": "CS101"}, user_id)
     assert toolkit.describe("remove", whole, user_id) == (
-        'Delete the knowledge base collection "CS101" and its 1 document (2 passages).'
+        'Delete the collection "CS101" and the 1 document in it from your knowledge base.'
     )
     # A bind never keeps facts the model sent.
     smuggled = await toolkit.bind("add", {**url, KNOWLEDGE_CARD_KEY: {"source_label": "nothing"}}, user_id)
@@ -576,7 +578,7 @@ async def test_the_executor_runs_the_knowledge_family_and_its_card_hooks(session
     bound = await executor.approval_arguments_async("knowledge.add", note, user_id, task_id=None)
     assert bound[KNOWLEDGE_CARD_KEY]["collection_exists"] is False
     assert executor.describe_approval("knowledge.add", bound, user_id) == (
-        'Save a note titled "Syllabus" to your knowledge base collection "CS101" (new collection).'
+        'Save a note titled "Syllabus" to "CS101" in your knowledge base (a new collection).'
     )
     saved = await executor.execute("knowledge.add", bound, user_id, approved=True)
     assert saved["ok"] is True
@@ -635,7 +637,7 @@ async def test_the_card_names_the_connected_account(session_factory):
     args = {"collection": "CS101", "connector": "google_workspace", "ids": ["a", "b"]}
     bound = await executor.approval_arguments_async("knowledge.add", args, user_id, task_id=None)
     assert executor.describe_approval("knowledge.add", bound, user_id) == (
-        'Save 2 files from Google Drive (school) to your knowledge base collection "CS101" (new collection).'
+        'Save 2 files from Google Drive (school) to "CS101" in your knowledge base (a new collection).'
     )
     assert await executor.connector_display_name("google_workspace", str(uuid.uuid4())) is None
     assert await executor.connector_display_name("google_workspace", user_id, "00000000") is None
@@ -700,7 +702,7 @@ async def test_a_turn_parks_knowledge_add_on_a_card_and_refuses_smuggled_facts(s
         "collection_exists": False,
         "source_label": 'a note titled "Syllabus"',
     }
-    assert card.reason == 'Save a note titled "Syllabus" to your knowledge base collection "CS101" (new collection).'
+    assert card.reason == 'Save a note titled "Syllabus" to "CS101" in your knowledge base (a new collection).'
     # Nothing was saved before the owner approved.
     async with session_factory() as session:
         assert (await session.execute(select(KbDocument))).first() is None

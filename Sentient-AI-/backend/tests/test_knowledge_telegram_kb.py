@@ -183,7 +183,7 @@ async def test_the_switch_off_a_missing_name_and_a_resend_get_their_replies(sess
     state["on"] = False
     await svc._handle_message(_document(3103, "/kb CS101"))
     await svc.wait_for_chats()
-    assert bot.texts()[-1] == "⚠️ The knowledge base is turned off. The owner can turn it on in Settings → Permissions."
+    assert bot.texts()[-1] == "⚠️ The knowledge base is turned off. You can turn it on in Settings → Permissions."
     assert len(audit.rows) == 1
     await svc._client.aclose()
 
@@ -219,5 +219,5 @@ def test_the_reply_line_wording():
         AddOutcome("ready", "Syllabus.pdf", pages=14, passages=42, withheld=2), "CS101"
     ) == 'Saved "Syllabus.pdf" to CS101: 14 pages, 42 passages (2 hidden).'
     assert knowledge_channels.reply_line(AddOutcome("error", "x.pdf", error="It is larger than 20 MB."), "A") == (
-        '⚠️ Could not save "x.pdf": It is larger than 20 MB.'
+        "⚠️ I couldn't save \"x.pdf\": It is larger than 20 MB."
     )

@@ -47,7 +47,7 @@ def test_both_are_registered_tool_less_and_off_by_default():
     assert len(labels) == len(set(labels))
     switches = capabilities.default_switches()
     assert switches["voice_notes"] is False and switches["voice_notes_cloud"] is False
-    assert "Settings → Permissions" in local.when_denied and "type the message" in local.when_denied
+    assert "Settings → Permissions" in local.when_denied and "type your message" in local.when_denied
     assert "The recording never leaves this computer" in local.description
     assert "The provider hears the recording" in cloud.description
 
@@ -59,7 +59,8 @@ def test_local_is_blocked_until_installed_and_says_why():
     assert missing.reason == voice_notes.NOT_INSTALLED_REASON
     assert missing.install_size_hint == ALLOWLIST["speech_to_text"].size_hint == "~250 MB download"
     docker = _status("voice_notes", on, _ctx(in_container=True, platform="linux"))
-    assert docker.effective == "blocked" and "WITH_SPEECH_TO_TEXT=1" in docker.reason
+    assert docker.effective == "blocked" and docker.reason == voice_notes.CONTAINER_REASON
+    assert "WITH_SPEECH_TO_TEXT" not in docker.reason and "Docker" not in docker.reason
     ready = _status("voice_notes", on, _ctx(speech_local_installed=True))
     assert ready.effective == "on"
     in_image = _status("voice_notes", on, _ctx(in_container=True, speech_local_installed=True))
@@ -71,8 +72,12 @@ def test_the_permissions_block_offers_the_speech_install_when_installs_is_on():
     ctx = _ctx()
     block = render_permissions_block(capabilities.report({"voice_notes": True, "installs": True}, ctx))
     assert (
-        "- Voice notes, transcribed on this computer: blocked — "
-        f"{voice_notes.NOT_INSTALLED_REASON} You may offer system.install_capability(name='speech_to_text')."
+        "- Voice notes, transcribed on this computer: blocked. "
+        f"{voice_notes.NOT_INSTALLED_REASON} You may offer to install it: call "
+        "system.install_capability with name='speech_to_text', and the person approves "
+        "it first. Ask them in plain words, saying what it adds, that it's a one-time "
+        "download of about 250 MB and whether to go ahead. Never show them the tool name "
+        "or what you pass to it."
     ) in block
     without = render_permissions_block(capabilities.report({"voice_notes": True, "installs": False}, ctx))
     assert "name='speech_to_text'" not in without

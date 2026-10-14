@@ -37,7 +37,7 @@ def test_event_triggers_needs_a_chat_channel_to_deliver():
     assert cap.tools == ("triggers.",) and cap.default_enabled is False and cap.risk == "medium"
     assert cap.description.startswith("Check your connected apps on a schedule")
     assert cap.when_denied == (
-        "App triggers are turned off. The owner can turn on 'Tell me when something happens "
+        "Alerts from your apps are turned off. You can turn on 'Tell me when something happens "
         "in my apps' in Settings → Permissions."
     )
     assert cap.availability(ctx(telegram_enabled=True)).available is True
@@ -53,7 +53,7 @@ def test_trigger_runs_gates_an_argument_and_needs_event_triggers():
     assert cap.label == "Run a task when something happens in my apps"
     assert cap.tools == () and cap.default_enabled is False and cap.risk == "high"
     assert cap.requires == ("event_triggers",)
-    assert cap.when_denied.startswith("Running tasks from triggers is off.")
+    assert cap.when_denied.startswith("Running a task when something happens in your apps is off.")
     statuses = {s.key: s for s in registry.report({"trigger_runs": True}, ctx(telegram_enabled=True))}
     assert statuses["trigger_runs"].effective == "blocked"
     both = registry.enabled_keys({"trigger_runs": True, "event_triggers": True}, ctx(telegram_enabled=True))

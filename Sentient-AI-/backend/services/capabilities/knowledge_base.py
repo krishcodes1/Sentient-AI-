@@ -31,6 +31,6 @@ CAPABILITY = Capability(
     default_enabled=True,
     risk="low",
     when_denied=(
-        "The knowledge base is turned off. The owner can turn it on in Settings → Permissions."
+        "The knowledge base is turned off. You can turn it on in Settings → Permissions."
     ),
 )

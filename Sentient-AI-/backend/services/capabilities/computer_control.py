@@ -237,7 +237,7 @@ def build_capability(
         default_enabled=False,
         risk="high",
         when_denied=(
-            "Controlling this computer is turned off. The owner can turn it on in "
+            "Controlling this computer is turned off. You can turn it on in "
             "Settings → Permissions."
         ),
         availability=make_availability(backend_available or _default_backend_available),

@@ -70,11 +70,12 @@ class Screen:
 
     def slack_text(self) -> str:
         """The text with a hint line naming the keywords (Slack has no
-        buttons here)."""
-        words = [b.word for row in self.buttons for b in row if b.word]
+        buttons here), as a sentence: "Reply show, skip or end"."""
+        words = list(dict.fromkeys(b.word for row in self.buttons for b in row if b.word))
         if not words:
             return self.text
-        return f"{self.text}\n\nReply {' / '.join(dict.fromkeys(words))}"
+        hint = words[0] if len(words) == 1 else f"{', '.join(words[:-1])} or {words[-1]}"
+        return f"{self.text}\n\nReply {hint}"
 
 
 def choices_block(choices: Sequence[str]) -> str:

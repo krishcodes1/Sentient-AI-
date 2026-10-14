@@ -1,6 +1,6 @@
 """Tests for approval cards an unattended run parked (pending_actions.origin):
 the origin is stored with the card in every store, approving one runs exactly
-that call, records it in the run's conversation with "Done: <tool> ran." and
+that call, records it in the run's conversation with "Done. It went through." and
 gives the channel that line, and never resumes a model turn; a card without
 an origin still resumes as before.
 
@@ -116,7 +116,7 @@ async def test_approving_an_origin_card_runs_the_one_call_and_resumes_nothing(se
     decide = build_decision_applier(app, session_factory)
     outcome = await decide(str(user.id), card.action_id, True)
     assert outcome["status"] == "approved"
-    assert outcome["summary"] == "Done: reminders.create ran."
+    assert outcome["summary"] == "Done. It went through."
     assert [c[0] for c in executor.calls] == ["reminders.create"] and executor.calls[0][2] is True
     assert NoChat.chats == 0
     async with session_factory() as session:
@@ -130,8 +130,8 @@ async def test_approving_an_origin_card_runs_the_one_call_and_resumes_nothing(se
             .scalars()
             .all()
         ]
-    assert contents[0].startswith("[Approved] Executed 'reminders.create'")
-    assert contents[-1] == "Done: reminders.create ran."
+    assert contents[0] == "You approved my request to set a reminder, and it's done."
+    assert contents[-1] == "Done. It went through."
 
 
 @pytest.mark.asyncio
@@ -142,7 +142,7 @@ async def test_a_failed_origin_call_says_so(session_factory):
     executor.result = {"ok": False, "error": "Reminder storage is unavailable"}
     app = SimpleNamespace(state=SimpleNamespace(agent_runtime=runtime, mcp_catalog=None, installation=None))
     outcome = await build_decision_applier(app, session_factory)(str(user.id), card.action_id, True)
-    assert outcome["summary"] == "Not done: reminders.create reported an error."
+    assert outcome["summary"] == "It didn't work. Ask me to try again if you still want it done."
 
 
 @pytest.mark.asyncio

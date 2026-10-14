@@ -27,6 +27,7 @@ no new message first, then waits a bounded time for a started call.
 from __future__ import annotations
 
 import asyncio
+import re
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Optional
 
@@ -47,8 +48,8 @@ from tests.test_telegram_progress import FakeClock, drain
 
 # Telegram /stop's reply once the chat's work has unwound, and while it
 # still unwinds.
-STOPPED = "⏹ Stopped. Nothing more will be sent for that request."
-STOPPING = "⏹ Stopping — nothing more will be sent for that request."
+STOPPED = "⏹ Stopped. I won't send anything more for that request."
+STOPPING = "⏹ Stopping now. I won't send anything more for that request."
 
 SEND_EMAIL = LLMResponse(
     content="Drafted it; approve the card to send.",
@@ -133,9 +134,17 @@ def _press(data: str, chat_id: Optional[int], message_id: int = 7) -> dict[str, 
         callback["message"] = {
             "chat": {"id": chat_id, "type": "private"},
             "message_id": message_id,
-            "text": "🔐 Approval required",
+            "text": CARD_TEXT,
         }
     return callback
+
+
+# The text of the card a press comes from, and what the card reads once the
+# press was applied: the same text, then the decision line with its time.
+CARD_TEXT = "🔐 Send an email to prof@example.com"
+APPROVED_EDIT = re.compile(
+    re.escape(CARD_TEXT) + r"\n\n✅ Approved at (1[0-2]|[1-9]):[0-5]\d [AP]M\."
+)
 
 
 def _answers(api: FakeTelegramAPI) -> list[str]:
@@ -180,7 +189,8 @@ async def test_the_press_is_answered_before_the_decision_runs(session_factory, f
 
     assert decisions == [(str(user.id), "act-1", True)]
     assert _answers(fake_api) == ["Approving…"]  # a press is answered once
-    assert _edits(fake_api) == ["🔐 Approval required\n\n— ✅ Approved from this chat."]
+    [edit] = _edits(fake_api)
+    assert APPROVED_EDIT.fullmatch(edit), edit
     assert fake_api.sent_messages()[-1]["text"] == "Sent, and office hours are 3pm."
     await service._client.aclose()
 
@@ -217,7 +227,8 @@ async def test_a_decision_that_fails_is_reported_in_the_chat(session_factory, fa
     await service.wait_for_chats()
     assert _answers(fake_api) == ["Approving…"]
     assert [m["text"] for m in fake_api.sent_messages()] == [
-        "⚠️ Could not apply that decision — see server logs."
+        "⚠️ Something went wrong and your answer didn't go through. "
+        "Tap the button again, or answer in the web app."
     ]
     assert _edits(fake_api) == []
     await service._client.aclose()
@@ -287,7 +298,7 @@ async def test_a_press_without_its_chat_decides_nothing(session_factory, fake_ap
     await service._handle_callback(_press("apv:act-6", None))
     await service.wait_for_chats()
     assert decisions == []
-    assert _answers(fake_api) == ["This chat is not linked to a Crawler AI account."]
+    assert _answers(fake_api) == ["This chat isn't linked to a Crawler AI account."]
     await service._client.aclose()
 
 
@@ -454,7 +465,7 @@ async def test_a_stop_sent_while_the_approved_action_runs_reaches_its_checks(
     # action (already approved) still finishes and is recorded...
     assert executor.stopped_at_release == [True]
     transcript = await _transcript(session_factory)
-    assert transcript[-1] == "[Approved] Executed 'google_workspace.send_email'."
+    assert transcript[-1] == "You approved my request to send an email, and it's done."
     # ...and nothing after it runs or is sent: no resumed turn, no reply.
     assert len(provider.calls) == 1
     texts = [m["text"] for m in fake_api.sent_messages()]
@@ -549,8 +560,8 @@ async def _last_message(session_factory):
 
 # The line /stop's reply adds while one approval card waits on the account.
 ONE_CARD_WAITS = (
-    "\n\n1 action is still waiting for your approval (/pending). "
-    "Approving it runs that one action; its task stays stopped."
+    "\n\nOne request is still waiting for your OK (send /pending to see it). "
+    "If you approve it, I'll do just that one thing and the task stays stopped."
 )
 
 
@@ -948,10 +959,10 @@ async def test_a_call_that_ran_beside_a_card_is_named_for_the_resumed_turn(
         assert service.decide is not None
         await service.decide(uid, await _card(fake_api), True)
 
-    ran = "Ran before asking for approval: reminders.create."
+    ran = "I already did this before asking you: set a reminder."
     texts = [m["text"] for m in fake_api.sent_messages()]
-    [reply] = [t for t in texts if "Waiting on your approval" in t]
-    assert reply.startswith("I need your approval before I can continue.")
+    [reply] = [t for t in texts if "🔐 I need your OK first to send an email." in t]
+    assert reply.startswith("I need your OK before I send an email.")
     assert ran in reply
     assert executor.calls == ["reminders.create", "google_workspace.send_email"]
     resumed = [m for m in provider.calls[1]["messages"] if m["role"] == "assistant"]
@@ -1027,4 +1038,5 @@ async def test_the_resumed_turn_shows_typing_and_progress_lines(
     assert reply == "Sent, and office hours are 3pm."
     assert " tokens · " in cost
     assert "disable_notification" not in sent[-1]
-    assert _edits(fake_api) == ["🔐 Approval required\n\n— ✅ Approved from this chat."]
+    [edit] = _edits(fake_api)
+    assert APPROVED_EDIT.fullmatch(edit), edit

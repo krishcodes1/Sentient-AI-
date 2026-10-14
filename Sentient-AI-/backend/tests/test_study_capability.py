@@ -63,7 +63,7 @@ def test_study_is_registered_off_by_default_low_risk_and_claims_the_family():
     assert cap.description.startswith("Make flashcard decks and practice quizzes")
     assert cap.tools == ("study.",) and cap.default_enabled is False and cap.risk == "low"
     assert cap.when_denied == (
-        "Flashcards and quizzes are turned off. The owner can turn them on in Settings → Permissions."
+        "Flashcards and quizzes are turned off. You can turn them on in Settings → Permissions."
     )
     assert cap.availability(_CTX).available
     for spec in CONNECTOR_CATALOG["study"]:

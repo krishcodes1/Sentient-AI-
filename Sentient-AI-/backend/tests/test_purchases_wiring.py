@@ -936,13 +936,13 @@ def test_a_checkout_card_names_no_risk_when_the_merchant_is_the_page_it_read():
     elsewhere = {"_checkout": {"checkout_id": "c1", "host": "other.example.net"}}
     assert (
         note("browser.checkout", args, {**args, **elsewhere}, reason, taint)
-        == "The site name came from a web page; check it matches where you meant to buy."
+        == "The shop name came from a web page. Make sure it's the shop you meant to buy from."
     )
     # A note copied word for word from the page.
     taint.add_result({"text": "limited time offer ends tonight at midnight sharp"})
     copied = {**args, "note": "limited time offer ends tonight at midnight sharp"}
     assert note("browser.checkout", copied, {**copied, **facts}, taint.taint_reason(copied), taint) == (
-        "Part of this request came from a web page. Check the site and the amount on the card before approving."
+        "Part of this came from the shop's web page. Check the shop and the amount before you approve."
     )
     # No card facts at all (the bind failed): still a plain sentence.
     assert "web page" in str(note("browser.checkout", args, args, reason, taint))
@@ -950,7 +950,7 @@ def test_a_checkout_card_names_no_risk_when_the_merchant_is_the_page_it_read():
     assert note("browser.checkout", args, {**args, **facts}, None, taint) is None
     mail = {"to": "someone@tickets.example.com"}
     heads_up = note("google_workspace.send_email", mail, mail, taint.taint_reason(mail), taint)
-    assert str(heads_up).startswith("Heads up: this request was shaped by external content")
+    assert str(heads_up) == f"Check this before you approve: {taint.taint_reason(mail)}."
 
 
 def test_bind_refusal_policies():
@@ -960,9 +960,21 @@ def test_bind_refusal_policies():
     assert refusal.policy == PURCHASE_RULE_POLICY and refusal.rule == "no_total"
     assert AgentRuntime._bind_refusal(ACT, {"refused": True}).policy == BROWSER_RULE_POLICY
     other = AgentRuntime._bind_refusal("gmail.send_email", {"refused": True})
-    assert other.policy == PRECHECK_ERROR_POLICY and other.reason == "gmail.send_email was refused."
+    # No error text of its own: plain words, never the tool id.
+    assert other.policy == PRECHECK_ERROR_POLICY and other.reason == "I couldn't use Gmail, so nothing happened."
     assert AgentRuntime._bind_refusal(CHECKOUT, {"merchant": "x", CHECKOUT_CARD_KEY: CARD}) is None
     assert AgentRuntime._bind_refusal(CHECKOUT, {"refused": "yes"}) is None
+
+
+def test_a_precheck_refusal_without_its_own_text_names_no_tool():
+    """A toolkit's precheck that refuses without error text gets the same
+    plain sentence the bind refusal does, never "reminders.create was
+    refused."."""
+    from services.agent.tool_registry import _refused_text
+
+    assert _refused_text("reminders.create") == "I couldn't set a reminder, so nothing happened."
+    assert _refused_text("study.delete") == "I couldn't delete flashcards, so nothing happened."
+    assert _refused_text(None) == "I couldn't do that step, so nothing happened."  # type: ignore[arg-type]
 
 
 # ── 8. audit redaction and prompt ────────────────────────────────────────

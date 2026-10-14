@@ -57,7 +57,7 @@ page_at = _act_tests.page_at
 
 ACT = "browser.act"
 ACT_LABEL = "Fill in forms and click on sites"
-NEEDS_BROWSER = "Needs 'Control a browser' on in Permissions."
+NEEDS_BROWSER = "This needs 'Control a browser' turned on in Permissions."
 WARNING = (
     "This page shows $499.00 and a saved payment method. This step may place an order. "
     "Crawler normally pays only through its checkout step."
@@ -113,7 +113,9 @@ def test_acting_without_browser_control_is_blocked_with_a_plain_reason():
     # Control a browser switched on but not usable here: acting says why.
     broken = statuses("browser_act", "browser_control", playwright_installed=False)["browser_act"]
     assert broken.effective == "blocked"
-    assert broken.reason.startswith("Needs 'Control a browser', which is blocked here: Playwright")
+    assert broken.reason.startswith(
+        "This needs 'Control a browser', which can't run here: The web browser add-on"
+    )
     assert "browser_act" not in capability_registry.enabled_keys(
         {"browser_act": True}, ctx()
     )
@@ -134,9 +136,9 @@ def test_acting_is_native_only(over, reason):
 
 def test_the_permissions_block_names_the_switch_in_each_state():
     off = render_permissions_block(statuses("browser_control").values())
-    assert f"- {ACT_LABEL}: off — Filling in forms and clicking is off." in off
+    assert f"- {ACT_LABEL}: off. Filling in forms and clicking is off." in off
     blocked = render_permissions_block(statuses("browser_act").values())
-    assert f"- {ACT_LABEL}: blocked — {NEEDS_BROWSER}" in blocked
+    assert f"- {ACT_LABEL}: blocked. {NEEDS_BROWSER}" in blocked
     on = render_permissions_block(statuses("browser_act", "browser_control").values())
     assert f"- {ACT_LABEL}: on" in on
 
@@ -297,7 +299,8 @@ async def test_telegram_sends_an_act_card_as_a_photo_with_its_sentence(session_f
     assert fake_api.sent_messages() == []  # the photo is the card
     [photo] = fake_api.photos
     caption = _caption_of(photo)
-    assert caption.startswith(f"🔐 Approval required\n\n{sentence}\n\nExpires in ")
+    assert caption.startswith(f"🔐 {sentence}\n\nOkay to go ahead? This expires in ")
+    assert "Check code" not in caption
     assert "e1" not in caption and "_page" not in caption
     buttons = [b["text"] for b in _keyboard_of(photo)["inline_keyboard"][0]]
     assert buttons == ["✅ Approve", "❌ Deny"]

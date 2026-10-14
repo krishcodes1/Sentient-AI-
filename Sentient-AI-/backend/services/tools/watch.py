@@ -52,6 +52,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from services.agent.prompt_guard import _INVISIBLE_CHARS
+from services.scheduler.recurrence import every_words
 from services.tools.html_text import extract_readable_text
 from services.tools.net import (
     AddressResolver,
@@ -211,7 +212,7 @@ async def fetch_snapshot(
             transport=transport,
         )
     except EgressBlocked as exc:
-        raise WatchFetchError("The network security policy refused the connection.") from exc
+        raise WatchFetchError("I'm not allowed to open that address.") from exc
 
     try:
         async with client:
@@ -231,13 +232,16 @@ async def fetch_snapshot(
                         break
                 encoding = response.charset_encoding or "utf-8"
     except EgressBlocked as exc:
-        raise WatchFetchError("The address is not allowed by the network security policy.") from exc
+        raise WatchFetchError("I'm not allowed to open that address.") from exc
     except httpx.TimeoutException as exc:
         raise WatchFetchError("The page did not answer in time.") from exc
     except httpx.TooManyRedirects as exc:
         raise WatchFetchError("The page redirected too many times.") from exc
     except httpx.HTTPError as exc:
-        raise WatchFetchError(f"The request failed ({type(exc).__name__}).") from exc
+        # The error's type goes to the log only; the owner may read this
+        # reason in a "Stopped watching" message, so it stays plain.
+        logger.info("page_watch_fetch_failed", error_type=type(exc).__name__)
+        raise WatchFetchError("The page couldn't be reached.") from exc
 
     # Parsing up to a megabyte of markup is CPU work; the sweeper shares the
     # event loop with every chat, so it runs in a thread.
@@ -442,22 +446,26 @@ class WatchToolkit:
 
     def describe(self, action: str, params: dict[str, Any]) -> Optional[str]:
         """The approval card's sentence, from the arguments; None when they
-        do not make a valid call (the card then keeps its generic line)."""
+        do not make a valid call (the card then keeps its generic line).
+        The sentence names the page by its label and host; the card's
+        details below it show the full address. A delete has only the
+        watch's id, which the sentence does not repeat (the details show
+        it): describing reads nothing, so it cannot look the label up."""
         params = dict(params or {})
         if action == "create":
             request, err = validate_create(params)
             if err or request is None:
                 return None
             return (
-                f'Watch "{request.label}" ({_host(request.url)}) every '
-                f"{request.interval_minutes} minutes and message you on Telegram "
-                "when its text changes. Full address below."
+                f'Check "{request.label}" ({_host(request.url)}) '
+                f"{every_words(request.interval_minutes)} and message you on Telegram "
+                "when its text changes. The full address is below."
             )
         if action == "delete":
             target = _watch_uuid(params.get("watch_id"))
             if target is None:
                 return None
-            return f"Delete page watch {target}; Crawler stops checking that page."
+            return "Stop checking one of your watched pages for changes."
         return None
 
     # -- Helpers -------------------------------------------------------------

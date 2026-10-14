@@ -210,7 +210,17 @@ async def test_an_unlisted_read_is_refused_and_never_executed():
     assert blocked(audit, UNATTENDED_FENCE_POLICY)
     # The model was told, as the call's result, so it could finish.
     last = provider.calls[-1]["messages"][-1]["content"]
-    assert "not available to this scheduled task" in last
+    assert "It can only do what you picked when you set it up." in last
+    # The refusal itself (which the web chat shows the owner) names the
+    # action in plain words (risk.plain_action), never the tool id.
+    from services.agent.risk import plain_action
+
+    [refused] = response.blocked_actions
+    assert refused.reason == (
+        f"This scheduled task can't {plain_action('canvas.get_courses')}. It can only do "
+        "what you picked when you set it up."
+    )
+    assert "canvas.get_courses" not in refused.reason
 
 
 @pytest.mark.asyncio
@@ -227,7 +237,7 @@ async def test_a_listed_write_under_an_auto_tier_parks_a_long_card_with_the_note
     [card] = await store.list_pending(USER)
     assert card.tool_name == write and card.origin == "schedule:1234"
     assert card.risk_note.startswith(
-        'Proposed by your scheduled task "Canvas summary" while you were away. Nothing has been done yet.'
+        'Your scheduled task "Canvas summary" suggested this while you were away. Nothing has happened yet.'
     )
     minutes = (datetime.fromisoformat(card.expires_at) - datetime.fromisoformat(card.created_at)).total_seconds() / 60
     assert round(minutes) == 180

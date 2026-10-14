@@ -175,7 +175,7 @@ async def test_callback_from_unlinked_chat_is_refused(session_factory, fake_api)
     await service.wait_for_chats()
     assert decisions == []  # never reached the decision pipeline
     answers = [p for m, p in fake_api.calls if m == "answerCallbackQuery"]
-    assert answers and "not linked" in answers[0]["text"]
+    assert answers and "isn't linked" in answers[0]["text"]
     await service._client.aclose()
 
 
@@ -256,8 +256,14 @@ async def test_notify_pending_skips_unlinked_and_messages_linked(
     sent = fake_api.sent_messages()
     assert len(sent) == 1
     assert sent[0]["chat_id"] == 888
-    assert "google_workspace.send_email" in sent[0]["text"]
-    assert "Recipient came from tool output" in sent[0]["text"]
+    # A plain card: the sentence, the risk note, every value as a labelled
+    # line, the question and the check code. Never the tool's name or JSON.
+    text = sent[0]["text"]
+    assert text.startswith("🔐 Sending email requires approval\n\n⚠️ Recipient came from tool output")
+    assert "To: prof@example.com" in text
+    assert "Okay to go ahead? This expires in 1" in text
+    assert text.splitlines()[-1].startswith("Check code ")
+    assert "google_workspace" not in text and "{" not in text
     buttons = sent[0]["reply_markup"]["inline_keyboard"][0]
     assert buttons[0]["callback_data"] == "apv:a1"
     assert buttons[1]["callback_data"] == "dny:a1"
@@ -294,9 +300,9 @@ async def test_a_desktop_card_leaves_out_the_screen_it_stores(session_factory, f
     )
     await service.notify_pending(action("mcp.github.search", {"q": "x", "_scope": "org"}))
     desktop, other = (m["text"] for m in fake_api.sent_messages())
-    assert '"ref": "d3"' in desktop
-    assert "_screen" not in desktop and "9f2c1a" not in desktop
-    assert '"_scope": "org"' in other
+    assert "On-screen item: d3" in desktop
+    assert "_screen" not in desktop and "Screen" not in desktop and "9f2c1a" not in desktop
+    assert "Scope: org" in other
     await service._client.aclose()
 
 
@@ -429,7 +435,8 @@ async def test_help_and_pending_for_linked_chat(session_factory, fake_api):
     # the group-style "/pending@bot" spelling must work too.
     await service._handle_message(telegram_dm(202, "/pending@sentientai_test_bot"))
     card = fake_api.sent_messages()[-1]
-    assert "canvas.submit_assignment" in card["text"]
+    assert card["text"].startswith("🔐 Submitting on your behalf")
+    assert "CSCI-456" in card["text"] and "canvas.submit_assignment" not in card["text"]
     buttons = card["reply_markup"]["inline_keyboard"][0]
     assert buttons[0]["callback_data"].startswith("apv:")
     assert buttons[1]["callback_data"].startswith("dny:")
@@ -540,7 +547,8 @@ async def test_typing_stops_when_the_turn_ends_whether_it_replied_or_failed(
     await service._handle_message(telegram_dm(424, "boom"))
     await service.wait_for_chats()
     assert running == stopped == [424, 424]
-    assert "unexpected error" in fake_api.sent_messages()[-1]["text"]
+    assert "Something went wrong on my side" in fake_api.sent_messages()[-1]["text"]
+    assert "the step never came back" not in fake_api.sent_messages()[-1]["text"]
     await service._client.aclose()
 
 
@@ -560,12 +568,16 @@ async def test_chat_error_and_pending_are_surfaced(session_factory, fake_api):
     service.chat = chat
     await service._handle_message(telegram_dm(606, "boom"))
     await service.wait_for_chats()
-    assert "quota" in fake_api.sent_messages()[-1]["text"]
+    # A provider failure in plain words, never its HTTP status or text.
+    failed = fake_api.sent_messages()[-1]["text"]
+    assert failed.startswith("⚠️ Your AI service is busy, or you've reached its usage limit.")
+    assert "HTTP" not in failed and "provider" not in failed
 
     await service._handle_message(telegram_dm(606, "email my professor"))
     await service.wait_for_chats()
     last = fake_api.sent_messages()[-1]["text"]
-    assert "I drafted the email." in last and "google_workspace.send_email" in last
+    assert "I drafted the email." in last and "I need your OK first to send an email." in last
+    assert "google_workspace" not in last
     await service._client.aclose()
 
 
@@ -806,3 +818,80 @@ async def test_every_outgoing_message_disables_link_previews(session_factory, fa
     assert by_method["editMessageText"]["link_preview_options"] == {"is_disabled": True}
     assert "link_preview_options" not in by_method["answerCallbackQuery"]
     await service._client.aclose()
+
+
+# ── plain words for errors and dates (docs/bot-message-style.md) ─────────
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        ("Unknown account.", "This chat isn't linked to an active Crawler AI account."),
+        (
+            "Rate limit exceeded: your account allows 20 agent messages per minute.",
+            "That's more messages in one minute than your account allows. "
+            "Wait a minute, then send it again.",
+        ),
+        (
+            "No AI provider is configured yet. Add an API key to start chatting.",
+            "I can't answer yet because no AI service is set up. Open Crawler AI to add one.",
+        ),
+        (
+            "gemini provider error (HTTP 429): quota exceeded for model x",
+            "Your AI service is busy, or you've reached its usage limit. "
+            "Try again in a few minutes.",
+        ),
+        (
+            "openai provider error (HTTP 401): invalid key sk-123",
+            "Your AI service didn't accept the request. Check the AI service "
+            "settings in Crawler AI.",
+        ),
+        (
+            "anthropic provider error: connection reset",
+            "Your AI service had a problem and I couldn't finish that. Try again in a minute.",
+        ),
+        (
+            "This request was already answered, or it's no longer here.",
+            "This request was already answered, or it's no longer here.",
+        ),
+        (None, "Something went wrong on my side, so I couldn't finish that. Please try again."),
+        ("  ", "Something went wrong on my side, so I couldn't finish that. Please try again."),
+        ({"x": 1}, "Something went wrong on my side, so I couldn't finish that. Please try again."),
+    ],
+)
+def test_errors_reach_the_chat_in_plain_words(error, expected):
+    """A developer message, a provider failure (its model, status and the
+    provider's own words) and a non-text error never reach the chat as
+    written; a sentence the appliers wrote for the owner does."""
+    from services.notifications.telegram import _plain_error
+
+    assert _plain_error(error) == expected
+
+
+def test_a_seven_day_line_never_shows_a_raw_or_missing_date():
+    from services.notifications.telegram import _until
+
+    assert _until(None) == "for the next 7 days"
+    assert _until("") == "for the next 7 days"
+    assert _until("not a date") == "for the next 7 days"
+    assert _until("2026-10-16T12:00:00+00:00").startswith("until ")
+    assert "2026" not in _until("2026-10-16T12:00:00+00:00")
+
+
+def test_a_card_without_a_reason_still_opens_with_a_plain_sentence():
+    """The card's first line is never a tool name or empty: the reason on
+    one line, else action_text's sentence, else the generic one."""
+    from types import SimpleNamespace
+
+    from services.action_text import GENERIC_SENTENCE
+    from services.notifications.telegram import _card_sentence
+
+    reasoned = SimpleNamespace(reason="Send an email\nTo: x", tool_name="gmail.send", arguments={})
+    assert _card_sentence(reasoned) == "Send an email To: x"
+    bare = SimpleNamespace(reason=None, tool_name="system.install_capability", arguments={})
+    sentence = _card_sentence(bare)
+    assert sentence and "system.install_capability" not in sentence and "_" not in sentence
+    odd = SimpleNamespace(reason=42, tool_name=None, arguments="not a dict")
+    assert _card_sentence(odd).strip()
+    assert _card_sentence(object()).strip()
+    assert GENERIC_SENTENCE

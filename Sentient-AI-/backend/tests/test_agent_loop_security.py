@@ -32,6 +32,9 @@ from core.config import settings
 from services.agent.approvals import InMemoryApprovalStore
 from services.agent.providers import LLMResponse, ProviderError, ToolCall
 from services.agent.runtime import (
+    GUARD_INPUT_REASON,
+    GUARD_INPUT_REPLY,
+    GUARD_OUTPUT_REPLY,
     AgentRuntime,
     RuntimePromptGuard,
     Tool,
@@ -158,9 +161,11 @@ async def test_injection_in_user_input_is_refused():
         user_id="u1",
     )
 
-    assert "security policy" in response.content
+    assert response.content == GUARD_INPUT_REPLY
     assert response.blocked_actions
     assert response.blocked_actions[0].policy == "prompt_guard"
+    # The person reads plain words; the scanner's reason stays on the audit row.
+    assert response.blocked_actions[0].reason == GUARD_INPUT_REASON
     assert provider.calls == []  # never reached the LLM
     assert executor.calls == []
     assert any(e["event"] == "input_blocked" for e in audit.entries)
@@ -190,8 +195,25 @@ async def test_final_output_after_tool_execution_is_scanned():
     )
 
     assert executor.calls  # tool did run
-    assert response.content == "Response redacted due to security policy."
+    assert response.content == GUARD_OUTPUT_REPLY
     assert any(b.tool_name == "output" for b in response.blocked_actions)
+
+
+def test_the_guards_pseudo_tool_names_never_reach_the_person():
+    """The prompt guard files a stopped message under "input" and a held
+    back reply under "output". The web's chip reads them as plain phrases,
+    and the chat channels add no "skipped a step" note for them: the
+    guard's own reply already says what happened."""
+    from services import action_text
+    from services.notifications import cards
+
+    assert action_text.short_phrase("input") == "act on your message"
+    assert action_text.short_phrase("output") == "send my reply"
+    for blocked in (["input"], ["output"], "input"):
+        assert cards.turn_notes({"blocked": blocked}, pending_hint="send /pending") == ""
+    notes = cards.turn_notes({"blocked": ["output", "desktop.act"]}, pending_hint="send /pending")
+    assert "Output" not in notes and "my reply" not in notes
+    assert "click or type in an app on your computer" in notes
 
 
 @pytest.mark.asyncio
@@ -366,7 +388,8 @@ async def test_pending_only_turn_returns_informative_content():
     assert executor.calls == []
     assert len(response.pending_approvals) == 1
     assert response.content.strip() != ""
-    assert "google_workspace.send_email" in response.content
+    # The parked call is named in plain words, never by its tool id.
+    assert response.content == "I need your OK before I send an email. Tap Approve or Deny on the request."
 
 
 # ---------------------------------------------------------------------------
@@ -522,8 +545,8 @@ async def test_resolve_provider_unconfigured_raises_clear_provider_error(monkeyp
     monkeypatch.setattr(settings, "OPENAI_API_KEY", None)
     with pytest.raises(ProviderError) as excinfo:
         await runtime._resolve_provider("openai", "gpt-4o")
-    assert "openai" in str(excinfo.value)
-    assert "not configured" in str(excinfo.value)
+    assert "OpenAI" in str(excinfo.value)
+    assert "isn't set up" in str(excinfo.value)
 
 
 @pytest.mark.asyncio

@@ -80,13 +80,18 @@ PRUNE_EVERY = timedelta(days=1)
 CAPABILITY = "scheduled_tasks"
 _STOP_WAIT_S = 10.0
 
-_UNREADABLE = "The schedule could not be read."
-_NO_RENDERER = "This reminder's feature is no longer available."
+# A task's last problem, in the owner's words: stored as last_error (shown by
+# schedule.list) and quoted after "Last problem:" when a task is paused.
+_UNREADABLE = "Its time or time zone can't be read anymore, so it stopped. Set its time again to start it."
+_NO_RENDERER = "The feature behind this reminder was removed, so the reminder stopped."
 _ERRORS = {
-    "failed": "The run failed.",
-    "timed_out": "The run took too long.",
-    "not_configured": "No AI provider is set up.",
+    "failed": "Something went wrong while running it.",
+    "timed_out": "It took too long, so I stopped it.",
+    "not_configured": "No AI service is set up yet. You can add one in Settings.",
 }
+# How each chat names the command that lists the tasks (with Resume
+# buttons on Telegram); Slack keeps "/..." for its own slash commands.
+_SCHEDULES_HINTS = {"telegram": "send /schedules", "slack": 'reply "schedules"'}
 
 
 def _utc(value: datetime) -> datetime:
@@ -665,7 +670,7 @@ class ScheduleService:
                 row.conversation_id = uuid.UUID(conversation_id)
             if failed:
                 row.consecutive_errors = (row.consecutive_errors or 0) + 1
-                row.last_error = _ERRORS.get(status, "The run failed.")
+                row.last_error = _ERRORS.get(status, _ERRORS["failed"])
                 if row.consecutive_errors >= ERROR_LIMIT and row.status == "active":
                     row.status = "error"
                     stopped_now = True
@@ -677,13 +682,18 @@ class ScheduleService:
         if stopped_now:
             from services.notifications.page_watch import defang
 
-            text = (
-                f"⚠️ Paused your scheduled task \"{defang(item.label)}\" after "
-                f"{failures} failed runs in a row. Last problem: {_ERRORS.get(status, 'the run failed')}\n"
-                "Resume it from /schedules (Slack: reply \"schedules\") or ask Crawler, once "
-                "the problem is fixed."
-            )
-            await deliver(str(item.user_id), [text], item.channels, self.senders, pause_s=0)
+            # One text per chat, so each names only its own command.
+            problem = _ERRORS.get(status, _ERRORS["failed"])
+            texts = {
+                channel: [
+                    f"⚠️ Paused your scheduled task \"{defang(item.label)}\" because it failed "
+                    f"{failures} times in a row. Last problem: {problem}\n"
+                    f"Once that's fixed, {_SCHEDULES_HINTS.get(channel, 'send /schedules')} to "
+                    "turn it back on, or just ask me."
+                ]
+                for channel in item.channels
+            }
+            await deliver(str(item.user_id), texts, item.channels, self.senders, pause_s=0)
             await self._audit(item, "paused_after_errors", {"failures": failures, "status": "error"})
 
     async def _budget_notice(self, item: _Claim, run_id: str) -> None:
@@ -700,10 +710,10 @@ class ScheduleService:
         if earlier:
             return
         text = (
-            "⏸ Scheduled tasks are being skipped: today's budget for runs while you "
-            "are away is used up. They run again once the last 24 hours are under it. The "
-            "owner can change these budgets under \"Scheduled tasks and daily briefing\" in "
-            "Settings → Permissions."
+            "⏸ I'm skipping your scheduled tasks for now: today's budget for tasks that run "
+            "on their own is used up. They start again once the spending over the last 24 "
+            "hours is back under it. You can change this budget in Settings → Permissions, "
+            "under \"Scheduled tasks and daily briefing\"."
         )
         await deliver(str(item.user_id), [text], item.channels, self.senders, pause_s=0)
 
@@ -716,8 +726,8 @@ class ScheduleService:
         when = short_when(item.scheduled_for, tz) if tz is not None else ""
         at = f" for {when}" if when else ""
         text = (
-            f"⏸ Skipped your scheduled task \"{defang(item.label)}\"{at}: Crawler was busy "
-            "with other runs while you were away. It runs again at its next time."
+            f"⏸ Skipped your scheduled task \"{defang(item.label)}\"{at} because I was busy "
+            "with other tasks at the time. It will run again at its next time."
         )
         await deliver(str(item.user_id), [text], item.channels, self.senders, pause_s=0)
 
@@ -766,7 +776,7 @@ class ScheduleService:
         try:
             owner, target = uuid.UUID(str(user_id)), uuid.UUID(str(task_id))
         except (TypeError, ValueError):
-            return {"ok": False, "error": "Scheduled task not found.", "not_found": True}
+            return {"ok": False, "error": "I couldn't find that scheduled task.", "not_found": True}
         async with self._session_factory() as session:
             row = (
                 await session.execute(
@@ -776,7 +786,7 @@ class ScheduleService:
                 )
             ).scalar_one_or_none()
         if row is None:
-            return {"ok": False, "error": "Scheduled task not found.", "not_found": True}
+            return {"ok": False, "error": "I couldn't find that scheduled task.", "not_found": True}
         options = row.options if isinstance(row.options, dict) else {}
         if not await self._gate_on(row.kind, options):
             from services import capabilities as registry
@@ -785,7 +795,7 @@ class ScheduleService:
             try:
                 reason = registry.get(key).when_denied
             except KeyError:
-                reason = "This task's feature is turned off."
+                reason = "The feature this task uses is turned off. You can turn it on in Settings → Permissions."
             return {"ok": False, "error": reason, "capability_off": True}
         key = str(target)
         last = self._run_now_at.get(key)
@@ -794,7 +804,7 @@ class ScheduleService:
             wait = int((RUN_NOW_COOLDOWN_SECONDS - (mono - last)) // 60) + 1
             return {
                 "ok": False,
-                "error": f"This task ran moments ago; try again in {wait} minute{'s' if wait != 1 else ''}.",
+                "error": f"This task just ran. You can run it again in {wait} minute{'s' if wait != 1 else ''}.",
                 "rate_limited": True,
             }
         self._run_now_at[key] = mono
@@ -815,20 +825,24 @@ class ScheduleService:
         channels: tuple[str, ...],
     ) -> str:
         """Create or change the user's nudge for *renderer* and return its
-        task id. Raises ValueError (a plain sentence) for an unknown
-        renderer, a bad recurrence or label, or no known time zone."""
+        task id. Raises ValueError (a plain sentence the model may repeat
+        to the owner) for an unknown renderer, a bad recurrence or label,
+        and the code "timezone_required" when no time zone is known."""
         from models.scheduled_task import ScheduledTask
         from models.user import User
         from services.tools.schedule import CHANNELS, clean_label
 
         if get_renderer(renderer) is None:
-            raise ValueError(f"No nudge renderer is registered as {renderer!r}.")
+            # A code bug, not the owner's doing: the renderer id goes to
+            # the log, never into the sentence.
+            logger.warning("schedule_nudge_renderer_unknown", renderer=str(renderer)[:40])
+            raise ValueError("This feature can't send reminders.")
         clean, err = clean_label(label)
         if clean is None:
-            raise ValueError(err or "Invalid label.")
+            raise ValueError(err or "That reminder name can't be used.")
         rule, err = parse_recurrence(recurrence)
         if rule is None:
-            raise ValueError(err or "Invalid recurrence.")
+            raise ValueError(err or "That repeat schedule can't be used.")
         owner = uuid.UUID(str(user_id))
         now = self._clock()
         async with self._session_factory() as session:
@@ -862,7 +876,7 @@ class ScheduleService:
                 raise ValueError("timezone_required")
             nxt = next_after(rule, tz, now)
             if nxt is None:
-                raise ValueError("That schedule never runs.")
+                raise ValueError("That schedule has no times left, so it would never run.")
             wanted = [c for c in CHANNELS if c in channels]
             if row is None:
                 row = ScheduledTask(
@@ -896,7 +910,7 @@ class ScheduleService:
                 await session.commit()
             except IntegrityError:
                 await session.rollback()
-                raise ValueError(f'The user already has a scheduled task called "{clean}".') from None
+                raise ValueError(f'There is already a scheduled task called "{clean}".') from None
         return task_id
 
     async def cancel_nudge(self, user_id: Any, *, renderer: str) -> bool:

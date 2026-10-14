@@ -86,7 +86,7 @@ async def test_create_list_pause_delete(client, session_factory, wired):
     assert made.status_code == 201, made.text
     task_id = made.json()["task_id"]
     listed = (await client.get("/api/schedules", headers=headers)).json()
-    assert [t["id"] for t in listed["tasks"]] == [task_id] and listed["tasks"][0]["schedule"] == "Weekdays at 08:00"
+    assert [t["id"] for t in listed["tasks"]] == [task_id] and listed["tasks"][0]["schedule"] == "Weekdays at 8:00 AM"
     paused = await client.patch(f"/api/schedules/{task_id}", json={"paused": True}, headers=headers)
     assert paused.status_code == 200 and paused.json()["status"] == "paused"
     resumed = await client.patch(f"/api/schedules/{task_id}", json={"paused": False}, headers=headers)

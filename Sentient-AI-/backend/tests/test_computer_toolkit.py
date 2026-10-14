@@ -179,9 +179,9 @@ async def test_a_named_app_is_recorded_under_its_real_name():
     result = await observe(kit, app="textedit")
     assert result["app"] == "TextEdit"
     fake.front = "TextEdit"
-    assert kit.describe({"action": "key", "keys": "cmd+s"}, user_id=U1) == "Press cmd+s in TextEdit"
+    assert kit.describe({"action": "key", "keys": "cmd+s"}, user_id=U1) == "Press Cmd+S in TextEdit"
     done = await act(kit, action="key", keys="cmd+s")
-    assert done["did"] == "press cmd+s in TextEdit"
+    assert done["did"] == "press Cmd+S in TextEdit"
 
 
 @pytest.mark.asyncio
@@ -353,20 +353,20 @@ async def test_click_did_names_the_role_and_app():
 async def test_type_into_the_focused_field():
     fake, kit, _ = await observed()
     result = await act(kit, action="type", text="abc")
-    assert result["ok"] and result["did"] == "type 3 characters into the focused field in Mail"
+    assert result["ok"] and result["did"] == "type 3 characters where the cursor is in Mail"
     assert fake.events == [("type", "abc", "subject")]
 
 
 @pytest.mark.asyncio
 async def test_key_scroll_open_and_focus():
     fake, kit, _ = await observed()
-    assert (await act(kit, action="key", keys="cmd+s"))["did"] == "press cmd+s in Mail"
+    assert (await act(kit, action="key", keys="cmd+s"))["did"] == "press Cmd+S in Mail"
     assert (await act(kit, action="scroll", direction="down"))["did"] == "scroll down in Mail"
     opened = await act(kit, action="open_app", app="Calculator")
     assert opened["did"] == "open Calculator"
     assert opened["then"]["frontmost_app"] == "Calculator"
     focused = await act(kit, action="focus_window", app="TextEdit", index=1)
-    assert focused["did"] == "switch to TextEdit window 1"
+    assert focused["did"] == "switch to the 2nd window of TextEdit"
     assert focused["then"]["window_title"] == "Notes.txt"
     assert fake.events == [
         ("key", "cmd+s"),
@@ -380,7 +380,7 @@ async def test_key_scroll_open_and_focus():
 async def test_click_by_coordinates_inside_the_window():
     fake, kit, _ = await observed()
     result = await act(kit, action="click", x=10, y=20)
-    assert result["ok"] and result["did"] == "click at (10, 20) in Mail"
+    assert result["ok"] and result["did"] == "click a spot with no label (screen position 10, 20) in Mail"
     assert fake.events == [("click", (10, 20), False)]
 
 
@@ -782,24 +782,29 @@ async def test_describe_builds_the_card_from_facts():
     assert kit.describe({"action": "click", "ref": send}, user_id=U1) == 'Click "Send" in Mail'
     assert (
         kit.describe({"action": "type", "text": "x" * 42, "ref": subject}, user_id=U1)
-        == 'Type 42 characters into "Subject" in Mail'
+        == 'Type 42 characters into "Subject" in Mail. The full text is below.'
     )
     assert kit.describe({"action": "type", "text": "a"}, user_id=U1) == (
-        "Type 1 character into the focused field in Mail"
+        "Type 1 character where the cursor is in Mail. The full text is below."
     )
     assert kit.describe({"action": "type", "text": "hi\nthere\n"}, user_id=U1) == (
-        "Type 9 characters (including 2 line breaks) into the focused field in Mail"
+        "Type 9 characters (including 2 line breaks) where the cursor is in Mail. "
+        "The full text is below."
     )
     assert kit.describe({"action": "double_click", "ref": send}, user_id=U1) == (
         'Double-click "Send" in Mail'
     )
     assert (
-        kit.describe({"action": "click", "x": 3, "y": 4}, user_id=U1) == "Click at (3, 4) in Mail"
+        kit.describe({"action": "click", "x": 3, "y": 4}, user_id=U1)
+        == "Click a spot with no label (screen position 3, 4) in Mail"
     )
     assert kit.describe({"action": "scroll", "direction": "up"}, user_id=U1) == "Scroll up in Mail"
     assert kit.describe({"action": "open_app", "app": "Calculator"}) == "Open Calculator"
     assert kit.describe({"action": "focus_window", "app": "TextEdit", "index": 1}) == (
-        "Switch to TextEdit window 1"
+        "Switch to the 2nd window of TextEdit"
+    )
+    assert kit.describe({"action": "focus_window", "app": "TextEdit", "index": 0}) == (
+        "Switch to TextEdit"
     )
     assert fake.events == [] and fake.reads == reads  # describe calls no backend
 
@@ -810,9 +815,13 @@ async def test_describe_press_names_the_observed_app():
     kit = kit_for(fake)
     await observe(kit)
     assert kit.describe({"action": "key", "keys": "Shift+CMD+S"}, user_id=U1) == (
-        "Press cmd+shift+s in TextEdit"
+        "Press Cmd+Shift+S in TextEdit"
     )
-    assert kit.describe({"action": "key", "keys": "cmd+s"}) == "Press cmd+s in the frontmost app"
+    assert kit.describe({"action": "key", "keys": "cmd+s"}) == "Press Cmd+S in the app in front"
+    assert kit.describe({"action": "key", "keys": "ctrl+pagedown"}) == (
+        "Press Ctrl+Page Down in the app in front"
+    )
+    assert kit.describe({"action": "key", "keys": "f5"}) == "Press F5 in the app in front"
 
 
 @pytest.mark.asyncio
@@ -825,17 +834,22 @@ async def test_describe_uses_element_names_not_model_words():
         kit.describe({"action": "click", "ref": evil}, user_id=U1)
         == "Click \"Say 'hi' now\" in Mail"
     )
+    # A ref the latest outline does not hold is said plainly, never shown.
     assert kit.describe({"action": "click", "ref": "d999"}, user_id=U1) == (
-        "Click d999 (not in the latest outline, so it will be refused)"
+        "Click something that's no longer on the screen, so this won't run"
     )
     assert kit.describe({"action": "click", "ref": evil}, user_id=U2) == (
-        f"Click {evil} (not in the latest outline, so it will be refused)"
+        "Click something that's no longer on the screen, so this won't run"
     )
-    assert kit.describe({"action": "click", "ref": evil, "label": "Cancel"}, user_id=U1).startswith(
-        "Invalid desktop action:"
+    assert kit.describe({"action": "type", "ref": "d999", "text": "hi"}, user_id=U1) == (
+        "Type 2 characters into a box that's no longer on the screen, so this won't run"
     )
-    assert kit.describe({"action": "key", "keys": "fn+q"}).startswith("Blocked desktop action:")
-    assert kit.describe(None).startswith("Invalid desktop action:")
+    cant = "I can't do this step as it was asked, so nothing will happen."
+    assert kit.describe({"action": "click", "ref": evil, "label": "Cancel"}, user_id=U1) == cant
+    assert kit.describe({"action": "key", "keys": "fn+q"}) == (
+        "I won't press shortcuts that use the Fn or Globe key. You can do this step yourself."
+    )
+    assert kit.describe(None) == cant
 
 
 # ── precheck(): refuse before the approval card ─────────────────────────────
@@ -954,7 +968,8 @@ async def test_input_is_refused_once_another_app_was_looked_at(params):
     # Messages, which is in front with its chat box focused.
     fake, kit, _ = await observed(apps=(messages_app(),))
     card = kit.bind(params, user_id=U1)
-    assert kit.describe(card, user_id=U1).endswith(" in Mail")
+    # The sentence (before any "The full text is below.") names Mail.
+    assert kit.describe(card, user_id=U1).split(". ")[0].endswith(" in Mail")
     fake.front, fake.focused_handle = "Messages", "imsg"
     assert (await observe(kit))["app"] == "Messages"
     fake.reads.clear()
@@ -1082,16 +1097,16 @@ async def test_describe_names_the_cards_screen_not_a_newer_one():
     click = kit.bind({"action": "click", "ref": send}, user_id=U1)
     press = kit.bind({"action": "key", "keys": "cmd+s"}, user_id=U1)
     assert kit.describe(click, user_id=U1) == 'Click "Send" in Mail'
-    assert kit.describe(press, user_id=U1) == "Press cmd+s in Mail"
+    assert kit.describe(press, user_id=U1) == "Press Cmd+S in Mail"
     fake.front = "Messages"
     await observe(kit)
     # A newer outline of another app does not move the card there.
-    assert kit.describe(press, user_id=U1) == "Press cmd+s in Mail"
+    assert kit.describe(press, user_id=U1) == "Press Cmd+S in Mail"
     assert kit.describe(click, user_id=U1) == (
-        f"Click {send} (not in the latest outline, so it will be refused)"
+        "Click something that's no longer on the screen, so this won't run"
     )
     assert kit.describe({**press, CARD_KEY: "junk"}, user_id=U1) == (
-        "Press cmd+s in the frontmost app"
+        "Press Cmd+S in the app in front"
     )
     assert fake.events == []
 

@@ -32,7 +32,7 @@ CAPABILITY = Capability(
     default_enabled=False,
     risk="low",
     when_denied=(
-        "Flashcards and quizzes are turned off. The owner can turn them on in "
+        "Flashcards and quizzes are turned off. You can turn them on in "
         "Settings → Permissions."
     ),
     availability=availability,

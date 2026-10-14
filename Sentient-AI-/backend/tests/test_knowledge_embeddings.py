@@ -145,7 +145,8 @@ def test_knowledge_semantic_is_blocked_without_an_embedding_backend():
     statuses = capability_registry.statuses_by_key(capability_registry.report(switches, _ctx("")))
     semantic = statuses["knowledge_semantic"]
     assert semantic.effective == "blocked"
-    assert semantic.reason.startswith("Your AI provider has no embedding model Crawler can use")
+    assert semantic.reason.startswith("Your AI provider can't search by meaning; keyword search still works.")
+    assert "KB_EMBEDDINGS" not in semantic.reason
     on = capability_registry.statuses_by_key(capability_registry.report(switches, _ctx("gemini")))
     assert on["knowledge_semantic"].effective == "on"
     needs = capability_registry.statuses_by_key(

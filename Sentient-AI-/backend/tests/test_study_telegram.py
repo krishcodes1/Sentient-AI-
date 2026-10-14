@@ -157,7 +157,7 @@ async def test_decks_are_numbered_and_review_says_when_nothing_is_due(session_fa
     await a_deck(session_factory, user, clock, title="Chem 201")
     await say(service, "/decks")
     listing = texts(sent)[-1]
-    assert "1. Bio 101 – Lecture 3 — 2 cards" in listing and "2. Chem 201 — 2 cards" in listing
+    assert "1. Bio 101 – Lecture 3: 2 cards" in listing and "2. Chem 201: 2 cards" in listing
     await say(service, "/review 9")
     assert "no deck with that number" in texts(sent)[-1]
 
@@ -221,7 +221,7 @@ async def test_the_switch_off_answers_with_when_denied(session_factory, study):
     service, sent = await telegram(str(user.id))
     state["on"] = False
     await say(service, "/review")
-    assert texts(sent)[-1] == "Flashcards and quizzes are turned off. The owner can turn them on in Settings → Permissions."
+    assert texts(sent)[-1] == "Flashcards and quizzes are turned off. You can turn them on in Settings → Permissions."
     await tap(service, f"sra:{saved['added_ids'][0]}")
     assert answers(sent)[-1].startswith("Flashcards and quizzes are turned off")
 
@@ -242,7 +242,7 @@ async def test_text_fallbacks_with_and_without_a_cursor(session_factory, study):
     await say(service, "/good")
     assert texts(sent)[-2].endswith("✅ Good · next in 1 day") and "Term 1?" in texts(sent)[-1]
     await say(service, "/end")
-    assert texts(sent)[-1].startswith("Review ended: 1 cards reviewed")
+    assert texts(sent)[-1].startswith("Review ended after 1 card.")
     await say(service, "/show")
     assert texts(sent)[-1] == "No card is waiting. Send /review."
 
@@ -286,7 +286,7 @@ async def test_a_quiz_runs_on_presses_with_a_position_guard_and_ends_with_a_scor
     got_it = [d for d in buttons(revealed) if d.startswith("sqg:") and d.endswith(":1")]
     await tap(service, got_it[0])
     assert texts(sent)[-1].startswith("Quiz done · Bio 101 – Lecture 3: 1/2 (50%).")
-    assert "To work on: cells" in texts(sent)[-1] and "send /review" in texts(sent)[-1]
+    assert "To work on: cells" in texts(sent)[-1] and "Send /review to go over them" in texts(sent)[-1]
 
 
 @pytest.mark.asyncio

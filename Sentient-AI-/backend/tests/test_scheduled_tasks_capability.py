@@ -34,7 +34,7 @@ def test_the_capability():
     assert cap.label == "Scheduled tasks and daily briefing"
     assert cap.tools == ("schedule.",) and cap.default_enabled is False and cap.risk == "medium"
     assert cap.when_denied == (
-        "Scheduled tasks are off. The owner can turn on 'Scheduled tasks and daily "
+        "Scheduled tasks are off. You can turn on 'Scheduled tasks and daily "
         "briefing' in Settings → Permissions."
     )
     assert cap.description.startswith("Run prompts you approve on a schedule")

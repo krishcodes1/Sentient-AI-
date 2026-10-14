@@ -389,9 +389,9 @@ def _required_reason(cap: Capability, statuses: Mapping[str, CapabilityStatus]) 
         if needed is None:
             return "It needs a permission this install does not have."
         if needed.effective == "off":
-            return f"Needs '{needed.label}' on in Permissions."
+            return f"This needs '{needed.label}' turned on in Permissions."
         if needed.effective == "blocked":
-            return f"Needs '{needed.label}', which is blocked here: {needed.reason}"
+            return f"This needs '{needed.label}', which can't run here: {needed.reason}"
     return ""
 
 
@@ -403,8 +403,8 @@ def report(
     Effective state: ``off`` when the owner switch is off; otherwise
     ``blocked`` when the capability is unavailable here, its probe says
     ``denied``, or a capability it ``requires`` is not on (browser_act
-    without browser_control: "Needs 'Control a browser' on in
-    Permissions."); otherwise ``on`` (a probe answering ``unknown`` or
+    without browser_control: "This needs 'Control a browser' turned on
+    in Permissions."); otherwise ``on`` (a probe answering ``unknown`` or
     ``not_required`` counts as on). An availability check or probe that
     raises reads as blocked. The probe runs only for a capability that is
     on and available, and its answer is cached for 10 s per context unless

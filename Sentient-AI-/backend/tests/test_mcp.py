@@ -301,7 +301,8 @@ async def test_permission_adapter_gates_mcp_tools():
     assert await adapter.check("u", "mcp.broker.buy_crypto", {}) == "blocked"
     assert await adapter.get_policy_name("u", "mcp.notes.search") == "mcp:default-approval"
     reason = await adapter.get_block_reason("u", "mcp.broker.buy_crypto", {})
-    assert "financial" in reason.lower()
+    # Plain words for the person: what it looked like, never the pattern.
+    assert "moves money" in reason and "mcp" not in reason.lower()
 
 
 # ---------------------------------------------------------------------------

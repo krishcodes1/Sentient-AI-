@@ -149,7 +149,7 @@ async def test_a_file_over_20_mb_is_refused_without_a_download(session_factory, 
     await svc.wait_for_chats()
     assert "getFile" not in bot.methods() and chat.calls == []
     assert bot.texts()[-1] == (
-        "⚠️ I couldn't read lecture3.pdf: That file is 34 MB; Crawler reads files up to 20 MB. "
+        "⚠️ I couldn't read lecture3.pdf. That file is 34 MB, and Crawler reads files up to 20 MB. "
         "Send a smaller file or a link to it."
     )
     await svc._client.aclose()
@@ -340,7 +340,7 @@ async def test_the_applier_stores_files_and_notes_them_in_history(session_factor
         assert done["content"] == "Read it."
         assert "[Attached file: 'hw3.pdf' (PDF, 1 page)" in seen[-1][-1]["content"]
         failed = await chat(str(user.id), "and this?", files=[InboundFile("old.doc", "application/msword", b.OLE_HEADER, "telegram")])
-        assert failed["error"].startswith("I couldn't read old.doc: This is an older Office format")
+        assert failed["error"].startswith("I couldn't read old.doc: This file uses an older Office format")
         assert len(seen) == 1
     finally:
         app.state.agent_runtime, app.state.file_intake = saved

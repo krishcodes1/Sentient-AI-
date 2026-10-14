@@ -1,5 +1,5 @@
 """Tests for low-risk grants on Telegram (permission tiers): the card's
-"⚡ Allow low-risk on <account> · 7 days" row and line, the ``apl:`` press that
+"⚡ Allow small changes on <account> for 7 days" row and line, the ``apl:`` press that
 approves with remember="low_risk", what the frozen card says with and without
 a grant, /grants with its ``rvg:`` Revoke buttons, and /help.
 
@@ -13,6 +13,7 @@ the real store over in-memory SQLite. Nothing reaches Telegram.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -62,11 +63,14 @@ def test_the_keyboard_row_names_the_account_and_is_capped():
     keyboard = telegram_module._approval_keyboard(ACTION_ID, None, "School Gmail")
     rows = keyboard["inline_keyboard"]
     assert rows[1] == [
-        {"text": "⚡ Allow low-risk on School Gmail · 7 days", "callback_data": "apl:" + ACTION_ID}
+        {
+            "text": "⚡ Allow small changes on School Gmail for 7 days",
+            "callback_data": "apl:" + ACTION_ID,
+        }
     ]
     long = telegram_module._approval_keyboard(ACTION_ID, None, "My very long\nuniversity account name")
     label = long["inline_keyboard"][1][0]["text"]
-    account = label.removeprefix("⚡ Allow low-risk on ").removesuffix(" · 7 days")
+    account = label.removeprefix("⚡ Allow small changes on ").removesuffix(" for 7 days")
     assert len(account) <= 24 and "\n" not in account
     assert len(long["inline_keyboard"][1][0]["callback_data"].encode()) <= 64
     # The week row wins (it is desktop.act's), and no offer means two buttons.
@@ -89,12 +93,15 @@ async def test_a_card_that_offers_a_grant_says_so(session_factory, fake_api):
     offered, plain = [m for m in fake_api.sent_messages() if m.get("reply_markup")]
     assert "apl:" + ACTION_ID in json.dumps(offered["reply_markup"])
     assert (
-        "Or allow low-risk changes on School Gmail for 7 days: save email drafts (nothing is sent); "
-        "star, mark important or apply your own labels to emails"
+        "Or let me make small changes on School Gmail for 7 days without asking: save email "
+        "drafts (nothing is sent); star, mark important or apply your own labels to emails"
     ) in offered["text"]
-    assert "Sends, deletes, sharing and anything other people see still ask. /grants lists and revokes." in offered["text"]
+    assert offered["text"].endswith(
+        "I'll still ask before I send, delete or share anything, and before anything other "
+        "people can see. Send /grants to see or undo this."
+    )
     assert "apl:" not in json.dumps(plain["reply_markup"])
-    assert "low-risk" not in plain["text"]
+    assert "small changes" not in plain["text"] and "low-risk" not in plain["text"]
 
 
 @pytest.mark.asyncio
@@ -115,8 +122,11 @@ async def test_apl_approves_with_remember_low_risk_and_says_until_when(session_f
         await service.stop()
     assert seen == [{"user_id": str(user.id), "action_id": ACTION_ID, "approved": True, "remember": "low_risk"}]
     [edited] = _edits(fake_api)
-    assert "✅ Approved from this chat. Low-risk changes on School Gmail are allowed until " in edited
-    assert edited.endswith("/grants to revoke.")
+    assert re.search(
+        r"\n\n✅ Approved at \d{1,2}:\d{2} [AP]M\. I won't ask about small changes on "
+        r"School Gmail until \w{3} \w{3} \d{1,2}\. Send /grants to undo that\.$",
+        edited,
+    ), edited
 
 
 @pytest.mark.asyncio
@@ -133,7 +143,11 @@ async def test_apl_without_a_grant_says_approved_once(session_factory, fake_api)
     finally:
         await service.stop()
     [edited] = _edits(fake_api)
-    assert edited.endswith("✅ Approved from this chat. (approved once)")
+    assert re.search(
+        r"\n\n✅ Approved at \d{1,2}:\d{2} [AP]M\. I couldn't turn on the 7 days without "
+        r"asking, so I'll still ask next time\.$",
+        edited,
+    ), edited
 
 
 @pytest.mark.asyncio
@@ -184,9 +198,9 @@ async def test_grants_lists_and_revokes_with_audit(session_factory, fake_api):
     try:
         await service._handle_update({"update_id": 1, "message": telegram_dm(7204, "/grants")})
         [listing] = [m for m in fake_api.sent_messages() if m.get("reply_markup")]
-        assert "• School Gmail — until " in listing["text"]
+        assert "• School Gmail, until " in listing["text"]
         assert listing["reply_markup"]["inline_keyboard"] == [
-            [{"text": "Revoke School Gmail", "callback_data": "rvg:" + grant.id}]
+            [{"text": "Turn off for School Gmail", "callback_data": "rvg:" + grant.id}]
         ]
         await service._handle_callback(_press("rvg:" + grant.id, 7204))
         # A second press: already ended.
@@ -197,7 +211,7 @@ async def test_grants_lists_and_revokes_with_audit(session_factory, fake_api):
     finally:
         await service.stop()
     texts = [m["text"] for m in fake_api.sent_messages()]
-    assert any("School Gmail no longer makes low-risk changes without asking" in t for t in texts)
+    assert any("I'll ask you first again before making changes on School Gmail" in t for t in texts)
     assert texts[-1] == NO_GRANTS_TEXT
     assert await store.list_live(str(user.id)) == []
     async with session_factory() as session:

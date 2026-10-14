@@ -17,13 +17,15 @@ from services.capabilities.base import Availability, Capability, ReportContext
 
 def availability(ctx: ReportContext) -> Availability:
     if not ctx.playwright_installed:
-        return Availability(False, "Playwright is not installed. Run: pip install playwright")
+        return Availability(
+            False, "The web browser add-on isn't installed yet (about 150 to 300 MB)."
+        )
     if ctx.browser_channel or ctx.browser_installed:
         return Availability(True)
     return Availability(
         False,
-        "No browser to drive. Install Google Chrome or Microsoft Edge, or the "
-        "bundled Chromium (about 150–300 MB).",
+        "There's no browser to use yet. Install Google Chrome or Microsoft Edge, "
+        "or add the web browser add-on (about 150 to 300 MB).",
     )
 
 
@@ -38,7 +40,7 @@ CAPABILITY = Capability(
     tools=("browser.read",),
     default_enabled=False,
     risk="high",
-    when_denied="Browser control is turned off. The owner can turn it on in Settings → Permissions.",
+    when_denied="Browser control is turned off. You can turn it on in Settings → Permissions.",
     availability=availability,
     install="browser",
 )

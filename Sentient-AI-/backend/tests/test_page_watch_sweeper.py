@@ -235,10 +235,11 @@ async def test_a_change_sends_one_message_to_the_owner_only(session_factory):
     user_id, text = outbox.sent[0]
     assert user_id == str(owner.id)
     assert text.startswith("🔔 Page changed: Fall schedule\n" + URL + "\n")
-    assert MINUS + " CSCI 260 - Wed 11:00" in text
-    assert "+ CSCI 260 - Thu 14:00" in text
-    assert "+ CSCI 330 - Fri 10:00" in text
-    assert "every 60 minutes" in text
+    assert "Removed: CSCI 260 - Wed 11:00" in text
+    assert "Added: CSCI 260 - Thu 14:00" in text
+    assert "Added: CSCI 330 - Fri 10:00" in text
+    assert MINUS not in text  # words, not diff signs
+    assert "I check this page every hour." in text
 
     stored = await row(session_factory, watch_id)
     assert utc(stored.last_changed_at) == T0
@@ -367,7 +368,7 @@ async def test_failures_back_off_then_stop_the_watch_with_one_message(session_fa
     user_id, text = outbox.sent[0]
     assert user_id == str(user.id)
     assert text.startswith("⚠️ Stopped watching: Fall schedule\n" + URL)
-    assert f"last {ERROR_LIMIT} checks failed" in text and "HTTP 503" in text
+    assert f"I couldn't check it the last {ERROR_LIMIT} times." in text and "HTTP 503" in text
 
     # A stopped watch is never fetched again.
     calls = len(fetch.calls)
@@ -423,7 +424,8 @@ async def test_an_unexpected_fetch_exception_counts_as_a_failure(session_factory
     await service(session_factory, explode, Outbox()).sweep_once()
     stored = await row(session_factory, watch_id)
     assert stored.consecutive_errors == 1
-    assert stored.last_error == "The check failed (ValueError)."
+    # A plain sentence: no exception name, nothing from its message.
+    assert stored.last_error == "Something went wrong while checking the page."
 
 
 @pytest.mark.asyncio
@@ -449,7 +451,7 @@ async def test_a_page_that_never_finishes_loading_does_not_hold_up_the_sweep(ses
 
     slow = await row(session_factory, slow_id)
     assert slow.consecutive_errors == 1 and slow.status.value == "active"
-    assert slow.last_error == "The page did not finish loading in time."
+    assert slow.last_error == "The page didn't finish loading in time."
     quick = await row(session_factory, quick_id)
     assert quick.last_hash == snapshot_digest(BASE) and quick.consecutive_errors == 0
     assert fetch.calls == [URL]
@@ -681,7 +683,7 @@ def test_a_change_on_the_last_kept_line_is_one_line_out_and_one_in():
         ("+", "a rewritten last kept line"),
     ]
     summary = change_summary(saved, "\n".join(edited), scan=lambda _t: True)
-    assert summary.split("\n") == [f"{MINUS} {kept[-1]}", "+ a rewritten last kept line"]
+    assert summary.split("\n") == [f"Removed: {kept[-1]}", "Added: a rewritten last kept line"]
 
 
 def test_a_first_line_longer_than_the_excerpt_is_not_reported_as_changed():

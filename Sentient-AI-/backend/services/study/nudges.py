@@ -33,7 +33,9 @@ NUDGE_MAX_CHARS = 500
 MAX_TITLES = 3
 TITLE_CHARS = 60
 _BOOKS = "\U0001F4DA"
-_HOW = 'Send /review on Telegram or "review" in Slack.'
+# One text reaches Telegram and Slack alike (the schedule sweeper's
+# deliver), so the way to start is named for both.
+_HOW = 'Send /review in Telegram or "review" in Slack to start.'
 
 
 async def _switch_on(session: Any) -> bool:
@@ -53,7 +55,7 @@ def _cut(text: str, limit: int) -> str:
 
 
 def nudge_text(total: int, decks: list[tuple[str, int]]) -> str:
-    """"📚 18 flashcards are due: Bio 101 – Lecture 3 (12), Chem 201 (6). ..."
+    """"📚 18 flashcards are due: Bio 101 (12), Chem 201 (6). Send /review ..."
     Counts and titles only."""
     noun = "flashcard is" if total == 1 else "flashcards are"
     shown = [f"{_cut(channel_safe(title), TITLE_CHARS)} ({count})" for title, count in decks[:MAX_TITLES]]

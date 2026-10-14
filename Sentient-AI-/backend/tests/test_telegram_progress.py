@@ -174,7 +174,7 @@ class Recorder:
         ({"name": "browser.read", "action": "something_new"}, "Using the browser…"),
         ({"name": "desktop.screenshot"}, "Taking a screenshot…"),
         ({"name": "desktop.observe", "action": "outline"}, "Looking at the app on your screen…"),
-        ({"name": "desktop.act", "action": "type"}, "Typing…"),
+        ({"name": "desktop.act", "action": "type"}, "Typing in an app…"),
         ({"name": "canvas.get_courses"}, "Checking your Canvas courses…"),
         ({"name": "canvas__1f2e3d4c.get_grades"}, "Checking your grades…"),
         ({"name": "google_workspace.search_emails"}, "Searching your email…"),

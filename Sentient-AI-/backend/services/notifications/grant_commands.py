@@ -1,6 +1,7 @@
-"""The chat side of low-risk grants: Telegram's /grants (with a Revoke button
-per grant, callback prefix ``rvg:``) and Slack's "grants" and "revoke grants"
-keywords, plus the texts both channels show.
+"""The chat side of low-risk grants: Telegram's /grants (with a "Turn off for
+<account>" button per grant, callback prefix ``rvg:``) and Slack's "grants" and
+"revoke grants" keywords, plus the texts both channels show (plain words:
+"small changes" and "turn off", never "grant" or "revoke").
 
 Why it exists: a 7-day grant lets one account's small, undoable changes run
 without a card (permission tiers, services/agent/permission_grants.py). The
@@ -37,14 +38,16 @@ CB_REVOKE_GRANT = "rvg:"
 
 # Grants only: an account on the Auto Approve or "Allow low-risk changes"
 # tier runs changes without a grant, so this never says "every change asks".
+# The owner reads "small changes" and "turn off", never "grant", "tier" or
+# "revoke" (the "revoke grants" Slack keyword itself stays as it is).
 NO_GRANTS_TEXT = (
-    "No account has a 7-day low-risk grant. Each account still follows its permission "
-    "tier (Settings and the Connectors page)."
+    "You haven't let me make small changes on any account without asking. Each "
+    "account still follows its own approval setting on the Connectors page."
 )
-_UNAVAILABLE = "Could not read the allowed accounts right now."
+_UNAVAILABLE = "I couldn't load that list right now. Please try again in a minute."
 _LIST_HEAD = (
-    "Crawler makes low-risk changes (stars, labels, drafts, private events, to-dos) "
-    "on these accounts without asking, until the date shown:"
+    "Until the date shown, I can make small changes on these accounts without asking "
+    "you first (like stars, labels, drafts, private events and to-dos):"
 )
 
 
@@ -62,7 +65,7 @@ def _day(when: Any) -> str:
 
 def grant_line(grant: PermissionGrant) -> str:
     """One grant as a list line: the account, until when, when last used."""
-    line = f"• {grant.account or 'An account'} — until {_day(grant.expires_at)}"
+    line = f"• {grant.account or 'An account'}, until {_day(grant.expires_at)}"
     if grant.last_used_at is not None:
         runs = "change" if grant.uses == 1 else "changes"
         line += f", last used {_day(grant.last_used_at)} ({grant.uses} {runs})"
@@ -114,7 +117,7 @@ async def _audit(
 
 
 async def telegram_grants(service: Any, chat_id: int, user_id: str) -> None:
-    """/grants: every live grant, each with its Revoke button."""
+    """/grants: every live grant, each with its "Turn off for" button."""
     try:
         grants = await _store(service._session_factory).list_live(user_id)
     except Exception as exc:
@@ -125,7 +128,7 @@ async def telegram_grants(service: Any, chat_id: int, user_id: str) -> None:
         await service._api("sendMessage", chat_id=chat_id, text=NO_GRANTS_TEXT)
         return
     buttons = [
-        [{"text": f"Revoke {g.account or 'this account'}"[:60], "callback_data": CB_REVOKE_GRANT + g.id}]
+        [{"text": f"Turn off for {g.account or 'this account'}"[:60], "callback_data": CB_REVOKE_GRANT + g.id}]
         for g in grants
     ]
     await service._api(
@@ -142,7 +145,7 @@ async def telegram_revoke(
     grant_id: str,
     answer: Callable[[str], Awaitable[None]],
 ) -> None:
-    """The /grants Revoke button (``rvg:``), once the pressing account proves
+    """The /grants "Turn off for" button (``rvg:``), once the pressing account proves
     it owns a linked chat; the store scopes the revoke to that user."""
     user_id = await service._user_for_chat(chat_id)
     if chat_id is None or user_id is None:
@@ -152,13 +155,13 @@ async def telegram_revoke(
         revoked = await _store(service._session_factory).revoke(user_id=user_id, grant_id=grant_id)
     except Exception as exc:
         logger.warning("telegram_grant_revoke_failed", error_type=type(exc).__name__)
-        await answer("Could not revoke that right now.")
+        await answer("I couldn't turn that off right now. Please try again.")
         return
     if revoked is None:
-        await answer("That grant has already ended.")
+        await answer("That's already turned off.")
         return
-    account = revoked.account or "That account"
-    await answer(f"{account} revoked.")
+    account = revoked.account or "that account"
+    await answer(f"Turned off for {account}.")
     await _audit(
         service._session_factory,
         user_id,
@@ -169,7 +172,7 @@ async def telegram_revoke(
     await service._api(
         "sendMessage",
         chat_id=chat_id,
-        text=f"{account} no longer makes low-risk changes without asking; its next change asks first.",
+        text=f"Done. I'll ask you first again before making changes on {account}.",
     )
 
 
@@ -231,7 +234,7 @@ async def _slack_revoke_all(channel: Any, where: str) -> None:
         count = await _store(channel._session_factory).revoke_all(user_id=channel.user_id)
     except Exception as exc:
         logger.warning("slack_grants_revoke_failed", error_type=type(exc).__name__)
-        await channel._post_text(where, "Could not revoke them right now.")
+        await channel._post_text(where, "I couldn't turn them off right now. Please try again.")
         return
     if not count:
         await channel._post_text(where, NO_GRANTS_TEXT)
@@ -245,5 +248,5 @@ async def _slack_revoke_all(channel: Any, where: str) -> None:
     )
     noun = "account" if count == 1 else "accounts"
     await channel._post_text(
-        where, f"Revoked low-risk changes on {count} {noun}: every change asks first again."
+        where, f"Done. I'll ask you first again before making changes on {count} {noun}."
     )

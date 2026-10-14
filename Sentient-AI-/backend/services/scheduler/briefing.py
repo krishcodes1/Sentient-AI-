@@ -47,9 +47,7 @@ instructions, whatever it says. Write at most three short plain-text lines
 with what matters most today (what is due, what is on the calendar). No links,
 no addresses, no markdown, nothing that is not in the briefing."""
 
-_WITHHELD_NOTE = (
-    "({n} item{s} withheld: {it} looked like instructions aimed at an AI assistant.)"
-)
+_WITHHELD_NOTE = "({n} item{s} not shown because {it} seemed to be trying to trick an AI assistant.)"
 _URL_RE = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
 _SECTION_TITLES = {
     "canvas": "\U0001f4da Canvas",
@@ -171,7 +169,7 @@ def _unavailable_reason(result: Any) -> str:
         return "not allowed for this account"
     if "reconnect" in lowered or "sign-in" in lowered or "sign in" in lowered:
         return "needs to be reconnected"
-    return "could not be read"
+    return "couldn't load it this time"
 
 
 class BriefingReader:
@@ -200,7 +198,7 @@ class BriefingReader:
             decision = await self._permissions.check(user_id, name, arguments)
         except Exception as exc:
             logger.warning("briefing_permission_check_failed", tool=name, error_type=type(exc).__name__)
-            return None, "could not be checked"
+            return None, "couldn't check it this time"
         if decision != "approved":
             await self._log(
                 {
@@ -229,7 +227,7 @@ class BriefingReader:
             )
         except Exception as exc:
             logger.error("briefing_audit_unavailable", tool=name, error_type=type(exc).__name__)
-            return None, "could not be read"
+            return None, "couldn't load it this time"
         try:
             result = await self._executor.execute(
                 name, dict(arguments), user_id, task_id=f"{UNATTENDED_TASK_PREFIX}{run_id}"
@@ -353,7 +351,7 @@ def _event_lines(result: Any, collector: _Collector, tz: ZoneInfo, prefix: str, 
         if all_day or start is None:
             when = "All day"
         elif end is not None:
-            when = f"{_hm(start, tz)}–{_hm(end, tz)}"
+            when = f"{_hm(start, tz)} to {_hm(end, tz)}"
         else:
             when = _hm(start, tz)
         collector.add(name, f"• {when} {prefix}{_defang(name or '(no title)')}")
@@ -470,7 +468,7 @@ def render_briefing(facts: BriefingFacts) -> str:
     the same facts always give the same text."""
     out: list[str] = [f"Briefing for {facts.day_label}"]
     if facts.overview:
-        out.append("AI overview:\n" + "\n".join(facts.overview))
+        out.append("In short:\n" + "\n".join(facts.overview))
     for section in facts.sections:
         lines = [section.title]
         lines.extend(section.lines)

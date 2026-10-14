@@ -695,7 +695,8 @@ class VideoToolkit:
                 "ok": True,
                 "needs_choice": True,
                 "title": found.title,
-                "note": "This page embeds several YouTube videos. Ask the user which one, then call "
+                "note": "This page embeds several YouTube videos. Ask the user which one in "
+                "plain words (by its number on the page, or its link), then call "
                 "video.transcript with its url.",
                 "candidates": [
                     {"title": f"Embedded video {i}", "url": watch_url(v.video_id)}
@@ -818,8 +819,9 @@ class VideoToolkit:
                 "ok": True,
                 "needs_choice": True,
                 "title": feed.title,
-                "note": f"{choice.reason} Ask the user which one, then call video.transcript again "
-                "with episode set to its guid or title.",
+                "note": f"{choice.reason} Ask the user which episode they mean by its title and "
+                "date, never its guid, then call video.transcript again with episode set to its "
+                "guid or title.",
                 "candidates": [
                     {"title": e.title, "date": e.date, "guid": e.guid} for e in choice.candidates
                 ],

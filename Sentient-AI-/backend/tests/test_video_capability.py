@@ -52,7 +52,7 @@ def test_the_capability():
     assert cap.tools == ("video.",) and cap.default_enabled is True and cap.risk == "low"
     assert cap.requires == ("web_browsing",)
     assert cap.when_denied == (
-        "Reading videos and podcasts is turned off. The owner can turn it on in Settings → Permissions."
+        "Reading videos and podcasts is turned off. You can turn it on in Settings → Permissions."
     )
     assert registry.settings_defaults("video_transcripts") == {
         "video_minutes_per_call": 45,
@@ -111,7 +111,7 @@ class Tripwire:
 def test_blocked_when_web_browsing_is_off():
     status = _statuses("video_transcripts")["video_transcripts"]
     assert status.effective == "blocked"
-    assert status.reason == "Needs 'Browse the web' on in Permissions."
+    assert status.reason == "This needs 'Browse the web' turned on in Permissions."
     assert _statuses("video_transcripts", "web_browsing")["video_transcripts"].effective == "on"
     # The offer reads the effective set (InstallationService.enabled_keys).
     effective = frozenset(k for k, s in _statuses("video_transcripts").items() if s.effective == "on")

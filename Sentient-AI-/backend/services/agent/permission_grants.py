@@ -78,14 +78,16 @@ _LOW_KINDS = frozenset({APPROVAL_LOW_RISK, APPROVAL_LOW_RISK_GRANT})
 # card's reason ("Why"), shown in plain text. SUSPENDED_NOTE reports a result
 # that looked like an attempt to steer Crawler, so it is a warning: it goes
 # in the card's risk note, which the web app, Telegram and Slack draw as a
-# risk warning.
+# risk warning. Both are plain sentences the owner reads (no "result",
+# "tier" or other internal words; docs/bot-message-style.md).
 CAP_NOTE = (
-    f"Asking first: {LOW_RISK_MAX_PER_TURN} low-risk changes already ran without asking "
-    "in this request."
+    f"I'm asking first because I already made {LOW_RISK_MAX_PER_TURN} small changes "
+    "without asking while working on this."
 )
 SUSPENDED_NOTE = (
-    "Asking first: a result earlier in this request looked like an attempt to steer "
-    "Crawler, so nothing more runs without your approval in it."
+    "Something I read while working on this, like an email or a web page, looked like it "
+    "was trying to give me orders. So I'll ask you before each step for the rest of this "
+    "request."
 )
 
 # Audit event names.
@@ -774,7 +776,8 @@ class _Decision:
 class StandingConsent:
     """One turn's standing-consent state: the per-turn low-risk count, the
     tripwire (``suspended``), each call's decision and the low-risk runs
-    for the reply's "Done without asking" line.
+    for the reply's note on changes made without asking
+    (risk.ran_without_asking_line).
 
     ``grants`` is the runtime's store (None: no grant ever applies);
     ``switch`` answers whether the owner's low_risk_actions capability is
@@ -974,11 +977,19 @@ class StandingConsent:
     def card_reason(self, tc: Any, reason: str) -> str:
         """The card's reason with standing consent's routine sentence after
         it (why a tier or grant did not cover this call), when there is one.
-        Plain text on every channel, unlike the risk note."""
+        Plain text on every channel, unlike the risk note. The card's
+        sentence has no final period ("Change labels on an email in your
+        Gmail"), so one is added before the note, which would otherwise run
+        on from it."""
         decision = self._decision_for(tc)
         if decision is None or not decision.why:
             return reason
-        return f"{reason} {decision.why}" if reason else decision.why
+        head = reason.rstrip() if isinstance(reason, str) else ""
+        if not head:
+            return decision.why
+        if head[-1] not in ".!?":
+            head += "."
+        return f"{head} {decision.why}"
 
     # -- execution ------------------------------------------------------------
 
@@ -1014,9 +1025,10 @@ class StandingConsent:
     # -- turn_end -------------------------------------------------------------
 
     async def finish(self, content: str) -> str:
-        """*content* with the "Done without asking" line when low-risk
-        changes ran without a card, and each grant's use recorded (best
-        effort: the changes already ran)."""
+        """*content* with the note on changes made without asking ("I made
+        these small changes without asking, as you allowed:" and one line
+        per action) when low-risk changes ran without a card, and each
+        grant's use recorded (best effort: the changes already ran)."""
         if not self._runs:
             return content
         if self.grants is not None:

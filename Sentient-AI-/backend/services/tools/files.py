@@ -255,12 +255,12 @@ class FilesToolkit:
         (never the model's words)."""
         if action != "forget":
             return None
-        file_id = params.get("file_id")
+        file_id = params.get("file_id") if isinstance(params, dict) else None
         if not isinstance(file_id, str):
             return None
         entry = self._card_facts.get((str(user_id), file_id.strip()))
         what = entry[0] if entry is not None else "one of your uploaded files"
         return (
-            f"Forget {what}: delete the text Crawler extracted from it. "
-            "Your original file is not touched."
+            f"Forget {what}. I'll delete the text I read from it. "
+            "Your own copy of the file stays as it is."
         )

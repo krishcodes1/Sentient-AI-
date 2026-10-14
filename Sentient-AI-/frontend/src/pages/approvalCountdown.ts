@@ -46,6 +46,22 @@ export function useCountdown(iso: string | null | undefined): number | null {
   return useSyncExternalStore(subscribe, () => secondsUntil(target));
 }
 
+/**
+ * The time left on a card in words, for "Okay to go ahead? This expires in 14 minutes.": whole
+ * minutes ("14 minutes", "1 minute"), then "about 2 hours" from 90 minutes and "about 3 days" from
+ * 48 hours, as the chat cards say it (cards.expires_in_text). The web card counts down live, so
+ * its last minute shows seconds ("40 seconds") where a chat card says "less than a minute".
+ */
+export function expiresInWords(totalSec: number): string {
+  const sec = Number.isFinite(totalSec) ? Math.max(0, Math.floor(totalSec)) : 0;
+  if (sec < 60) return sec === 1 ? "1 second" : `${sec} seconds`;
+  const min = Math.floor(sec / 60);
+  if (min < 90) return min === 1 ? "1 minute" : `${min} minutes`;
+  const hours = Math.round(min / 60);
+  if (hours < 48) return `about ${hours} hours`;
+  return `about ${Math.round(hours / 24).toLocaleString("en-US")} days`;
+}
+
 // mm:ss (or h:mm:ss past an hour) for the approval countdown.
 export function formatCountdown(totalSec: number): string {
   const sec = totalSec % 60;

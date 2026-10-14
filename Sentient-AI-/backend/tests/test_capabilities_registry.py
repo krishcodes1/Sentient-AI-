@@ -200,7 +200,7 @@ def test_hide_personal_details_is_an_always_available_policy_switch_on_by_defaul
     on = render_permissions_block(capabilities.report({}, ctx))
     assert "- Hide personal details from the AI provider: on" in on
     off = render_permissions_block(capabilities.report({"hide_personal_details": False}, ctx))
-    assert f"- Hide personal details from the AI provider: off — {cap.when_denied}" in off
+    assert f"- Hide personal details from the AI provider: off. {cap.when_denied}" in off
 
 
 def test_tutor_mode_is_registered_on_by_default_low_risk_and_claims_its_runtime_builtin():
@@ -243,7 +243,7 @@ def test_the_knowledge_base_switches_are_registered():
     base = capabilities.get("knowledge_base")
     assert base.label == "Knowledge base (your documents)" and base.default_enabled is True
     assert base.tools == ("knowledge.",) and base.risk == "low"
-    assert base.when_denied == "The knowledge base is turned off. The owner can turn it on in Settings → Permissions."
+    assert base.when_denied == "The knowledge base is turned off. You can turn it on in Settings → Permissions."
     for tool in ("knowledge.search", "knowledge.read", "knowledge.list", "knowledge.add", "knowledge.remove"):
         assert capabilities.capability_for_tool(tool) is base
     semantic = capabilities.get("knowledge_semantic")
@@ -275,4 +275,4 @@ def test_low_risk_actions_is_an_always_available_policy_switch_on_by_default():
     on = render_permissions_block(capabilities.report({}, ctx))
     assert "- Make low-risk changes without asking: on" in on
     off = render_permissions_block(capabilities.report({"low_risk_actions": False}, ctx))
-    assert f"- Make low-risk changes without asking: off — {cap.when_denied}" in off
+    assert f"- Make low-risk changes without asking: off. {cap.when_denied}" in off

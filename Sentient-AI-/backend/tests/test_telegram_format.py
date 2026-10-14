@@ -631,8 +631,9 @@ async def test_a_reply_is_formatted_and_its_notes_stay_exact(telegram):
     assert reply["parse_mode"] == "HTML"
     assert reply["text"].startswith("<b>Drafted</b> the email &amp; saved it.\n\n")
     text = visible_text(reply["text"])
-    assert "\U0001f510 Waiting on your approval for: google_workspace.send_email. " in text
-    assert "Blocked by security policy: shell_exec" in text
+    assert "\U0001f510 I need your OK first to send an email. " in text
+    assert "\u26d4 I skipped one step because your safety settings don't allow it: " in text
+    assert "google_workspace" not in text and "shell_exec" not in text
     assert "tokens" in text.splitlines()[-1]
     await service._client.aclose()
 
@@ -681,7 +682,7 @@ async def test_help_kb_usage_and_command_replies_are_sent_as_written(telegram):
     help_text, usage, fresh = bot.sends()
     for body in (help_text, usage, fresh):
         assert "parse_mode" not in body
-    assert "/kb <collection>" in help_text["text"]
+    assert "/kb CS101: put this in a file's caption" in help_text["text"]
     assert all(line in help_text["text"] for line in HELP_LINES if line)
     assert usage["text"] == knowledge_channels.USAGE
     assert fresh["text"].startswith("Fresh start")
@@ -707,7 +708,8 @@ async def test_an_approval_card_and_a_progress_line_are_sent_as_written(telegram
     card, line = bot.sends()
     assert "parse_mode" not in card and "parse_mode" not in line
     assert "**Hi** <b>there</b> & _you_" in card["text"]
-    assert "Tool: google_workspace.send_email" in card["text"]
+    assert card["text"].startswith("🔐 Send an email\n\n")
+    assert "To: prof.lee@uni.edu" in card["text"] and "google_workspace" not in card["text"]
     assert line["text"] == "Searching the web for **news** <now>"
     await service._client.aclose()
 
@@ -827,7 +829,7 @@ async def test_a_scheduled_result_is_formatted_on_telegram_and_plain_on_slack(te
     assert slack_parts == [
         "\U0001f5d3 Canvas summary · Tue 08:00\n\n"
         "**Two** items are due & one is late.\n- CS101\n- MA200\n\n"
-        'reply "schedules" to pause'
+        'Reply "schedules" to pause this.'
     ]
     for part in telegram_parts:
         assert await service.send_text("user-1", part)
@@ -836,7 +838,7 @@ async def test_a_scheduled_result_is_formatted_on_telegram_and_plain_on_slack(te
     assert body["text"] == (
         "\U0001f5d3 Canvas summary · Tue 08:00\n\n"
         "<b>Two</b> items are due &amp; one is late.\n• CS101\n• MA200\n\n"
-        "/schedules to pause"
+        "Send /schedules to pause this."
     )
     await service._client.aclose()
 
@@ -844,7 +846,9 @@ async def test_a_scheduled_result_is_formatted_on_telegram_and_plain_on_slack(te
 def test_a_scheduled_reply_that_leaves_a_fence_open_is_closed_before_the_notes():
     [part] = compose("Code", "Tue 08:00", _outcome(reply="```py\nx = 1", cards=1), "telegram")
     html = render_html(part)
-    assert html.endswith("1 action is waiting for your approval (/pending).\n\n/schedules to pause")
+    assert html.endswith(
+        "1 action is waiting for your approval. Send /pending to see it.\n\nSend /schedules to pause this."
+    )
     assert '<pre><code class="language-py">x = 1</code></pre>' in html
 
 

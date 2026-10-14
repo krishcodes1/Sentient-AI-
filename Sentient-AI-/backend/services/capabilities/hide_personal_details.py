@@ -32,8 +32,8 @@ CAPABILITY = Capability(
     default_enabled=True,
     risk="low",
     when_denied=(
-        "Personal details (emails, phone numbers, addresses) are sent to the AI provider "
-        "as written. The owner can turn on Hide personal details from the AI provider in "
-        "Settings → Permissions."
+        "Personal details (emails, phone numbers, addresses) go to the AI provider as "
+        "written. You can hide them by turning on 'Hide personal details from the AI "
+        "provider' in Settings → Permissions."
     ),
 )

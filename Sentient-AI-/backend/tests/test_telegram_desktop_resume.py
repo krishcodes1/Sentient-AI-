@@ -271,13 +271,13 @@ async def test_the_resumed_turn_reads_the_approved_result_as_a_user_turn_in_full
     assert [m["role"] for m in resumed] == ["user", "assistant", "user"], resumed
     assert resumed[0]["content"] == ASK
     last = resumed[-1]["content"]
-    assert "[Approved] Executed 'desktop.act'" in last
+    assert "The owner approved 'desktop.act'" in last
     assert "<tool_result_" in last and 'name="desktop.act"' in last
     # The fresh outline is whole: the 15th's events are already in it.
     assert "Dentist 10:00" in last and "Team sync 15:00" in last
     # The transcript still records the decision as its own row.
     rows = await _transcript(session_factory)
-    assert rows[-2].content.startswith("[Approved] Executed 'desktop.act'.")
+    assert rows[-2].content.startswith("You approved my request to click or type in an app on your computer")
     assert rows[-1].content == ANSWER.content
 
 
@@ -296,7 +296,8 @@ async def test_a_resumed_turn_that_parks_another_act_sends_its_card_and_says_so(
 
     assert fake.events == [("open_app", "Calendar")]  # the scroll waits for its card
     texts = _texts(fake_api)
-    assert "Waiting on your approval for: desktop.act" in texts[-1], texts
+    note = "🔐 I need your OK first to click or type in an app on your computer."
+    assert note in texts[-1] and "desktop.act" not in texts[-1], texts
     assert not any(DEAD_END in t for t in texts)
     assert 'Scroll down in Calendar' in _cards(fake_api)[1]["text"]
 
@@ -358,7 +359,7 @@ async def test_a_resume_that_fails_after_a_call_keeps_the_call_in_the_transcript
         "Send 'continue' to try again."
     ), texts
     rows = await _transcript(session_factory)
-    assert rows[-1].content == "[No reply: the model provider returned an error.]"
+    assert rows[-1].content == "[I couldn't finish this because your AI service had a problem.]"
     assert [tc["name"] for tc in rows[-1].tool_calls] == ["desktop.observe"]
 
 

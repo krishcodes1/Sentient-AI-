@@ -58,6 +58,7 @@ import asyncio
 import base64
 import html
 import json
+import re
 import secrets
 import time
 import uuid as uuid_module
@@ -69,6 +70,7 @@ import httpx
 import structlog
 from sqlalchemy import select, update
 
+from services.action_text import GENERIC_SENTENCE, approval_sentence
 from services.agent import cancel as agent_cancel
 from services.agent.app_approvals import REMEMBER_WEEK, Channel, weekly_app_for
 from services.agent.permission_grants import REMEMBER_LOW_RISK
@@ -96,11 +98,12 @@ _CB_DENY = "dny:"
 # "Allow <app> for 7 days": approve the card and allow its app for a week
 # for this chat (services.agent.app_approvals).
 _CB_APPROVE_WEEK = "apw:"
-# /apps: revoke one weekly app approval.
+# /apps: revoke one weekly app approval (the "Turn off for <app>" button).
 _CB_REVOKE_APP = "rva:"
-# "Allow low-risk on <account> · 7 days": approve the card and allow low-risk
-# changes on its account for 7 days (services.agent.permission_grants). The
-# /grants Revoke button is "rvg:" (services.notifications.grant_commands).
+# "Allow small changes on <account> for 7 days": approve the card and allow
+# low-risk changes on its account for 7 days
+# (services.agent.permission_grants). The /grants revoke button is "rvg:"
+# (services.notifications.grant_commands).
 _CB_APPROVE_LOW_RISK = "apl:"
 # Longest account label on the grant button.
 _GRANT_BUTTON_ACCOUNT_CHARS = 24
@@ -131,57 +134,62 @@ MAX_FILES_PER_TURN = 5
 MAX_PHOTO_BYTES = 5 * 1024 * 1024
 
 # The /help reply: the lead paragraph, then one line per command (HELP_LINES,
-# in the order they are listed), then the line for /help itself.
+# in the order they are listed), then the line for /help itself. Each line is
+# "/command: what it does", with a real example instead of placeholder syntax.
 _HELP_INTRO = (
-    "Just type a task or a question and the assistant answers "
-    "here — with the same tools, memory and safety checks as "
-    "the web app. When an action needs your permission, the "
-    "request appears with Approve / Deny buttons. Each reply ends "
-    "with what it used, e.g. “5.3k tokens · ≈$0.002”."
+    "Send me a task or a question and I'll answer here, with the same tools, "
+    "memory and safety checks as the web app. When something needs your OK "
+    "first, I'll ask with Approve and Deny buttons. Each reply ends with a short "
+    "line on what it used and about what it cost."
 )
 HELP_LINES: list[str] = [
-    "/stop — stop the request that is running now",
-    "/new — start a fresh conversation",
-    "/pending — re-send every action waiting for your decision",
-    "/apps — apps allowed for a week, with a button to revoke each",
-    "/usage — tokens used today and over the last 30 days",
+    "/stop: stop what I'm working on right now",
+    "/new: start a new conversation",
+    "/pending: show again everything that's waiting for your OK",
+    "/apps: apps I can use without asking for 7 days, with a button to undo each",
+    "/usage: what I've used today and over the last 30 days, and about what it cost",
     # top10:secret_pii_redaction
 
     # top10:file_extraction
     "Send a PDF, Word, PowerPoint or Excel file (up to 20 MB) with a question about it.",
 
     # top10:scheduler_briefing
-    "/schedules — your scheduled tasks, with Run now, Pause and Resume",
-    "/briefing — send your daily briefing now",
-    "/timezone — show or set your time zone, e.g. /timezone America/Chicago",
+    "/schedules: your scheduled tasks, with buttons to run, pause or resume each",
+    "/briefing: send your daily briefing now",
+    "/timezone: see or change your time zone, for example /timezone America/Chicago",
 
     # top10:tutor_mode
-    "/tutor — tutor mode for this chat: /tutor on, /tutor off, /tutor status",
+    "/tutor on or /tutor off: tutor mode for this chat, where I help with hints "
+    "instead of answers. /tutor status shows if it's on.",
 
     # top10:knowledge_base
-    "/kb <collection> — as a file's caption: save the file to your knowledge base",
+    "/kb CS101: put this in a file's caption to save the file to your knowledge "
+    "base, in the CS101 collection",
 
     # top10:flashcards_quizzes
-    "/decks — your flashcard decks",
-    "/review [n] — review the flashcards due now (all decks, or deck n)",
-    "/quiz n [count] — a practice quiz on deck n",
-    "/export n [anki|csv] — download deck n for Anki or a spreadsheet",
-    "During a review: /show, /again, /hard, /good, /easy, /skip, /end (quiz: /a to /f)",
+    "/decks: your flashcard decks",
+    "/review: go over the flashcards due now (or /review 2 for just deck 2)",
+    "/quiz 2: a practice quiz on deck 2 (add a number for how many questions, like /quiz 2 10)",
+    "/export 2: download deck 2 for Anki (or /export 2 csv for a spreadsheet)",
+    "While reviewing: /show, /again, /hard, /good, /easy, /skip or /end. In a quiz, "
+    "answer with /a to /f.",
 
     # top10:event_triggers
-    "/triggers — your app triggers, with Pause and Resume; /triggers delete 2 removes one",
+    "/triggers: what I do when something happens in your apps, with buttons to pause "
+    "or resume each (/triggers delete 2 removes number 2)",
 
     # top10:permission_tiers
-    "/grants — accounts allowed low-risk changes, with a button to revoke each",
+    "/grants: accounts where I can make small changes without asking, with a button "
+    "to undo each",
 
     # top10:voice_notes
-    "🎤 Send a voice note and I'll answer it like a typed message (when the owner has "
-    "turned voice notes on); I first show what I heard.",
+    "🎤 Send a voice note and I'll answer it like a typed message, after showing you "
+    "what I heard (voice notes have to be turned on first).",
 
     # top10:video_transcripts
 
 ]
-_HELP_LAST_LINE = "/help — this message"
+_HELP_LAST_LINE = "/help: show this list"
 
 # Decision callback signature: (user_id, action_id, approved) -> outcome
 # dict with at least {"status": "approved"|"denied"} or {"error": str}.
@@ -308,6 +316,30 @@ def _purchase_card(action: Any) -> Optional[dict[str, Any]]:
     return card if isinstance(card, dict) else None
 
 
+def _card_sentence(action: Any) -> str:
+    """The plain sentence an approval card opens with and its notification
+    shows: the action's reason (the runtime writes it from the call's own
+    arguments, such as "Send an email to priya@acme.com from your Gmail")
+    on one line, so no part of it can pass for a line of the details. A
+    card with no usable reason gets action_text's sentence for the call,
+    and the generic one when even that cannot be built (as Slack's card
+    does). Never a tool name, never raises."""
+    reason = getattr(action, "reason", None)
+    text = " ".join(reason.split()) if isinstance(reason, str) else ""
+    if text:
+        return text
+    try:
+        built = approval_sentence(
+            str(getattr(action, "tool_name", "") or ""),
+            _card_arguments(getattr(action, "tool_name", None), getattr(action, "arguments", None)),
+        )
+    except Exception:
+        built = ""
+    if isinstance(built, str) and built.strip():
+        return " ".join(built.split())
+    return GENERIC_SENTENCE
+
+
 def _purchase_notice(card: dict[str, Any]) -> str:
     """The "Crawler can make mistakes" line: the card's own copy (the
     checkout toolkit puts NOTICE on every card), else the toolkit's."""
@@ -317,31 +349,61 @@ def _purchase_notice(card: dict[str, Any]) -> str:
     return PURCHASE_NOTICE
 
 
+def _fact(value: Any) -> str:
+    """One of a purchase card's facts as one line of text ("" when it is
+    missing): whitespace and line breaks collapsed, so a fact read off the
+    page can never pass for another line of the card."""
+    if value is None or isinstance(value, bool):
+        return ""
+    return " ".join(str(value).split())
+
+
 def _purchase_caption(card: dict[str, Any], expires_at: Any) -> str:
     """The purchase card's caption, on a photo or as the text card:
-    "🛒 Purchase approval — shop.example.com · $23.40 · 2 items ·
-    Visa ····4242 — Crawler can make mistakes. …", then the expiry. Every
-    part is read from the card's facts; the card number is never on it
-    (the label is masked by the vault). The item count is left out when
-    the toolkit found no item lines (many shops' rows are not li/tr), as
-    the web card and the approval sentence leave it out."""
-    host = str(card.get("host") or card.get("origin") or "the site")
-    amount = str(card.get("amount_usd") or "?")
-    currency = str(card.get("currency") or "USD")
-    money = f"${amount}" if currency == "USD" else f"{amount} {currency}"
+
+        🛒 Pay $23.40 at shop.example.com
+
+        2 items, paid with Visa ····4242.
+        Crawler can make mistakes. Check the amount and the site before you approve.
+
+        Okay to go ahead? This expires in 14 minutes.
+
+    Every part is read from the card's facts; the card number is never on
+    it (the label is masked by the vault). A fact the toolkit did not find
+    is left out: the item count when the page had no item lines (many
+    shops' rows are not li/tr), as the web card and the approval sentence
+    leave it out, and the card label when there is none. A total that
+    could not be read is said plainly ("I couldn't read the total.") and
+    never shown as a made up amount. Never raises."""
+    if not isinstance(card, dict):
+        card = {}
+    host = _fact(card.get("host")) or _fact(card.get("origin")) or "the shop's site"
+    amount = _fact(card.get("amount_usd"))
+    currency = _fact(card.get("currency")) or "USD"
+    if amount:
+        money = f"${amount}" if currency == "USD" else f"{amount} {currency}"
+        head = f"🛒 Pay {money} at {host}"
+    else:
+        head = f"🛒 Pay at {host}"
     items = card.get("items")
     count = len(items) if isinstance(items, list) else 0
-    parts = [host, money]
-    if count > 0:
-        parts.append(f"{count} item{'' if count == 1 else 's'}")
-    label = card.get("card_label")
-    if isinstance(label, str) and label.strip():
-        parts.append(label.strip())
-    caption = "🛒 Purchase approval — " + " · ".join(parts)
+    label = _fact(card.get("card_label"))
+    facts = [] if amount else ["I couldn't read the total."]
+    if count > 0 and label:
+        facts.append(f"{count} item{'' if count == 1 else 's'}, paid with {label}.")
+    elif count > 0:
+        facts.append(f"{count} item{'' if count == 1 else 's'}.")
+    elif label:
+        facts.append(f"Paid with {label}.")
+    body = [" ".join(facts)] if facts else []
     notice = _purchase_notice(card)
     if notice:
-        caption += f" — {notice}"
-    return f"{caption}\n\nExpires in {_expires_in_text(expires_at)}."
+        body.append(notice)
+    lines = [head]
+    if body:
+        lines += ["", *body]
+    lines += ["", cards.ask_line(expires_at)]
+    return "\n".join(lines)
 
 
 def _approval_keyboard(
@@ -349,8 +411,9 @@ def _approval_keyboard(
 ) -> dict[str, Any]:
     """Approve and Deny, plus "Allow <app> for 7 days" on its own row when
     the card may be allowed for a week (a desktop.act in an app on the
-    weekly list), or "Allow low-risk on <account> · 7 days" when the card
-    offers a low-risk grant (never both: the week is desktop.act's only)."""
+    weekly list), or "Allow small changes on <account> for 7 days" when the
+    card offers a low-risk grant (never both: the week is desktop.act's
+    only)."""
     rows: list[list[dict[str, str]]] = [
         [
             {"text": "✅ Approve", "callback_data": _CB_APPROVE + action_id},
@@ -370,7 +433,10 @@ def _approval_keyboard(
         rows.append(
             [
                 {
-                    "text": f"⚡ Allow low-risk on {_button_account(low_risk_account)} · 7 days",
+                    "text": (
+                        f"⚡ Allow small changes on {_button_account(low_risk_account)} "
+                        "for 7 days"
+                    ),
                     "callback_data": _CB_APPROVE_LOW_RISK + action_id,
                 }
             ]
@@ -388,20 +454,25 @@ def _button_account(account: str) -> str:
 
 
 def _low_risk_line(action: Any, account: str) -> str:
-    """What a card that offers a low-risk grant says about it."""
+    """What a card that offers a low-risk grant says about it
+    (cards.low_risk_line), ending with how to undo it from this chat."""
     from services.agent.risk import low_risk_notes_for_tool
 
     return cards.low_risk_line(
-        account, low_risk_notes_for_tool(action.tool_name), how="/grants lists and revokes."
+        account,
+        low_risk_notes_for_tool(action.tool_name),
+        how="Send /grants to see or undo this.",
     )
 
 
 def _weekly_line(weekly_app: str) -> str:
-    """What a card that offers the week says about it."""
+    """What a card that offers the week says about it: what the week lets
+    Crawler do without asking, what still asks, and how to undo it."""
     return (
-        f"Or allow {weekly_app} for 7 days: Crawler then scrolls and clicks around in "
-        f"{weekly_app} without a card for requests from this chat; typing, and buttons "
-        "that change or send something, still ask. /apps lists and revokes."
+        f"Or allow {weekly_app} for 7 days: I can then scroll and click around in "
+        f"{weekly_app} without asking, for requests from this chat. I'll still ask "
+        "before I type, or press a button that changes or sends something. "
+        "Send /apps to see or undo this."
     )
 
 
@@ -413,9 +484,21 @@ def _day(when: Any) -> str:
         if moment.tzinfo is None:
             moment = moment.replace(tzinfo=timezone.utc)
         local = moment.astimezone()
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError, OSError):
         return str(when)
     return f"{local:%a} {local:%b} {local.day}"
+
+
+def _until(when: Any) -> str:
+    """How long a 7-day permission lasts, for the line a decided card gets:
+    "until Fri Oct 16", or "for the next 7 days" when the end date is
+    missing or cannot be read (never a raw timestamp or "None")."""
+    if when is None or when == "":
+        return "for the next 7 days"
+    day = _day(when)
+    if day == str(when):
+        return "for the next 7 days"
+    return f"until {day}"
 
 
 def _chunks(text: str, size: int = _MESSAGE_CHUNK) -> list[str]:
@@ -541,20 +624,18 @@ def _usage_line(outcome: dict[str, Any]) -> Optional[str]:
     )
 
 
+# How this chat lists the approval cards again, in the reply notes and the
+# /stop reply ("... or send /pending to see it again").
+_PENDING_HINT = "send /pending"
+
+
 def _with_turn_notes(reply: str, outcome: dict[str, Any]) -> str:
-    """*reply* with what the turn left for the person to do: the approval
-    it parked (its card is already in the chat) and the calls security
-    policy blocked. A message turn and the turn resumed after an approval
-    report both the same way, so their replies read the same."""
-    if outcome.get("pending_approvals"):
-        names = ", ".join(outcome["pending_approvals"])
-        reply += (
-            f"\n\n\U0001f510 Waiting on your approval for: {names}. "
-            "The request is in this chat — or send /pending."
-        )
-    if outcome.get("blocked"):
-        reply += "\n\n⛔ Blocked by security policy: " + ", ".join(outcome["blocked"])
-    return reply
+    """*reply* with what the turn left for the person to do, in plain words
+    and never by tool name (cards.turn_notes): the requests waiting on
+    their OK (each card is already in the chat) and the steps their safety
+    settings did not allow. A message turn and the turn resumed after an
+    approval report both the same way, so their replies read the same."""
+    return reply + cards.turn_notes(outcome, pending_hint=_PENDING_HINT)
 
 
 def _turn_notes(outcome: dict[str, Any]) -> str:
@@ -563,15 +644,97 @@ def _turn_notes(outcome: dict[str, Any]) -> str:
     return _with_turn_notes("", outcome)
 
 
-def _expires_in_text(expires_at_iso: str) -> str:
-    try:
-        expires = datetime.fromisoformat(expires_at_iso)
-        if expires.tzinfo is None:
-            expires = expires.replace(tzinfo=timezone.utc)
-        minutes = max(0, int((expires - datetime.now(timezone.utc)).total_seconds() // 60))
-        return f"{minutes} min"
-    except (ValueError, TypeError):
-        return "a few minutes"
+# The answer to a button pressed from a chat that is not linked.
+_NOT_LINKED_TEXT = "This chat isn't linked to a Crawler AI account."
+# What the chat says when something on this side failed and there is no
+# plain sentence to pass on (an unexpected error, never its text). The
+# same words as Slack's.
+_SOMETHING_WENT_WRONG = (
+    "Something went wrong on my side, so I couldn't finish that. Please try again."
+)
+# The reply to a turn that ended with no text and nothing else to report
+# (Slack's words).
+_NO_REPLY_TEXT = "I didn't come up with a reply that time. Please ask again."
+# A decision that failed on this side: the press was answered already, so
+# this goes to the chat as a message, never as the error's own text.
+_DECISION_FAILED = (
+    "Something went wrong and your answer didn't go through. "
+    "Tap the button again, or answer in the web app."
+)
+# The reply to /new (Slack's words for "new").
+_FRESH_START_TEXT = "Fresh start. Your next message starts a new conversation."
+
+# Errors the appliers in api/routes/agent.py return in developer words,
+# each as the chat says it. Every other error they return is already a
+# sentence written for the owner (an expired request, a refusal) and is
+# sent as it is.
+_PLAIN_ERRORS: dict[str, str] = {
+    "Agent runtime is not available.": (
+        "I'm not ready to do that right now. Try again in a minute, or use the web app."
+    ),
+    "The assistant is not available right now.": (
+        "I'm not ready to answer right now. Try again in a minute."
+    ),
+    "Unknown account.": "This chat isn't linked to an active Crawler AI account.",
+    "Message content cannot be empty.": "That message was empty. Send me some text.",
+    "Unknown tutor command.": "Use /tutor on, /tutor off or /tutor status.",
+    "Reading files is not set up in this process.": "I can't read files here right now.",
+    # services.agent.providers.ProviderNotConfigured.SETUP_MESSAGE: the
+    # install has no AI service yet.
+    "No AI provider is configured yet. Add an API key to start chatting.": (
+        "I can't answer yet because no AI service is set up. Open Crawler AI to add one."
+    ),
+}
+# The start of the chat applier's per-minute limit refusal ("Rate limit
+# exceeded: your account allows 20 agent messages per minute."), and what
+# the chat says instead.
+_RATE_LIMIT_PREFIX = "Rate limit exceeded"
+_RATE_LIMIT_TEXT = (
+    "That's more messages in one minute than your account allows. "
+    "Wait a minute, then send it again."
+)
+
+
+# A provider failure as services.agent.providers.ProviderError words it
+# ("gemini provider error (HTTP 429): quota"), with its HTTP status.
+_PROVIDER_ERROR_RE = re.compile(r"\bprovider error(?: \(HTTP (\d{3})\))?:")
+
+
+def _provider_error_text(status: Optional[str]) -> str:
+    """A failure of the owner's AI service in plain words, by its HTTP
+    status: a rate or spending limit, a refused key, or anything else."""
+    if status == "429":
+        return (
+            "Your AI service is busy, or you've reached its usage limit. "
+            "Try again in a few minutes."
+        )
+    if status in ("401", "403"):
+        return (
+            "Your AI service didn't accept the request. Check the AI service "
+            "settings in Crawler AI."
+        )
+    return "Your AI service had a problem and I couldn't finish that. Try again in a minute."
+
+
+def _plain_error(error: Any) -> str:
+    """An applier's error as the chat says it: the plain sentence for a
+    known developer message (``_PLAIN_ERRORS``, and the per-minute limit),
+    a plain sentence about the AI service for a provider failure (whose
+    text names the provider, an HTTP status and the provider's own words),
+    else the error as written, which the appliers word for the owner.
+    Never raises; anything that is not text gives
+    ``_SOMETHING_WENT_WRONG``."""
+    if not isinstance(error, str) or not error.strip():
+        return _SOMETHING_WENT_WRONG
+    text = error.strip()
+    if text in _PLAIN_ERRORS:
+        return _PLAIN_ERRORS[text]
+    if text.startswith(_RATE_LIMIT_PREFIX):
+        return _RATE_LIMIT_TEXT
+    provider = _PROVIDER_ERROR_RE.search(text)
+    if provider is not None:
+        return _provider_error_text(provider.group(1))
+    return text
 
 
 class TelegramService:
@@ -1052,13 +1215,19 @@ class TelegramService:
         """Push an approval request to the owner's linked chat (no-op when
         the user has no linked chat). ``action`` is a StoredAction.
 
+        Every other card reads as docs/bot-message-style.md lays out: the
+        plain sentence ("🔐 Send an email to priya@acme.com from your
+        Gmail"), any risk note, every detail as "Label: value" lines
+        (cards.layout_card, secrets masked), "Okay to go ahead? This expires
+        in 14 minutes." and the check code, then any 7-day offer.
+
         A browser.checkout card is a photo of the checkout page with the
-        purchase caption (the site, the amount, the items, the card label
-        and the "Crawler can make mistakes" notice) and the same
-        Approve/Deny keyboard; a browser.act card is a photo of the page
-        with the target outlined, captioned with the act's sentence. When
-        the picture is gone (a restart) or the upload fails, the text card
-        carries the same caption."""
+        purchase caption (the amount and the site, the items, the card
+        label, the "Crawler can make mistakes" notice and the question) and
+        the same Approve/Deny keyboard; a browser.act card is a photo of the
+        page with the target outlined, captioned with the act's sentence
+        and the question. When the picture is gone (a restart) or the upload
+        fails, the text card carries the same caption."""
         try:
             chat_id = await self.linked_chat_id(action.user_id)
             if chat_id is None:
@@ -1066,15 +1235,23 @@ class TelegramService:
             # A desktop.act in an app on the weekly list also offers "Allow
             # <app> for 7 days" (services.agent.app_approvals).
             weekly_app = weekly_app_for(action.tool_name, action.arguments)
-            # A LOW action's card may offer "Allow low-risk on <account>"
+            # A LOW action's card may offer "Allow small changes on <account>"
             # (services.agent.permission_grants).
             low_risk_account = cards.low_risk_account(action)
             keyboard = _approval_keyboard(action.action_id, weekly_app, low_risk_account)
             purchase = _purchase_card(action)
+            # Any risk note, on one line like the sentence: a value quoted in
+            # the note can't pass for a line of the card.
+            risk_note = getattr(action, "risk_note", None)
+            risk_line = (
+                f"⚠️ {' '.join(risk_note.split())}"
+                if isinstance(risk_note, str) and risk_note.strip()
+                else ""
+            )
             if purchase is not None:
                 caption = _purchase_caption(purchase, action.expires_at)
-                if getattr(action, "risk_note", None):
-                    caption = f"{caption}\n\n⚠️ {action.risk_note}"
+                if risk_line:
+                    caption = f"{caption}\n\n{risk_line}"
                 image = self._approval_image_of(action)
                 if image is not None and await self._send_photo(
                     chat_id, image, caption, reply_markup=keyboard
@@ -1082,31 +1259,41 @@ class TelegramService:
                     return
                 await self._api("sendMessage", chat_id=chat_id, text=caption, reply_markup=keyboard)
                 return
+            # The card's head: one plain sentence saying what will happen
+            # (the runtime's reason, written from the call's own arguments),
+            # and any risk note under it. Never a tool name or JSON.
+            lines = [f"🔐 {_card_sentence(action)}"]
+            if risk_line:
+                lines += ["", risk_line]
+            ask = cards.ask_line(action.expires_at)
+            # The 7-day offer goes under the question, on the button message.
+            footer: list[str] = []
+            if weekly_app:
+                footer = ["", _weekly_line(weekly_app)]
+            elif low_risk_account:
+                footer = ["", _low_risk_line(action, low_risk_account)]
             if action.tool_name == _ACT_TOOL:
-                # One plain sentence from the act toolkit's facts ('Click
-                # "Add to cart" on shop.example.com'): the arguments are
-                # refs and typed text, which a JSON dump would only obscure.
-                lines = ["🔐 Approval required", "", str(action.reason)]
+                # The sentence alone, from the act toolkit's facts ('Click
+                # "Add to cart" on shop.example.com'), then the question: the
+                # arguments are refs and typed text, which a list of values
+                # would only obscure, so this card has no details and no
+                # check code.
+                lines += ["", ask]
             else:
-                lines = [
-                    "🔐 Approval required",
-                    "",
-                    f"Tool: {action.tool_name}",
-                    f"Why: {action.reason}",
-                ]
-            if getattr(action, "risk_note", None):
-                lines += ["", f"⚠️ {action.risk_note}"]
-            if action.tool_name != _ACT_TOOL:
-                # Every argument in full (F3): a long card goes out as
+                # Every argument in full (F3), as plain labelled lines, then
+                # the question and the check code: a long card goes out as
                 # labelled, paced parts, the buttons on the last. An
                 # oversized card or a lost part gets a notice instead, and no
-                # buttons. The act card keeps its one sentence (above).
+                # buttons. Room is kept for the 7-day offer, so the button
+                # message stays within Telegram's limit.
+                room = _MESSAGE_CHUNK - cards.utf16_len("\n".join(footer))
                 card = cards.layout_card(
                     lines,
                     _card_arguments(action.tool_name, action.arguments or {}),
                     tool_name=str(action.tool_name),
-                    max_chars=_MESSAGE_CHUNK,
+                    max_chars=max(room, _MESSAGE_CHUNK // 2),
                     length=cards.utf16_len,
+                    ask=ask,
                 )
 
                 async def send_part(text: str) -> bool:
@@ -1116,7 +1303,7 @@ class TelegramService:
                     ready = await cards.send_card_parts(
                         card,
                         send_part,
-                        retry_hint="Send /pending to get it again, or decide in the web app.",
+                        retry_hint="Send /pending to get it again, or answer in the web app.",
                     )
                 if not ready:
                     logger.warning(
@@ -1127,12 +1314,7 @@ class TelegramService:
                     )
                     return
                 lines = list(card.final_lines)
-            lines += ["", f"Expires in {_expires_in_text(action.expires_at)}."]
-            if weekly_app:
-                lines += ["", _weekly_line(weekly_app)]
-            elif low_risk_account:
-                lines += ["", _low_risk_line(action, low_risk_account)]
-            text = "\n".join(lines)
+            text = "\n".join(lines + footer)
             if action.tool_name == _ACT_TOOL:
                 # The act card's picture: the page with the target outlined,
                 # the sentence as its caption. Without one (it could not be
@@ -1288,7 +1470,7 @@ class TelegramService:
                 await self._api(
                     "sendMessage",
                     chat_id=chat_id,
-                    text="Crawler can't use that kind of message yet. Send text, a photo or a document.",
+                    text="I can't open that kind of message yet. Send text, a photo or a document.",
                 )
                 return
             await route(chat_id, media_user, message)
@@ -1351,19 +1533,20 @@ class TelegramService:
             "sendMessage",
             chat_id=chat_id,
             text=(
-                "⏹ Stopped. Nothing more will be sent for that request."
+                "⏹ Stopped. I won't send anything more for that request."
                 if not still_running
-                else "⏹ Stopping — nothing more will be sent for that request."
+                else "⏹ Stopping now. I won't send anything more for that request."
             )
             + await self._waiting_cards_note(user_id),
         )
 
     async def _waiting_cards_note(self, user_id: str) -> str:
         """What /stop's reply adds when approval cards are waiting on the
-        account: the stop also ends each one's task once it is approved
-        (services.agent.cancel.mark_since), though the approved action
-        itself still runs. Empty when none wait, or when they cannot be
-        read: the stop has already been requested either way."""
+        account (cards.waiting_cards_note): the stop also ends each one's
+        task once it is approved (services.agent.cancel.mark_since), though
+        the approved action itself still runs. Empty when none wait, or
+        when they cannot be read: the stop has already been requested
+        either way."""
         from services.agent.approvals import DbApprovalStore
 
         try:
@@ -1371,17 +1554,7 @@ class TelegramService:
         except Exception as exc:
             logger.warning("telegram_stop_pending_lookup_failed", error=str(exc)[:200])
             return ""
-        if not waiting:
-            return ""
-        if waiting == 1:
-            return (
-                "\n\n1 action is still waiting for your approval (/pending). "
-                "Approving it runs that one action; its task stays stopped."
-            )
-        return (
-            f"\n\n{waiting} actions are still waiting for your approval (/pending). "
-            "Approving one runs that one action; its task stays stopped."
-        )
+        return cards.waiting_cards_note(waiting, pending_hint=_PENDING_HINT)
 
     async def _handle_pending(self, chat_id: int, user_id: str) -> None:
         """Re-send every approval still waiting on this account, so a card
@@ -1394,7 +1567,7 @@ class TelegramService:
             await self._api(
                 "sendMessage",
                 chat_id=chat_id,
-                text="Nothing is waiting for your approval right now.",
+                text=cards.NOTHING_PENDING_TEXT,
             )
             return
         for action in pending:
@@ -1407,8 +1580,8 @@ class TelegramService:
 
     async def _handle_apps(self, chat_id: int, user_id: str) -> None:
         """List the apps Crawler may use without asking (weekly app
-        approvals), each with a Revoke button, whichever chat or browser
-        allowed them: the owner sees every one from here."""
+        approvals), each with a "Turn off for <app>" button, whichever chat
+        or browser allowed them: the owner sees every one from here."""
         from services.agent.app_approvals import DbAppApprovalStore
 
         try:
@@ -1416,7 +1589,9 @@ class TelegramService:
         except Exception as exc:
             logger.warning("telegram_apps_lookup_failed", error=str(exc)[:200])
             await self._api(
-                "sendMessage", chat_id=chat_id, text="Could not read the allowed apps right now."
+                "sendMessage",
+                chat_id=chat_id,
+                text="I couldn't load your allowed apps just now. Try again in a minute.",
             )
             return
         if not approvals:
@@ -1424,14 +1599,15 @@ class TelegramService:
                 "sendMessage",
                 chat_id=chat_id,
                 text=(
-                    "No apps are allowed for a week. When Crawler asks to act in an app "
-                    "like Calendar, the card has an \u201cAllow for 7 days\u201d button."
+                    "You haven't let me use any app without asking. When I ask to do "
+                    "something in an app like Calendar, the request has an "
+                    "\u201cAllow Calendar for 7 days\u201d button."
                 ),
             )
             return
         here = Channel.telegram(chat_id)
         lines = [
-            "Crawler scrolls and clicks around in these apps without a card, until the date shown:",
+            "I can scroll and click around in these apps without asking you, until the date shown:",
             "",
         ]
         buttons: list[list[dict[str, str]]] = []
@@ -1442,9 +1618,14 @@ class TelegramService:
                 where = "the web app"
             else:
                 where = "another Telegram chat"
-            lines.append(f"\u2022 {approval.app} \u2014 from {where}, until {_day(approval.expires_at)}")
+            lines.append(f"\u2022 {approval.app}, allowed from {where} until {_day(approval.expires_at)}")
             buttons.append(
-                [{"text": f"Revoke {approval.app}", "callback_data": _CB_REVOKE_APP + approval.id}]
+                [
+                    {
+                        "text": f"Turn off for {approval.app}",
+                        "callback_data": _CB_REVOKE_APP + approval.id,
+                    }
+                ]
             )
         await self._api(
             "sendMessage",
@@ -1459,11 +1640,11 @@ class TelegramService:
         approval_id: str,
         answer: Callable[[str], Awaitable[None]],
     ) -> None:
-        """The /apps Revoke button (``rva:``), once the pressing account
+        """The /apps "Turn off" button (``rva:``), once the pressing account
         proves it owns a linked chat."""
         user_id = await self._user_for_chat(chat_id)
         if chat_id is None or user_id is None:
-            await answer("This chat is not linked to a Crawler AI account.")
+            await answer(_NOT_LINKED_TEXT)
             return
         await self._handle_revoke_app(chat_id, user_id, approval_id, answer)
 
@@ -1474,9 +1655,9 @@ class TelegramService:
         approval_id: str,
         answer: Callable[[str], Awaitable[None]],
     ) -> None:
-        """A Revoke button from /apps: end that approval (the owner's own
-        only; the store scopes by user) and say so in the chat. Audited as
-        the web's revoke is."""
+        """A "Turn off" button from /apps: end that approval (the owner's
+        own only; the store scopes by user) and say so in the chat. Audited
+        as the web's revoke is."""
         from services.agent.app_approvals import DbAppApprovalStore
 
         try:
@@ -1485,20 +1666,17 @@ class TelegramService:
             )
         except Exception as exc:
             logger.warning("telegram_app_revoke_failed", error=str(exc)[:200])
-            await answer("Could not revoke that right now.")
+            await answer("I couldn't turn that off just now. Try again in a minute.")
             return
         if revoked is None:
-            await answer("That approval has already ended.")
+            await answer("That one has already ended.")
             return
-        await answer(f"{revoked.app} revoked.")
+        await answer(f"{revoked.app} turned off.")
         await self._audit_app_revoke(user_id, revoked)
         await self._api(
             "sendMessage",
             chat_id=chat_id,
-            text=(
-                f"{revoked.app} is no longer allowed. The next action in "
-                f"{revoked.app} will ask you first."
-            ),
+            text=f"Done. I'll ask you first again before doing anything in {revoked.app}.",
         )
 
     async def _audit_app_revoke(self, user_id: str, revoked: Any) -> None:
@@ -1543,7 +1721,7 @@ class TelegramService:
         await self._api(
             "sendMessage",
             chat_id=chat_id,
-            text="Fresh start \u2014 your next message begins a new conversation.",
+            text=_FRESH_START_TEXT,
         )
 
     async def _handle_tutor(self, chat_id: int, user_id: str, argument: str) -> None:
@@ -1560,7 +1738,7 @@ class TelegramService:
             return
         if self.tutor is None:
             await self._api(
-                "sendMessage", chat_id=chat_id, text="Tutor mode is not available right now."
+                "sendMessage", chat_id=chat_id, text="Tutor mode isn't available right now."
             )
             return
         fresh = chat_id in self._fresh_chats
@@ -1571,13 +1749,15 @@ class TelegramService:
             )
         except Exception as exc:
             logger.error("telegram_tutor_failed", chat_id=chat_id, error_type=type(exc).__name__)
-            outcome = {"error": "Tutor mode could not be changed right now."}
+            outcome = {"error": "I couldn't change tutor mode just now. Please try again."}
         if outcome.get("error"):
             if fresh:
                 # The /new it carried was not used: keep it for the next message.
                 self._fresh_chats.add(chat_id)
             await self._api(
-                "sendMessage", chat_id=chat_id, text=f"⚠️ {outcome['error']}"[:_MESSAGE_CHUNK]
+                "sendMessage",
+                chat_id=chat_id,
+                text=f"⚠️ {_plain_error(outcome['error'])}"[:_MESSAGE_CHUNK],
             )
             return
         await self._api(
@@ -1667,7 +1847,7 @@ class TelegramService:
             outcome = await self.chat(user_id, text, new_conversation=fresh, **listen)
         except Exception as exc:
             logger.error("telegram_chat_failed", chat_id=chat_id, error=str(exc))
-            outcome = {"error": "The assistant hit an unexpected error."}
+            outcome = {"error": _SOMETHING_WENT_WRONG}
         finally:
             typing.cancel()
             # Before anything else goes out (a /stop's reply included),
@@ -1677,13 +1857,13 @@ class TelegramService:
             await self._api(
                 "sendMessage",
                 chat_id=chat_id,
-                text=f"⚠️ {outcome['error']}"[:_MESSAGE_CHUNK],
+                text=f"⚠️ {_plain_error(outcome['error'])}"[:_MESSAGE_CHUNK],
             )
             return
         reply = (outcome.get("content") or "").strip()
         notes = _turn_notes(outcome)
         if not reply and not notes:
-            reply = "(The assistant returned no text.)"
+            reply = _NO_REPLY_TEXT
         # Photos first, so the text (which ends with the usage line)
         # is the last thing the turn sends.
         for image in outcome.get("images") or []:
@@ -1773,7 +1953,7 @@ class TelegramService:
             gate = getattr(self.chat, "file_gate", None)
             refusal = await gate() if callable(gate) else None
             if refusal is None and not takes_keyword(self.chat, "files"):
-                refusal = "This bot can't read files yet."
+                refusal = "I can't read files in this chat yet."
             if refusal is not None:
                 if key is not None:
                     # The album's other messages are dropped silently.
@@ -1832,7 +2012,7 @@ class TelegramService:
                 name = sanitize_display_name(document.get("file_name") or "file")
                 size = document.get("file_size")
                 if isinstance(size, int) and size > UPLOAD.max_bytes:
-                    return [], [], f"I couldn't read {name}: {too_large(size, UPLOAD.max_bytes)}"
+                    return [], [], f"I couldn't read {name}. {too_large(size, UPLOAD.max_bytes)}"
                 try:
                     data = await download_telegram_file(
                         self._client, self._token, str(document.get("file_id")), max_bytes=UPLOAD.max_bytes
@@ -1841,9 +2021,9 @@ class TelegramService:
                     reason = (
                         too_large(size if isinstance(size, int) else None, UPLOAD.max_bytes)
                         if exc.code == "too_large"
-                        else "Telegram did not hand the file over. Try sending it again."
+                        else "Telegram didn't send me the file. Try sending it again."
                     )
-                    return [], [], f"I couldn't read {name}: {reason}"
+                    return [], [], f"I couldn't read {name}. {reason}"
                 files.append(
                     InboundFile(
                         name=name,
@@ -1856,14 +2036,14 @@ class TelegramService:
             photo = _largest_photo(message.get("photo"))
             if photo is None:
                 if message.get("photo"):
-                    return [], [], "I couldn't use that photo: it is larger than 5 MB."
+                    return [], [], "That photo is over 5 MB, which is too big for me to open."
                 continue
             try:
                 raw = await download_telegram_file(
                     self._client, self._token, str(photo["file_id"]), max_bytes=MAX_PHOTO_BYTES
                 )
             except TelegramFileError:
-                return [], [], "I couldn't use that photo: Telegram did not hand it over."
+                return [], [], "Telegram didn't send me that photo. Try sending it again."
             images.append({"media_type": "image/jpeg", "data": base64.b64encode(raw).decode("ascii")})
         return files, images, None
 
@@ -1940,19 +2120,21 @@ class TelegramService:
             outcome = await self.chat(user_id, caption, new_conversation=fresh, **listen)
         except Exception as exc:
             logger.error("telegram_chat_failed", chat_id=chat_id, error_type=type(exc).__name__)
-            outcome = {"error": "The assistant hit an unexpected error."}
+            outcome = {"error": _SOMETHING_WENT_WRONG}
         finally:
             typing.cancel()
             await progress.aclose()
         if outcome.get("error"):
-            await self._api("sendMessage", chat_id=chat_id, text=f"⚠️ {outcome['error']}"[:_MESSAGE_CHUNK])
+            await self._api(
+                "sendMessage", chat_id=chat_id, text=f"⚠️ {_plain_error(outcome['error'])}"[:_MESSAGE_CHUNK]
+            )
             return
         reply = (outcome.get("content") or "").strip()
         notes = _turn_notes(outcome)
         for image in outcome.get("images") or []:
             await self._send_photo(chat_id, image.get("data_url", ""), image.get("caption", ""))
         await self._send_reply(
-            chat_id, reply or ("" if notes else "(The assistant returned no text.)"), outcome, notes
+            chat_id, reply or ("" if notes else _NO_REPLY_TEXT), outcome, notes
         )
 
     # ── voice notes (top10:voice_notes) ──────────────────────────────────
@@ -2054,8 +2236,8 @@ class TelegramService:
                 "sendMessage",
                 chat_id=chat_id,
                 text=(
-                    "To link this chat, open Crawler AI \u2192 Settings \u2192 "
-                    "Telegram approvals and tap Connect."
+                    "To link this chat, open Crawler AI, go to Settings, then "
+                    "Telegram approvals, and tap Connect."
                 ),
             )
             return
@@ -2077,8 +2259,8 @@ class TelegramService:
                     "sendMessage",
                     chat_id=chat_id,
                     text=(
-                        "That link has expired. Generate a fresh one from "
-                        "Crawler AI → Settings → Telegram approvals."
+                        "That link has expired. To get a new one, open Crawler AI, go to "
+                        "Settings, then Telegram approvals, and tap Connect."
                     ),
                 )
                 return
@@ -2101,9 +2283,9 @@ class TelegramService:
             "sendMessage",
             chat_id=chat_id,
             text=(
-                f"✅ Linked to {display}.\n\n"
-                "When the assistant needs your approval for an action, "
-                "it will message you here with Approve/Deny buttons."
+                f"✅ This chat is now linked to {display}.\n\n"
+                "You can message me here any time. When I need your OK before "
+                "doing something, I'll ask here with Approve and Deny buttons."
             ),
         )
 
@@ -2128,13 +2310,13 @@ class TelegramService:
             route = self._callback_routes.get(prefix)
             if route is None:
                 logger.warning("telegram_callback_unknown_prefix", data=data[:32])
-                await answer("Unknown action.")
+                await answer("That button doesn't work anymore.")
                 return
             await route(chat_id, target, answer)
             return
         approved = prefix != _CB_DENY
         # "Allow <app> for 7 days" approves the card and remembers the app;
-        # "Allow low-risk on <account>" approves it and allows the account.
+        # "Allow small changes on <account>" approves it and allows the account.
         remember = (
             REMEMBER_WEEK
             if prefix == _CB_APPROVE_WEEK
@@ -2156,10 +2338,13 @@ class TelegramService:
         user_id = await self._user_for_chat(chat_id)
         if chat_id is None or user_id is None:
             logger.info("telegram_callback_from_unlinked_account_ignored")
-            await answer("This chat is not linked to a Crawler AI account.")
+            await answer(_NOT_LINKED_TEXT)
             return
         if self.decide is None:
-            await answer("Approvals are not available right now.")
+            await answer(
+                "I can't take your answer right now. Try again in a minute, or answer "
+                "in the web app."
+            )
             return
 
         # Answered now, not when the decision is done: an approval runs the
@@ -2232,11 +2417,12 @@ class TelegramService:
             outcome = await self.decide(user_id, action_id, approved, **listen)
         except Exception as exc:
             # A decision failure must reach the person who pressed the
-            # button; silently swallowing it looks like a dead button.
+            # button; silently swallowing it looks like a dead button. The
+            # chat gets a plain sentence, never the exception's text.
             logger.error(
                 "telegram_decision_failed", action_id=action_id, error=str(exc)
             )
-            outcome = {"error": "Could not apply that decision — see server logs."}
+            outcome = {"error": _DECISION_FAILED}
         finally:
             if typing is not None:
                 typing.cancel()
@@ -2249,51 +2435,63 @@ class TelegramService:
             outcome=str(outcome.get("status") or outcome.get("error"))[:80],
         )
         if outcome.get("error"):
+            # The applier's error is a sentence written for the owner (the
+            # request expired, it was already answered, a re-check refused
+            # it); a developer message is put in plain words first.
             await self._api(
                 "sendMessage",
                 chat_id=chat_id,
-                text="⚠️ " + str(outcome["error"])[:180],
+                text=f"⚠️ {_plain_error(outcome['error'])}"[:_MESSAGE_CHUNK],
             )
             return
 
-        verdict = "✅ Approved" if approved else "❌ Denied"
-        # "Allow for 7 days": the card says until when, and how to undo it.
-        weekly = outcome.get("weekly")
+        # "✅ Approved at 5:25 PM." or "❌ Denied at 5:25 PM. I didn't do it."
+        verdict = cards.decision_line(approved, at=cards.decided_at_text())
+        # "Allow for 7 days": the card says until when, and how to undo it
+        # ("I can scroll and click around in Calendar without asking until
+        # Fri Oct 16. Send /apps to undo that.").
+        weekly_raw = outcome.get("weekly")
+        weekly: dict[str, Any] = weekly_raw if isinstance(weekly_raw, dict) else {}
+        app = weekly.get("app")
         allowed = (
-            f" {weekly['app']} is allowed for 7 days, until "
-            f"{_day(weekly.get('expires_at'))}. /apps to revoke."
-            if isinstance(weekly, dict) and weekly.get("app")
+            f" I can scroll and click around in {' '.join(app.split())} without asking "
+            f"{_until(weekly.get('expires_at'))}. Send /apps to undo that."
+            if isinstance(app, str) and app.strip()
             else ""
         )
-        # "Allow low-risk on <account>": until when, and how to undo it; a
-        # grant that could not be made (the switch is off, the action no
-        # longer grades LOW) leaves the card approved once.
-        low_risk = outcome.get("low_risk")
-        if isinstance(low_risk, dict) and low_risk.get("account"):
+        # "Allow small changes on <account>": until when, and how to undo
+        # it ("I won't ask about small changes on Gmail until Fri Oct 16.
+        # Send /grants to undo that."); a grant that could not be made (the
+        # switch is off, the action no longer grades LOW) leaves the card
+        # approved just this once, in Slack's words.
+        low_risk_raw = outcome.get("low_risk")
+        low_risk: dict[str, Any] = low_risk_raw if isinstance(low_risk_raw, dict) else {}
+        account = low_risk.get("account")
+        if isinstance(account, str) and account.strip():
             allowed = (
-                f" Low-risk changes on {low_risk['account']} are allowed until "
-                f"{_day(low_risk.get('expires_at'))}. /grants to revoke."
+                f" I won't ask about small changes on {' '.join(account.split())} "
+                f"{_until(low_risk.get('expires_at'))}. Send /grants to undo that."
             )
         elif approved and remember == REMEMBER_LOW_RISK:
-            allowed = " (approved once)"
+            allowed = " I couldn't turn on the 7 days without asking, so I'll still ask next time."
         # Freeze the card: replace the buttons with the decision so it
         # can't be pressed twice from the chat history. A photo card (a
         # purchase) has a caption, not text, and is edited as one.
         if message_id is not None and message.get("photo"):
-            original = message.get("caption") or "Purchase approval"
+            original = message.get("caption") or "🛒 Purchase"
             await self._api(
                 "editMessageCaption",
                 chat_id=chat_id,
                 message_id=message_id,
-                caption=f"{original}\n\n— {verdict} from this chat.{allowed}"[:1024],
+                caption=f"{original}\n\n{verdict}{allowed}"[:1024],
             )
         elif message_id is not None:
-            original = message.get("text") or "Approval request"
+            original = message.get("text") or "🔐 Request"
             await self._api(
                 "editMessageText",
                 chat_id=chat_id,
                 message_id=message_id,
-                text=f"{original}\n\n— {verdict} from this chat.{allowed}",
+                text=f"{original}\n\n{verdict}{allowed}",
             )
         summary = outcome.get("summary")
         if summary:

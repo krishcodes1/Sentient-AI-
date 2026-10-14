@@ -56,8 +56,9 @@ export default function LowRiskGrantButton({
         Allow low-risk changes on {account} for 7 days
       </button>
       <p id={hintId} className="text-xs mt-1.5" style={{ color: "var(--text-muted)" }}>
-        Crawler then makes low-risk changes on this account without asking, for 7 days. Sends,
-        deletes, sharing and anything other people see still ask. Revoke in Settings.
+        For the next 7 days I'll make small changes on this account without asking. I'll still ask
+        before I send, delete or share anything, and before anything other people can see. You can
+        turn this off in Settings.
       </p>
     </div>
   );

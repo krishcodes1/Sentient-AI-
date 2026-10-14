@@ -554,38 +554,38 @@ class KnowledgeToolkit:
                 return None
             label = facts.get("source_label") or self._plain_label(plan)
             name = facts.get("collection") or plan.collection
-            new = "" if facts.get("collection_exists") else " (new collection)"
-            return f'Save {label} to your knowledge base collection "{name}"{new}.'
+            new = "" if facts.get("collection_exists") else " (a new collection)"
+            # The sentence names a web page by its host; the card's details
+            # show the full address.
+            address = " The full address is below." if plan.kind == "url" else ""
+            return f'Save {label} to "{name}" in your knowledge base{new}.{address}'
         if action == "remove":
             target, _refusal = validate_remove(params)
             if target is None:
                 return None
             kind, _ref = target
             if kind == "document":
-                title = facts.get("title") or "a saved document"
-                count = facts.get("passages")
-                passages = f" ({_plural(int(count), 'passage', 'passages')})" if isinstance(count, int) else ""
+                title = f'"{facts["title"]}"' if facts.get("title") else "a saved document"
                 where = (
-                    f' from your knowledge base collection "{facts["collection"]}"'
+                    f' from "{facts["collection"]}" in your knowledge base'
                     if facts.get("collection")
                     else " from your knowledge base"
                 )
-                return f'Delete "{title}"{passages}{where}.'
+                return f"Remove {title}{where}. I won't be able to look things up in it anymore."
             name = facts.get("collection") or target[1]
-            documents, count = facts.get("documents"), facts.get("passages")
-            what = ""
-            if isinstance(documents, int) and isinstance(count, int):
-                what = (
-                    f" and its {_plural(documents, 'document', 'documents')} "
-                    f"({_plural(count, 'passage', 'passages')})"
+            documents = facts.get("documents")
+            if isinstance(documents, int) and not isinstance(documents, bool) and documents > 0:
+                return (
+                    f'Delete the collection "{name}" and the '
+                    f"{_plural(documents, 'document', 'documents')} in it from your knowledge base."
                 )
-            return f'Delete the knowledge base collection "{name}"{what}.'
+            return f'Delete the collection "{name}" from your knowledge base.'
         return None
 
     @staticmethod
     def _plain_label(plan: AddPlan) -> str:
         if plan.kind == "url":
-            return f"the web page at {url_host(plan.url or '')}"
+            return f"the web page at {url_host(plan.url or '') or 'that address'}"
         if plan.kind == "text":
             return "a note"
         if plan.kind == "files":

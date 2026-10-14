@@ -42,21 +42,27 @@ def _load(name: str) -> Optional[ZoneInfo]:
 def parse_zone(name: object) -> tuple[Optional[ZoneInfo], Optional[str]]:
     """``(zone, None)`` for a real IANA zone name, else ``(None, error)``.
 
-    The error is a plain sentence for the model or the owner. A name must
-    look like a zone, be one zoneinfo knows (``available_timezones``, when
-    that list can be read) and load; "../etc", "America" and "" all fail."""
+    The error is a plain sentence for the model or the owner (the /timezone
+    reply shows it as is), so it asks for "a region and city" rather than
+    naming the IANA format. A name must look like a zone, be one zoneinfo
+    knows (``available_timezones``, when that list can be read) and load;
+    "../etc", "America" and "" all fail."""
     if not isinstance(name, str) or not name.strip():
-        return None, "A time zone must be an IANA name such as 'America/New_York'."
+        return None, "I need a time zone written as a region and city, like America/New_York or Europe/London."
     text = name.strip()
     if len(text) > ZONE_NAME_MAX_CHARS or not _ZONE_NAME_RE.fullmatch(text):
-        return None, f"'{text[:ZONE_NAME_MAX_CHARS]}' is not a time zone name (use one like 'Europe/London')."
+        return None, _unknown(text[:ZONE_NAME_MAX_CHARS], "Europe/London")
     known = _known_zones()
     if known and text not in known:
-        return None, f"'{text}' is not a known time zone (use one like 'America/Chicago')."
+        return None, _unknown(text, "America/Chicago")
     zone = _load(text)
     if zone is None:
-        return None, f"'{text}' is not a known time zone (use one like 'America/Chicago')."
+        return None, _unknown(text, "America/Chicago")
     return zone, None
+
+
+def _unknown(text: str, example: str) -> str:
+    return f"I didn't recognize “{text}” as a time zone. Try a region and city, like {example}."
 
 
 def is_valid_zone(name: object) -> bool:

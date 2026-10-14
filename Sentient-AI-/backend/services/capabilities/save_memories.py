@@ -35,7 +35,7 @@ CAPABILITY = Capability(
     default_enabled=True,
     risk="medium",
     when_denied=(
-        "Saving memories is turned off. The owner can turn it on in Settings → "
-        "Permissions; you can still add a memory yourself on the Memory page."
+        "Saving memories is turned off. You can turn it on in Settings → Permissions, or add a "
+        "memory yourself on the Memory page."
     ),
 )

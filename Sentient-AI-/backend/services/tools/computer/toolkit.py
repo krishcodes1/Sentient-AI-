@@ -151,6 +151,33 @@ _NO_PERMISSION = (
     "(Accessibility). The owner can grant it in Settings → Permissions."
 )
 _OWNER_STEP = "The owner can do this step themselves."
+# The same advice as an approval card puts it to the owner (the model reads
+# _OWNER_STEP, where "you" would read as the model itself).
+_OWNER_STEP_CARD = "You can do this step yourself."
+# Names of keys as a card shows them, the way keyboards print them.
+_KEY_WORDS = {
+    "cmd": "Cmd",
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "win": "Win",
+    "enter": "Enter",
+    "tab": "Tab",
+    "space": "Space",
+    "escape": "Esc",
+    "backspace": "Backspace",
+    "delete": "Delete",
+    "up": "Up Arrow",
+    "down": "Down Arrow",
+    "left": "Left Arrow",
+    "right": "Right Arrow",
+    "home": "Home",
+    "end": "End",
+    "pageup": "Page Up",
+    "pagedown": "Page Down",
+    "insert": "Insert",
+    "plus": "Plus",
+}
 
 # The reserved desktop.act argument an approval card's screen is stored
 # under (see ``ComputerToolkit.bind``). No action takes it, so a call that
@@ -342,6 +369,24 @@ def _characters(count: int) -> str:
     return "1 character" if count == 1 else f"{count} characters"
 
 
+def _keys(combo: Any) -> str:
+    """A key combo as keyboards print it: "Cmd+Shift+S", "Ctrl+Enter",
+    "F5". Falls back to the combo's own text."""
+    parts = str(combo).split("+") if combo is not None else []
+    if not parts or not all(parts):
+        return str(combo)
+    return "+".join(_KEY_WORDS.get(p, p.upper() if len(p) <= 3 else p) for p in parts)
+
+
+def _ordinal(number: int) -> str:
+    """2nd, 3rd, 11th..."""
+    if 10 <= number % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(number % 10, "th")
+    return f"{number}{suffix}"
+
+
 def _target(node: Node, with_role: bool) -> str:
     role = clean_text(node.role, 30).lower() or "element"
     name = _label(node.name)
@@ -353,18 +398,20 @@ def _target(node: Node, with_role: bool) -> str:
 def _facts(request: _Request, app: Optional[str], *, with_role: bool) -> str:
     """What the request does, from facts only (the element's real name and
     role, the app the outline came from, the parsed combo, the character
-    count), never from the model's own wording."""
-    where = f" in {_label(app)}" if app else " in the frontmost app"
+    count), never from the model's own wording. A ref the latest outline no
+    longer holds is said plainly (the thing is no longer on the screen, so
+    the act won't run), never shown as the ref itself."""
+    where = f" in {_label(app)}" if app else " in the app in front"
     action = request.action
-    stale = "(not in the latest outline, so it will be refused)"
+    stale = "no longer on the screen, so this won't run"
     if action in ("click", "double_click"):
         verb = "click" if action == "click" else "double-click"
         if request.ref is not None:
             if request.node is None:
-                return f"{verb} {request.ref} {stale}"
+                return f"{verb} something that's {stale}"
             return f"{verb} {_target(request.node, with_role)}{where}"
         x, y = request.point or (0, 0)
-        return f"{verb} at ({x}, {y}){where}"
+        return f"{verb} a spot with no label (screen position {x}, {y}){where}"
     if action == "type":
         amount = _characters(len(request.text))
         breaks = request.text.count("\n")
@@ -372,17 +419,19 @@ def _facts(request: _Request, app: Optional[str], *, with_role: bool) -> str:
             amount += f" (including {breaks} line break{'' if breaks == 1 else 's'})"
         if request.ref is not None:
             if request.node is None:
-                return f"type {amount} into {request.ref} {stale}"
+                return f"type {amount} into a box that's {stale}"
             return f"type {amount} into {_target(request.node, with_role)}{where}"
-        return f"type {amount} into the focused field{where}"
+        return f"type {amount} where the cursor is{where}"
     if action == "key":
-        return f"press {request.combo}{where}"
+        return f"press {_keys(request.combo)}{where}"
     if action == "scroll":
         return f"scroll {request.direction}{where}"
     if action == "open_app":
         return f"open {_label(request.app)}"
-    suffix = f" window {request.index}" if request.index else ""
-    return f"switch to {_label(request.app)}{suffix}"
+    # index 0 is the app's front window, so index 1 is its 2nd window.
+    if request.index:
+        return f"switch to the {_ordinal(request.index + 1)} window of {_label(request.app)}"
+    return f"switch to {_label(request.app)}"
 
 
 def _find_handle(nodes: Iterable[Node], handle: Any) -> Optional[Node]:
@@ -497,8 +546,9 @@ class ComputerToolkit:
         self, params: Optional[Mapping[str, Any]], *, user_id: Optional[str] = None
     ) -> str:
         """The approval-card sentence for a desktop.act call, built from facts:
-        ``Click "Send" in Mail``, ``Type 42 characters into "Subject" in Mail``,
-        ``Press cmd+s in TextEdit``, ``Open Calculator``. Refs resolve against
+        ``Click "Send" in Mail``, ``Type 42 characters into "Subject" in
+        Mail. The full text is below.`` (the card's details show the text),
+        ``Press Cmd+S in TextEdit``, ``Open Calculator``. Refs resolve against
         *user_id*'s latest outline. With the screen ``bind`` added, the
         sentence names that screen's app, and a ref resolves only while that
         outline is still the latest, so the card says what the approved act
@@ -508,11 +558,18 @@ class ComputerToolkit:
             card = params.pop(CARD_KEY, None)
             request = _parse_act(params)
         except _Refused as refusal:
-            return f"Blocked desktop action: {refusal.message}"
-        except _Failed as failure:
-            return f"Invalid desktop action: {failure.message}"
+            # The refusal is written for the model ("Combos with the Fn/Globe
+            # key are never sent. The owner can ..."); the card says it to
+            # the owner. A blocked key is the only refusal parsing raises.
+            if refusal.rule == "blocked_key":
+                return f"I won't press shortcuts that use the Fn or Globe key. {_OWNER_STEP_CARD}"
+            return f"I won't do this step. {refusal.message.replace(_OWNER_STEP, _OWNER_STEP_CARD)}"
+        except _Failed:
+            # The parse error is written for the model; the precheck refuses
+            # such a call before any card, so this is a fallback only.
+            return "I can't do this step as it was asked, so nothing will happen."
         except Exception:
-            return "Invalid desktop action."
+            return "I can't do this step as it was asked, so nothing will happen."
         snapshot = self._snapshot(user_id) if user_id else None
         app = snapshot.app if snapshot else None
         if card is not None:
@@ -523,7 +580,11 @@ class ComputerToolkit:
         if request.ref is not None and snapshot is not None:
             request = dataclasses.replace(request, node=snapshot.refs.get(request.ref))
         text = _facts(request, app, with_role=False)
-        return text[:1].upper() + text[1:]
+        text = text[:1].upper() + text[1:]
+        if request.action == "type" and not (request.ref is not None and request.node is None):
+            # The words to be typed are the card's details below it, whole.
+            text += ". The full text is below."
+        return text
 
     def bind(self, params: Optional[Mapping[str, Any]], *, user_id: str) -> dict[str, Any]:
         """*params* as a desktop.act approval card stores them: with the

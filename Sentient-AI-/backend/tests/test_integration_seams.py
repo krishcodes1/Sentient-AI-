@@ -474,17 +474,16 @@ async def test_the_installation_report_follows_the_default_provider(
 BUILTIN_COMMANDS = ["/stop", "/pending", "/new", "/usage", "/apps"]
 # Today's /help reply, word for word.
 GOLDEN_HELP = (
-    "Just type a task or a question and the assistant answers "
-    "here — with the same tools, memory and safety checks as "
-    "the web app. When an action needs your permission, the "
-    "request appears with Approve / Deny buttons. Each reply ends "
-    "with what it used, e.g. “5.3k tokens · ≈$0.002”.\n\n"
-    "/stop — stop the request that is running now\n"
-    "/new — start a fresh conversation\n"
-    "/pending — re-send every action waiting for your decision\n"
-    "/apps — apps allowed for a week, with a button to revoke each\n"
-    "/usage — tokens used today and over the last 30 days\n"
-    "/help — this message"
+    "Send me a task or a question and I'll answer here, with the same tools, "
+    "memory and safety checks as the web app. When something needs your OK "
+    "first, I'll ask with Approve and Deny buttons. Each reply ends with a short "
+    "line on what it used and about what it cost.\n\n"
+    "/stop: stop what I'm working on right now\n"
+    "/new: start a new conversation\n"
+    "/pending: show again everything that's waiting for your OK\n"
+    "/apps: apps I can use without asking for 7 days, with a button to undo each\n"
+    "/usage: what I've used today and over the last 30 days, and about what it cost\n"
+    "/help: show this list"
 )
 LINKED_CHAT = 7101
 UNLINKED_CHAT = 7102
@@ -530,11 +529,11 @@ async def test_telegram_help_is_todays_text_and_new_lines_go_before_help(monkeyp
     assert sent[-1] == ("sendMessage", {"chat_id": LINKED_CHAT, "text": GOLDEN_HELP})
 
     monkeypatch.setattr(
-        telegram, "HELP_LINES", [*telegram.HELP_LINES, "/kb — search your notes"]
+        telegram, "HELP_LINES", [*telegram.HELP_LINES, "/kb: search your notes"]
     )
     await service._handle_help(LINKED_CHAT)
     assert sent[-1][1]["text"] == GOLDEN_HELP.replace(
-        "\n/help", "\n/kb — search your notes\n/help"
+        "\n/help", "\n/kb: search your notes\n/help"
     )
     await service._client.aclose()
 
@@ -630,10 +629,10 @@ async def test_telegram_button_routes_dispatch_as_before():
     service._handle_revoke_app = revoke  # type: ignore[method-assign]
 
     await service._handle_callback(_press("zzz:whatever", LINKED_CHAT))
-    assert _answers(sent) == ["Unknown action."]
+    assert _answers(sent) == ["That button doesn't work anymore."]
 
     await service._handle_callback(_press("rva:approval-1", UNLINKED_CHAT))
-    assert _answers(sent)[-1] == "This chat is not linked to a Crawler AI account."
+    assert _answers(sent)[-1] == "This chat isn't linked to a Crawler AI account."
     assert revoked == []
 
     await service._handle_callback(_press("rva:approval-1", LINKED_CHAT))
@@ -764,7 +763,7 @@ async def test_slack_new_says_fresh_start_and_a_registered_handler_is_tried_in_o
     await channel._on_events_api(_dm("Ping", 2))
     await channel._on_events_api(_dm("pingu", 3))
     await channel.wait_idle()
-    assert posted == [(DM, "Fresh start: your next message begins a new conversation.")]
+    assert posted == [(DM, "Fresh start. Your next message starts a new conversation.")]
     assert sorted(handled) == ["Ping", "chat:pingu"]
     assert slack_mod._reply_task_name(keyword_ping) == "slack-ping"
     await channel._connector.close()

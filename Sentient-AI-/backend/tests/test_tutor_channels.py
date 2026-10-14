@@ -111,7 +111,8 @@ async def test_a_failed_command_keeps_the_pending_new():
     service._fresh_chats.add(LINKED_CHAT)
     await service._handle_message(telegram_dm(LINKED_CHAT, "/tutor on"))
     assert LINKED_CHAT in service._fresh_chats
-    assert _texts(sent) == ["⚠️ Unknown account."]
+    # The applier's developer words reach the chat as a plain sentence.
+    assert _texts(sent) == ["⚠️ This chat isn't linked to an active Crawler AI account."]
     await service._client.aclose()
 
 
@@ -122,7 +123,7 @@ async def test_a_malformed_argument_gets_the_usage_line_and_help_lists_tutor():
     assert applied == []
     assert _texts(sent) == ["Use /tutor on, /tutor off or /tutor status."]
     await service._handle_message(telegram_dm(LINKED_CHAT, "/help"))
-    assert "/tutor — tutor mode for this chat: /tutor on, /tutor off, /tutor status" in _texts(sent)[-1]
+    assert "/tutor on or /tutor off: tutor mode for this chat" in _texts(sent)[-1]
     assert "/tutor" in service._commands
     await service._client.aclose()
 

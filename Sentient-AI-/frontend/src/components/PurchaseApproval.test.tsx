@@ -111,7 +111,7 @@ describe("PurchaseApproval", () => {
 
   it("says when the card has no page details instead of rendering blanks", () => {
     render(<PurchaseApproval approval={checkout({ arguments: { merchant: "shop.example.com" } })} />);
-    expect(screen.getByRole("alert")).toHaveTextContent(/no page details/i);
+    expect(screen.getByRole("alert")).toHaveTextContent(/missing the checkout page.s details/i);
     expect(screen.queryByText("Pay")).not.toBeInTheDocument();
   });
 });

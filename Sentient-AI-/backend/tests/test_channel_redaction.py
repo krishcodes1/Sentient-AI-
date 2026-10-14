@@ -182,18 +182,123 @@ async def test_a_card_shows_masked_arguments_with_the_real_digest(telegram, monk
     await service.notify_pending(action)
     [text] = api.texts()
     assert TOKEN not in text and "[hidden: GitHub token]" in text
-    assert "prof.lee@uni.edu" in text
-    assert f"Arguments digest: {cards.arguments_digest(arguments)}" in text
+    assert "To: prof.lee@uni.edu" in text
+    assert cards.check_code_line(arguments) in text
     await service._client.aclose()
 
 
-def test_layout_card_masks_the_render_and_keeps_the_digest():
+# The same call's card in the web app (GET /agent/approvals and the stream,
+# api.routes.agent._approval_card_fields) and in a chat must show the same
+# check code, so the owner can tell they are the same request. The chat
+# masks secrets in what it shows, never in what it codes; a desktop.act
+# card leaves out its stored screen in both.
+_SAME_CODE_CASES = [
+    (
+        "google_workspace.send_email",
+        {"to": "prof.lee@uni.edu", "subject": "Keys", "body": f"the key is {TOKEN}"},
+    ),
+    (
+        "desktop.act",
+        {"action": "type", "ref": "d12", "text": f"card {CARD}", "_screen": {"app": "Notepad"}},
+    ),
+    ("slack.post_message", {"channel": "C0CHAN001", "text": "line one\nline two"}),
+]
+
+
+def _check_code_of(text: str) -> str:
+    [line] = [line for line in text.split("\n") if line.startswith("Check code ")]
+    return line.removeprefix("Check code ")
+
+
+def _card_action(tool_name: str, arguments: dict[str, Any]) -> SimpleNamespace:
+    return SimpleNamespace(
+        action_id="act-1",
+        user_id="22222222-2222-2222-2222-222222222222",
+        tool_name=tool_name,
+        arguments=arguments,
+        reason="Do the thing",
+        risk_note=None,
+        expires_at="2099-01-01T00:00:00+00:00",
+    )
+
+
+def _assert_same_card(text: str, tool_name: str, arguments: dict[str, Any]) -> None:
+    from api.routes import agent as agent_routes
+
+    web = agent_routes._approval_card_fields(tool_name, arguments)
+    assert web["check_code"] and _check_code_of(text) == web["check_code"]
+    # Every value the web card lists is on the chat card too, under the
+    # same label; secrets only ever masked.
+    assert web["details"]
+    for detail in web["details"]:
+        assert f"{detail['label']}:" in text
+    assert TOKEN not in text and CARD not in text
+    assert "Notepad" not in text and "_screen" not in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("tool_name", "arguments"), _SAME_CODE_CASES)
+async def test_the_telegram_card_shows_the_web_cards_check_code(
+    telegram, monkeypatch, tool_name, arguments
+):
+    service, api = telegram
+
+    async def linked(_user_id: str) -> int:
+        return CHAT
+
+    monkeypatch.setattr(service, "linked_chat_id", linked)
+    await service.notify_pending(_card_action(tool_name, arguments))
+    _assert_same_card("\n".join(api.texts()), tool_name, arguments)
+    await service._client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("tool_name", "arguments"), _SAME_CODE_CASES)
+async def test_the_slack_card_shows_the_web_cards_check_code(monkeypatch, tool_name, arguments):
+    from services.notifications import slack as slack_mod
+
+    channel, posted = _slack()
+
+    async def linked_dm() -> str:
+        return "D0DM00001"
+
+    monkeypatch.setattr(slack_mod.SlackChannel, "running", property(lambda self: True))
+    monkeypatch.setattr(channel, "_linked_dm", linked_dm)
+    assert await channel.notify_pending(_card_action(tool_name, arguments)) is True
+    text = "\n".join(
+        block["text"]["text"]
+        for body in posted
+        for block in body.get("blocks", [])
+        if block.get("type") == "section"
+    )
+    _assert_same_card(text, tool_name, arguments)
+    await channel._connector.close()
+
+
+def test_layout_card_masks_the_render_and_keeps_the_check_code():
     arguments = {"body": f"card {CARD}"}
     card = cards.layout_card(["Approval required"], arguments, tool_name="x.y", max_chars=3900)
     text = "\n".join(card.final_lines)
-    assert CARD not in text and "[hidden: card number]" in text
-    assert card.final_lines[-1] == f"Arguments digest: {cards.arguments_digest(arguments)}"
-    assert cards.arguments_digest(arguments) != cards.arguments_digest({"body": "card [hidden: card number]"})
+    assert CARD not in text and "Message: card [hidden: card number]" in text
+    # The code is of the real arguments, not of what the chat was shown.
+    assert card.final_lines[-1] == f"Check code {cards.check_code(arguments)}"
+    assert cards.check_code(arguments) != cards.check_code({"body": "card [hidden: card number]"})
+
+
+def test_layout_card_masks_nested_and_multi_line_values_in_every_part():
+    arguments = {
+        "to": "prof.lee@uni.edu",
+        "options": {"retries": 2, "notes": [f"first {TOKEN}", "second"]},
+        "body": "line\n" * 2000 + f"last {CARD}",
+    }
+    card = cards.layout_card(["Approval required"], arguments, tool_name="x.y", max_chars=3900)
+    messages = [*card.leading, "\n".join(card.final_lines)]
+    joined = "\n".join(messages)
+    assert len(card.leading) >= 2
+    assert TOKEN not in joined and "FAKEFAKE" not in joined and "4111" not in joined
+    assert "[hidden: GitHub token]" in joined and "[hidden: card number]" in joined
+    assert "prof.lee@uni.edu" in joined
+    assert card.final_lines[-1] == cards.check_code_line(arguments)
 
 
 # ── Slack ────────────────────────────────────────────────────────────────

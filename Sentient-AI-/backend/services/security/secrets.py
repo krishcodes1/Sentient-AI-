@@ -469,7 +469,7 @@ RULES: tuple[Rule, ...] = (
          _rx(r"(?<![A-Za-z0-9_*.-])[01]\.A[A-Za-z0-9_*.-]{99,4096}[A-Za-z0-9_*-]"), HIGH),
     # A JWT or JWE (header.payload.signature and beyond), or a bare header.
     # It may follow a %XX escape (a JWT inside a URL-encoded link).
-    Rule("jwt", C, "sign-in token (JWT)",
+    Rule("jwt", C, "sign-in token",
          _rx(r"(?:(?<![A-Za-z0-9_-])|(?<=%[0-9A-Fa-f]{2}))eyJ[A-Za-z0-9_-]{10,16384}\.[A-Za-z0-9_-]{0,16384}(?:\.[A-Za-z0-9_-]{1,16384}){0,3}"), HIGH),
     Rule("aws_access_key", C, "AWS access key", _rx(r"AKIA[A-Z0-9]{16}"), HIGH),
     Rule("aws_temporary_access_key", C, "AWS access key",
@@ -484,15 +484,15 @@ RULES: tuple[Rule, ...] = (
     # ── credentials in context ────────────────────────────────────────
     # The signature (or token) of a pre-signed link: S3, Google Cloud,
     # Azure SAS, Canvas file links.
-    Rule("signed_link_signature", C, "signed link signature",
+    Rule("signed_link_signature", C, "private link code",
          _rx(r"(?<=[?&])(?:x-amz-signature|x-amz-security-token|x-goog-signature|x-goog-credential|sig|signature|verifier)=([A-Za-z0-9%/+=_.-]{16,4096})", _I),
          MEDIUM, group=1),
     Rule("link_password", C, "password in a link",
          _rx(r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]{1,15}://[^\s/:@]{1,128}:([^\s/@]{1,256})@"), MEDIUM, group=1),
-    Rule("authorization_header", C, "authorization header",
+    Rule("authorization_header", C, "access token",
          _rx(r"(?<![A-Za-z0-9_-])(?:proxy-)?authorization[\"']?[ \t]{0,3}[:=][ \t]{0,3}[\"']?(?:bearer|basic|token|bot)[ \t]{1,3}([A-Za-z0-9+/=._~-]{8,4096})", _I),
          MEDIUM, group=1),
-    Rule("bearer_token", C, "bearer token",
+    Rule("bearer_token", C, "access token",
          _rx(r"(?<![A-Za-z0-9])[Bb]earer[ \t]{1,3}([A-Za-z0-9+/._~-]{20,4096}=*)"), MEDIUM, group=1, check=_bearer_check),
     # KEY=value, "secret": "value", password: value, with a random-looking
     # value (Shannon entropy at least 3.5 bits per character, 20+ chars):
@@ -539,7 +539,7 @@ RULES: tuple[Rule, ...] = (
     Rule("card_groups_amex_loose", P, "card number",
          _rx(r"(?<![0-9])[0-9]{4}[ -][0-9]{6}[ -][0-9]{4,5}(?![0-9])"), LOW, check=_standalone),
     # ── bank accounts ─────────────────────────────────────────────────
-    Rule("iban", B, "IBAN",
+    Rule("iban", B, "bank account number (IBAN)",
          _rx(r"\b[A-Z]{2}[0-9]{2}(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,4})?\b"), HIGH, check=_iban_check),
     Rule("stated_bank_account", B, "bank account number",
          _rx(r"\b(?:bank[ \t]{1,3}account|routing|ABA)(?:[ \t]{1,3}(?:number|no\.?|num|#))?[ \t]{0,3}(?:is|:|#|=)?[ \t]{0,3}([0-9][0-9 -]{4,20}[0-9])(?![0-9])", _I),
@@ -547,7 +547,7 @@ RULES: tuple[Rule, ...] = (
     # ── government ids ────────────────────────────────────────────────
     Rule("us_ssn", G, "US Social Security number",
          _rx(r"(?<![0-9-])([0-9]{3})([- ])([0-9]{2})\2([0-9]{4})(?![0-9-])"), MEDIUM, check=_ssn_check),
-    Rule("us_itin", G, "US ITIN",
+    Rule("us_itin", G, "US tax ID number",
          _rx(r"(?<![0-9-])([0-9]{3})([- ])([0-9]{2})\2([0-9]{4})(?![0-9-])"), MEDIUM, check=_itin_check),
     Rule("us_ssn_stated", G, "US Social Security number",
          _rx(r"\b(?:SSN|social[ \t]{1,3}security(?:[ \t]{1,3}(?:number|no\.?|#))?)[ \t]{0,3}(?:is|:|#|=)?[ \t]{0,3}([0-9]{3}[- ]?[0-9]{2}[- ]?[0-9]{4})(?![0-9])", _I),
@@ -582,7 +582,7 @@ RULES: tuple[Rule, ...] = (
     # purpose: the audit log and the logs hide it, but the model and the
     # chat must still carry the link to the user (it works once, for 10
     # minutes), so the model floor, channels and tool arguments leave it.
-    Rule("study_export_token", C, "export link token",
+    Rule("study_export_token", C, "private download link",
          _rx(r"(?<![A-Za-z0-9_-])cse_[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])"), LOW),
 )
 
@@ -720,7 +720,7 @@ def looks_like_credential(text: str) -> bool:
 
 
 def with_article(label: str) -> str:
-    """"a GitHub token", "an AWS access key", "an IBAN"."""
+    """"a GitHub token", "an AWS access key", "a bank account number (IBAN)"."""
     return ("an " if label[:1].upper() in "AEIOU" else "a ") + label
 
 

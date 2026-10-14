@@ -21,5 +21,5 @@ CAPABILITY = Capability(
     tools=("system.install_capability",),
     default_enabled=True,
     risk="medium",
-    when_denied="Installing software is turned off. The owner can turn it on in Settings → Permissions.",
+    when_denied="Installing optional software is turned off. You can turn it on in Settings → Permissions.",
 )

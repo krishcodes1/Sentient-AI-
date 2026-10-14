@@ -134,6 +134,12 @@ def _shown_chars(value: Any) -> int:
     return len(_INVISIBLE_CHARS.sub(lambda m: json.dumps(m.group())[1:-1], text))
 
 
+def _card_count(value: Any) -> int:
+    """A count from a card's bound facts, 0 when it is not a whole number
+    (a card's sentence never fails on odd facts)."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
 def _cut(text: Optional[str], limit: int) -> Optional[str]:
     if text is None:
         return None
@@ -628,14 +634,19 @@ class StudyToolkit:
         if not isinstance(facts, Mapping) or not isinstance(facts.get("title"), str):
             return None
         title = _cut(" ".join(str(facts["title"]).split()), item_rules.TITLE_MAX_CHARS)
+        # A deck's items are its cards (flashcards and quiz questions), the
+        # word the owner knows them by.
         count = facts.get("delete_items")
-        if isinstance(count, int) and count > 0:
-            noun = "item" if count == 1 else "items"
-            return f'Delete {count} {noun} (and their review history) from the deck "{title}". This cannot be undone.'
-        items, reviews = int(facts.get("items") or 0), int(facts.get("reviews") or 0)
+        if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+            noun = "card" if count == 1 else "cards"
+            return (
+                f'Delete {count} {noun} and their review history from the deck "{title}". '
+                "You can't undo this."
+            )
+        items, reviews = _card_count(facts.get("items")), _card_count(facts.get("reviews"))
         return (
-            f'Delete the deck "{title}" ({items} item{"" if items == 1 else "s"}, '
-            f'{reviews} review{"" if reviews == 1 else "s"}). This cannot be undone.'
+            f'Delete the deck "{title}" ({items} card{"" if items == 1 else "s"}, '
+            f'{reviews} past review{"" if reviews == 1 else "s"}). You can\'t undo this.'
         )
 
     async def _delete(self, owner: uuid.UUID, params: dict[str, Any]) -> dict[str, Any]:

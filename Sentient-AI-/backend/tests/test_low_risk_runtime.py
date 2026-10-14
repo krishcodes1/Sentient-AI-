@@ -38,7 +38,13 @@ from services.agent.permission_grants import (
     DbPermissionGrantStore,
 )
 from services.agent.providers import LLMResponse
-from services.agent.risk import LOW_RISK_MAX_PER_TURN
+from services.agent.risk import (
+    LOW_RISK_MAX_PER_TURN,
+    RAN_WITHOUT_ASKING_HEADER,
+    card_note,
+    grade_tool,
+    ran_without_asking_line,
+)
 from services.agent.runtime import AgentRuntime
 from services.agent.tool_registry import (
     ConnectorSpec,
@@ -67,7 +73,9 @@ PRIVATE_EVENT = {
     "start": {"dateTime": "2026-10-01T16:00:00-04:00"},
     "end": {"dateTime": "2026-10-01T18:00:00-04:00"},
 }
-DONE = "Done without asking (low-risk changes you allowed): "
+# The first line of the reply's note on changes made without asking; the
+# lines under it come from risk.ran_without_asking_line.
+DONE = RAN_WITHOUT_ASKING_HEADER
 
 
 class Clock:
@@ -327,15 +335,16 @@ async def test_a_star_and_a_private_event_run_without_a_card_under_the_low_risk_
         f"POST /gmail/v1/users/me/messages/{MID}/modify",
         "POST /calendar/v3/calendars/primary/events",
     ]
-    assert response.content == (
-        "All set.\n\n" + DONE + "1 × google_workspace.modify_labels on School Gmail; "
-        "1 × google_workspace.create_event on School Gmail."
-    )
+    note = ran_without_asking_line([(STAR, "School Gmail"), (EVENT, "School Gmail")])
+    assert response.content == "All set.\n\n" + note
+    assert note.startswith(DONE + "\n- ") and note.count("\n- ") == 2
+    # Plain words only: no tool id, no "×".
+    assert STAR not in note and EVENT not in note and "×" not in note
     for event in ("tool_executing", "tool_executed"):
         rows = world.rows_for(event)
         assert [r["tool"] for r in rows] == [STAR, EVENT]
         assert all(r["approval"] == "low_risk" and r["risk"] == "low" for r in rows)
-        assert all(r["risk_reason"] == "it is a small change you can undo" for r in rows)
+        assert all(r["risk_reason"] == "it's a small change you can undo" for r in rows)
         assert all("grant_id" not in r for r in rows)
 
 
@@ -374,9 +383,13 @@ async def test_trash_gets_a_card_even_under_auto_approve(world, google):
     )
     [pending] = response.pending_approvals
     assert pending.reason.endswith(
-        "Asking first because it moves mail to or from Trash or Spam: your standing "
-        "permission for this account does not cover that."
+        "I'm asking first because it moves mail to or from Trash or Spam. What you let me "
+        "do on this account without asking doesn't cover that."
     )
+    trash = {"message_id": MID, "add_label_ids": ["TRASH"]}
+    assert pending.reason.endswith(card_note(grade_tool(STAR, trash)))
+    # The card's own sentence ends before the note starts, never a run-on.
+    assert ". I'm asking first because" in pending.reason
     assert pending.risk_note is None
     assert pending.low_risk_account is None
     assert google.writes() == []
@@ -397,7 +410,8 @@ async def test_an_invitation_gets_a_card_even_under_auto_approve(world, google):
     assert google.writes() == ["POST /calendar/v3/calendars/primary/events"]
     rows = world.rows_for("tool_executed")
     assert rows[-1]["approval"] == "tier" and rows[-1]["risk"] == "low"
-    # The auto tier's runs are not low-risk runs: no "Done without asking".
+    # The auto tier's runs are not low-risk runs: no note on changes made
+    # without asking.
     assert DONE not in response.content
 
 
@@ -431,7 +445,7 @@ async def test_the_grant_flow_and_its_expiry(world, google):
     # The next LOW call on that account runs without a card.
     _runtime, response = await world.run(star("c2", MID2), FINAL)
     assert response.pending_approvals == []
-    assert response.content.endswith(DONE + "1 × google_workspace.modify_labels on School Gmail.")
+    assert response.content.endswith(ran_without_asking_line([(STAR, "School Gmail")]))
     executed = world.rows_for("tool_executed")[-1]
     assert executed["approval"] == "low_risk_grant" and executed["grant_id"] == grant.id
     [used] = await world.grants.list_live(world.user_id)
@@ -563,7 +577,7 @@ async def test_the_eleventh_low_risk_change_in_a_turn_gets_a_card(world, google)
     [pending] = response.pending_approvals
     assert pending.arguments["message_id"] == ids[-1]
     assert pending.reason.endswith(CAP_NOTE) and pending.risk_note is None
-    assert f"{LOW_RISK_MAX_PER_TURN} × google_workspace.modify_labels" in response.content
+    assert f"(School Gmail), {LOW_RISK_MAX_PER_TURN} times" in response.content
 
 
 # ── the tripwire ────────────────────────────────────────────────────────────
@@ -660,7 +674,7 @@ async def test_an_id_another_account_returned_gets_a_card(world, google):
         FINAL,
     )
     assert response.pending_approvals == []
-    assert response.content.endswith(DONE + "1 × google_workspace.modify_labels on School Gmail.")
+    assert response.content.endswith(ran_without_asking_line([(STAR, "School Gmail")]))
 
 
 # ── the stream carries the offer ────────────────────────────────────────────

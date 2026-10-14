@@ -126,15 +126,15 @@ async def test_review_show_and_grade_by_keyword(session_factory, study):
     channel, posted, chats = slack(str(user.id))
     say = _Say(channel)
     await say("decks")
-    assert "1. Spanish vocab — 2 cards" in posted[-1] and 'Reply "review 2"' in posted[-1]
+    assert "1. Spanish vocab: 2 cards" in posted[-1] and 'Reply "review 2"' in posted[-1]
     await say("review")
-    assert "el perro 0" in posted[-1] and posted[-1].endswith("Reply show / skip / end")
+    assert "el perro 0" in posted[-1] and posted[-1].endswith("Reply show, skip or end")
     await say("Show")
-    assert "Answer: the dog 0" in posted[-1] and "Reply again / hard / good / easy / skip / end" in posted[-1]
+    assert "Answer: the dog 0" in posted[-1] and "Reply again, hard, good, easy, skip or end" in posted[-1]
     await say("good")
     assert posted[-2].endswith("✅ Good · next in 1 day") and "el perro 1" in posted[-1]
     await say("end")
-    assert posted[-1] == 'Review ended: 1 cards reviewed. Send "review" to go on.'
+    assert posted[-1] == 'Review ended after 1 card. Send "review" to keep going.'
     await say("good")  # no cursor any more: ordinary chat
     assert chats == ["good"]
 
@@ -173,7 +173,7 @@ async def test_replies_name_slack_words_never_slash_commands(session_factory, st
     assert posted[-1] == 'Reveal the answer first ("show").'
     await say("show")
     await say("again")
-    assert posted[-1].endswith('2 missed cards are due now: send "review".')
+    assert posted[-1].endswith('2 missed cards are due now. Send "review" to go over them.')
     for text in posted:
         for command in ("/review", "/decks", "/quiz", "/show", "/good", "/again"):
             assert command not in text, text
@@ -211,7 +211,7 @@ async def test_a_quiz_by_letters(session_factory, study):
     channel, posted, chats = slack(str(user.id))
     say = _Say(channel)
     await say("quiz 1 5")
-    assert "question 1 of 1" in posted[-1] and posted[-1].endswith("Reply a / b / end")
+    assert "question 1 of 1" in posted[-1] and posted[-1].endswith("Reply a, b or end")
     shown = [line.split(") ", 1)[1] for line in posted[-1].split("\n") if line[:2] in ("A)", "B)")]
     letter = "ab"[shown.index("el perro")]
     await say(letter)

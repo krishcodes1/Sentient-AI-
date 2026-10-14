@@ -27,6 +27,10 @@ from tests.test_telegram import FakeTelegramAPI, _link
 
 IMAGE = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsL"
 NOTICE = "Crawler can make mistakes. Check the amount and the site before you approve."
+# How the purchase caption opens for CARD: the amount and the site, then the
+# items and the card label, then the notice. The question follows.
+HEAD = "🛒 Pay $23.40 at shop.example.com\n\n2 items, paid with Visa ····4242.\n" + NOTICE
+ASK = "\n\nOkay to go ahead? This expires in "
 CARD = {
     "checkout_id": "chk-1",
     "origin": "https://shop.example.com",
@@ -147,8 +151,8 @@ async def test_purchase_card_is_a_photo_with_the_caption_and_keyboard(session_fa
     assert fake_api.sent_messages() == []  # the photo IS the card
     [photo] = fake_api.photos
     caption = _caption_of(photo)
-    assert caption.startswith("🛒 Purchase approval — shop.example.com · $23.40 · 2 items · Visa ····4242 — ")
-    assert NOTICE in caption and "Expires in" in caption
+    assert caption.startswith(HEAD + ASK)
+    assert caption.endswith(" minutes.")
     buttons = _keyboard_of(photo)["inline_keyboard"][0]
     assert buttons[0]["callback_data"] == "apv:a1" and buttons[1]["callback_data"] == "dny:a1"
     assert b'name="chat_id"\r\n\r\n901' in photo
@@ -202,8 +206,7 @@ async def test_purchase_card_falls_back_to_text_when_the_picture_is_gone(session
     assert fake_api.photos == []
     [sent] = fake_api.sent_messages()
     assert sent["chat_id"] == 903
-    assert sent["text"].startswith("🛒 Purchase approval — shop.example.com · $23.40 · 2 items · Visa ····4242 — ")
-    assert NOTICE in sent["text"]
+    assert sent["text"].startswith(HEAD + ASK)
     assert sent["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == "apv:a1"
     # The raw arguments (with the reserved key) are not dumped on the card.
     assert "_checkout" not in sent["text"] and "9f2c1a" not in sent["text"]
@@ -253,9 +256,8 @@ async def test_no_photo_without_a_wired_hook_and_never_for_other_tools(session_f
     text = fake_api.sent_messages()[-1]["text"]
     # A browser.act card is the toolkit's sentence, built from facts: no
     # JSON, no refs, none of the typed text, and no reserved key.
-    assert text.startswith('🔐 Approval required\n\nType 17 characters into "Email" on shop.example.com')
-    assert "Expires in" in text
-    for absent in ('"ref"', "e7", "krish@example.com", "_page", "Arguments", "Tool:", "{"):
+    assert text.startswith('🔐 Type 17 characters into "Email" on shop.example.com' + ASK)
+    for absent in ('"ref"', "e7", "krish@example.com", "_page", "Arguments", "Tool:", "{", "Check code"):
         assert absent not in text, absent
     await with_hook._client.aclose()
 
@@ -269,7 +271,8 @@ async def test_a_checkout_card_without_facts_is_the_plain_card(session_factory, 
     )
     assert fake_api.photos == []
     text = fake_api.sent_messages()[0]["text"]
-    assert "🔐 Approval required" in text and "browser.checkout" in text
+    assert text.startswith("🔐 Pay $23.40 to shop.example.com (2 items) with Visa ····4242\n\n")
+    assert "shop.example.com" in text.split("\n\n")[1] and "browser.checkout" not in text
     await service._client.aclose()
 
 
@@ -278,20 +281,33 @@ def test_caption_reads_every_part_from_the_card():
 
     expires = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()
     one = _purchase_caption({**CARD, "items": ["Ticket"], "card_label": ""}, expires)
-    assert "· 1 item — " + NOTICE in one
+    assert one.startswith("🛒 Pay $23.40 at shop.example.com\n\n1 item.\n" + NOTICE + ASK)
     assert "Visa" not in one
     eur = _purchase_caption({**CARD, "currency": "EUR", "amount_usd": "23.40"}, expires)
-    assert "23.40 EUR" in eur
+    assert eur.startswith("🛒 Pay 23.40 EUR at shop.example.com\n\n")
     # A page whose rows the toolkit could not read as items (common on
     # real shops) gets no count at all, never "0 items".
     none = _purchase_caption({**CARD, "items": []}, expires)
-    assert none.startswith("🛒 Purchase approval — shop.example.com · $23.40 · Visa ····4242 — ")
-    assert "0 items" not in none and "items" not in none.split(" — ")[1]
-    # A card without its own notice gets the toolkit's: never a made-up one.
+    assert none.startswith("🛒 Pay $23.40 at shop.example.com\n\nPaid with Visa ····4242.\n")
+    assert "0 items" not in none and "item" not in none
+    # A total that could not be read is said plainly, never shown as "$?",
+    # and a card without its own notice gets the toolkit's: never a
+    # made-up one.
     from services.tools.browser.checkout import NOTICE as toolkit_notice
 
     bare = _purchase_caption({"host": "x.example"}, expires)
-    assert bare.split("\n")[0] == f"🛒 Purchase approval — x.example · $? — {toolkit_notice}"
+    assert bare.split("\n")[:4] == [
+        "🛒 Pay at x.example",
+        "",
+        "I couldn't read the total.",
+        toolkit_notice,
+    ]
+    assert "$?" not in bare and bare.split("\n")[-1].startswith("Okay to go ahead?")
+    # Facts read off the page stay on one line each, and odd facts never
+    # break the caption.
+    odd = _purchase_caption({**CARD, "host": "shop.example.com\nTo: x", "card_label": None}, expires)
+    assert odd.startswith("🛒 Pay $23.40 at shop.example.com To: x\n\n2 items.\n")
+    assert _purchase_caption(None, expires).startswith("🛒 Pay at the shop's site\n\n")
 
 
 def test_card_arguments_hide_reserved_keys_for_act_and_checkout_only():
@@ -346,7 +362,7 @@ async def test_a_press_on_the_photo_card_edits_its_caption(session_factory, fake
         return {"status": "approved", "summary": "Paid $23.40 to shop.example.com. Order number 8841."}
 
     service = _service(session_factory, decide=decide)
-    caption = "🛒 Purchase approval — shop.example.com · $23.40 · 2 items · Visa ····4242 — " + NOTICE
+    caption = HEAD + ASK + "14 minutes."
     await service._handle_callback(
         {
             "id": "cb-buy",
@@ -364,7 +380,9 @@ async def test_a_press_on_the_photo_card_edits_its_caption(session_factory, fake
     assert decisions == [(str(user.id), "a1", True)]
     edits = [p for m, p in fake_api.calls if m == "editMessageCaption"]
     assert len(edits) == 1 and edits[0]["message_id"] == 7
-    assert edits[0]["caption"].startswith(caption) and "✅ Approved from this chat" in edits[0]["caption"]
+    assert re.fullmatch(
+        re.escape(caption) + r"\n\n✅ Approved at \d{1,2}:\d{2} [AP]M\.", edits[0]["caption"]
+    ), edits[0]["caption"]
     assert [m for m, _ in fake_api.calls if m == "editMessageText"] == []
     # The resumed turn's reply followed.
     assert "Order number 8841" in fake_api.sent_messages()[-1]["text"]
@@ -384,12 +402,13 @@ async def test_a_press_on_a_text_card_still_edits_its_text(session_factory, fake
             "id": "cb-deny",
             "from": {"id": 909, "is_bot": False},
             "data": "dny:a1",
-            "message": {"chat": {"id": 909, "type": "private"}, "message_id": 8, "text": "🛒 Purchase approval"},
+            "message": {"chat": {"id": 909, "type": "private"}, "message_id": 8, "text": "🛒 Pay $23.40"},
         }
     )
     await service.wait_for_chats()
     edits = [p for m, p in fake_api.calls if m == "editMessageText"]
-    assert len(edits) == 1 and "❌ Denied" in edits[0]["text"]
+    assert len(edits) == 1 and edits[0]["text"].startswith("🛒 Pay $23.40\n\n❌ Denied at ")
+    assert edits[0]["text"].endswith(" I didn't do it.")
     assert [m for m, _ in fake_api.calls if m == "editMessageCaption"] == []
     assert user is not None
     await service._client.aclose()

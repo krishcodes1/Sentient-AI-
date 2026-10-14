@@ -146,13 +146,13 @@ async def test_approval_resumes_the_task(client, session_factory):
 
         # Two assistant messages: the recorded outcome, then the resumed answer.
         assert len(messages) == 2
-        assert "[Approved] Executed" in messages[0]["content"]
+        assert messages[0]["content"].startswith("You approved my request to send an email")
         assert messages[1]["content"] == "Sent it — your professor has the message now."
 
         # The resumed turn saw the tool outcome in its history.
         assert provider.calls, "the runtime never called the provider to resume"
         history = provider.calls[0]
-        assert any("[Approved] Executed" in str(m.get("content", "")) for m in history)
+        assert any("The owner approved" in str(m.get("content", "")) for m in history)
     finally:
         app.dependency_overrides.pop(agent_routes.get_runtime, None)
 
@@ -197,12 +197,12 @@ async def test_the_resumed_turn_gets_the_result_whole_as_a_user_turn(client, ses
 
         history = [m for m in provider.calls[-1] if m.get("role") != "system"]
         assert history[-1]["role"] == "user"
-        assert history[-1]["content"].startswith("[Approved] Executed 'google_workspace.send_email'.")
+        assert history[-1]["content"].startswith("The owner approved 'google_workspace.send_email' and it ran;")
         assert "LAST-WORD" in history[-1]["content"], "the result was cut"
         assert 'name="google_workspace.send_email"' in history[-1]["content"]
         # The decision row is not in the model's history as an assistant turn.
         assert not any(
-            m["role"] == "assistant" and "[Approved] Executed" in str(m["content"])
+            m["role"] == "assistant" and "You approved my request" in str(m["content"])
             for m in history
         )
         # It is still the transcript's record of the decision.
@@ -216,7 +216,7 @@ async def test_the_resumed_turn_gets_the_result_whole_as_a_user_turn(client, ses
                     )
                 ).scalars()
             )
-        assert any(r.content.startswith("[Approved] Executed") for r in rows)
+        assert any(r.content.startswith("You approved my request to send an email") for r in rows)
         assert rows[-1].content == "Sent."
     finally:
         app.dependency_overrides.pop(agent_routes.get_runtime, None)
@@ -309,7 +309,7 @@ async def test_the_web_gets_the_approved_calls_confirmation_picture(client, sess
     body, request, rows = await _decided_checkout(
         client, session_factory, provider, {**CHECKOUT_RESULT, "user_image": JPEG}, "web-shot@example.com"
     )
-    [decision_row] = [r for r in rows if r.content.startswith("[Approved] Executed 'browser.checkout'")]
+    [decision_row] = [r for r in rows if r.content.startswith("You approved my request to pay for something on a website")]
     assert body["message_id"] == str(decision_row.id)
     assert body["images"] == [
         {"tool": "browser.checkout", "source": "shop.example.com", "index": 0, "data_url": JPEG}
@@ -408,7 +408,7 @@ async def test_resume_failure_does_not_fail_the_approval(client, session_factory
             )
         ).json()["messages"]
         assert len(messages) == 1
-        assert "[Approved] Executed" in messages[0]["content"]
+        assert messages[0]["content"].startswith("You approved my request to send an email")
     finally:
         app.dependency_overrides.pop(agent_routes.get_runtime, None)
 
@@ -447,6 +447,6 @@ async def test_denial_does_not_resume(client, session_factory):
             )
         ).json()["messages"]
         assert len(messages) == 1
-        assert "[Denied]" in messages[0]["content"]
+        assert messages[0]["content"] == "You denied my request to send an email, so I didn't do it."
     finally:
         app.dependency_overrides.pop(agent_routes.get_runtime, None)

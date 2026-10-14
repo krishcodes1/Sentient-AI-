@@ -129,7 +129,10 @@ async def test_the_card_states_the_decks_facts_and_the_approved_delete_cascades(
 
     [card] = response.pending_approvals
     assert card.tool_name == "study.delete"
-    assert card.reason == 'Delete the deck "Bio 101 – Lecture 3" (3 items, 2 reviews). This cannot be undone.'
+    assert card.reason == (
+        'Delete the deck "Bio 101 – Lecture 3" (3 cards, 2 past reviews). '
+        "You can't undo this."
+    )
     assert card.arguments == {"deck_id": deck_id, DECK_CARD_KEY: {"title": "Bio 101 – Lecture 3", "items": 3, "reviews": 2}}
     assert await _count(session_factory, StudyDeck) == 1  # nothing until approved
 
@@ -152,8 +155,8 @@ async def test_deleting_some_items_names_how_many(session_factory):
     response = await _turn(runtime, uid, _call("study.delete", deck_id=deck_id, item_ids=doomed))
     [card] = response.pending_approvals
     assert card.reason == (
-        'Delete 2 items (and their review history) from the deck "Bio 101 – Lecture 3". '
-        "This cannot be undone."
+        'Delete 2 cards and their review history from the deck "Bio 101 – Lecture 3". '
+        "You can't undo this."
     )
     outcome = await runtime.approve_action(card.action_id, uid)
     assert outcome["result"]["deleted_items"] == 2

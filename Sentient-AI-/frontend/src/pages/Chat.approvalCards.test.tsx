@@ -85,7 +85,7 @@ const DECISION_ROW: Message = {
   id: "m3",
   conversation_id: "c1",
   role: "assistant",
-  content: "[Approved] Executed 'browser.checkout'.\n\nResult:\n{...}",
+  content: "You approved my request to pay for something on a website, and it's done.",
   tool_calls: [
     {
       name: "browser.checkout",
@@ -192,7 +192,7 @@ describe("Approval cards on the way to a purchase", () => {
     expect(screen.queryByText(/wants to run/)).not.toBeInTheDocument();
     expect(document.body.textContent).not.toContain("krish@example.com");
     expect(document.body.textContent).not.toContain('"ref"');
-    expect(screen.queryByText("Risk warning")).not.toBeInTheDocument();
+    expect(screen.queryByText("Check this first")).not.toBeInTheDocument();
   });
 
   it("shows a browser.act card with the picture of the page it will run on", async () => {
@@ -236,7 +236,7 @@ describe("Approval cards on the way to a purchase", () => {
     await waitFor(() => expect(decideApproval).toHaveBeenCalledWith("a1", true));
 
     const img = await screen.findByRole("img", {
-      name: "Screenshot of shop.example.com (browser.checkout)",
+      name: "Screenshot of shop.example.com",
     });
     expect(img).toHaveAttribute("src", SHOT);
     expect(screen.queryByText(/Screenshot not kept/)).not.toBeInTheDocument();

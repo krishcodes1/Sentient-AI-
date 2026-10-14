@@ -395,7 +395,8 @@ async def test_after_a_stale_ref_the_model_looks_again_and_gets_its_card():
 @pytest.mark.asyncio
 async def test_a_telegram_reply_after_a_stale_ref_names_no_block(session_factory):
     # The Telegram poller lists the channel turn's "blocked" tools under
-    # "Blocked by security policy" (_with_turn_notes); a stale ref is not one.
+    # "I skipped one step because your safety settings don't allow it"
+    # (_with_turn_notes); a stale ref is not one.
     from api.routes.agent import build_chat_applier
     from main import app
     from services.notifications.telegram import _with_turn_notes
@@ -697,7 +698,7 @@ async def test_a_refusal_beside_a_card_ends_the_turn_on_the_card():
     assert blocked["rule"] == "blocked_app"
     [refused] = [tr for tr in response.tool_calls if tr["tool_call_id"] == "t2"]
     assert refused["result"]["rule"] == "blocked_app"
-    assert response.content.startswith("I need your approval")
+    assert response.content.startswith("I need your OK before I")
     assert turn.fake.events == []
 
 
@@ -904,7 +905,8 @@ async def test_a_look_at_another_app_later_in_the_round_cannot_move_the_card():
     )
     [pending] = response.pending_approvals
     assert pending.reason == (
-        "Type 7 characters (including 1 line break) into the focused field in Mail"
+        "Type 7 characters (including 1 line break) where the cursor is in Mail. "
+        "The full text is below."
     )
     rows = [e for e in turn.audit.entries if e.get("policy") == PARKED_ROUND_POLICY]
     assert [(r["tool"], r["arguments"]) for r in rows] == [
@@ -929,7 +931,7 @@ async def test_a_card_is_refused_once_a_later_turn_looked_at_another_app():
     turn = Turn(mail_and_messages())
     response = await turn.run(OBSERVE, call("t2", ACT, action="key", keys="cmd+a"))
     [pending] = response.pending_approvals
-    assert pending.reason == "Press cmd+a in Mail"
+    assert pending.reason == "Press Cmd+A in Mail"
     turn.fake.front = "Messages"
     await turn.run(OBSERVE, LLMResponse(content="Messages is open."))
     outcome = await turn.runtime.approve_action(pending.action_id, U1)

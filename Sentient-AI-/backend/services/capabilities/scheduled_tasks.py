@@ -35,7 +35,7 @@ CAPABILITY = Capability(
     default_enabled=False,
     risk="medium",
     when_denied=(
-        "Scheduled tasks are off. The owner can turn on 'Scheduled tasks and daily "
+        "Scheduled tasks are off. You can turn on 'Scheduled tasks and daily "
         "briefing' in Settings → Permissions."
     ),
     availability=availability,

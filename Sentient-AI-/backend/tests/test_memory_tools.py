@@ -319,11 +319,12 @@ def test_the_card_holds_exactly_what_will_be_stored():
     toolkit = MemoryToolkit(None)
     card = toolkit.card_arguments({"content": "  Prefers tea \n", "category": " Fact "})
     assert card == {"content": "Prefers tea", "category": "fact"}
-    assert toolkit.describe(card) == (
-        'Save to memory (fact), used in every future conversation: "Prefers tea"'
-    )
+    assert toolkit.describe(card) == 'Remember this fact for future chats: "Prefers tea"'
     long = toolkit.describe({"content": "z" * 480, "category": "project"})
-    assert long is not None and "480-character memory (project)" in long
+    assert long == "Remember this about your work for future chats. The full text is below."
+    assert toolkit.describe({"content": "Rafi", "category": "profile"}) == (
+        'Remember this about you for future chats: "Rafi"'
+    )
     # Arguments that are not a memory stay as they are (the precheck refuses them).
     assert toolkit.card_arguments({"content": 1}) == {"content": 1}
     assert toolkit.describe({"content": 1}) is None
@@ -335,6 +336,14 @@ def test_the_card_limits_mirror_the_runtime_and_telegram():
 
     # The runtime keeps at least the sentence the toolkit writes.
     assert memory_module._REASON_CHARS <= AgentRuntime._APPROVAL_REASON_CHARS
+    # Every wording quotes a memory of the longest quotable length whole
+    # within that, and the limit is the one the card always had.
+    for category in MemoryCategory:
+        limit = memory_module._quote_limit(category)
+        assert limit == 244 - len(category.value)
+        sentence = memory_module._quoted_sentence("y" * limit, category)
+        assert sentence is not None and len(sentence) <= memory_module._REASON_CHARS
+        assert memory_module._quoted_sentence("y" * (limit + 1), category) is None
     # Telegram cuts the arguments at 700 (the "…" takes the last one).
     assert not _short_json({"x": "y" * (memory_module._CARD_ARGUMENT_CHARS - 12)}).endswith("…")
     assert _short_json({"x": "y" * 700}).endswith("…")
@@ -391,8 +400,7 @@ async def test_a_long_memory_in_another_script_gets_no_card_but_a_short_one_is_q
     short = {"content": "Пользователь предпочитает краткие ответы.", "category": "preference"}
     assert await toolkit.precheck("remember", short, str(user.id)) is None
     assert toolkit.describe(short) == (
-        "Save to memory (preference), used in every future conversation: "
-        '"Пользователь предпочитает краткие ответы."'
+        'Remember this preference for future chats: "Пользователь предпочитает краткие ответы."'
     )
     assert (await toolkit.execute("remember", short, str(user.id)))["ok"] is True
 
@@ -591,8 +599,7 @@ async def test_a_memory_is_saved_only_after_the_owner_approves_its_exact_text(se
     # The card shows exactly what will be stored, and says what it is for.
     assert pending.arguments == {"content": "Prefers meetings after 11am", "category": "preference"}
     assert pending.reason == (
-        "Save to memory (preference), used in every future conversation: "
-        '"Prefers meetings after 11am"'
+        'Remember this preference for future chats: "Prefers meetings after 11am"'
     )
     [card] = [e["data"] for e in events if e["type"] == "pending_approval"]
     assert card["arguments"] == pending.arguments
@@ -628,8 +635,8 @@ class _TipsPage:
 @pytest.mark.asyncio
 async def test_a_memory_copied_from_a_fetched_page_is_flagged_on_its_card(session_factory):
     """The memory-poisoning path: text the model read on a page, proposed as
-    a memory. The card says it was shaped by external content, and nothing
-    is stored unless the owner approves it anyway."""
+    a memory. The card says the text was copied from something Crawler
+    read, and nothing is stored unless the owner approves it anyway."""
     user, _ = await make_user(session_factory, email="mem-e2e-taint@example.com")
     uid = str(user.id)
     page = _TipsPage()
@@ -656,8 +663,9 @@ async def test_a_memory_copied_from_a_fetched_page_is_flagged_on_its_card(sessio
     [pending] = response.pending_approvals
     assert pending.tool_name == TOOL
     assert pending.arguments == {"content": _TipsPage.SENTENCE, "category": "preference"}
-    assert pending.risk_note and "external content" in pending.risk_note
-    assert "untrusted tool result" in pending.risk_note
+    # The card warns that the text came from something Crawler read, in
+    # plain words (services/agent/taint.py and the runtime's risk note).
+    assert pending.risk_note and "was copied from something I read" in pending.risk_note
     assert await _memories(session_factory) == []
 
     await runtime.deny_action(pending.action_id, uid)

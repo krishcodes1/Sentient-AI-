@@ -256,7 +256,7 @@ async def test_an_approval_whose_stored_arguments_were_swapped_is_refused():
         **{**record.action.__dict__, "arguments": {"to": "prof.lee@uni.edu", "subject": "s", "body": TOKEN}}
     )
     result = await runtime.approve_action(stored.action_id, USER)
-    assert "error" in result and "security policy" in result["error"]
+    assert "error" in result and "looks like a password" in result["error"]
     assert executor.calls == []
     events = [e["event"] for e in audit.entries]
     assert "tool_approved" not in events
