@@ -29,6 +29,12 @@ c87279ce5744f3fc07538e75b5f53c864b19c38b:Sentient-AI-/desktop/ui/src/components/
 85189bbfbb5a3cfcd5142f3d26ffd7bf5352034e:Sentient-AI-/backend/tests/test_setup_api.py:generic-api-key:986
 a9791cac5a829e300c511b53ab424ea968dc4d41:Sentient-AI-/backend/tests/test_setup_api.py:generic-api-key:30
 
+# Placeholder FAKE_KEY in the goals tests (branch feat/C5-skills-and-goals).
+# If that branch is squash-merged or rebased these get new fingerprints.
+04fc6b1548fd28df0bf1520ee21fb2c322d4f74c:Sentient-AI-/backend/tests/test_goals_api.py:generic-api-key:50
+04fc6b1548fd28df0bf1520ee21fb2c322d4f74c:Sentient-AI-/backend/tests/test_goals_toolkit.py:generic-api-key:35
+04fc6b1548fd28df0bf1520ee21fb2c322d4f74c:Sentient-AI-/backend/tests/test_goals_store.py:generic-api-key:43
+
 # Throwaway values that only exist inside CI jobs.
 a8a18eb732a8fb512ae083c78d1290edc6c01505:.github/workflows/ci.yml:generic-api-key:171
 a361b46725aa444cd9d40146e150171231051d84:.github/workflows/ci.yml:generic-api-key:124
