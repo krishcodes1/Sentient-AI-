@@ -1,0 +1,46 @@
+# Reviewed gitleaks findings that are not real credentials.
+#
+# Each entry is a gitleaks fingerprint (commit:file:rule:line), so it silences
+# exactly one finding in one commit. Anything new still gets reported. A new
+# fake fixture can be added here, or marked inline with a gitleaks:allow
+# comment on the line itself. Reviewed 2026-10-13 against CI run 38484439518.
+
+# Robinhood's published "Example Signature" values from their API docs.
+8a467b72c8a0542eab54e2d4ff720079d75aac37:Sentient-AI-/backend/tests/test_connectors_behavior.py:generic-api-key:108
+
+# Fake provider tokens for the redactor and audit pattern tests.
+aec1f7d4f0d6d6ddb7d551b1f2a04e869eeef3b1:Sentient-AI-/backend/tests/test_provider_embeddings.py:gcp-api-key:30
+aec1f7d4f0d6d6ddb7d551b1f2a04e869eeef3b1:Sentient-AI-/backend/tests/test_security_secrets.py:generic-api-key:46
+aec1f7d4f0d6d6ddb7d551b1f2a04e869eeef3b1:Sentient-AI-/backend/tests/test_security_secrets.py:generic-api-key:170
+aec1f7d4f0d6d6ddb7d551b1f2a04e869eeef3b1:Sentient-AI-/backend/tests/test_security_secrets.py:generic-api-key:171
+aec1f7d4f0d6d6ddb7d551b1f2a04e869eeef3b1:Sentient-AI-/backend/tests/test_security_secrets.py:jwt:42
+aec1f7d4f0d6d6ddb7d551b1f2a04e869eeef3b1:Sentient-AI-/backend/tests/test_security_secrets.py:private-key:86
+aec1f7d4f0d6d6ddb7d551b1f2a04e869eeef3b1:Sentient-AI-/backend/tests/test_security_secrets.py:slack-app-token:71
+886554b7e9510ca457102163d6f6a969ff40b880:Sentient-AI-/backend/tests/test_audit_token_patterns.py:slack-app-token:35
+886554b7e9510ca457102163d6f6a969ff40b880:Sentient-AI-/backend/tests/test_audit_token_patterns.py:slack-legacy-workspace-token:32
+886554b7e9510ca457102163d6f6a969ff40b880:Sentient-AI-/backend/tests/test_audit_token_patterns.py:slack-legacy-workspace-token:33
+886554b7e9510ca457102163d6f6a969ff40b880:Sentient-AI-/backend/tests/test_audit_token_patterns.py:jwt:28
+
+# Made-up app keys in setup, installer and hardening tests.
+c87279ce5744f3fc07538e75b5f53c864b19c38b:Sentient-AI-/desktop/ui/src/components/KeysStep.test.tsx:generic-api-key:18
+2d3ce145634a77eadb2fa23f5547254b81cb9bcd:Sentient-AI-/installer/tests/test_bootstrap.py:generic-api-key:43
+2d3ce145634a77eadb2fa23f5547254b81cb9bcd:Sentient-AI-/installer/tests/test_bootstrap.py:generic-api-key:384
+5fc4cee04af55ef8897f098d607e82837469fabe:Sentient-AI-/backend/tests/test_production_hardening.py:generic-api-key:267
+85189bbfbb5a3cfcd5142f3d26ffd7bf5352034e:Sentient-AI-/backend/tests/test_setup_api.py:generic-api-key:986
+a9791cac5a829e300c511b53ab424ea968dc4d41:Sentient-AI-/backend/tests/test_setup_api.py:generic-api-key:30
+
+# Placeholder FAKE_KEY in the goals tests (branch feat/C5-skills-and-goals).
+# If that branch is squash-merged or rebased these get new fingerprints.
+04fc6b1548fd28df0bf1520ee21fb2c322d4f74c:Sentient-AI-/backend/tests/test_goals_api.py:generic-api-key:50
+04fc6b1548fd28df0bf1520ee21fb2c322d4f74c:Sentient-AI-/backend/tests/test_goals_toolkit.py:generic-api-key:35
+04fc6b1548fd28df0bf1520ee21fb2c322d4f74c:Sentient-AI-/backend/tests/test_goals_store.py:generic-api-key:43
+
+# Throwaway values that only exist inside CI jobs.
+a8a18eb732a8fb512ae083c78d1290edc6c01505:.github/workflows/ci.yml:generic-api-key:171
+a361b46725aa444cd9d40146e150171231051d84:.github/workflows/ci.yml:generic-api-key:124
+
+# Hand-typed sample output in the README's key generation section.
+962e1fab4f0ab8974bf28485d172c3e382b9c60e:Sentient-AI-/README.md:generic-api-key:254
+962e1fab4f0ab8974bf28485d172c3e382b9c60e:Sentient-AI-/README.md:generic-api-key:255
+99dc3cdab89044ca5228df882f4d691be6f877b4:README.md:generic-api-key:254
+99dc3cdab89044ca5228df882f4d691be6f877b4:README.md:generic-api-key:255
