@@ -102,8 +102,11 @@ jobs:
       - name: Lint
         run: npx eslint . --max-warnings 0
 
+      # pipefail, as in the backend job: the step must fail with vitest,
+      # not succeed with tee.
       - name: Unit tests with coverage
         run: |
+          set -o pipefail
           npm i -D --no-save @vitest/coverage-v8@3
           npx vitest run --coverage --coverage.reporter=text-summary \
             --coverage.reporter=lcov | tee coverage.txt
@@ -201,9 +204,11 @@ jobs:
       # pytest-cov is installed here rather than pinned in
       # requirements-dev.txt: coverage is a reporting concern for CI, and a
       # developer running the suite locally should not have to carry the
-      # plugin to do it.
+      # plugin to do it. pipefail: without it the step exits with tee's
+      # status, and failing tests left the job green.
       - name: Run tests with coverage
         run: |
+          set -o pipefail
           pip install pytest-cov
           python -m pytest tests/ -v \
             --cov=. --cov-report=term --cov-report=xml --cov-report=html \
