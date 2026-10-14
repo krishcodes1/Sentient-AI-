@@ -2450,8 +2450,9 @@ class TelegramService:
         # "Allow for 7 days": the card says until when, and how to undo it
         # ("I can scroll and click around in Calendar without asking until
         # Fri Oct 16. Send /apps to undo that.").
-        weekly = outcome.get("weekly")
-        app = weekly.get("app") if isinstance(weekly, dict) else None
+        weekly_raw = outcome.get("weekly")
+        weekly: dict[str, Any] = weekly_raw if isinstance(weekly_raw, dict) else {}
+        app = weekly.get("app")
         allowed = (
             f" I can scroll and click around in {' '.join(app.split())} without asking "
             f"{_until(weekly.get('expires_at'))}. Send /apps to undo that."
@@ -2463,8 +2464,9 @@ class TelegramService:
         # Send /grants to undo that."); a grant that could not be made (the
         # switch is off, the action no longer grades LOW) leaves the card
         # approved just this once, in Slack's words.
-        low_risk = outcome.get("low_risk")
-        account = low_risk.get("account") if isinstance(low_risk, dict) else None
+        low_risk_raw = outcome.get("low_risk")
+        low_risk: dict[str, Any] = low_risk_raw if isinstance(low_risk_raw, dict) else {}
+        account = low_risk.get("account")
         if isinstance(account, str) and account.strip():
             allowed = (
                 f" I won't ask about small changes on {' '.join(account.split())} "

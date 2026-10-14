@@ -720,8 +720,9 @@ class TriggerToolkit:
         # card's details show it).
         name = f'the trigger "{label}"' if label else "this trigger"
         if action == "delete":
-            spec = src.SPECS.get(before.get("source")) if before and isinstance(before.get("source"), str) else None
-            what = f", which reacts to {spec.phrase}" if spec is not None else ""
+            source = before.get("source") if before else None
+            source_spec = src.SPECS.get(source) if isinstance(source, str) else None
+            what = f", which reacts to {source_spec.phrase}" if source_spec is not None else ""
             return (
                 f"Delete {name}{what}. Anything it noticed but hasn't sent yet is dropped, and "
                 "its past messages stay in your chat history."
@@ -1208,7 +1209,8 @@ def describe_rule(
     show every value, the ids and the whole instructions included."""
     app = src.source_app(source, connector_type)
     where = f"{app} ({account_label})" if account_label else app
-    courses = filters.get("course_ids") if isinstance(filters.get("course_ids"), (list, tuple)) else []
+    raw_courses = filters.get("course_ids")
+    courses = list(raw_courses) if isinstance(raw_courses, (list, tuple)) else []
     in_courses = ""
     if len(courses) == 1:
         in_courses = " for one of your courses"

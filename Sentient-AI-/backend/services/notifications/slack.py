@@ -1652,8 +1652,9 @@ def _verdict(press: ButtonPress, outcome: dict[str, Any]) -> str:
     line = cards.decision_line(press.approved, at=cards.decided_at_text())
     if not press.approved:
         return line
-    low_risk = outcome.get("low_risk")
-    account = low_risk.get("account") if isinstance(low_risk, dict) else None
+    low_risk_raw = outcome.get("low_risk")
+    low_risk: dict[str, Any] = low_risk_raw if isinstance(low_risk_raw, dict) else {}
+    account = low_risk.get("account")
     if isinstance(account, str) and account.strip():
         expires = low_risk.get("expires_at")
         until = f"Until {_day(expires)}" if expires else "For the next 7 days"
