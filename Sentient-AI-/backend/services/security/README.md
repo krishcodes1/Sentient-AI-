@@ -28,7 +28,8 @@ and audit rows carry labels, counts and exception type names only.
 Keep every quantifier bounded, and when the body can run long, start the
 match only where the body cannot already be running (a lookbehind over the
 body's own characters, as the existing rows do): the adversarial test runs
-1 MB of each rule's worst case and must finish in under 2 seconds.
+1 MB of each rule's worst case and fails when it takes more than 32 times
+as long as an eighth of the same text (linear is 8).
 
 A new sink uses an existing policy, or adds one to `policies.py` with a
 table row in `tests/test_security_policies.py`.

@@ -4,7 +4,7 @@ the negatives that must stay readable (paging tokens, meeting passcodes, commit
 SHAs, UUIDs, ISBNs, order ids, Slack ts values, timestamps, the whole security
 system prompt); the validators; leftmost-longest merging; that a Finding never
 holds its text; the 2,000,000-character limit; and 1 MB of each rule's worst
-case in under 2 seconds.
+case in linear time.
 
 Why it exists: every sink (memory, audit, logs, Telegram, Slack, tool
 arguments, the model request) trusts this one table, so a missed format leaks
@@ -354,13 +354,34 @@ def _adversarial(sample: str) -> list[str]:
     return texts
 
 
+def _scan_seconds(text: str, rule: sec.Rule) -> float:
+    started = time.perf_counter()
+    sec._candidates(text, [rule])
+    return time.perf_counter() - started
+
+
+def _scans_linearly(text: str, rule: sec.Rule) -> bool:
+    """Eight times the text takes at most 32 times as long: linear is 8, a
+    rule that rescans a run from each position is 64 and up. The floor keeps
+    a scheduler pause on a millisecond scan from counting, and a single slow
+    run on a busy box is noise, so the check gets three tries."""
+    for _ in range(3):
+        eighth = _scan_seconds(text[: len(text) // 8], rule)
+        whole = _scan_seconds(text, rule)
+        if whole < max(32 * eighth, 0.25):
+            return True
+    return False
+
+
+# Timed against an eighth of the same text in the same process, not a
+# wall-clock budget: the card checks run up to 200,000 times per MB ("4111
+# 4111 ..."), coverage's tracer multiplies that cost several times over, and
+# a fixed 2 s failed linear rules under --cov.
 @pytest.mark.parametrize("rule_id", sorted(POSITIVES))
-def test_one_megabyte_of_worst_case_input_per_rule_is_fast(rule_id):
+def test_one_megabyte_of_worst_case_input_per_rule_scans_in_linear_time(rule_id):
     rule = _BY_ID[rule_id]
     for text in _adversarial(POSITIVES[rule_id][0]):
-        started = time.perf_counter()
-        sec._candidates(text, [rule])
-        assert time.perf_counter() - started < 2.0, f"{rule_id} is slow on {text[:40]!r}"
+        assert _scans_linearly(text, rule), f"{rule_id} is super-linear on {text[:40]!r}"
 
 
 def test_the_whole_table_on_one_megabyte_of_prose_is_bounded():
