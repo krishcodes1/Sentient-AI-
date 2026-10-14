@@ -9,7 +9,10 @@ pydantic-settings>=2.1.0,<3.0.0
 python-jose[cryptography]>=3.3.0,<4.0.0
 passlib[bcrypt]>=1.7.4,<2.0.0
 bcrypt>=4.0.0,<5.0.0
-cryptography>=42.0.0,<44.0.0
+# 49.0.0 is the first release with every current advisory fixed (bundled
+# OpenSSL in the wheels, EC public key checks, X.509 verifier). Every
+# cryptography release is a major, so the bound stops at the next unknown one.
+cryptography>=49.0.0,<51.0.0
 httpx>=0.26.0,<1.0.0
 # httpx's own transport layer. Declared because core/http_pinning.py
 # imports it directly to replace connect-time DNS with validated, pinned
@@ -35,7 +38,9 @@ python-dotenv>=1.2.3,<2.0.0
 playwright>=1.63,<1.64
 # Desktop capture for desktop.screenshot (capability "screen").
 mss>=9.0,<11
-Pillow>=10.0,<12
+# 12.3.0 fixes decoder memory bugs (PSD, GD, McIdas, fonts) that are reachable
+# through services/files/worker/parsers/image.py, which opens uploaded files.
+Pillow>=12.3.0,<13
 # macOS backend of computer_control (services/tools/computer/backend_mac.py):
 # the accessibility tree and the Accessibility trust check
 # (ApplicationServices), synthetic mouse/keyboard/scroll events and the
