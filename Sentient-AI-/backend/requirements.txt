@@ -69,4 +69,4 @@ openpyxl>=3.1.5,<3.2
 # IANA timezone data for zoneinfo (GET /api/usage/summary?tz=). Slim
 # container images may ship without /usr/share/zoneinfo, and zoneinfo
 # falls back to this package — without it every named zone is "unknown".
-tzdata>=2024.1
+tzdata>=2026.5
