@@ -13,7 +13,7 @@ bcrypt>=4.0.0,<5.0.0
 # OpenSSL in the wheels, EC public key checks, X.509 verifier). Every
 # cryptography release is a major, so the bound stops at the next unknown one.
 cryptography>=49.0.0,<51.0.0
-httpx>=0.26.0,<1.0.0
+httpx>=0.28.1,<1.0.0
 # httpx's own transport layer. Declared because core/http_pinning.py
 # imports it directly to replace connect-time DNS with validated, pinned
 # addresses, so it is a real dependency and not only httpx's.
