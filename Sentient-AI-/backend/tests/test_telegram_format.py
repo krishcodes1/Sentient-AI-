@@ -51,7 +51,7 @@ CARD = "4111 1111 1111 1111"
 TOKEN = "ghp_" + "FAKE" * 9
 ALLOWED_TAGS = {"b", "i", "s", "code", "pre", "blockquote"}
 _TAG_RE = re.compile(r'<(/?)([a-z-]+)(?: class="language-[a-z0-9+#-]{1,20}")?>')
-_FAST_S = 1.0
+_FLOOR_S = 0.25
 
 
 def assert_well_formed(html: str) -> None:
@@ -337,16 +337,33 @@ _HOSTILE = {
 }
 
 
+def _seconds(work: Callable[[str], Any], text: str) -> float:
+    started = time.perf_counter()
+    work(text)
+    return time.perf_counter() - started
+
+
+def _runs_linearly(work: Callable[[str], Any], text: str) -> bool:
+    """Eight times the text takes at most 32 times as long: linear is 8, a
+    quadratic pass is 64. The floor keeps a scheduler pause on a millisecond
+    run from counting, and a single slow run on a busy box is noise, so the
+    check gets three tries."""
+    for _ in range(3):
+        eighth = _seconds(work, text[: len(text) // 8])
+        whole = _seconds(work, text)
+        if whole < max(32 * eighth, _FLOOR_S):
+            return True
+    return False
+
+
 @pytest.mark.parametrize("markdown", _HOSTILE.values(), ids=_HOSTILE.keys())
 def test_hostile_markdown_renders_and_splits_in_linear_time(markdown):
-    started = time.perf_counter()
     html = render_html(markdown)
-    assert time.perf_counter() - started < _FAST_S
     assert "<a" not in html
-    started = time.perf_counter()
     parts = split_markdown(markdown, 3900)
-    assert time.perf_counter() - started < _FAST_S
     assert all(utf16_len(part) <= 3900 for part in parts)
+    assert _runs_linearly(render_html, markdown)
+    assert _runs_linearly(lambda text: split_markdown(text, 3900), markdown)
 
 
 def test_telegram_markdown_fails_safe_to_a_plain_str():
