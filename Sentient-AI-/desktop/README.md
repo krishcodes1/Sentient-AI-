@@ -64,7 +64,7 @@ Prerequisites:
 | | Mac | Windows |
 |---|---|---|
 | Rust | `rustup` (stable). Universal builds also need `rustup target add aarch64-apple-darwin x86_64-apple-darwin` | `rustup` with the MSVC toolchain + "Desktop development with C++" (Visual Studio Build Tools) |
-| Node | 20 or newer | 20 or newer |
+| Node | 22 (22.13+), 24, or 26+ | 22 (22.13+), 24, or 26+ |
 | System | Xcode Command Line Tools (`xcode-select --install`), macOS 13+ | WebView2 (built into Windows 10/11) |
 | To run the stack | Docker Desktop | Docker Desktop (WSL 2 backend) |
 
