@@ -80,8 +80,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # 22, not 20: vitest 5 (the test runner) needs Node ^22.12, and
-      # jsdom 30 (the test DOM, Dependabot #65) needs ^22.22.2.
+      # 22, not 20: jsdom 30 (the test DOM) needs Node ^22.22.2 and its
+      # undici 8 throws on import under Node 20; vitest 5 (the test
+      # runner) needs ^22.12 too.
       - name: Set up Node.js
         uses: actions/setup-node@v7
         with:
