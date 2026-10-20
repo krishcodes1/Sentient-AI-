@@ -49,7 +49,7 @@ flow for sensitive actions, and eight swappable LLM providers.
 ### Prerequisites
 
 - **Python 3.11+** — [python.org/downloads](https://www.python.org/downloads/)
-- **Node.js 20+** — [nodejs.org](https://nodejs.org/)
+- **Node.js 22.22+** (or 24.15+, needed for the frontend tests) — [nodejs.org](https://nodejs.org/)
 - **PostgreSQL 15+** — [postgresql.org](https://www.postgresql.org/download/)
 - **Redis 7+** — [redis.io](https://redis.io/download)
 - **Docker** (optional, for easiest setup) — [docker.com](https://www.docker.com/get-started/)
@@ -219,7 +219,7 @@ Production checklist:
 
 1. **Install dependencies**
    - Download and install **Python 3.12+** from [python.org](https://www.python.org/downloads/) — check "Add Python to PATH"
-   - Download and install **Node.js 20+** from [nodejs.org](https://nodejs.org/)
+   - Download and install **Node.js 22.22+** (or 24.15+) from [nodejs.org](https://nodejs.org/)
    - Download and install **PostgreSQL 16** from [postgresql.org/download/windows](https://www.postgresql.org/download/windows/) — remember the password you set
    - Download and install **Redis** via [Memurai](https://www.memurai.com/get-memurai) (Redis-compatible for Windows) or use WSL
 

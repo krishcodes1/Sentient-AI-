@@ -80,10 +80,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # 22, not 20: jsdom 30 (the test DOM) needs Node ^22.22.2 and its
+      # undici 8 throws on import under Node 20.
       - name: Set up Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
           cache-dependency-path: Sentient-AI-/frontend/package-lock.json
 
