@@ -115,11 +115,18 @@ describe("InstallStep", () => {
   });
 
   it("ignores phase events from before the install was started", async () => {
+    const user = userEvent.setup();
     render(<InstallStep resume={null} onStarted={vi.fn()} onNext={vi.fn()} />);
     await waitFor(() => expect(bridge.listeners()).toBe(2));
-    bridge.emitPhase({ phase: "failed", elapsed_s: 0, error: "old" });
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    // A "working" phase is the one start() would keep, so only it shows whether a stale event
+    // got in; the progress line is hidden until start, so check after clicking.
+    bridge.emitPhase({ phase: "building", elapsed_s: 300 });
     expect(screen.getByRole("button", { name: "Install & start Crawler AI" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Install & start Crawler AI" }));
+    expect(await screen.findByText("Preparing Crawler AI’s files…")).toBeInTheDocument();
+    expect(screen.queryByText("Building images…")).not.toBeInTheDocument();
+    expect(screen.queryByText("5:00")).not.toBeInTheDocument();
   });
 
   it("unsubscribes from events when it goes away", async () => {

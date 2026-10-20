@@ -34,6 +34,10 @@ describe("KeysStep", () => {
     const onDone = renderStep();
     expect(screen.getByRole("radio", { name: /Generate for me/ })).toBeChecked();
     await user.click(screen.getByRole("button", { name: "Save keys" }));
+    // Not toHaveBeenCalledWith alone: it treats `secret_key: undefined` as absent. Generate mode
+    // must not send the key fields at all, so check the exact keys of the payload too.
+    expect(mocked.saveKeys).toHaveBeenCalledTimes(1);
+    expect(Object.keys(mocked.saveKeys.mock.calls[0][0]).sort()).toEqual(["mode", "overwrite"]);
     expect(mocked.saveKeys).toHaveBeenCalledWith({ mode: "generate", overwrite: false });
     expect(await screen.findByText("Keys saved on this computer ✓")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Next" }));
@@ -113,6 +117,7 @@ describe("KeysStep", () => {
 
     await user.click(within(dialog).getByRole("button", { name: "Replace keys" }));
     expect(mocked.saveKeys).toHaveBeenCalledTimes(2);
+    expect(Object.keys(mocked.saveKeys.mock.calls[1][0]).sort()).toEqual(["mode", "overwrite"]);
     expect(mocked.saveKeys).toHaveBeenLastCalledWith({ mode: "generate", overwrite: true });
     expect(await screen.findByText("Keys saved on this computer ✓")).toBeInTheDocument();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
