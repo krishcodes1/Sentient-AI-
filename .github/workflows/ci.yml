@@ -81,7 +81,8 @@ jobs:
       - uses: actions/checkout@v7
 
       # 22, not 20: jsdom 30 (the test DOM) needs Node ^22.22.2 and its
-      # undici 8 throws on import under Node 20.
+      # undici 8 throws on import under Node 20; vitest 5 (the test
+      # runner) needs ^22.12 too.
       - name: Set up Node.js
         uses: actions/setup-node@v7
         with:
@@ -105,11 +106,13 @@ jobs:
         run: npx eslint . --max-warnings 0
 
       # pipefail, as in the backend job: the step must fail with vitest,
-      # not succeed with tee.
+      # not succeed with tee. coverage-v8 peers on the exact vitest
+      # version, so it is installed at the version the lockfile resolved
+      # (a bare @5 would break the step once a newer 5.x ships).
       - name: Unit tests with coverage
         run: |
           set -o pipefail
-          npm i -D --no-save @vitest/coverage-v8@3
+          npm i -D --no-save "@vitest/coverage-v8@$(node -p "require('vitest/package.json').version")"
           npx vitest run --coverage --coverage.reporter=text-summary \
             --coverage.reporter=lcov | tee coverage.txt
 
