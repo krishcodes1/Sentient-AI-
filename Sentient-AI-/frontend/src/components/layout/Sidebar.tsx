@@ -14,6 +14,7 @@ import {
   Brain,
   Plug,
   Shield,
+  ShieldAlert,
   Settings as SettingsIcon,
   LogOut,
   X,
@@ -30,6 +31,8 @@ const navItems = [
   { to: "/chat", icon: MessageSquare, label: "Chat" },
   { to: "/memory", icon: Brain, label: "Memory" },
   { to: "/connectors", icon: Plug, label: "Connectors" },
+  // Security wave (security10): the Security page.
+  { to: "/security", icon: ShieldAlert, label: "Security" },
   { to: "/audit", icon: Shield, label: "Audit logs" },
   { to: "/settings", icon: SettingsIcon, label: "Settings" },
 ];

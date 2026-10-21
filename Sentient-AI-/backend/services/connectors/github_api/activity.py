@@ -22,7 +22,7 @@ from typing import Any, Optional
 from services.agent import risk
 from services.agent.permissions import ActionCategory
 from services.connectors.base import ConnectorError, path_segment
-from services.connectors.definition import ToolSpec, _schema
+from services.connectors.definition import Outbound, ToolSpec, _schema
 from services.connectors.shaping import clamp_limit
 
 from .common import (
@@ -120,6 +120,7 @@ ACTIVITY_ACTIONS: tuple[ToolSpec, ...] = (
             generate_release_notes={"type": "boolean", "description": "Let GitHub write the notes"},
         ),
         required_scope="releases.write",
+        outbound=Outbound(content=("name", "body")),
     ),
     ToolSpec(
         "publish_release",
@@ -148,6 +149,7 @@ ACTIVITY_ACTIONS: tuple[ToolSpec, ...] = (
         risk_check=risk.when_value(
             "public", lambda value: value is not False, "high", "it publishes a public gist"
         ),
+        outbound=Outbound(content=("content", "description", "filename")),
     ),
 )
 

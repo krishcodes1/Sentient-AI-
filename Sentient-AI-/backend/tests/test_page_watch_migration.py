@@ -43,8 +43,9 @@ PAGE_WATCH_MERGE = "0015_merge_page_watches"
 # Joins the page-watch merge and 0015_app_approvals into one line.
 APP_APPROVALS_MERGE = "0016_merge_app_approvals"
 # The single head: the last of the revisions reserved on top of that merge
-# (0017-0024, tests/test_integration_seams.py).
-HEAD = "0024_media_transcripts"
+# (0017-0024 for the top10 skills, then 0025-0032 for the security wave;
+# tests/test_integration_seams.py).
+HEAD = "0032_file_reputation"
 
 
 def _versions(db_path: Path) -> list[str]:

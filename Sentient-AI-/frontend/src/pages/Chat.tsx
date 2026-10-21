@@ -62,6 +62,7 @@ import {
   ApprovalDetailList,
   ApprovalTechnicalDetails,
 } from "@/components/ApprovalDetails";
+import SecurityNotes from "@/components/SecurityNotes";
 import WeeklyAppButton, {
   WeeklyAllowedNote,
   type ApprovalDecision,
@@ -313,6 +314,8 @@ function ApprovalCard({
         // Every value the action will use, labelled, whole (spec F3).
         <ApprovalDetailList approval={approval} className="mb-3" />
       )}
+      {/* What the server's call checks noticed (security wave), on every card type. */}
+      <SecurityNotes notes={approval.security_notes} />
       {/* Backend-flagged risk: the request was shaped by external/untrusted
           content. Rendered in danger colors directly above the buttons so it
           cannot be missed on the way to Approve. */}

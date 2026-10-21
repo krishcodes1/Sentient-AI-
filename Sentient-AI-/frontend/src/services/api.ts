@@ -1232,3 +1232,380 @@ export async function revokePermissionGrant(id: string): Promise<void> {
 // top10:voice_notes
 
 // top10:video_transcripts
+
+// Security wave (S1): outbound message checks (Security ▸ Outgoing messages).
+import type { OrganisationDomain, OutboundSettings } from "@/types";
+
+/** The outgoing-message checks' switch, the sent-to history's counts and the organisation's
+ *  domains. */
+export async function getOutboundSettings(): Promise<OutboundSettings> {
+  return request<OutboundSettings>("/security/outbound");
+}
+
+/** Forget this account's sent-to history: every address counts as new again. */
+export async function forgetKnownRecipients(): Promise<{ removed: number }> {
+  return request<{ removed: number }>("/security/outbound/known-recipients", { method: "DELETE" });
+}
+
+/** Add an organisation domain. A refusal is a 409/422 whose message says why. Owner only. */
+export async function addOrganisationDomain(domain: string): Promise<OrganisationDomain> {
+  return request<OrganisationDomain>("/security/outbound/domains", {
+    method: "POST",
+    body: JSON.stringify({ domain }),
+  });
+}
+
+/** Remove an organisation domain. Owner only. */
+export async function removeOrganisationDomain(id: string): Promise<void> {
+  return request<void>(`/security/outbound/domains/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+// Security wave (S2): scam checks on new email (Security ▸ Mail alerts).
+import type {
+  MailActionKind,
+  MailAlertCard,
+  MailAlertList,
+  MailScanAccount,
+  MailScanStatus,
+} from "@/types";
+
+/** Security ▸ Mail alerts: the switch, today's AI reviews and this account's checked mailboxes. */
+export async function getMailScanStatus(): Promise<MailScanStatus> {
+  return request<MailScanStatus>("/security/mail/status");
+}
+
+/** This account's mail alerts, newest first; `before` pages to older ones. */
+export async function listMailAlerts(
+  opts: { view?: "open" | "all"; before?: string | null; limit?: number } = {},
+): Promise<MailAlertList> {
+  const q = new URLSearchParams();
+  q.set("view", opts.view ?? "open");
+  if (opts.before) q.set("before", opts.before);
+  if (opts.limit) q.set("limit", String(opts.limit));
+  return request<MailAlertList>(`/security/mail/alerts?${q.toString()}`);
+}
+
+/** Make an approval card for an alert (Move to Spam/Junk). 409 when one is already waiting. */
+export async function requestMailAlertAction(
+  id: string,
+  action: MailActionKind,
+): Promise<{ card: MailAlertCard }> {
+  return request<{ card: MailAlertCard }>(`/security/mail/alerts/${encodeURIComponent(id)}/actions`, {
+    method: "POST",
+    body: JSON.stringify({ action }),
+  });
+}
+
+/** "Not a scam": takes the alert out of the open view. */
+export async function dismissMailAlert(id: string): Promise<{ ok: boolean; status: string }> {
+  return request<{ ok: boolean; status: string }>(`/security/mail/alerts/${encodeURIComponent(id)}/dismiss`, {
+    method: "POST",
+    body: "{}",
+  });
+}
+
+/** Pause or resume the scam check for one of this account's mailboxes. */
+export async function setMailScanPaused(connectorId: string, paused: boolean): Promise<MailScanAccount> {
+  return request<MailScanAccount>(`/security/mail/accounts/${encodeURIComponent(connectorId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ paused }),
+  });
+}
+
+// Security wave (S3): on-demand scam checks (Security ▸ Check for scams).
+import type { ScamCheckRequest, ScamCheckResult, ScamCheckStatus } from "@/types";
+
+/** Check pasted text and screenshots for scams (Security page). */
+export async function checkScam(body: ScamCheckRequest): Promise<ScamCheckResult> {
+  return request<ScamCheckResult>("/security/scam-check", { method: "POST", body: JSON.stringify(body) });
+}
+
+/** Whether scam checks are on, and what they can use right now. */
+export async function getScamCheckStatus(): Promise<ScamCheckStatus> {
+  return request<ScamCheckStatus>("/security/scam-check/status");
+}
+
+// Security wave (S4): link reputation and the owner's service keys (Security ▸ Service keys).
+import type {
+  LinkReputationStatus,
+  SecurityKeyTestResult,
+  SecurityServiceKey,
+  SecurityServiceKeys,
+  SecurityServiceName,
+} from "@/types";
+
+/** Every service a key can be saved for, with whether one is saved. Never a key. Owner only. */
+export async function getSecurityKeys(): Promise<SecurityServiceKeys> {
+  return request<SecurityServiceKeys>("/security/keys");
+}
+
+/** Tests a typed key (or, with none, the configured one); nothing is stored. */
+export async function testSecurityKey(
+  name: SecurityServiceName,
+  key?: string,
+): Promise<SecurityKeyTestResult> {
+  return request<SecurityKeyTestResult>(`/security/keys/${name}/test`, {
+    method: "POST",
+    body: JSON.stringify(key ? { key } : {}),
+  });
+}
+
+/** Tests the key and stores it only when the test passes (a failed test is a 400). */
+export async function saveSecurityKey(
+  name: SecurityServiceName,
+  key: string,
+): Promise<{ ok: boolean; service: SecurityServiceKey; detail?: string }> {
+  return request<{ ok: boolean; service: SecurityServiceKey; detail?: string }>(`/security/keys/${name}`, {
+    method: "PUT",
+    body: JSON.stringify({ key }),
+  });
+}
+
+/** Forget the stored key for one service. A key from the server's .env is not touched. */
+export async function removeSecurityKey(name: SecurityServiceName): Promise<void> {
+  await request<void>(`/security/keys/${name}`, { method: "DELETE" });
+}
+
+/** How link lookups are going: the service used, lookups against the limits, the last problem. */
+export async function getLinkReputationStatus(): Promise<LinkReputationStatus> {
+  return request<LinkReputationStatus>("/security/link-reputation/status");
+}
+
+// Security wave (S5): MCP tool pinning (Security ▸ MCP reviews and the Connectors chip).
+import type {
+  McpReviewList,
+  McpServerApproval,
+  McpToolPinView,
+  McpToolReviewDetail,
+} from "@/types";
+
+/** Every MCP server's tools and how many wait for review; one server with `connectorId`. */
+export async function getMcpReviews(connectorId?: string): Promise<McpReviewList> {
+  const query = connectorId ? `?connector_id=${encodeURIComponent(connectorId)}` : "";
+  return request<McpReviewList>(`/security/mcp/reviews${query}`);
+}
+
+/** One tool's change (or a new tool's whole definition) as diff lines, with its hash. */
+export async function getMcpToolReview(pinId: string): Promise<McpToolReviewDetail> {
+  return request<McpToolReviewDetail>(`/security/mcp/pins/${encodeURIComponent(pinId)}`);
+}
+
+/** Approve the version that was shown: 409 when the tool changed again since. */
+export async function approveMcpTool(pinId: string, definitionHash: string): Promise<McpToolPinView> {
+  return request<McpToolPinView>(`/security/mcp/pins/${encodeURIComponent(pinId)}/approve`, {
+    method: "POST",
+    body: JSON.stringify({ definition_hash: definitionHash }),
+  });
+}
+
+/** Keep a changed or new tool off: it is not offered until approved. */
+export async function keepMcpToolOff(pinId: string): Promise<McpToolPinView> {
+  return request<McpToolPinView>(`/security/mcp/pins/${encodeURIComponent(pinId)}/keep-off`, {
+    method: "POST",
+  });
+}
+
+/** Approve every shown tool of one server at the hashes that were shown (`pins`: pin id to
+ *  hash), in one request. 409 when any of them changed again: nothing is approved then. */
+export async function approveMcpServer(
+  connectorId: string,
+  pins: Record<string, string>,
+): Promise<McpServerApproval> {
+  return request<McpServerApproval>(`/security/mcp/servers/${encodeURIComponent(connectorId)}/approve`, {
+    method: "POST",
+    body: JSON.stringify({ pins }),
+  });
+}
+
+// Security wave (S6): breach monitor and the password check (Security ▸ Breach monitor).
+import type { BreachAddress, BreachCheckResult, BreachFinding, BreachOverview, PwnedRange } from "@/types";
+
+/** The owner's breach monitor: state, watched addresses and breaches seen. Owner only (403). */
+export async function getBreachMonitor(): Promise<BreachOverview> {
+  return request<BreachOverview>("/security/breach");
+}
+
+/** Watch one more address. A refusal is a 409/422 whose message says why. Owner only. */
+export async function addBreachAddress(address: string): Promise<BreachAddress> {
+  return request<BreachAddress>("/security/breach/addresses", {
+    method: "POST",
+    body: JSON.stringify({ address }),
+  });
+}
+
+/** Pause or resume the weekly check for one address. Owner only. */
+export async function setBreachAddressPaused(id: string, paused: boolean): Promise<BreachAddress> {
+  return request<BreachAddress>(`/security/breach/addresses/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ paused }),
+  });
+}
+
+/** Stop watching an address and forget what was found for it. Owner only. */
+export async function removeBreachAddress(id: string): Promise<void> {
+  return request<void>(`/security/breach/addresses/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+/** Look one address up now. A failed lookup is outcome "not_checked" with a note, not an error. */
+export async function checkBreachAddress(id: string): Promise<BreachCheckResult> {
+  return request<BreachCheckResult>(`/security/breach/addresses/${encodeURIComponent(id)}/check`, {
+    method: "POST",
+  });
+}
+
+/** Mark one breach as seen. Owner only. */
+export async function acknowledgeBreachFinding(id: string): Promise<BreachFinding> {
+  return request<BreachFinding>(`/security/breach/findings/${encodeURIComponent(id)}/acknowledge`, {
+    method: "POST",
+  });
+}
+
+/** Mark every breach as seen. Owner only. */
+export async function acknowledgeAllBreachFindings(): Promise<{ acknowledged: number }> {
+  return request<{ acknowledged: number }>("/security/breach/findings/acknowledge-all", { method: "POST" });
+}
+
+/** Pwned Passwords range for a 5-character SHA-1 prefix. Only the prefix is sent, in the body;
+ *  the browser never calls the service itself (the page's CSP allows only this server). */
+export async function getPwnedRange(prefix: string): Promise<PwnedRange> {
+  return request<PwnedRange>("/security/pwned-passwords/range", {
+    method: "POST",
+    body: JSON.stringify({ prefix }),
+  });
+}
+
+// Security wave (S7): site rules for Crawler's browser (Security ▸ Site rules, owner only).
+import type { SiteCategory, SiteCheck, SiteRule, SiteRuleCreate, SiteRuleKind, SiteRulesView } from "@/types";
+
+/** The site rules, the built-in categories and recent hits. Owner only (403). */
+export async function getSiteRules(): Promise<SiteRulesView> {
+  return request<SiteRulesView>("/security/site-rules");
+}
+
+/** Add a rule; 422/409 carry the server's reason. Owner only. */
+export async function createSiteRule(body: SiteRuleCreate): Promise<SiteRule> {
+  return request<SiteRule>("/security/site-rules", { method: "POST", body: JSON.stringify(body) });
+}
+
+/** Change a rule's kind. Owner only. */
+export async function updateSiteRule(id: string, kind: SiteRuleKind): Promise<SiteRule> {
+  return request<SiteRule>(`/security/site-rules/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ kind }),
+  });
+}
+
+/** Remove a rule. Owner only. */
+export async function deleteSiteRule(id: string): Promise<void> {
+  return request<void>(`/security/site-rules/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+/** Set a built-in category's kind ("always_ask" resets it). Owner only. */
+export async function setSiteCategory(key: string, kind: SiteRuleKind): Promise<SiteCategory> {
+  return request<SiteCategory>(`/security/site-rules/categories/${encodeURIComponent(key)}`, {
+    method: "PUT",
+    body: JSON.stringify({ kind }),
+  });
+}
+
+/** Which rule applies to a site, explained. Owner only. */
+export async function checkSite(site: string): Promise<SiteCheck> {
+  return request<SiteCheck>("/security/site-rules/check", { method: "POST", body: JSON.stringify({ site }) });
+}
+
+// Security wave (S9): rules on tool arguments (Security ▸ Tool rules, owner only).
+import type {
+  BuiltinToolRule,
+  ToolRule,
+  ToolRuleCatalog,
+  ToolRuleCreate,
+  ToolRuleDraft,
+  ToolRulePreview,
+  ToolRulesView,
+} from "@/types";
+
+/** The built-in rules with their switches, the owner's rules, the operators and the limits. */
+export async function listToolRules(): Promise<ToolRulesView> {
+  return request<ToolRulesView>("/security/tool-rules");
+}
+
+/** Add a rule. A refusal is a 422 whose message says why, shown as is. Owner only. */
+export async function createToolRule(body: ToolRuleCreate): Promise<ToolRule> {
+  return request<ToolRule>("/security/tool-rules", { method: "POST", body: JSON.stringify(body) });
+}
+
+/** Remove one of the owner's rules. Owner only. */
+export async function deleteToolRule(id: string): Promise<void> {
+  return request<void>(`/security/tool-rules/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+/** Turn a built-in rule on or off. Owner only. */
+export async function setBuiltinToolRule(key: string, enabled: boolean): Promise<BuiltinToolRule> {
+  return request<BuiltinToolRule>(`/security/tool-rules/builtins/${encodeURIComponent(key)}`, {
+    method: "PUT",
+    body: JSON.stringify({ enabled }),
+  });
+}
+
+/** What a draft rule would match and how it reads; an invalid draft answers `valid: false`. */
+export async function previewToolRule(body: ToolRuleDraft): Promise<ToolRulePreview> {
+  return request<ToolRulePreview>("/security/tool-rules/preview", { method: "POST", body: JSON.stringify(body) });
+}
+
+/** The tools a rule can name, with their argument names, for the form's suggestions. */
+export async function getToolRuleCatalog(): Promise<ToolRuleCatalog> {
+  return request<ToolRuleCatalog>("/security/tool-rules/catalog");
+}
+
+// Security wave (S10): file reputation through VirusTotal (Security ▸ File checks).
+import type { FileCheck, FileChecksResponse, FileUploadRequest } from "@/types";
+
+/** Security ▸ File checks: the caller's own checks, newest first, and the service's state. */
+export async function listFileChecks(limit = 50): Promise<FileChecksResponse> {
+  return request<FileChecksResponse>(`/security/files?limit=${encodeURIComponent(String(limit))}`);
+}
+
+/** Look up a fingerprint the browser computed; the file itself is never sent. */
+export async function checkFileHash(body: {
+  sha256: string;
+  name?: string;
+  size_bytes?: number;
+  media_type?: string;
+}): Promise<FileCheck> {
+  return request<FileCheck>("/security/files/check", { method: "POST", body: JSON.stringify(body) });
+}
+
+/**
+ * Ask to send a file VirusTotal does not know; parks an approval card (nothing is uploaded
+ * until it is approved). With `file`, the raw bytes are the body (as uploadFile does, never
+ * base64 in JSON); without, the server uses its own copy or source.
+ */
+export async function requestFileUpload(checkId: string, file?: File): Promise<FileUploadRequest> {
+  const endpoint = `/security/files/${encodeURIComponent(checkId)}/upload`;
+  if (!file) return request<FileUploadRequest>(endpoint, { method: "POST" });
+  await ensureFreshToken();
+  const token = localStorage.getItem("auth_token");
+  const response = await fetch(`${API_BASE}${endpoint}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": file.type || "application/octet-stream",
+      ...deviceHeader(),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: file,
+  });
+  if (!response.ok) {
+    const errorBody = await response.json().catch(() => ({}));
+    if (response.status === 401) handleUnauthorized();
+    throw new ApiError(
+      errorDetailToMessage(errorBody.detail, `Upload failed: ${response.statusText}`),
+      response.status,
+    );
+  }
+  return response.json();
+}
+
+/** Forget one check (and any copy held for an upload). */
+export async function forgetFileCheck(checkId: string): Promise<void> {
+  return request<void>(`/security/files/${encodeURIComponent(checkId)}`, { method: "DELETE" });
+}

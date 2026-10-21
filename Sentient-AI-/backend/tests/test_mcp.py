@@ -426,6 +426,59 @@ def test_sanitized_tool_entries_dedupes_and_rejects_unresolvable():
     assert entries[1][1].name == "my_tool"
 
 
+def _suffix_search_from_two(label, infos):
+    """The collision search as it was first written: every tool starts again at
+    "_2". Quadratic when many names normalize alike, but the reference for the
+    names the faster search must give."""
+    from services.mcp.integration import (
+        _MAX_FULL_NAME_LEN,
+        _MAX_TOOL_COMPONENT_LEN,
+        MCP_PREFIX,
+    )
+
+    budget = min(_MAX_FULL_NAME_LEN - len(MCP_PREFIX) - 2 - len(label), _MAX_TOOL_COMPONENT_LEN)
+    resolvable = [
+        (base, info)
+        for info in infos
+        if (base := sanitize_tool_name(info.name)[: max(budget, 0)])
+    ]
+    exposed = [""] * len(resolvable)
+    used: set[str] = set()
+    for index in sorted(range(len(resolvable)), key=lambda i: resolvable[i][1].name):
+        base = resolvable[index][0]
+        candidate, n = base, 2
+        while candidate in used:
+            suffix = f"_{n}"
+            candidate = base[: max(1, budget - len(suffix))] + suffix
+            n += 1
+        used.add(candidate)
+        exposed[index] = candidate
+    return [(exposed[i], resolvable[i][1].name) for i in range(len(resolvable))]
+
+
+def test_the_collision_search_resumes_per_base_and_gives_the_same_names_as_starting_from_two():
+    """Security S5 hardening: a server that sends thousands of names that
+    normalize to one base made the suffix search quadratic on every discovery.
+    It now resumes where the last search for that base stopped; the names are
+    exactly those of a search that starts again at "_2" every time."""
+    import random
+
+    rng = random.Random(20261014)
+    alphabet = "ab_ !-"
+    for _ in range(300):
+        names = ["".join(rng.choice(alphabet) for _ in range(rng.randint(1, 6))) for _ in range(rng.randint(1, 40))]
+        names += [name + "_2" for name in names[:5]] + [name + "_10" for name in names[:3]]
+        infos = [MCPToolInfo(name=name) for name in names]
+        label = rng.choice(["x", "notes_server", "l" * 100, "l" * 58])
+        got = [(exposed, info.name) for exposed, info in sanitized_tool_entries(label, infos)]
+        assert got == _suffix_search_from_two(label, infos), names
+
+    # Many names on one base: still one distinct name each.
+    many = [MCPToolInfo(name="a" + "!" * k + "#") for k in range(3000)]
+    exposed = [name for name, _ in sanitized_tool_entries("srv", many)]
+    assert len(set(exposed)) == 3000 and {"a", "a_2", "a_3000"} <= set(exposed)
+
+
 @pytest.mark.asyncio
 async def test_catalog_and_dispatcher_agree_on_normalized_names(session_factory):
     from tests.conftest import make_user

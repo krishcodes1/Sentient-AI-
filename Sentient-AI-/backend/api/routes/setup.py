@@ -516,7 +516,8 @@ async def clear_telegram(request: Request, admin: User = Depends(require_admin))
 
 @router.delete("/secrets", status_code=status.HTTP_204_NO_CONTENT)
 async def clear_secrets(request: Request, admin: User = Depends(require_admin)) -> Response:
-    """Discard every stored provider key and the stored bot token.
+    """Discard every stored provider key, the stored bot token and the
+    stored security service keys (Security -> Service keys).
 
     The documented way out after ENCRYPTION_KEY was rotated or lost: the
     old blobs can no longer be read, and the service refuses to overwrite

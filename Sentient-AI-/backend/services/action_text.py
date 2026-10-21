@@ -1857,6 +1857,7 @@ _FAMILY_APPS: dict[str, str] = {
     "tutor": "tutor mode",
     "video": "video transcripts",
     "tools": "Crawler",
+    "security": "Crawler's safety checks",
     "canvas": "Canvas",
     "google_workspace": "your Google account",
     "microsoft": "your Microsoft account",
@@ -2112,6 +2113,15 @@ _TOOLS: dict[str, _Entry] = {
     "video.transcript": _Entry("get a video's transcript"),
     "video.list": _Entry("list your saved transcripts"),
     "tools.find": _Entry("look up what I can do"),
+    # Security wave (security10): the safety checks' own actions (S3, S10).
+    # An upload card's sentence comes from the file reputation toolkit's
+    # describer (it names the file and what VirusTotal does with it).
+    "security.check_scam": _Entry("check a message or link for signs of a scam"),
+    "security.check_file": _Entry("check a file with VirusTotal"),
+    "security.upload_to_virustotal": _Entry(
+        "send a file to VirusTotal to be scanned",
+        labels={"sha256": "File fingerprint", "file_name": "File"},
+    ),
     # -- Canvas ---------------------------------------------------------------
     "canvas.submit_assignment": _Entry(
         "hand in an assignment",
@@ -2179,6 +2189,13 @@ _TOOLS: dict[str, _Entry] = {
     "google_workspace.get_thread": _Entry("read an email conversation", app=_GMAIL),
     "google_workspace.list_labels": _Entry("list your email labels", app=_GMAIL),
     "google_workspace.get_attachment_text": _Entry("read an email attachment", app=_GMAIL),
+    # Security wave (security10): the mail checks' reads (S1, S2, S10).
+    "google_workspace.get_draft": _Entry("read an email draft", app=_GMAIL),
+    "google_workspace.get_attachment_hash": _Entry("check an email attachment", app=_GMAIL),
+    "google_workspace.list_new_message_ids": _Entry("check for new email", app=_GMAIL),
+    "google_workspace.get_message_security": _Entry(
+        "check where an email came from", app=_GMAIL
+    ),
     # -- Google Calendar --------------------------------------------------------
     "google_workspace.create_event": _Entry(
         "add a calendar event",
@@ -2400,6 +2417,10 @@ _TOOLS: dict[str, _Entry] = {
     "microsoft.search_messages": _Entry("search your email", app=_OUTLOOK),
     "microsoft.get_message": _Entry("read an email", app=_OUTLOOK),
     "microsoft.get_attachment_text": _Entry("read an email attachment", app=_OUTLOOK),
+    # Security wave (security10): the mail checks' reads (S2, S10).
+    "microsoft.get_attachment_hash": _Entry("check an email attachment", app=_OUTLOOK),
+    "microsoft.list_new_message_ids": _Entry("check for new email", app=_OUTLOOK),
+    "microsoft.get_message_security": _Entry("check where an email came from", app=_OUTLOOK),
     "microsoft.list_folders": _Entry("list your email folders", app=_OUTLOOK),
     "microsoft.search_contacts": _Entry("search your contacts", app=_OUTLOOK),
     # -- Outlook calendar --------------------------------------------------------------

@@ -67,6 +67,7 @@ from services.tools.browser.checkout.facts import (
     collect_checkout_facts,
 )
 from services.tools.browser.checkout.ledger import PurchaseLedger
+from services.tools.browser.guard import EgressHooks
 from services.tools.browser.handoff import Challenge
 from services.tools.browser.session import BrowserSession, BrowserSessionManager
 
@@ -349,9 +350,15 @@ class BrowserCheckoutToolkit:
         cancel_flag: CancelFlag,
         clock: Callable[[], float] = time.monotonic,
         pending_ttl_s: float = 900,
+        egress_hooks: Optional[EgressHooks] = None,
     ) -> None:
         self._sessions = sessions
         self._guard = guard
+        # Security wave (S4, S7): the owner's site rules and the link
+        # lookup, bound to each context this toolkit guards (None: neither).
+        # Inside the approved order's window the rules exempt only
+        # protected and bank hosts (review SEC-F4).
+        self._egress_hooks = egress_hooks
         self._handoff = handoff
         self._memory = memory
         self._vault = vault
@@ -865,6 +872,7 @@ class BrowserCheckoutToolkit:
         seen yet."""
         try:
             await self._guard.install_egress_guard(session.context, account_mode=session.mode == "account")
+            _shared.attach_egress_hooks(self._guard, session, self._egress_hooks)
         except Exception as exc:  # fail closed: never act on an unguarded context
             _log_failure("checkout_guard_failed", exc)
             raise _Failed("The browser's network guard could not be set up, so nothing was done.")

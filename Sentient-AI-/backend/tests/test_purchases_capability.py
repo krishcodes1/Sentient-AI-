@@ -66,8 +66,19 @@ def test_settings_defaults_are_the_purchase_caps_and_nothing_else():
     assert registry.settings_defaults("purchases") is not purchases.PURCHASE_SETTINGS_DEFAULTS
     # scheduled_tasks carries the unattended budgets (scheduler_briefing),
     # knowledge_base its limits (top10:knowledge_base),
-    # video_transcripts its minute caps and retention (video_transcripts).
-    with_settings = {"purchases", "scheduled_tasks", "knowledge_base", "video_transcripts"}
+    # video_transcripts its minute caps and retention (video_transcripts),
+    # and the security wave's mail scam check (S2), scam check (S3), link
+    # reputation (S4) and file reputation (S10) their caps and limits.
+    with_settings = {
+        "purchases",
+        "scheduled_tasks",
+        "knowledge_base",
+        "video_transcripts",
+        "mail_scam_scan",
+        "scam_check",
+        "link_reputation",
+        "file_reputation",
+    }
     for key in registry.keys():
         if key not in with_settings:
             assert registry.settings_defaults(key) == {}, key

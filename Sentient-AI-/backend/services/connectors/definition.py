@@ -17,7 +17,7 @@ base class.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Callable, Collection, Literal, Mapping, Optional
 
 from services.agent.permissions import ActionCategory, PermissionTier
 
@@ -36,6 +36,38 @@ RiskCheck = Callable[[Mapping[str, Any]], Optional[tuple[str, str]]]
 # ---------------------------------------------------------------------------
 # Actions
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Outbound:
+    """Which arguments of an action leave the account (security S1, services/security/outbound.py).
+
+    - ``content``: argument paths whose text other people will read
+      ("body", "event_data.summary"; a path naming an object or list covers
+      every string inside it).
+    - ``recipients``: paths holding email addresses.
+    - ``resolve``: recipients that are not in the arguments ("reply": the
+      message named by message_id; "draft": the draft named by draft_id).
+    - ``delivers``: False for a draft (saved, not sent).
+    - ``history``: record the recipients in the sent-to history after a
+      successful send (mail sends only).
+    - ``shares_content`` marks an action that gives the people in its
+      ``recipients`` access to the owner's content (forward, share, invite).
+      The built-in tool rule 'Sharing outside your organisation' (security
+      S9) asks before one aimed outside the organisation's domains.
+    """
+
+    content: tuple[str, ...] = ()
+    recipients: tuple[str, ...] = ()
+    resolve: Optional[str] = None
+    delivers: bool = True
+    history: bool = False
+    shares_content: bool = False
+
+
+# The argument that names what an Outbound.resolve value reads: a reply's
+# recipients come from the message it answers, a draft's from the draft.
+OUTBOUND_RESOLVE: Mapping[str, str] = {"reply": "message_id", "draft": "draft_id"}
 
 
 @dataclass(frozen=True)
@@ -75,6 +107,11 @@ class ToolSpec:
       not treated as copied from untrusted content.
     - ``low_risk_note`` says in a few words what the LOW action does, for
       the tier's help text and the grant card (at most 80 characters).
+
+    ``outbound`` (security wave, S1) names the arguments that leave the
+    account: the text other people read and the addresses it goes to (see
+    ``Outbound``). Only a non-READ action may declare it; the registry
+    checks every path against the schema (``outbound_problems``).
     """
 
     action: str
@@ -89,6 +126,49 @@ class ToolSpec:
     risk_check: Optional[RiskCheck] = None
     ref_args: tuple[str, ...] = ()
     low_risk_note: str = ""
+    outbound: Optional[Outbound] = None
+
+
+def outbound_problems(spec: ToolSpec, properties: Collection[str]) -> list[str]:
+    """Registry checks for ToolSpec.outbound: only on non-READ actions; every path's first
+    segment is a schema property; resolve is "reply"/"draft" and its id argument exists; history
+    needs recipients or resolve and a delivering action; an empty declaration is refused, and so
+    is shares_content without recipients (nobody to share with)."""
+    out = spec.outbound
+    if out is None:
+        return []
+    name = spec.action
+    problems: list[str] = []
+    if spec.category == ActionCategory.READ:
+        problems.append(f"action '{name}': only a non-READ action may declare outbound fields")
+    if not (out.content or out.recipients or out.resolve):
+        problems.append(f"action '{name}': an outbound declaration names no argument")
+    for kind, paths in (("content", out.content), ("recipients", out.recipients)):
+        if len(set(paths)) != len(paths):
+            problems.append(f"action '{name}': outbound {kind} names a path twice")
+        for path in paths:
+            segments = path.split(".") if isinstance(path, str) else [""]
+            if not all(segments) or segments[0] not in properties:
+                problems.append(
+                    f"action '{name}': outbound {kind} path '{path}' does not start with a parameter"
+                )
+    if out.resolve is not None:
+        id_argument = OUTBOUND_RESOLVE.get(out.resolve)
+        if id_argument is None:
+            problems.append(
+                f"action '{name}': outbound resolve must be one of {sorted(OUTBOUND_RESOLVE)}"
+            )
+        elif id_argument not in properties:
+            problems.append(
+                f"action '{name}': outbound resolve '{out.resolve}' needs the '{id_argument}' parameter"
+            )
+    if out.history and not (out.recipients or out.resolve):
+        problems.append(f"action '{name}': outbound history needs recipients or resolve")
+    if out.history and not out.delivers:
+        problems.append(f"action '{name}': outbound history is only for an action that delivers")
+    if out.shares_content and not out.recipients:
+        problems.append(f"action '{name}': outbound shares_content needs recipients")
+    return problems
 
 
 def _schema(**props: dict[str, Any]) -> dict[str, Any]:

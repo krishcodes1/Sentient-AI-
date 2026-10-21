@@ -16,6 +16,12 @@ and whichever acts next shuts it, so a sign-in or a one-time code the
 person types during a checkout's handoff passes the guard the same way
 it does after a read's. Nothing here logs page text, typed text or a URL's query
 string: those are the person's data and log lines are persistent.
+
+Security wave (S4, S7): ``attach_egress_hooks`` binds a toolkit's
+``guard.EgressHooks`` to the context it guards, for the session's user, and
+``observe`` asks the owner's site rules about the page before describing it
+(a Blocked page is blanked and refused, an Always-ask page gets a notice).
+This module never imports a skill: the hooks are handed in.
 """
 
 from __future__ import annotations
@@ -31,6 +37,7 @@ import structlog
 
 from services.tools.browser import snapshot as snap
 from services.tools.browser.checkout import markers
+from services.tools.browser.guard import EgressHooks, PageNotice
 from services.tools.browser.handoff import Challenge
 from services.tools.browser.pagememory import PageMemory
 from services.tools.browser.session import BrowserSession
@@ -60,6 +67,11 @@ REF_TIMEOUT_MS = 3_000
 # it as having no document (``frame_evaluate``).
 EMPTY_FRAME_TIMEOUT_S = 0.5
 JPEG_QUALITY = 70
+# What a read answers when the owner's site rules could not be read for the
+# page it is about to describe (security S7): fail closed, describe nothing.
+UNAVAILABLE_TEXT = (
+    "Crawler could not read its Site rules just now, so it did not describe this page."
+)
 # Fields whose pixels never leave the machine, even in a screenshot the
 # person asked for: the checkout's classifier marks them (``mask_locators``)
 # and this selector finds the marks and the plain attribute cases.
@@ -296,6 +308,42 @@ async def settle(page: Any) -> None:
         pass
 
 
+def attach_egress_hooks(guard: Any, session: BrowserSession, hooks: Optional[EgressHooks]) -> None:
+    """Bind the security wave's hooks to the guarded context of *session*,
+    for its user: the owner's site rules (S7) and the link lookup (S4). A
+    no-op without hooks or without an egress state (a test double); a
+    factory left unset never replaces a hook another toolkit attached."""
+    if hooks is None:
+        return
+    egress_state = getattr(guard, "egress_state", None)
+    state = egress_state(session.context) if callable(egress_state) else None
+    if state is None:
+        return
+    if hooks.site_rules is not None:
+        state.site_rules = hooks.site_rules(session.user_id)
+    if hooks.reputation is not None:
+        state.reputation = hooks.reputation(session.user_id)
+
+
+def _site_notice(guard: Any, session: BrowserSession, page: Any) -> Optional[PageNotice]:
+    """What the owner's site rules say about *page* before a read describes
+    it, or None (no guard, no state, no hook). Inside browser.checkout's
+    hand-off on this page the rules exempt protected and bank hosts. A hook
+    that raises reads as Blocked: an unread rule list describes nothing."""
+    egress_state = getattr(guard, "egress_state", None) if guard is not None else None
+    state = egress_state(session.context) if callable(egress_state) else None
+    hook = getattr(state, "site_rules", None) if state is not None else None
+    if hook is None:
+        return None
+    exempt = bool(getattr(state, "checkout_handoff", False)) and getattr(state, "handoff_page", None) is page
+    try:
+        notice = hook.page_notice(page.url, exempt=exempt)
+    except Exception as exc:  # noqa: BLE001 - fail closed: describe nothing
+        log_failure("browser_site_notice_failed", exc)
+        return PageNotice("blocked", "site_rules_unavailable", UNAVAILABLE_TEXT)
+    return notice if isinstance(notice, PageNotice) else None
+
+
 def hand_over(guard: Any, session: BrowserSession, page: Any, *, checkout: bool = False) -> None:
     """The page is the person's until the agent's next action on this
     session: their own submit (the sign-in form, the one-time code) must
@@ -420,8 +468,24 @@ async def observe(
     page is a challenge (checked first, so a CAPTCHA wall is never
     described as if it were content; with *guard*, the page is the
     person's from that moment: ``hand_over``). With *memory*, the page
-    is remembered as the one the user's next browser.act may be bound to."""
+    is remembered as the one the user's next browser.act may be bound to.
+    The owner's site rules (security S7) are asked first: a Blocked page is
+    blanked and refused without being described or remembered, and an
+    Always-ask page is described with a ``site_notice``."""
     page = await session.page()
+    notice = _site_notice(guard, session, page)
+    if notice is not None and notice.kind == "blocked":
+        try:
+            await page.goto("about:blank", timeout=5_000)
+        except Exception:  # noqa: BLE001 - the refusal stands whether or not the page blanked
+            pass
+        return {
+            "ok": False,
+            "refused": True,
+            "rule": notice.rule,
+            "error": notice.text,
+            "mode": session.mode,
+        }
     challenge = await handoff.detect_challenge(page)
     if challenge is not None:
         return await needs_human(session, page, challenge.kind, challenge.detail, guard=guard)
@@ -447,7 +511,7 @@ async def observe(
             query=query,
             full=full,
         )
-    return {
+    result: dict[str, Any] = {
         "ok": True,
         "url": out.url,
         "title": out.title,
@@ -459,3 +523,6 @@ async def observe(
         "mode": session.mode,
         **(extra or {}),
     }
+    if notice is not None and notice.kind == "always_ask":
+        result["site_notice"] = notice.text
+    return result

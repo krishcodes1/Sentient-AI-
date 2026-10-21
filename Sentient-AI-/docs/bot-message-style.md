@@ -14,6 +14,14 @@ tool, an argument, JSON or a policy is.
 - One emoji at most per message, at the start, with a fixed meaning:
   🔐 needs your OK, ✅ approved or done, ❌ denied, ⚠️ something went
   wrong or needs care, ⛔ not allowed, ⏸ paused, 🛒 a purchase.
+- The safety checks (security wave) add a few marks of their own, each with
+  one meaning: 🚨 a high-risk warning or a likely scam email, ℹ️ for your
+  information, 🚩 a message that is likely a scam, 🔎 a scam check (asking
+  for the message, checking it, or no signs of a scam found), ❔ a scam
+  check that couldn't run, 🔓 a new data breach, 🛡️ breach checks are on.
+- Security notes on an approval card are the one place with more than one
+  mark: each note is its own line, starting with its severity mark (🚨
+  high, ⚠️ warn, ℹ️ info). See "Approval cards" below.
 
 ## Never show
 
@@ -63,6 +71,17 @@ Check code 6d3b dfca 7bf8 cfc5
   to be sent are shown in full. Text that spans several lines goes under
   its label, indented, so it can't pass for another line of the card.
   Yes/No instead of true/false; lists one item per line.
+- When a safety check has something to say, its notes come after the
+  sentence and the risk note (`⚠️ Check this before you approve: ...`),
+  one line each, `<mark> <one plain sentence>`:
+  `🚨 Google Safe Browsing lists evil.example.`,
+  `⚠️ First time Crawler sends to ann@example.com.`,
+  `ℹ️ This reply goes to: ann@example.com.` A note names a rule only in
+  words the owner chose ("Tool rule: Wire reminders."), never a check's id,
+  and never quotes the message being checked. A card with a 🚨 or ⚠️ note
+  never offers "Allow for 7 days" or "Allow low-risk changes". The words
+  live in each check's own module; the marks and layout in `cards.py`
+  (`SEVERITY_MARKS`, `security_note_lines`).
 - Secrets stay masked (`redact_obj` with the CHANNEL policy).
 - `Okay to go ahead? This expires in N minutes.` then the quiet
   `Check code xxxx xxxx xxxx xxxx` line (the same code the web card shows,
@@ -82,7 +101,12 @@ the button again, or answer in the web app."
 - `services/action_text.py`: the plain sentence, short phrase, app name
   and field labels for every action that can ask for approval.
 - `services/notifications/cards.py`: the shared card layout, details
-  rendering, check code and reply notes for every chat channel.
+  rendering, check code and reply notes for every chat channel, and the
+  security notes' marks and lines.
+- The safety checks' own messages (scam check verdicts, mail alerts,
+  breach alerts, file check alerts): `services/scam_check/verdict.py`,
+  `services/mail_scan/messages.py`, `services/breach/messages.py`,
+  `services/file_reputation/alerts.py`.
 - `services/agent/runtime.py` `<style>` and
   `services/agent/channel_style.py`: what the AI is told about how to
   talk, including never naming tools or showing arguments.

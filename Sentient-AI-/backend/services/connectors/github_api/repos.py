@@ -19,7 +19,7 @@ from typing import Any, Optional
 from services.agent import risk
 from services.agent.permissions import ActionCategory
 from services.connectors.base import ConnectorError, path_segment
-from services.connectors.definition import ToolSpec, _schema
+from services.connectors.definition import Outbound, ToolSpec, _schema
 from services.connectors.shaping import clamp_limit
 
 from .common import (
@@ -198,6 +198,7 @@ REPO_ACTIONS: tuple[ToolSpec, ...] = (
         risk_check=risk.when_value(
             "private", lambda value: value is not True, "high", "it creates a public repository"
         ),
+        outbound=Outbound(content=("description",)),
     ),
     ToolSpec(
         "create_branch",
@@ -235,6 +236,7 @@ REPO_ACTIONS: tuple[ToolSpec, ...] = (
         ),
         required_scope="repo.write",
         always_confirm=True,
+        outbound=Outbound(content=("content", "message")),
     ),
     ToolSpec(
         "delete_branch",

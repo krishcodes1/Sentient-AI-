@@ -1074,6 +1074,57 @@ async def export_account(
             yield chunk
         yield ","
 
+        # Security wave (S1): the outgoing-message checks' sent-to history,
+        # as it is held: keyed HMACs with first/last sent and counts, never
+        # an address (services/security/outbound_store.export_for_user).
+        from services.security.outbound_store import export_for_user as outbound_export
+
+        yield '"known_recipients":' + _json(await outbound_export(db, current_user.id)) + ","
+
+        # Security wave (S2): what the mail scam scan concluded about each
+        # flagged message (verdicts, signal codes, the review), never the
+        # message reference or the review input (services/mail_scan/actions).
+        from services.mail_scan.actions import mail_export
+
+        yield '"mail_scam_findings":' + _json(await mail_export(db, current_user.id)) + ","
+
+        # Security wave (S6): the owner's watched addresses and the breaches
+        # found for them (services/breach/store.export_for_user).
+        from services.breach.store import export_for_user as breach_export
+
+        yield '"breach_watch":' + _json(await breach_export(db, current_user.id)) + ","
+
+        # Security wave (S10): this account's file checks. The encrypted
+        # source reference, the source key, the card id and the VirusTotal
+        # analysis id are operational and left out.
+        from models.file_reputation import FileReputationCheck
+
+        async for chunk in _stream_table(
+            FileReputationCheck,
+            FileReputationCheck.created_at,
+            "file_checks",
+            lambda c: {
+                "sha256": c.sha256,
+                "name": c.name,
+                "source": c.source,
+                "media_type": c.media_type,
+                "size_bytes": c.size_bytes,
+                "state": c.state,
+                "verdict": c.verdict,
+                "malicious": c.malicious,
+                "engines": c.engines,
+                "threat_label": c.threat_label,
+                "reason": c.reason,
+                "checked_at": c.checked_at,
+                "uploaded_at": c.uploaded_at,
+                "created_at": c.created_at,
+                "updated_at": c.updated_at,
+                "expires_at": c.expires_at,
+            },
+        ):
+            yield chunk
+        yield ","
+
         async for chunk in _stream_table(
             AuditLog,
             AuditLog.timestamp,

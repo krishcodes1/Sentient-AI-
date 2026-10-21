@@ -189,6 +189,21 @@ def test_classify_tool():
         assert classify_tool(never) is None
 
 
+def test_the_virustotal_upload_is_never_offered_to_an_unattended_run():
+    # Security wave (S10): an upload shares a file with security companies, so
+    # only the owner asks for it, even when a run lists it; the lookup by
+    # fingerprint stays an ordinary read a run may be given. (Block sender is
+    # deferred, decisions 8a, so the fence names no mail block action.)
+    assert classify_tool("security.upload_to_virustotal") is None
+    assert classify_tool("security.check_file") == "read"
+    everything = build_tools([], enabled_capabilities=frozenset({"file_reputation"}))
+    assert {"security.check_file", "security.upload_to_virustotal"} <= {t.name for t in everything}
+    run = run_with(reads=("security.check_file",), writes=("security.upload_to_virustotal",))
+    names = {t.name for t in build_fence(everything, run)[0]}
+    assert "security.check_file" in names
+    assert "security.upload_to_virustotal" not in names
+
+
 @pytest.mark.asyncio
 async def test_a_listed_read_runs():
     provider = ScriptedProvider([call("canvas.get_upcoming", {"days": 7}), LLMResponse(content="Two items due.")])

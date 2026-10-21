@@ -8,12 +8,18 @@ stored encrypted (store.UserFileStore), and an audit row says what happened
 with codes and counts only (``file_uploaded`` / ``file_upload_refused``),
 never a name or any text. Callers get the stored files and, per refused
 file, its display name, code and user-safe sentence.
+
+Security wave (S10): a file screen main.py hands in (use_screen; S10's
+FileReputationService) sees every inbound file first, refused ones included,
+so a file can be looked up in VirusTotal by its fingerprint; annotate then
+adds a flagged file's check to its attachment entry. Without a screen, and
+whenever the screen fails, intake behaves exactly as before.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Optional, Sequence
+from typing import Any, Awaitable, Callable, Optional, Protocol, Sequence
 
 import structlog
 
@@ -39,6 +45,20 @@ class InboundFile:
     media_type: str
     data: bytes
     source: str
+    # Security wave (S10): where the channel can hand the bytes over again
+    # (Telegram's file_id), for a file check's later upload; None elsewhere.
+    source_ref: Optional[str] = None
+
+
+class FileScreen(Protocol):
+    """What intake asks about every inbound file (security wave, S10's
+    FileReputationService): ``screen`` returns at once and never decides
+    whether the file is stored; ``annotate`` adds facts to attachment
+    entries (a flagged file's check) and returns them."""
+
+    async def screen(self, user_id: str, inbound: InboundFile) -> None: ...
+
+    async def annotate(self, user_id: str, entries: list[dict[str, Any]]) -> list[dict[str, Any]]: ...
 
 
 @dataclass(frozen=True)
@@ -65,10 +85,17 @@ class FileIntake:
         *,
         gate: Optional[IntakeGate] = None,
         audit: Optional[AuditSink] = None,
+        screen: Optional[FileScreen] = None,
     ) -> None:
         self.store = store
         self._gate = gate
         self._audit = audit
+        # Security wave (S10): None until main.py hands one in (use_screen).
+        self._screen = screen
+
+    def use_screen(self, screen: FileScreen) -> None:
+        """Wire the file screen after construction (main.py; security wave)."""
+        self._screen = screen
 
     async def refusal(self) -> Optional[str]:
         """None when files may be read now, else the sentence to answer
@@ -85,6 +112,7 @@ class FileIntake:
         result = IntakeResult()
         refusal = await self.refusal()
         for inbound in files:
+            await self._screen_one(user_id, inbound)
             display = sanitize_display_name(inbound.name)
             if refusal is not None:
                 result.errors.append(IntakeError(display, "switched_off", refusal))
@@ -105,6 +133,33 @@ class FileIntake:
             result.files.append(info)
             await self._record(user_id, inbound, info=info)
         return result
+
+    async def _screen_one(self, user_id: str, inbound: InboundFile) -> None:
+        """Hand one inbound file to the screen (security wave, S10). A screen
+        that fails is logged by type and never stops the upload."""
+        if self._screen is None:
+            return
+        try:
+            await self._screen.screen(user_id, inbound)
+        except Exception as exc:
+            logger.warning("file_screen_failed", error_type=type(exc).__name__)
+
+    async def annotate(self, user_id: str, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Attachment entries as the screen annotates them (a flagged file's
+        check added; security wave, S10): *entries* unchanged without a
+        screen, or when the screen fails or answers anything but a list
+        (logged by type)."""
+        if self._screen is None:
+            return entries
+        try:
+            annotated = await self._screen.annotate(user_id, entries)
+        except Exception as exc:
+            logger.warning("file_annotate_failed", error_type=type(exc).__name__)
+            return entries
+        if not isinstance(annotated, list):
+            logger.warning("file_annotate_bad_answer", answer_type=type(annotated).__name__)
+            return entries
+        return annotated
 
     async def _record(
         self,

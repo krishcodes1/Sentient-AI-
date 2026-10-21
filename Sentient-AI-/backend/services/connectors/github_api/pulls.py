@@ -19,7 +19,7 @@ from typing import Any, Optional
 
 from services.agent.permissions import ActionCategory
 from services.connectors.base import ConnectorError, path_segment
-from services.connectors.definition import ToolSpec, _schema
+from services.connectors.definition import Outbound, ToolSpec, _schema
 from services.connectors.shaping import clamp_limit
 
 from .common import (
@@ -134,6 +134,7 @@ PULL_ACTIONS: tuple[ToolSpec, ...] = (
             draft={"type": "boolean", "description": "Open as a draft"},
         ),
         required_scope="pulls.write",
+        outbound=Outbound(content=("title", "body")),
     ),
     ToolSpec(
         "review_pr",
@@ -148,6 +149,7 @@ PULL_ACTIONS: tuple[ToolSpec, ...] = (
         ),
         required_scope="pulls.write",
         always_confirm=True,
+        outbound=Outbound(content=("body",)),
     ),
     ToolSpec(
         "request_reviewers",
@@ -186,6 +188,7 @@ PULL_ACTIONS: tuple[ToolSpec, ...] = (
         ),
         required_scope="pulls.write",
         always_confirm=True,
+        outbound=Outbound(content=("commit_title", "commit_message")),
     ),
 )
 

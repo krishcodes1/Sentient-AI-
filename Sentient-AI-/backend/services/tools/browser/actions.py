@@ -79,7 +79,7 @@ from services.tools.browser._shared import log_failure as _log_failure
 from services.tools.browser._shared import stale_result as _stale
 from services.tools.browser._shared import valid_ref as _valid_ref
 from services.tools.browser.checkout import markers
-from services.tools.browser.guard import READ_CLICK_REASONS, StaleRef, wait_for_quiet
+from services.tools.browser.guard import READ_CLICK_REASONS, EgressHooks, StaleRef, wait_for_quiet
 from services.tools.browser.pagememory import PageMemory
 from services.tools.browser.session import BrowserSession, BrowserSessionManager, Mode
 
@@ -170,11 +170,15 @@ class BrowserReadToolkit:
         handoff: HandoffDetector,
         clock: Callable[[], float] = time.monotonic,
         page_memory: Optional[PageMemory] = None,
+        egress_hooks: Optional[EgressHooks] = None,
     ) -> None:
         self._sessions = sessions
         self._guard = guard
         self._handoff = handoff
         self._clock = clock
+        # Security wave (S4, S7): the owner's site rules and the link
+        # lookup, bound to each context this toolkit guards (None: neither).
+        self._egress_hooks = egress_hooks
         # Shared with the write tiers: every observation here is the page
         # their next approval card is bound to (spec §5).
         self._memory = page_memory
@@ -287,6 +291,7 @@ class BrowserReadToolkit:
         if self._guarded.get(session.user_id) is context:
             return
         await self._guard.install_egress_guard(context, account_mode=session.mode == "account")
+        _shared.attach_egress_hooks(self._guard, session, self._egress_hooks)
         self._guarded[session.user_id] = context
 
     # -- observation ---------------------------------------------------------
@@ -367,6 +372,26 @@ class BrowserReadToolkit:
         state = self._guard.egress_state(session.context)
         return 0 if state is None else len(state.blocked)
 
+    def _notes_count(self, session: BrowserSession) -> int:
+        """How many security notes the guard's hooks have left on this
+        context so far (none without a state: a test double)."""
+        state = self._guard.egress_state(session.context)
+        notes = getattr(state, "notes", None) if state is not None else None
+        return len(notes) if isinstance(notes, list) else 0
+
+    def _with_notes(self, session: BrowserSession, result: dict[str, Any], *, since: int) -> dict[str, Any]:
+        """*result* with the texts of the notes the hooks added after the
+        first *since* (security wave: a look-alike site, a lookup that could
+        not run) as ``security_notes``; unchanged when there are none."""
+        state = self._guard.egress_state(session.context)
+        notes = getattr(state, "notes", None) if state is not None else None
+        if not isinstance(notes, list):
+            return result
+        texts = [n["text"] for n in notes[since:] if isinstance(n, dict) and n.get("text")]
+        if texts:
+            result["security_notes"] = texts
+        return result
+
     def _blocked_reason(self, session: BrowserSession, *, since: int = 0) -> Optional[str]:
         """What the egress guard refused last, as ``"<url>: <reason>"``, if
         it refused anything after the first *since* entries (so an old
@@ -422,6 +447,7 @@ class BrowserReadToolkit:
             return _error(f"Refusing to open that URL: {reason}")
         page = await session.page()
         blocked_before = self._blocked_count(session)
+        notes_before = self._notes_count(session)
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS)
         except PlaywrightTimeoutError:
@@ -458,7 +484,7 @@ class BrowserReadToolkit:
             result["summary"] = f"{result['summary']} · HTTP {status}"
             if session.task.summaries:
                 session.task.summaries[-1] = result["summary"]
-        return result
+        return self._with_notes(session, result, since=notes_before)
 
     @staticmethod
     async def _past_redirects(page: Any) -> None:
@@ -566,6 +592,7 @@ class BrowserReadToolkit:
             return _error(markers.READ_CLICK_MESSAGE, consequential=reason)
         locator = page.locator(f"aria-ref={ref}")
         blocked_before = self._blocked_count(session)
+        notes_before = self._notes_count(session)
         # A click with no card sends nothing: the guard stops any page
         # script's request but a GET, and any order address, until the
         # click has settled and the network is quiet (at most 2 s).
@@ -599,9 +626,10 @@ class BrowserReadToolkit:
         blocked = self._blocked_reason(session, since=blocked_before)
         if blocked is not None and page.url.startswith("chrome-error://"):
             return _error(f"That click was refused by the network policy: {blocked}")
-        return await self._observe(
+        result = await self._observe(
             session, "click", {"ref": ref, "name": self._label(session, str(name or ""))}
         )
+        return self._with_notes(session, result, since=notes_before)
 
     @staticmethod
     async def _order_reason(page: Any, ref: str) -> Optional[str]:

@@ -25,8 +25,14 @@ export const ACT_TOOL = "browser.act";
 
 // Only these tools have reserved keys: each toolkit refuses any argument no action takes, so a
 // key starting with "_" there was added by the backend. Every other tool's arguments are shown
-// whole, so nothing that will run is hidden from the person approving it.
-const RESERVED_KEY_TOOLS = new Set(["desktop.act", "browser.act", PURCHASE_TOOL]);
+// whole, so nothing that will run is hidden from the person approving it. A VirusTotal upload
+// card (security wave) keeps the file the server holds under "_upload".
+const RESERVED_KEY_TOOLS = new Set([
+  "desktop.act",
+  "browser.act",
+  PURCHASE_TOOL,
+  "security.upload_to_virustotal",
+]);
 
 export function shownArguments(approval: PendingApproval): Record<string, unknown> {
   const args = approval.arguments ?? {};

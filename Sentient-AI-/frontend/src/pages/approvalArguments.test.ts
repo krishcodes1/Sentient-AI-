@@ -1,6 +1,7 @@
 /**
  * Tests for the approval-card helpers: shownArguments leaves the backend's reserved key out of a
- * desktop.act, browser.act or browser.checkout card and shows every other tool's arguments whole;
+ * desktop.act, browser.act, browser.checkout or VirusTotal upload card and shows every other
+ * tool's arguments whole;
  * purchaseCard reads a checkout card's `_checkout` facts; approvalImage accepts only a base64
  * raster data URL; approvalDetails lists every value in everyday words (the server's `details`, or
  * the arguments labelled here for an older server) and stepLabel names a finished step plainly.
@@ -70,6 +71,17 @@ describe("shownArguments", () => {
       approval("browser.checkout", { merchant: "shop.example.com", amount: 23.4, _checkout: CHECKOUT }),
     );
     expect(shown).toEqual({ merchant: "shop.example.com", amount: 23.4 });
+  });
+
+  it("hides the reserved _upload key of a VirusTotal upload card", () => {
+    const shown = shownArguments(
+      approval("security.upload_to_virustotal", {
+        sha256: "ab".repeat(32),
+        file_name: "invoice.pdf",
+        _upload: { holder: "h-1", size: 1234 },
+      }),
+    );
+    expect(shown).toEqual({ sha256: "ab".repeat(32), file_name: "invoice.pdf" });
   });
 
   it("shows every argument of any other tool", () => {

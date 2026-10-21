@@ -234,6 +234,25 @@ _CANVAS_PATHS = ["/api/v1/", "/login/oauth2/token", "/files/"]
 # Policy key of the unauthenticated Canvas school search (see below).
 CANVAS_SCHOOL_SEARCH_POLICY = "canvas_school_search"
 
+# Security wave (security10): the outside security services. None is a
+# connector: the registry neither derives nor replaces these keys, and each
+# owner key travels only in a request header, never in a URL.
+#
+# Policy key of the owner-keyed link lookups (services/reputation/links.py): Google Safe
+# Browsing v4 Lookup and Web Risk uris.search, HTTPS only, one path each. Not a connector:
+# the registry neither derives nor replaces it, and never the "google" key.
+LINK_REPUTATION_POLICY = "link_reputation"
+# Policy keys of the breach monitor's two fixed vendors (services/breach). Not
+# connectors: the registry never derives or replaces them.
+HIBP_POLICY = "hibp"
+PWNED_PASSWORDS_POLICY = "pwned_passwords"
+# Policy keys of the VirusTotal file lookups (services/file_reputation). Not connectors: the
+# registry never derives or replaces them. The lookup key can reach only GET /files/<sha256>
+# (its prefix ends in a slash, so it never matches the upload endpoint /api/v3/files); the
+# upload key is used only by an approved upload and its analysis polls.
+VIRUSTOTAL_LOOKUP_POLICY = "virustotal_lookup"
+VIRUSTOTAL_UPLOAD_POLICY = "virustotal_upload"
+
 # Default network policies per connector (deny-by-default)
 DEFAULT_POLICIES: dict[str, NetworkPolicy] = {
     "canvas": NetworkPolicy(
@@ -283,6 +302,43 @@ DEFAULT_POLICIES: dict[str, NetworkPolicy] = {
         connector_type=CANVAS_SCHOOL_SEARCH_POLICY,
         allowed_hosts=["canvas.instructure.com"],
         allowed_paths={"canvas.instructure.com": ["/api/v1/accounts/search"]},
+        https_only=True,
+    ),
+    # Security wave (security10): the owner-keyed outside services, each on
+    # its own key with only the paths its client calls, HTTPS only.
+    LINK_REPUTATION_POLICY: NetworkPolicy(
+        connector_type=LINK_REPUTATION_POLICY,
+        allowed_hosts=["safebrowsing.googleapis.com", "webrisk.googleapis.com"],
+        allowed_paths={
+            "safebrowsing.googleapis.com": ["/v4/threatMatches:find"],
+            "webrisk.googleapis.com": ["/v1/uris:search"],
+        },
+        https_only=True,
+    ),
+    HIBP_POLICY: NetworkPolicy(
+        connector_type=HIBP_POLICY,
+        allowed_hosts=["haveibeenpwned.com"],
+        allowed_paths={
+            "haveibeenpwned.com": ["/api/v3/breachedaccount/", "/api/v3/subscription/status"]
+        },
+        https_only=True,
+    ),
+    PWNED_PASSWORDS_POLICY: NetworkPolicy(
+        connector_type=PWNED_PASSWORDS_POLICY,
+        allowed_hosts=["api.pwnedpasswords.com"],
+        allowed_paths={"api.pwnedpasswords.com": ["/range/"]},
+        https_only=True,
+    ),
+    VIRUSTOTAL_LOOKUP_POLICY: NetworkPolicy(
+        connector_type=VIRUSTOTAL_LOOKUP_POLICY,
+        allowed_hosts=["www.virustotal.com"],
+        allowed_paths={"www.virustotal.com": ["/api/v3/files/"]},
+        https_only=True,
+    ),
+    VIRUSTOTAL_UPLOAD_POLICY: NetworkPolicy(
+        connector_type=VIRUSTOTAL_UPLOAD_POLICY,
+        allowed_hosts=["www.virustotal.com"],
+        allowed_paths={"www.virustotal.com": ["/api/v3/files", "/api/v3/analyses/"]},
         https_only=True,
     ),
 }

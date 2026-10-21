@@ -39,6 +39,7 @@ from .definition import (
     ConnectorDefinition,
     CredentialField,
     NetworkSpec,
+    Outbound,
     ToolSpec,
     _schema,
 )
@@ -225,6 +226,7 @@ ACTIONS: tuple[ToolSpec, ...] = (
         required_scope="submissions.write",
         # Handing in work cannot be taken back and speaks for the student.
         always_confirm=True,
+        outbound=Outbound(content=("submission_data",)),
     ),
     # top10:file_extraction: course files, read with the courses.read scope
     # existing rows already hold (no re-grant). list_files falls back to the

@@ -8,8 +8,8 @@ fence (services/agent/unattended.py) refuses anything else that is named.
 Some families are never given to an unattended run, whatever the owner
 listed: acting on the computer or in a browser, installing software, saving
 memories, watches, schedules and triggers (no self-replication), the tool
-finder, skills, the tutor and third-party MCP tools. Every DELETE, EXECUTE
-and FINANCIAL action is out too.
+finder, skills, the tutor and third-party MCP tools, and an upload of a file
+to VirusTotal. Every DELETE, EXECUTE and FINANCIAL action is out too.
 """
 
 from __future__ import annotations
@@ -36,7 +36,16 @@ NEVER_TYPES: frozenset[str] = frozenset(
         "mcp",
     }
 )
-NEVER_TOOLS: frozenset[str] = frozenset({"web.screenshot", "files.view_page", "files.forget"})
+NEVER_TOOLS: frozenset[str] = frozenset(
+    {
+        "web.screenshot",
+        "files.view_page",
+        "files.forget",
+        # Security wave (S10): sending a file to VirusTotal shares it with
+        # security companies, so only the owner asks for it, never a run.
+        "security.upload_to_virustotal",
+    }
+)
 # Given to every unattended run: the model's clock.
 ALWAYS_READS: frozenset[str] = frozenset({"reminders.now"})
 FIND_TOOL = "tools.find"

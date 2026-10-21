@@ -2,7 +2,7 @@
  * Tests for the chat's approval cards on the way to a purchase: a browser.act card is the one
  * sentence the backend built from facts (no tool line, no JSON, none of the typed text) with the
  * picture of the page it will run on, and approving a purchase shows the confirmation screenshot that comes back with the decision under
- * the row that records it.
+ * the row that records it; a card's security notes show between its sentence and the risk warning.
  *
  * Why it exists: The owner approves several browser.act cards before any checkout; a card that
  * read `{"action": "fill", "ref": "e7", "text": …}` under "Tool browser.act wants to run" told
@@ -209,6 +209,25 @@ describe("Approval cards on the way to a purchase", () => {
       name: "The page this step will run on, with its target outlined in red",
     });
     expect(img).toHaveAttribute("src", SHOT);
+  });
+
+  it("shows the card's security notes above the risk warning", async () => {
+    // Security wave: what the server's call checks noticed, on the act card too.
+    await parkCards({
+      ...ACT,
+      risk_note: "Part of this request came from a web page.",
+      security_notes: [
+        { kind: "site_sensitive", severity: "warn", text: "shop.example.com handles payments." },
+        { kind: "recipients_resolved", severity: "info", text: "Nothing else to check." },
+      ],
+    });
+    const section = await screen.findByRole("region", { name: "Security notes" });
+    expect(section).toHaveTextContent("shop.example.com handles payments.");
+    expect(section).toHaveTextContent("Nothing else to check.");
+    const warning = screen.getByText("Check this first");
+    expect(section.compareDocumentPosition(warning) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const reason = screen.getByText(ACT.reason);
+    expect(reason.compareDocumentPosition(section) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("draws no picture for a browser.act card whose image is not a raster data URL", async () => {

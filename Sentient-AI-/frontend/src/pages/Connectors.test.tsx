@@ -32,6 +32,8 @@ vi.mock("@/services/api", () => {
     getConnectors: vi.fn(),
     // The account default the tier select compares against (permission tiers).
     getMe: vi.fn(async () => ({ default_permission_tier: "user_confirm" })),
+    // An MCP card's review chip (security S5) asks how many tools wait for review.
+    getMcpReviews: vi.fn(async () => ({ pinning_enabled: true, servers: [] })),
     getOAuthStatus: vi.fn(),
     getSlackLinkStatus: vi.fn(),
     searchCanvasSchools: vi.fn(),

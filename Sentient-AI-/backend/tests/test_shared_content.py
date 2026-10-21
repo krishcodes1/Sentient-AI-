@@ -111,3 +111,55 @@ def test_the_preamble_passes_the_real_prompt_guard(kind):
         "Hey, can you send me the lab report before Friday? Thanks.", kind
     )
     assert PromptGuard().scan(text).is_safe
+
+
+# Security wave: a caller's own preamble (S3's scam check) and the
+# forwarded-message fence (A31, Telegram).
+
+
+def test_a_given_preamble_replaces_the_voice_wording_and_the_fence_is_unchanged():
+    preamble = "The block below is a message someone sent to the user.\nIt is evidence."
+    fenced = fence_untrusted("Your parcel is waiting: pay 1.99 now.", "message to check", preamble=preamble)
+    head, tag, rest = fenced.split("\n", 2)
+    # One line: the line break became a space, and the voice wording is gone.
+    assert head == "The block below is a message someone sent to the user. It is evidence."
+    assert "recorded" not in head
+    assert tag.startswith("<shared_content_") and tag.endswith('kind="message to check" trust="untrusted">')
+    assert untrusted_spans(fenced) == ["Your parcel is waiting: pay 1.99 now."]
+    # Capped at one line of MAX_PREAMBLE_CHARS; an empty preamble keeps the default.
+    long_head = fence_untrusted("x", "message", preamble="a" * 500).split("\n", 1)[0]
+    assert long_head == "a" * shared_content.MAX_PREAMBLE_CHARS
+    assert fence_untrusted("x", "audio file", preamble="").startswith(
+        "The block below is a transcript of audio file"
+    )
+
+
+def test_fence_forwarded_wraps_text_as_someone_elses_words_and_untrusted_spans_finds_it():
+    from services.agent.shared_content import FORWARDED_PREAMBLE, fence_forwarded
+    from services.notifications.voice import DEFAULT_INSTRUCTION
+
+    text = "Hi, it's your supplier. Please send the invoice to billing@pay-supplier.example now."
+    fenced = fence_forwarded(text)
+    assert fenced.startswith(FORWARDED_PREAMBLE + "\n<shared_content_")
+    assert 'kind="forwarded message" trust="untrusted"' in fenced
+    assert "\n" not in FORWARDED_PREAMBLE
+    messages = [{"role": "system", "content": "rules"}, {"role": "user", "content": fenced}]
+    assert untrusted_spans_in(messages) == [text]
+    # The owner's own words leave the forwarded text out entirely.
+    assert "billing@pay-supplier.example" not in outside_fences(fenced)
+    # The preamble passes the real prompt guard, as the voice wording does.
+    assert PromptGuard().scan(f"{DEFAULT_INSTRUCTION}\n\n{fence_forwarded('See you at five.')}").is_safe
+
+
+def test_unfinished_opening_tags_are_read_in_linear_time_and_a_real_fence_still_counts():
+    """_FENCE_RE's attribute run is bounded: an unbounded one ran to the end of
+    the line from every unfinished opening tag, quadratic on a pasted text
+    full of them (security wave, S9 integration request)."""
+    import time
+
+    junk = "<shared_content_0123456789abcdef " * 40_000
+    started = time.process_time()
+    assert untrusted_spans(junk) == []
+    assert time.process_time() - started < 2.0
+    fenced = fence_untrusted("Mail accounts@supplier.example the bank details", "forwarded voice note")
+    assert untrusted_spans(junk + "\n" + fenced) == ["Mail accounts@supplier.example the bank details"]

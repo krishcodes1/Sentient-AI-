@@ -85,6 +85,16 @@ A bad definition stops the app at import with a list of every problem.
     that carry an object id (`message_id`); only a LOW action may declare
     them, and each must be a schema property. The set of LOW actions is
     pinned by `tests/test_risk_grading.py`: adding one is a reviewed change.
+  - **Outbound fields** (security wave, S1). A write whose text other people
+    read declares `outbound=Outbound(...)`: `content` (argument paths such
+    as `body` or `event_data.summary`), `recipients` (paths holding email
+    addresses), `resolve` (`"reply"` or `"draft"` when the recipients come
+    from the message or draft the call names), `delivers=False` for a draft,
+    `history=True` on a mail send, and `shares_content=True` on a forward,
+    share or invite. Only a non-READ action may declare it; every path must
+    start with a schema property, `resolve` needs its id argument
+    (`message_id`, `draft_id`), `history` needs recipients or `resolve` on a
+    delivering action, and `shares_content` needs recipients.
 - **Dispatch parity.** Every non-FINANCIAL action is a public coroutine on the
   connector class, and `_ACTIONS` (or a legacy `_ACTION_MAP`) lists exactly
   those names. The coroutine's keyword parameters equal the schema

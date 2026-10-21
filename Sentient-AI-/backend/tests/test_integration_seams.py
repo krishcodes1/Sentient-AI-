@@ -60,6 +60,16 @@ RESERVED = [
     ("0022_event_triggers", "0021_study", "event_triggers"),
     ("0023_permission_grants", "0022_event_triggers", "permission_tiers"),
     ("0024_media_transcripts", "0023_permission_grants", "video_transcripts"),
+    # Security wave (security10): one revision per skill that adds schema, plus
+    # the shared key store and card notes (0025).
+    ("0025_security_service_keys", "0024_media_transcripts", "security_service_keys"),
+    ("0026_known_recipients", "0025_security_service_keys", "outbound_checks"),
+    ("0027_mail_security", "0026_known_recipients", "mail_scam_scan"),
+    ("0028_mcp_tool_pins", "0027_mail_security", "mcp_pinning"),
+    ("0029_breach_watch", "0028_mcp_tool_pins", "breach_monitor"),
+    ("0030_browser_site_rules", "0029_breach_watch", "browser_site_rules"),
+    ("0031_tool_rules", "0030_browser_site_rules", "tool_rules"),
+    ("0032_file_reputation", "0031_tool_rules", "file_reputation"),
 ]
 
 
@@ -71,13 +81,13 @@ def _alembic(db_path: Path) -> Config:
     return config
 
 
-def test_the_reserved_revisions_form_one_linear_chain_from_0016_to_0024():
+def test_the_reserved_revisions_form_one_linear_chain_from_0016_to_0032():
     script = ScriptDirectory.from_config(_alembic(Path("unused.db")))
-    assert script.get_heads() == ["0024_media_transcripts"]
+    assert script.get_heads() == ["0032_file_reputation"]
     # Walking down from the head passes through exactly the reserved ids, in
     # order, and lands on the 0016 merge.
     walked = []
-    revision = script.get_revision("0024_media_transcripts")
+    revision = script.get_revision("0032_file_reputation")
     while revision is not None and revision.revision != "0016_merge_app_approvals":
         walked.append((revision.revision, revision.down_revision))
         revision = script.get_revision(revision.down_revision)
@@ -88,7 +98,7 @@ def test_the_reserved_revisions_form_one_linear_chain_from_0016_to_0024():
     )
     for (rev, _, _), (child, _, _) in zip(RESERVED, RESERVED[1:], strict=False):
         assert script.get_revision(rev).nextrev == frozenset({child})
-    assert script.get_revision("0024_media_transcripts").nextrev == frozenset()
+    assert script.get_revision("0032_file_reputation").nextrev == frozenset()
 
 
 def test_each_reserved_revision_lives_in_its_own_file():
@@ -430,8 +440,15 @@ def test_report_context_carries_the_default_provider_last():
     field = fields[names.index("default_provider")]
     assert (field.name, field.default) == ("default_provider", "")
     # Later top10 facts are appended after it, in wave order
-    # (top10:knowledge_base added embedding_backend).
-    later_order = ("local_ocr_installed", "embedding_backend", "speech_local_installed", "default_provider_audio")
+    # (top10:knowledge_base added embedding_backend), then the security
+    # wave's service_keys.
+    later_order = (
+        "local_ocr_installed",
+        "embedding_backend",
+        "speech_local_installed",
+        "default_provider_audio",
+        "service_keys",
+    )
     later = names[names.index("default_provider") + 1 :]
     assert later == [name for name in later_order if name in later]
     assert registry.default_context().default_provider == ""

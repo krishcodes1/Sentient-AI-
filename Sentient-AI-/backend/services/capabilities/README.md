@@ -259,3 +259,122 @@ availability reads environment facts (`speech_local_installed`,
 (`speech_to_text`), so the Permissions page shows the Install button and
 the `<permissions>` block may offer `system.install_capability`. Nothing is
 offered to the model: no fetched content can ask for audio to be processed.
+
+## Security wave capabilities
+
+The security wave (security10) adds one capability per skill, registered after
+`video_transcripts` in skill order, every one on by default. Most are policy
+switches (`tools=()`); `scam_check` claims `security.check_scam` and
+`file_reputation` claims `security.check_file` and
+`security.upload_to_virustotal`, the `security.*` built-in family
+(`services/tools/security_checks.py`). Three need the owner's own key for an
+outside service: their `availability()` reads `ReportContext.service_keys`
+(the names of the keys stored or set in `.env`, never a key), so
+`link_reputation`, `breach_monitor` and `file_reputation` stay blocked, with a
+reason pointing to Security → Service keys, until one is saved there. Each
+skill's paragraph below is pasted at integration.
+
+### Outbound message checks (`outbound_checks`)
+
+A policy switch with a floor. Some protections must never be off: their core lives in
+`services/security` and runs whatever the switch says. For outbound messages that core is the
+hidden-character floor (`services/security/outbound.OutboundFloor`, the executor's default at
+both card binds and at dispatch) and the refusal of a recipient address that hides characters.
+The `outbound_checks` switch (`tools=()`, always available, on by default, `risk="low"`) adds only
+the parts that cost reads or only inform: the recipient and link notes on the card (READs through
+the executor, one history SELECT, S4's lookup) and the escalation of a flagged call that would
+have run without a card. A switch read error counts as on. Its `when_denied` line tells the model
+hidden characters are still removed.
+
+### Scam checks on new email (`mail_scam_scan`)
+
+`mail_scam_scan` is a policy switch (`tools=()`) that runs a background check with its own model
+budget. It is on by default (medium risk) and always available, since alerts also reach the
+Security page. Its sweeper (`services/notifications/mail_scan.py`) re-reads the switch before
+every account it checks and every review (a gate that cannot be read is off). Its AI spending is
+capped by its own setting, `ai_reviews_per_day` (20 per person per UTC day, counted from the
+findings' `reviewed_at`), never by the shared unattended budget, and `keep_alerts_days` (30)
+sets how long findings are kept. Every change it proposes is an approval card parked with
+`AgentRuntime.park_card` and the origin `mailcheck:<finding id>`.
+
+### Scam checks when asked (`scam_check`)
+
+A capability with a tool and channel entry points. `scam_check` claims one exact tool,
+`security.check_scam` (a READ in the shared `security` family dispatched by `SecurityToolkit`;
+`main.py` registers `ScamCheckService.check_for_tool`). Its out-of-turn entry points (the web
+chat's `/scam`, the Security page route, and the Telegram interceptor and Slack keyword) read the
+switch per check from `capability_statuses` and fail closed, like the input features. Its one
+owner setting is a per-person daily cap, `checks_per_day` (default 30), read per check through
+`capability_settings` (a read error falls back to the default). It has no key of its own: the
+Safe Browsing / Web Risk key belongs to `link_reputation`.
+
+### Link reputation (`link_reputation`)
+
+A policy switch (`tools=()`), on by default and low risk, that reads blocked until
+`ReportContext.service_keys` holds `safe_browsing` or `web_risk` (an HIBP or VirusTotal key
+alone does not unblock it), so adding a Google key is the only step. The key lives in the shared
+encrypted store (`InstallationService.service_key`), never in `capability_settings`, which holds
+only `lookups_per_minute` (60) and `lookups_per_day` (2,000). `LinkReputation` reads the switch
+per call through `capability_statuses()` and fails closed for egress when it cannot (nothing is
+sent, the link is marked "not checked"). Local link checks need no switch. There is no model
+tool: the in-turn path for "is this link dangerous?" is the scam check's `security.check_scam`.
+
+### MCP tool pinning (`mcp_pinning`)
+
+`mcp_pinning` ("Hold changed MCP tools for review", on by default, low risk) is another policy
+switch: it gates no tool and is always available. `McpPinService` reads it through the `enabled`
+hook `main.py` wires, and a read error counts as on. While it is on, the MCP catalog offers, and
+the dispatcher and the `mcp_pin` call check allow, only tools whose current definition matches the
+one approved; while it is off, MCP tools behave as before and nothing is recorded (changes made
+meanwhile surface for review when it is turned back on). It has no settings: the limits (500 pins
+per server, 32 KiB per stored definition, removed pins kept 180 days, one message per server per
+6 hours) are constants in `services/mcp/pinning.py` and `pin_notify.py`.
+
+### Breach monitor (`breach_monitor`)
+
+`breach_monitor` is a policy switch (`tools=()`) whose availability is an owner key: it reads
+`"hibp" in ctx.service_keys`, so it is on by default but blocked, with "Breach checks use your
+own Have I Been Pwned key, and none is saved yet. Add one in Security → Service keys.", until the
+key exists (stored or in `.env`); saving one turns it on with no second click. The weekly sweeper
+and Check now read the effective state through `capability_gate` (fail closed), and re-read it
+before every lookup. The keyless feature it governs, the Security page's password check, reads
+the owner's switch value (`CapabilityStatus.enabled`), not `effective`, so it works without a key
+yet stops when the owner turns breach checks off. It has no settings (the weekly cadence is a
+constant), so there is no `_SETTINGS_DEFAULTS` entry and no `CapabilitySettings.tsx` row.
+
+### Site rules for the browser (`browser_site_rules`)
+
+`browser_site_rules` is a policy switch (`tools=()`, on by default, low risk) for a list the owner
+keeps: Blocked / Always ask / Trusted site rules and overrides of the built-in sensitive-site
+categories. Lists never live in `capability_settings` (whole numbers only); they get their own
+table (`browser_site_rules`) behind owner-only routes, and every write is audited in the same
+transaction as the change. Hot paths (the browser guard on every navigation, the web resolver on
+every hop) read an immutable in-memory snapshot without touching the database; the service rebuilds
+it after each owner change, on a "capabilities" change and at most every 60 s, keeps the last good
+one when a read fails, and fails closed (browser and web page tools refused, navigations stopped)
+when none was ever loaded. The switch is re-read on every call (the installation's 5 s cache); one
+that cannot be read counts as on. Off means no rule applies at all, owner rules included.
+
+### Tool rules (`tool_rules`)
+
+`tool_rules` ('Ask before calls that break a tool rule', on by default) is a policy switch
+(`tools=()`) like `hide_personal_details` and `low_risk_actions`: it only ever adds approval
+cards (a call that breaks a built-in or owner rule asks, and its card names the rule), never
+removes one. It is read once per turn by the first check of the security call-checks pipeline
+(`services/security/tool_rules/check.py`), treats a gate error as on, and keeps its rules in
+their own tables (migration `0031_tool_rules`), since capability settings hold numbers only.
+
+### File reputation (`file_reputation`)
+
+`file_reputation` claims `security.check_file` and `security.upload_to_virustotal` (exact names,
+because S3's `check_scam` shares the `security.` family). It is a key-gated capability: its
+availability reads `"virustotal" in ctx.service_keys`, so it is on by default but blocked until
+a key exists, and its four limits (`lookups_per_minute` 4, `lookups_per_day` 500,
+`automatic_lookups_per_day` 100, `lookups_per_user_per_day` 100, whole numbers 1..10000) are read
+per request through `capability_statuses()["file_reputation"].settings`; a report that cannot be
+read counts as off. `security.upload_to_virustotal` has an approval card of its own: its bind
+ties the card to the file's SHA-256 and stores the file's facts under the reserved `_upload` key
+(hidden from the card's shown arguments and kept out of the audit log); at approval the toolkit
+fetches the bytes again (Telegram, the mail connector through the executor) or reads them from
+memory (web, Slack), hashes them again, and refuses a mismatch or missing bytes, so nothing but
+the approved file can be sent.

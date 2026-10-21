@@ -108,10 +108,13 @@ from services.agent.runtime import (
     PURCHASE_RULE_POLICY,
     PrecheckRefusal,
     Tool,
+    canonical_tool_name,
 )
 from services.capabilities.base import Capability, CapabilityStatus
 from services.memory import MAX_MEMORY_CHARS
 from services.platform import current as current_platform
+from services.security.call_checks import CallCheckPipeline, CallFacts, arguments_not_object
+from services.security.outbound import CleanedCall, OutboundFloor
 from services.tools.browser import guard as browser_guard
 from services.tools.browser import handoff as browser_handoff
 from services.tools.browser.act import ACT_ACTIONS as BROWSER_ACT_ACTIONS
@@ -163,7 +166,7 @@ _EMPTY_SCHEMA: dict[str, Any] = {"type": "object", "properties": {}, "required":
 # connector modules can declare their own catalogs without importing this
 # module; they are re-exported here under the same names.
 from services.connectors import registry as connector_registry  # noqa: E402
-from services.connectors.definition import ToolSpec, _schema  # noqa: E402
+from services.connectors.definition import Outbound, ToolSpec, _schema  # noqa: E402
 
 # Keyed by connector type. The connector entries come from each connector
 # module's DEFINITION (services/connectors/registry.py); the built-in
@@ -436,6 +439,8 @@ CONNECTOR_CATALOG: dict[str, list[ToolSpec]] = {
                     "description": "focus_window: a window index from observe windows (0 = the app's front window)",
                 },
             ),
+            # Security wave (S1): typed text can carry hidden characters.
+            outbound=Outbound(content=("text",)),
         ),
     ],
     # Built-in, three capabilities, all off by default: "browser_control"
@@ -527,6 +532,8 @@ CONNECTOR_CATALOG: dict[str, list[ToolSpec]] = {
                     "description": "press: the key to press",
                 },
             ),
+            # Security wave (S1): typed text can carry hidden characters.
+            outbound=Outbound(content=("text", "fields")),
         ),
         ToolSpec(
             "checkout",
@@ -1395,6 +1402,15 @@ def study_toolkit_of(executor: Any) -> StudyToolkit:
     return toolkit
 
 
+def security_toolkit_of(executor: Any) -> SecurityToolkit:
+    """The security.* family's dispatcher *executor* answers through
+    (``ConnectorToolExecutor.security_toolkit``); main.py registers each
+    security skill's handlers on it (S3's check_scam, S10's file tools and
+    the toolkit its upload card hooks read). Security wave (security10)."""
+    toolkit: SecurityToolkit = executor.security_toolkit
+    return toolkit
+
+
 def _study_precheck(toolkit: StudyToolkit, action: str, params: Mapping[str, Any]) -> Optional[PrecheckRefusal]:
     """study.delete's rules before any card (a "_deck" the model brought, a
     malformed id), filed under study_rule; the deck itself is checked by the
@@ -1618,6 +1634,95 @@ CONNECTOR_CATALOG["video"] = [
         _schema(limit={"type": "integer", "description": "How many to list (1-20, default 10)"}),
     ),
 ]
+
+# Security wave (security10): the "security" built-in family.
+# services/tools/security_checks.py dispatches each action to the handler a
+# skill registered (main.py), and refuses an action nobody registered.
+# security.check_scam (S3, capability "scam_check") is a READ: wording and
+# link checks only, no model call. security.check_file (S10, capability
+# "file_reputation") is a READ that sends only a fingerprint to VirusTotal.
+# security.upload_to_virustotal (S10) is the family's one WRITE: it shares a
+# file with an outside service, so it is always_confirm, in the executor's
+# confirm set and kept on its card by the stance below. Declared as separate
+# statements, like the tools family, so the literals above stay untouched.
+from services.tools.security_checks import SecurityToolkit  # noqa: E402
+
+CONNECTOR_CATALOG["security"] = [
+    ToolSpec(
+        "check_scam",
+        "Check a message, link or sender for signs of a scam or phishing: look-alike and "
+        "known-bad links (Google's list only when the owner added a key), hidden characters, "
+        "and pressure, payment, password and code requests. Use when the user asks whether "
+        "something is a scam, real or safe, or before suggesting they open a link from a "
+        "message. Pass every link exactly as written (max 10), the part of the message that "
+        "asks for something (max 4000 chars) and the sender as shown. Returns likely_scam, "
+        "suspicious or no_signs_found with reasons and advice. Never tell the user something "
+        "is safe or legitimate: for no_signs_found say no signs were found and that no check "
+        "can prove a message is safe. Refer to links by the 'shown' form returned. To check a "
+        "screenshot or a whole forwarded message, tell the user about /scam in Telegram, "
+        "'scam' in Slack, /scam in this chat or the Security page's Check for scams tab.",
+        ActionCategory.READ,
+        _schema(
+            text={"type": "string", "description": "The message text to check (max 4000 chars)"},
+            urls={
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Every link in the message, exactly as written (max 10)",
+            },
+            sender={
+                "type": "string",
+                "description": "The sender's name and address as shown (max 320 chars)",
+            },
+            reply_to={
+                "type": "string",
+                "description": "The Reply-To address, when different (max 320 chars)",
+            },
+        ),
+    ),
+    ToolSpec(
+        "check_file",
+        "Look up a file in VirusTotal by its fingerprint: an upload's file_id (from an [Attached "
+        "file] note or files.list) or a SHA-256 (64 hex characters, e.g. from an email connector's "
+        "get_attachment_hash). Only the fingerprint is sent, never the file. Says how many "
+        "security vendors flag it; 'no_detections' is not a guarantee the file is safe and "
+        "'unknown' means VirusTotal has never seen it.",
+        ActionCategory.READ,
+        _schema(
+            file_id={"type": "string", "description": "An upload's file_id (give this or sha256)"},
+            sha256={"type": "string", "description": "The file's SHA-256, 64 hex characters"},
+        ),
+    ),
+    ToolSpec(
+        "upload_to_virustotal",
+        "Send a file VirusTotal does not know yet (security.check_file said 'unknown') to be "
+        "scanned. Only when the user asks for it: VirusTotal shares uploaded files with security "
+        "companies, so never suggest it for personal or private documents. The user approves a "
+        "card first; the result arrives a few minutes later.",
+        ActionCategory.WRITE,
+        _schema(
+            sha256={
+                "type": "string",
+                "description": "The SHA-256 from security.check_file",
+                "required": True,
+            }
+        ),
+        always_confirm=True,
+    ),
+]
+BUILTIN_CONNECTOR_TYPES = (*BUILTIN_CONNECTOR_TYPES, "security")
+# security.check_file and S3's check_scam are reads and auto by policy; an
+# upload to VirusTotal shares a file with a third party, so it keeps its card
+# under every account default.
+_BUILTIN_STANCE["security"] = "user_confirm"
+register_default_policies(
+    {
+        ("security", ActionCategory.READ): PermissionTier.AUTO_APPROVE,
+        ("security", ActionCategory.WRITE): PermissionTier.USER_CONFIRM,
+        ("security", ActionCategory.DELETE): PermissionTier.HARD_BLOCKED,
+        ("security", ActionCategory.EXECUTE): PermissionTier.HARD_BLOCKED,
+        ("security", ActionCategory.FINANCIAL): PermissionTier.HARD_BLOCKED,
+    }
+)
 
 # Built-ins the prompt's playbooks rely on, offered ahead of the rest when
 # the tool array is over its cap (build_tools sets Tool.starter). Connector
@@ -2472,6 +2577,12 @@ _MEMORY_REFUSAL_RULES = frozenset({"memory_off", "memory_full", "memory_screen",
 # an interval under the minimum, arguments too long for the card), refused
 # before its approval card.
 WATCH_RULE_POLICY = "watch_rule"
+# Security wave (S10): a security.upload_to_virustotal refused before its
+# approval card (bad arguments, a file VirusTotal already knows, bytes that
+# can no longer be had, or file checks not wired in this process). Equal to
+# services.file_reputation.toolkit.FILE_REPUTATION_RULE_POLICY and to the
+# runtime's _BIND_REFUSAL_POLICIES row (S10's tests hold them equal).
+FILE_REPUTATION_RULE_POLICY = "file_reputation_rule"
 
 # The reserved key a browser.checkout card carries its page facts under
 # (services.tools.browser.checkout.toolkit.CARD_KEY), set by the toolkit's
@@ -2487,6 +2598,10 @@ _DESKTOP_ACT = ("desktop", "act")
 _BROWSER_ACT = ("browser", "act")
 _BROWSER_CHECKOUT = ("browser", "checkout")
 _MEMORY_REMEMBER = ("memory", "remember")
+# Security wave (S10): the one security.* action with a card of its own; its
+# hooks go to the file reputation toolkit the security family keeps
+# (SecurityToolkit.file_reputation).
+_SECURITY_UPLOAD = ("security", "upload_to_virustotal")
 
 
 def _without_confirmation(arguments: Mapping[str, Any]) -> dict[str, Any]:
@@ -2494,6 +2609,35 @@ def _without_confirmation(arguments: Mapping[str, Any]) -> dict[str, Any]:
     approval flow, never by the model, so any ``user_confirmed`` it sent is
     dropped; the card, the precheck and the dispatch all see the same call."""
     return {k: v for k, v in arguments.items() if k != "user_confirmed"}
+
+
+# What the executor answers when S1's hidden-character floor breaks on a call
+# (services/security/outbound.py): fixed text, and nothing is sent.
+OUTBOUND_CLEAN_FAILED = (
+    "Crawler could not check this message for hidden characters, so nothing was sent."
+)
+# The floor's refusals are filed as S1's call check refusing (scaffold A22,
+# A28): its check name and policy, and this rule when the floor broke (or
+# refused without naming a rule). Literal here so the executor does not lean
+# on S1's module for names; a test holds them equal to OutboundCheck's.
+OUTBOUND_FLOOR_CHECK = "outbound"
+OUTBOUND_FLOOR_POLICY = "outbound_rule"
+OUTBOUND_CLEAN_FAILED_RULE = "outbound_clean_failed"
+
+
+def _floor_refusal(rule: Any = None, error: Any = None) -> dict[str, Any]:
+    """S1's floor refusing a call (or breaking on it), in the call-check
+    shape, so ``call_check_refusal`` files it as ``tool_blocked`` under
+    ``outbound_rule`` instead of a call that ran: the rule and fixed text the
+    floor gave, else ``outbound_clean_failed`` and OUTBOUND_CLEAN_FAILED."""
+    return {
+        "ok": False,
+        "refused": True,
+        "call_check": OUTBOUND_FLOOR_CHECK,
+        "policy": OUTBOUND_FLOOR_POLICY,
+        "rule": rule if isinstance(rule, str) and rule else OUTBOUND_CLEAN_FAILED_RULE,
+        "error": error if isinstance(error, str) and error else OUTBOUND_CLEAN_FAILED,
+    }
 
 
 def _toolkit_rule(result: Mapping[str, Any]) -> str:
@@ -2545,6 +2689,19 @@ def _not_wired(tool: str) -> dict[str, Any]:
         "rule": "unavailable",
         "error": f"{tool} is not set up in this process.",
     }
+
+
+def _file_reputation_refusal(result: Mapping[str, Any]) -> PrecheckRefusal:
+    """A security.upload_to_virustotal refused before its card (S10's precheck
+    answer, or ``_not_wired`` while file checks are not set up), filed under
+    file_reputation_rule with the toolkit's rule; the model is shown the
+    answer itself."""
+    return PrecheckRefusal(
+        reason=str(result.get("error") or "security.upload_to_virustotal was refused."),
+        policy=FILE_REPUTATION_RULE_POLICY,
+        result=dict(result),
+        rule=_toolkit_rule(result),
+    )
 
 
 def _standing_refused(tool: str) -> dict[str, Any]:
@@ -2707,6 +2864,10 @@ class ConnectorToolExecutor:
         # top10:video_transcripts
         video_toolkit: Optional[VideoToolkit] = None,
 
+        # Security wave (security10)
+        call_checks: Optional[CallCheckPipeline] = None,
+        outbound: Optional[OutboundFloor] = None,
+        security_toolkit: Optional[SecurityToolkit] = None,
     ) -> None:
         self._session_factory = session_factory
         self._web = web_toolkit or WebToolkit()
@@ -2750,6 +2911,22 @@ class ConnectorToolExecutor:
             ActionCategory.FINANCIAL,
         )
         delete = ActionCategory.DELETE
+        # Security wave: the call checks' fail-closed backstop at the top of
+        # execute (services/security/call_checks.py; empty unless main.py
+        # wires the production pipeline, use_call_checks), and S1's
+        # hidden-character floor every write passes through at its card and
+        # at dispatch (services/security/outbound.py; the bare floor needs
+        # no wiring, main.py swaps in the service, use_outbound).
+        self._call_checks: CallCheckPipeline = (
+            call_checks if call_checks is not None else CallCheckPipeline()
+        )
+        self._outbound: OutboundFloor = outbound if outbound is not None else OutboundFloor()
+        # The security.* family's dispatcher (services/tools/security_checks.py):
+        # main.py registers each skill's handlers on it (security_toolkit_of), and
+        # an action nobody registered is refused, so a bare executor runs none.
+        self.security_toolkit: SecurityToolkit = (
+            security_toolkit if security_toolkit is not None else SecurityToolkit()
+        )
         # One entry per built-in family (see services/capabilities/README.md).
         # Only the toolkits that keep something per user (reminders, memory,
         # page watches, the computer's refs, the browser's tasks) are handed
@@ -2881,6 +3058,19 @@ class ConnectorToolExecutor:
             # check is asked between fetches and before a provider read.
             "video": self._video_builtin(video_toolkit, session_factory),
 
+            # Security wave (security10): one dispatcher for the family; main.py
+            # registers each skill's handler (S3 check_scam, S10 check_file and
+            # its upload). user_id is the executor's, never the model's. The
+            # upload (WRITE) runs only re-dispatched with approved=True after
+            # the owner said yes to its card.
+            "security": _Builtin(
+                "Security check",
+                lambda a, p, uid, ok: self.security_toolkit.execute(a, p, uid, approved=ok),
+                frozenset({read, write}),
+                confirm=frozenset({write}),
+                confirm_note="sends a file to VirusTotal",
+            ),
+
         }
         # Returns the owner's capability report by key. Unwired, the
         # registry defaults apply (see _gate_refusal), so an off-by-default
@@ -2894,6 +3084,9 @@ class ConnectorToolExecutor:
         # calls (connector instances are per-call) within this process.
         self._limiters: dict[uuid_module.UUID, Any] = {}
         self._mcp_dispatcher: Optional[Any] = None
+        # S5's MCP tool pins for the dispatcher (use_mcp_pins); None until
+        # main.py wires them, and the dispatcher is then built as before.
+        self._mcp_pins: Optional[Any] = None
 
     async def _web_call(
         self, action: str, params: dict[str, Any], user_id: str, approved: bool, task_id: str
@@ -3059,6 +3252,16 @@ class ConnectorToolExecutor:
 
         # top10:video_transcripts
 
+        # Security wave (S10): the upload card's sentence, from the file facts
+        # its bind stored under _upload (never the model's words). Unwired, the
+        # generic reason; the precheck refuses such a call before any card.
+        if key == _SECURITY_UPLOAD:
+            file_reputation = self.security_toolkit.file_reputation
+            if file_reputation is None:
+                return None
+            sentence: Optional[str] = file_reputation.describe(key[1], params, user_id)
+            return sentence
+
         return None
 
     def approval_arguments(
@@ -3076,8 +3279,11 @@ class ConnectorToolExecutor:
         saved and the approved call saves what was approved. Calls no
         backend. ``browser.checkout``'s card needs the live page, so its
         bind is ``approval_arguments_async``; here its arguments pass
-        unchanged.
+        unchanged. Every card's arguments first pass S1's floor, so no write's
+        card shows text the owner cannot see (the same dict when nothing
+        changed).
         """
+        arguments = self._outbound.card_arguments(tool_name, arguments)
         key = _tool_key(tool_name)
         if key == _DESKTOP_ACT:
             return self._computer.bind(arguments, user_id=user_id)
@@ -3122,7 +3328,8 @@ class ConnectorToolExecutor:
         Either may answer a refusal (``{"ok": False, "refused": True,
         "rule": ..., "error": ...}``) instead of card arguments; the runtime
         files it under ``purchase_rule`` and makes no card. Every other
-        tool's bind is the sync hook's."""
+        tool's bind is the sync hook's. S1's floor runs first, as there."""
+        arguments = self._outbound.card_arguments(tool_name, arguments)
         key = _tool_key(tool_name)
         if key == _BROWSER_ACT and self._act is not None and hasattr(self._act, "bind_async"):
             # The task id is the runtime's, as for checkout below.
@@ -3163,6 +3370,19 @@ class ConnectorToolExecutor:
         # top10:voice_notes
 
         # top10:video_transcripts
+
+        # Security wave (S10): the upload card stores the file's facts under
+        # the reserved _upload key and keeps its held bytes for the card's
+        # life; a rule that fails now answers a refusal (filed under
+        # file_reputation_rule). Unwired, refused before any card.
+        if key == _SECURITY_UPLOAD:
+            file_reputation = self.security_toolkit.file_reputation
+            if file_reputation is None:
+                return _not_wired("security.upload_to_virustotal")
+            bound: dict[str, Any] = await file_reputation.bind(
+                key[1], _without_confirmation(arguments), user_id
+            )
+            return bound
 
         if key != _BROWSER_CHECKOUT:
             return self.approval_arguments(tool_name, arguments, user_id)
@@ -3290,6 +3510,17 @@ class ConnectorToolExecutor:
 
         # top10:video_transcripts
 
+        # Security wave (S10): the upload's rules before any card (bad
+        # arguments, a call that brings its own _upload, a file VirusTotal
+        # already knows, bytes that can no longer be had), filed under
+        # file_reputation_rule. The toolkit reads the database, so this comes
+        # back as an awaitable. Unwired, the upload is refused here.
+        if key == _SECURITY_UPLOAD:
+            file_reputation = self.security_toolkit.file_reputation
+            if file_reputation is None:
+                return _file_reputation_refusal(_not_wired("security.upload_to_virustotal"))
+            return self._precheck_security_upload(file_reputation, key[1], params, user_id)
+
         if key == _DESKTOP_ACT:
             result = self._computer.precheck(params, user_id=user_id)
             policy = COMPUTER_RULE_POLICY
@@ -3311,6 +3542,17 @@ class ConnectorToolExecutor:
             result=dict(result),
             rule=_toolkit_rule(result),
         )
+
+    @staticmethod
+    async def _precheck_security_upload(
+        file_reputation: Any, action: str, params: dict[str, Any], user_id: str
+    ) -> Optional[PrecheckRefusal]:
+        """S10's upload precheck (``FileReputationToolkit.precheck``), filed
+        under file_reputation_rule with the toolkit's rule."""
+        result = await file_reputation.precheck(action, params, user_id)
+        if result is None:
+            return None
+        return _file_reputation_refusal(result)
 
     async def _precheck_memory(
         self, arguments: dict[str, Any], user_id: str
@@ -3577,14 +3819,143 @@ class ConnectorToolExecutor:
         if self._mcp_dispatcher is None:
             from services.mcp.integration import MCPConnectorLoader, MCPDispatcher
 
+            # S5's pins ride along only once wired (use_mcp_pins), so an
+            # executor without them builds the dispatcher exactly as before.
+            pins: dict[str, Any] = {} if self._mcp_pins is None else {"pins": self._mcp_pins}
             self._mcp_dispatcher = MCPDispatcher(
-                MCPConnectorLoader(self._session_factory)
+                MCPConnectorLoader(self._session_factory), **pins
             )
         return self._mcp_dispatcher
 
     def use_permission_grants(self, store: Optional[PermissionGrantStore]) -> None:
         """Wire the low-risk grants store after construction (main.py)."""
         self._permission_grants = store
+
+    def use_call_checks(self, pipeline: CallCheckPipeline) -> None:
+        """Wire the call-checks pipeline after construction (main.py hands
+        the runtime the same object)."""
+        self._call_checks = pipeline
+
+    @property
+    def call_checks(self) -> CallCheckPipeline:
+        """The call-checks pipeline this executor's backstop runs."""
+        return self._call_checks
+
+    def use_outbound(self, outbound: OutboundFloor) -> None:
+        """Wire S1's outbound service (the floor plus its audit row and the
+        sent-to history) after construction (main.py)."""
+        self._outbound = outbound
+
+    def use_mcp_pins(self, pins: Any) -> None:
+        """Wire S5's MCP tool pins after construction (main.py). The
+        dispatcher is rebuilt on its next use so it reads them."""
+        self._mcp_pins = pins
+        self._mcp_dispatcher = None
+
+    def _backstop_facts(
+        self,
+        tool_name: str,
+        arguments: Any,
+        user_id: str,
+        *,
+        approved: bool,
+        approval: Optional[str],
+        task_id: Optional[str],
+        weekly: bool = False,
+    ) -> CallFacts:
+        """The call as the backstop's checks see it (stage "execute"). A
+        non-mapping argument reads as no arguments here, so an unknown tool
+        still gets today's "Unknown tool" answer from the code below (a known
+        or MCP tool with one never gets this far: execute refuses it first).
+        A person approved it only when no standing consent and no weekly app
+        approval ran it: a weekly act is one no person saw, so an escalation
+        still stops it (scaffold D6)."""
+        from services.mcp.integration import is_mcp_tool
+
+        args = dict(arguments) if isinstance(arguments, Mapping) else {}
+        is_mcp = is_mcp_tool(tool_name)
+        resolved = None if is_mcp else resolve_tool(tool_name)
+        person_approved = approved and approval is None and not weekly
+        return CallFacts(
+            stage="execute",
+            user_id=user_id,
+            tool_name=tool_name,
+            canonical=canonical_tool_name(tool_name),
+            arguments=args if is_mcp else _without_confirmation(args),
+            spec=resolved.spec if resolved is not None else None,
+            is_mcp=is_mcp,
+            person_approved=person_approved,
+            runs_without_card=not person_approved,
+            # "weekly" as the act's audit rows name it (_weekly_audit_fields).
+            approval=approval if approval is not None else ("weekly" if weekly else None),
+            task_id=task_id,
+        )
+
+    def _clean_outbound(
+        self, tool_name: str, spec: Optional[ToolSpec], arguments: Mapping[str, Any]
+    ) -> tuple[Optional[CleanedCall], Optional[dict[str, Any]]]:
+        """S1's floor on a call about to be dispatched: ``(cleaned, None)``,
+        or ``(None, refusal)`` when the floor refuses it or breaks (fail
+        closed: nothing is sent that could not be checked). The refusal is in
+        the call-check shape (``_floor_refusal``), so the runtime files it as
+        a block, never as a call that ran."""
+        try:
+            cleaned = self._outbound.clean_call(tool_name, spec, arguments)
+        except Exception as exc:
+            logger.error("outbound_clean_failed", tool=tool_name, error_type=type(exc).__name__)
+            return None, _floor_refusal()
+        if cleaned.refusal is not None:
+            refusal = cleaned.refusal if isinstance(cleaned.refusal, Mapping) else {}
+            return None, _floor_refusal(refusal.get("rule"), refusal.get("error"))
+        return cleaned, None
+
+    async def _note_cleaned(
+        self, user_id: str, tool_name: str, cleaned: CleanedCall, *, approved: bool
+    ) -> None:
+        """Audit what the floor removed (S1). Best effort: the cleaned call
+        goes ahead either way."""
+        try:
+            await self._outbound.note_cleaned(user_id, tool_name, cleaned, approved=approved)
+        except Exception as exc:
+            logger.error("outbound_note_failed", tool=tool_name, error_type=type(exc).__name__)
+
+    async def _before_send(
+        self, user_id: str, tool_name: str, resolved: ResolvedTool, arguments: Mapping[str, Any]
+    ) -> Optional[Any]:
+        """S1's ticket for an approved send whose result will not name its
+        recipients (resolved now, before the send). Best effort: None."""
+        try:
+            return await self._outbound.before_send(self, user_id, tool_name, resolved.spec, arguments)
+        except Exception as exc:
+            logger.warning("outbound_before_send_failed", tool=tool_name, error_type=type(exc).__name__)
+            return None
+
+    async def _invoke_and_record(
+        self,
+        connector: Any,
+        credentials: dict[str, Any],
+        resolved: ResolvedTool,
+        arguments: dict[str, Any],
+        approved: bool,
+        *,
+        user_id: str,
+        tool_name: str,
+        ticket: Optional[Any],
+    ) -> dict[str, Any]:
+        """``_invoke_connector``, then S1's sent-to history for an approved
+        send that succeeded. The record never raises and never changes the
+        result: the send already happened."""
+        result = await self._invoke_connector(
+            connector, credentials, resolved, arguments, approved, user_id=user_id
+        )
+        if approved and isinstance(result, Mapping) and result.get("ok") is True:
+            try:
+                await self._outbound.after_send(
+                    user_id, tool_name, resolved.spec, arguments, result, ticket
+                )
+            except Exception as exc:
+                logger.warning("outbound_record_failed", tool=tool_name, error_type=type(exc).__name__)
+        return result
 
     async def execute(
         self,
@@ -3595,6 +3966,7 @@ class ConnectorToolExecutor:
         *,
         task_id: Optional[str] = None,
         approval: Optional[str] = None,
+        weekly: bool = False,
     ) -> dict[str, Any]:
         # ``task_id`` is the runtime's task identity (see
         # ToolExecutor.execute); only task-scoped families (the browser
@@ -3605,12 +3977,39 @@ class ConnectorToolExecutor:
         # (the tier) or "low_risk_grant" (a 7-day grant). It is checked again
         # here, before any rate-limit slot or network request
         # (_standing_refusal); None is a person's approval or a read.
+        #
+        # ``weekly`` says a weekly app approval runs this desktop.act
+        # (services/agent/app_approvals.py): ``approved`` unlocks the act,
+        # but no person saw this one, so the backstop's checks treat it as
+        # run without a card. A separate keyword, not an ``approval`` kind:
+        # standing consent never covers a built-in.
         from services.mcp.integration import is_mcp_tool
 
-        if approval is not None and (approval not in STANDING_APPROVALS or is_mcp_tool(tool_name)):
+        is_mcp = is_mcp_tool(tool_name)
+        if approval is not None and (approval not in STANDING_APPROVALS or is_mcp):
             return _standing_refused(tool_name)
 
-        if is_mcp_tool(tool_name):
+        # Security wave: arguments that are not a JSON object (a model can
+        # send a list) are refused for every tool this executor would run,
+        # before the backstop and the floor: neither can read them, and
+        # dict() would turn a list of pairs into real arguments for the
+        # dispatch. An unknown name still gets its "Unknown tool" answer.
+        if not isinstance(arguments, Mapping) and (is_mcp or resolve_tool(tool_name) is not None):
+            logger.warning("tool_arguments_not_object", tool=tool_name)
+            return arguments_not_object().result()
+
+        # Security wave: the call checks as a fail-closed backstop for every caller (approved
+        # cards, standing consent, unattended runs, weekly acts, internal reads), before the MCP
+        # branch so MCP calls are covered too. No pipeline: nothing is built or awaited.
+        if self._call_checks:
+            backstop = await self._call_checks.run(self._backstop_facts(
+                tool_name, arguments, user_id, approved=approved, approval=approval,
+                task_id=task_id, weekly=weekly))
+            refused = backstop.execute_result()
+            if refused is not None:
+                return refused
+
+        if is_mcp:
             if self._session_factory is None:
                 return {
                     "ok": False,
@@ -3619,8 +4018,14 @@ class ConnectorToolExecutor:
                         "session factory); refusing to dispatch."
                     ),
                 }
+            # S1's floor on every string an MCP tool is sent (it has no spec
+            # to declare its outbound fields).
+            cleaned, floor_refusal = self._clean_outbound(tool_name, None, arguments)
+            if cleaned is None:
+                return floor_refusal or _floor_refusal()
+            await self._note_cleaned(user_id, tool_name, cleaned, approved=approved)
             return await self._get_mcp_dispatcher().execute(
-                tool_name, dict(arguments), user_id
+                tool_name, dict(cleaned.arguments), user_id
             )
 
         resolved = resolve_tool(tool_name)
@@ -3642,6 +4047,15 @@ class ConnectorToolExecutor:
         # Confirmation status is decided by the approval flow, never by the
         # model. Strip any attempt to smuggle it through tool arguments.
         arguments = _without_confirmation(arguments)
+
+        # Security wave: S1's hidden-character floor on everything dispatched
+        # from here (built-ins included). A refusal, or a floor that breaks,
+        # sends nothing (fail closed), and is filed as a block (_floor_refusal).
+        cleaned, floor_refusal = self._clean_outbound(tool_name, resolved.spec, arguments)
+        if cleaned is None:
+            return floor_refusal or _floor_refusal()
+        await self._note_cleaned(user_id, tool_name, cleaned, approved=approved)
+        arguments = dict(cleaned.arguments)
 
         if approval is not None and not connector_registry.is_registered(resolved.connector_type):
             # Standing consent covers only a connected account's actions: a
@@ -3790,6 +4204,12 @@ class ConnectorToolExecutor:
             RateLimitExceededError,
         )
 
+        # Security wave: for an approved send whose result will not name its
+        # recipients, S1 resolves them now (best effort, before any slot).
+        ticket = (
+            await self._before_send(user_id, tool_name, resolved, arguments) if approved else None
+        )
+
         limiter_error = self._acquire_rate_limit(
             config["id"], config["rate_limit_per_minute"]
         )
@@ -3836,8 +4256,9 @@ class ConnectorToolExecutor:
 
         try:
             try:
-                return await self._invoke_connector(
-                    connector, credentials, resolved, arguments, approved, user_id=user_id
+                return await self._invoke_and_record(
+                    connector, credentials, resolved, arguments, approved,
+                    user_id=user_id, tool_name=tool_name, ticket=ticket,
                 )
             except AuthenticationError as exc:
                 if not self._should_retry_auth(
@@ -3858,8 +4279,9 @@ class ConnectorToolExecutor:
                 credentials=credentials,
                 force=True,
             )
-            return await self._invoke_connector(
-                connector, credentials, resolved, arguments, approved, user_id=user_id
+            return await self._invoke_and_record(
+                connector, credentials, resolved, arguments, approved,
+                user_id=user_id, tool_name=tool_name, ticket=ticket,
             )
         except HardBlockError as exc:
             return {"ok": False, "error": str(exc)}

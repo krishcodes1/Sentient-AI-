@@ -695,11 +695,19 @@ async def test_catalog_caches_discovery_within_ttl(session_factory, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_catalog_rediscovers_after_ttl_expiry(session_factory, monkeypatch):
+async def test_catalog_rediscovers_after_ttl_expiry_and_holds_a_new_tool_for_review(
+    session_factory, monkeypatch
+):
+    """After the TTL the catalog lists the server again. The server was pinned
+    on its first discovery, so a tool it adds later is new on a pinned server:
+    recorded and held for the owner's review (security S5), not offered."""
+    from sqlalchemy import select
+
+    from models.mcp_tool_pin import McpToolPin
     from tests.conftest import make_user
 
     user, _ = await make_user(session_factory)
-    await _make_mcp_connector(session_factory, user.id)
+    connector_id = await _make_mcp_connector(session_factory, user.id)
 
     clock = FakeClock()
     monkeypatch.setattr("services.mcp.integration.time", clock)
@@ -717,10 +725,17 @@ async def test_catalog_rediscovers_after_ttl_expiry(session_factory, monkeypatch
     tools = await catalog.tools_for_user(str(user.id))
 
     assert transport.methods.count("tools/list") == 2
-    assert [t.name for t in tools] == [
-        "mcp.notes_server.search_notes",
-        "mcp.notes_server.list_notebooks",
-    ]
+    assert [t.name for t in tools] == ["mcp.notes_server.search_notes"]
+    async with session_factory() as session:
+        held = (
+            await session.execute(
+                select(McpToolPin.exposed_name, McpToolPin.status, McpToolPin.review_kind).where(
+                    McpToolPin.connector_id == connector_id,
+                    McpToolPin.status == "needs_review",
+                )
+            )
+        ).all()
+    assert [tuple(row) for row in held] == [("list_notebooks", "needs_review", "new")]
 
 
 @pytest.mark.asyncio

@@ -170,6 +170,7 @@ describe("Layout on a desktop", () => {
       "Chat",
       "Memory",
       "Connectors",
+      "Security",
       "Audit logs",
       "Settings",
     ]) {

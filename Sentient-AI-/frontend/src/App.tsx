@@ -20,6 +20,8 @@ import Login from "./pages/Login";
 const Dashboard = lazy(() => import("./pages/Dashboard"));
 const Chat = lazy(() => import("./pages/Chat"));
 const Connectors = lazy(() => import("./pages/Connectors"));
+// Security wave (security10): the Security page, one tab per security check.
+const Security = lazy(() => import("./pages/Security"));
 const AuditLogs = lazy(() => import("./pages/AuditLogs"));
 const Settings = lazy(() => import("./pages/Settings"));
 const MemoryPage = lazy(() => import("./pages/Memory"));
@@ -108,6 +110,7 @@ export default function App() {
             <Route path="/chat" element={<Chat />} />
             <Route path="/memory" element={<MemoryPage />} />
             <Route path="/connectors" element={<Connectors />} />
+            <Route path="/security" element={<Security />} />
             <Route path="/audit" element={<AuditLogs />} />
             <Route path="/settings" element={<Settings />} />
           </Route>

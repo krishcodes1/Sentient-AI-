@@ -198,6 +198,29 @@ def weekly_covers(arguments: Any) -> bool:
     return role in _NAV_ROLES or (role == "button" and bool(_NAV_BUTTON.fullmatch(name)))
 
 
+def may_run_weekly(arguments: Any) -> bool:
+    """True when a weekly app approval could run this desktop.act once it is bound: scrolling,
+    open_app or focus_window, a navigation key (the same _NAV_KEYS test weekly_covers makes),
+    or a click/double_click by ref. Never type and never a click by coordinates. A cheap
+    superset of weekly_covers that needs no bind, for the call checks' runs_without_card (A29).
+
+    Unbound arguments have no target yet, so a click by ref counts whatever it names: the
+    weekly branch then binds it and ``weekly_covers`` decides. Every shape this refuses,
+    ``weekly_covers`` refuses too, so a call it calls carded can never run unasked."""
+    if not isinstance(arguments, Mapping):
+        return False
+    action = arguments.get("action")
+    if action == "scroll" or action in _APP_ACTIONS:
+        return True
+    if action == "key":
+        try:
+            combo = keymod.parse_combo(arguments.get("keys"))
+        except keymod.KeyComboError:
+            return False
+        return combo.key in _NAV_KEYS and combo.modifiers <= _NAV_KEY_MODIFIERS
+    return action in ("click", "double_click") and isinstance(arguments.get("ref"), str)
+
+
 def weekly_arguments(arguments: Mapping[str, Any]) -> dict[str, Any]:
     """*arguments* (bound, as a card's) marked as run by a weekly approval
     (``WEEKLY_MARK`` on the screen): the toolkit then never brings the app

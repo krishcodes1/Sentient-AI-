@@ -98,10 +98,13 @@ def test_default_context_fills_both_facts(monkeypatch):
     monkeypatch.setattr(transcribe, "local_engine_installed", lambda model_dir=None: False)
     ctx = capabilities.default_context(default_provider="anthropic")
     assert ctx.speech_local_installed is False and ctx.default_provider_audio is False
-    # The two facts are the last fields (wave order), after default_provider.
+    # The two facts sit together after default_provider (wave order); only
+    # a later wave's facts come after them (the security wave's service_keys).
     names = list(ReportContext.__dataclass_fields__)
-    assert names[-2:] == ["speech_local_installed", "default_provider_audio"]
-    assert names.index("default_provider") < names.index("speech_local_installed")
+    first = names.index("speech_local_installed")
+    assert names[first : first + 2] == ["speech_local_installed", "default_provider_audio"]
+    assert names[first + 2 :] == ["service_keys"]
+    assert names.index("default_provider") < first
 
 
 def test_the_docker_image_fetches_the_same_pinned_model():

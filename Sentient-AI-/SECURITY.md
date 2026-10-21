@@ -310,7 +310,10 @@ spotlighting, DeepMind CaMeL, OWASP LLM Top 10):
   re-escalated to the human approval flow when its arguments derive from
   that untrusted data (a redirected recipient/URL or a copied identifier).
   This closes the "injected instruction drives an auto-approved write" hole
-  in code, not in the model. `services/agent/taint.py`.
+  in code, not in the model. `services/agent/taint.py`. Telegram messages
+  the owner forwards to the bot are fenced as someone else's words, so the
+  taint gate and tool rule B1 treat their addresses and links as untrusted,
+  and are never run as commands (a forwarded `/start CODE` links nothing).
 - **PromptGuard scanning** — user input, tool arguments, tool results, and
   model output (including the post-tool completion) are scanned (pattern +
   heuristic layers: role hijack, instruction override, homoglyphs,
@@ -352,6 +355,91 @@ These are mitigations, not proofs: pattern-based defenses can be bypassed.
 The deterministic backstops — the taint gate and the approval flow — are
 what a hijacked model cannot talk its way around: a sensitive action still
 requires the human clicking Approve.
+
+### Pre-dispatch call checks (security wave)
+
+Every tool call passes one ordered pipeline of checks
+(`services/security/call_checks.py`: tool rules, MCP tool pins, browser site
+rules, outbound messages, file reputation) in the agent turn after the secret
+guard, again when its card is approved, and once more as a backstop in the
+executor. A check can add a note to the approval card, turn a call that would
+have run without a card into a card (and withdraw any standing consent for
+it), or refuse the call before any card; nothing lets a call skip a card. A
+check that fails or times out is only logged for a read; for any other call
+it means a card (with a note saying the check could not run) in the turn,
+and a refusal at approval and in the executor.
+Notes are typed (a kind, a severity, one sentence with control and
+direction-override characters removed), stored on the card and shown on the
+web, Telegram and Slack, and a card with a warning never offers "Allow for 7
+days" or "Allow low-risk changes".
+
+### Outbound message checks
+
+Before anything Crawler writes leaves the account, S1 removes the characters a reader cannot see
+that are used to smuggle text: Unicode tag characters, bidi overrides and isolates, long runs of
+zero-width characters and meaningless variation selectors in the text other people read and in
+every MCP argument, and tag and bidi characters from every other argument of every write (names
+included). This floor runs at the approval card and again right before dispatch, on every path,
+whatever the owner's switch says, so no card shows text the owner cannot see and nothing hidden
+reaches another person. A recipient address that hides any such character is refused before any
+card. With "Check messages before they go out" on (the default), the card also says who the
+message really goes to (first time Crawler sends there, outside the organisation, a look-alike of
+a familiar address, the real recipients of a reply or a saved draft) and which links can carry
+data out (images that load by themselves, long coded values, link text naming another site, the
+owner's Google lookup); a flagged call that would have run without a card gets one, and a card
+with a warning never offers standing consent. "Could not check" is always said; nothing is called
+safe. The sent-to history keeps per-user keyed fingerprints (HMAC under a key derived from
+`ENCRYPTION_KEY`), never an address; only `scheme://host/` of a link is handed to the link
+lookup, and nothing leaves without the owner's key.
+
+### Scam checks when asked
+
+Crawler can check a message, link, screenshot or QR code for signs of a scam when someone asks
+(`/scam` in a web chat, Telegram or Slack, Security ▸ Check for scams, or the
+`security.check_scam` tool in a chat turn). The checked message is someone else's words: it is
+checked outside the chat turn, sent to the account's own AI provider inside a fence with a fixed
+preamble, and stored fenced, so its links and addresses stay untrusted in later turns. Crawler's
+fixed rules decide the verdict; the AI can raise it but never lower it, the advice comes from a
+fixed table, and the AI's own reasons are dropped when they hold a link, a domain, an address, a
+phone number or wording aimed at an AI (a scanner error withholds them all). No answer says
+"safe", and no link in an answer is clickable (defanged in Telegram and Slack, code text on the
+web, punycode for look-alike letters). Links go to Google Safe Browsing / Web Risk only with the
+owner's key; files are looked up by fingerprint only. Pictures are never stored; audit rows hold
+verdicts, counts, codes and sha256s, never the text, a link or a host.
+
+### MCP tool pinning
+
+Crawler remembers a fingerprint (sha256 of a canonical form) of what every tool of a connected MCP
+server says it does: its name, description and input schema exactly as the server sent them, plus
+its title, annotations and output schema when present. While "Hold changed MCP tools for review"
+is on (the default), a tool whose definition changes, or a new tool on a server already in use, is
+not offered to the AI, and the call check and the dispatcher refuse to run it, until the owner has
+seen the exact difference on Security ▸ MCP reviews and approved that version; an approval names
+the hash that was shown and is refused if the server changed the tool again. The dispatcher checks
+a fresh tool list before every call, so a change made after the approval card was shown is still
+caught. Invisible characters (zero-width, bidi controls, Unicode tag characters) are removed from
+every tool description and schema before the model reads them and shown to the owner as labelled
+chips with the text they spell. Changes are told on the owner's linked chats by tool name only,
+never with the server's words. A server seen for the first time is trusted as it is (trust on
+first use), and pinning fails closed: if the pins cannot be read or written, the server's tools are
+withheld.
+
+### Tool rules
+
+Every tool call's arguments are checked against four built-in rules and the owner's own rules
+before it runs, and a call that breaks one waits for the owner's approval on a card that names
+the rule; a rule never blocks a call outright and can never let one skip a card. The built-in
+rules ask before a send, share or invite to an address that appeared only in content Crawler
+read (an email, a web page, a file, a forwarded message or Crawler's own earlier replies) or that
+uses look-alike characters, before one action addresses more than 10 people, before a forward,
+share or invite outside the owner's organisation, and before a change that includes a link to a
+site seen only in read content. Owner rules (Security → Tool rules, owner only, web only) match a
+tool glob and up to five argument conditions; values are normalised (invisible characters,
+fullwidth and look-alike letters) so a spliced word cannot dodge a rule, patterns pass a static
+safety check that bounds their cost, and anything that cannot be checked asks. The executor
+refuses a write a rule matches that no person approved, with a fixed text that never tells the
+model the rule. Removing a rule or turning a built-in off notifies the owner on Telegram and
+Slack; every change is audited with ids, names and a digest, never a condition value.
 
 ## Network security
 
@@ -407,6 +495,116 @@ so it never blocks the event loop.
   `wss.slack.com`. File downloads that redirect (OneDrive content, GitHub
   Actions logs) may follow only to the listed storage hosts, by GET,
   without our credentials.
+
+### Owner keys for outside security services
+
+Google Safe Browsing or Web Risk, Have I Been Pwned and VirusTotal are used
+only with the owner's own key, entered in Security → Service keys (or set in
+`.env`, which wins). A key is tested before it is stored, stored encrypted
+(AES-256-GCM) and never sent back to the browser; without a key nothing is
+sent to that service. The one keyless lookup is the Pwned Passwords range
+check, which sends only the first five characters of a password's SHA-1
+hash, through this server. Each service's requests go through its own
+network policy and the SSRF-checked client.
+
+### Link reputation
+
+Links in mail alerts, scam checks, outgoing messages and pages Crawler's browser opens are
+checked on this server for look-alike letters, brand imitations, bare IP addresses, credentials
+before an "@", shorteners, script links and link text that names another site, reading each link
+the way a browser does. With the owner's own Google Safe Browsing or Web Risk key (and the
+"Check links with Google Safe Browsing" switch on), links are also looked up in Google's list of
+dangerous sites. Only the link is sent, in a reduced form: for the browser only the site's
+scheme and host; otherwise the path without userinfo or fragment, and the query only when it
+carries nothing that looks like a token, a code, a session id, a secret or an e-mail address.
+Non-public hosts are never sent. The key travels in a request header through the
+`link_reputation` network policy and the SSRF-checked client; verdicts are kept in memory only,
+within Google's stated cache lifetime; logs never carry a link, host or key. A lookup that fails
+never blocks anything and is reported as "not checked"; no answer is ever called "safe". The
+browser refuses only a page Google lists.
+
+### Breach monitoring
+
+Crawler can watch the owners' email addresses for new data breaches with Have I Been Pwned, using
+the owner's own key (Security → Service keys); without a key nothing is sent, and the owner can
+turn it off in Settings → Permissions. Only owner accounts are watched: each owner's sign-in
+address plus at most 10 addresses they add, looked up once a week, paced to the key's rate
+limit. Addresses are stored encrypted (AES-256-GCM) and found by a keyed HMAC, never in plain
+text; no log line, audit row or error message carries an address or the key, which travels only
+in a request header. The request goes through the SSRF-checked client under a network policy
+that allows only HIBP's two API paths over HTTPS, and the SSRF check sees only the host, so the
+address never reaches a log. Alerts are fixed sentences (no model), go only to the owner's own
+linked Telegram and Slack chats, never name a breach HIBP marks sensitive, and defang the
+vendor's text so the attribution is the only link. The password check on the same page hashes
+the password in the browser and sends only the first 5 hex characters of its SHA-1 to Crawler,
+which asks Pwned Passwords for every suffix with that prefix (padded) and hands the list back;
+the match is made in the browser. The password never leaves the browser, and nothing about a
+check is kept: no cache, no audit row, and no log line with the prefix or the number of entries.
+The proxy is limited to 20 checks a minute per user.
+
+### Site rules for Crawler's browser
+
+The owner can mark sites **Blocked**, **Always ask** or **Trusted** (Security → Site rules, owner
+only; never from chat). Banks, brokers, crypto exchanges and tax and government portals (161 sites)
+are Always ask by default. The rules are enforced at four points: the pre-dispatch call checks
+(a browser or web page call, a new page watch or a web page saved to the knowledge base on a
+Blocked site is refused before anything starts, and again when a card is approved; an act on an
+Always-ask site carries a "sensitive site" note and never runs without a card), the browser egress
+guard after its SSRF check (navigations, redirect hops, popups and frames), the observe step (a
+page on a Blocked site is blanked and never described), and the resolver of every other page
+fetcher (every hop of a web fetch, research source or screenshot, of a knowledge-base web import,
+and of each background page-watch check, so a watch saved before its site was Blocked stops
+fetching it). Inside an approved
+checkout's order window or 3-D Secure hand-off, a Blocked verdict is set aside only for protected
+sign-in, CAPTCHA and payment hosts and hosts on the built-in banks list; Blocked rules over those
+protected hosts are refused outright. Hosts are read the way Chromium reads them, so a rule cannot
+be evaded by spelling a host differently, and every reading is linear in the URL's length. Rules
+that cannot be read fail closed for the browser and web page tools, page watches and knowledge-base
+web imports. Hosts reach the audit log only
+as keyed hashes (HMAC-SHA256 under a key derived from `ENCRYPTION_KEY`); nothing is sent anywhere.
+
+### File reputation
+
+Crawler can look files up in VirusTotal with the owner's own key (Security → Service keys);
+without a key, or with "Check files with VirusTotal" off in Settings → Permissions, nothing is
+hashed, stored or sent. Only a file's SHA-256 is sent automatically, through the SSRF-checked
+client under a network policy that lets the lookup reach only `GET /api/v3/files/<sha256>` on
+`www.virustotal.com` over HTTPS (uploads and analysis polls have their own policy); the key
+travels only in the `x-apikey` header and never appears in a URL, log line, audit row or
+response. Answers are cached, VirusTotal's limits are kept in a request log written before each
+request, and only stats, dates, a sanitised threat label and the type description are read from
+an answer (names, tags, comments and vendor texts never are). A file is uploaded only after its
+own approval card, which says that VirusTotal shares uploads with security companies; at
+approval the bytes are fetched again and must hash to the card's fingerprint, the neutral name
+`file` is sent, and a restart, a changed file or a missing key sends nothing. Personal documents
+are never kept for an upload and cannot be proposed from a chat. Telegram file ids and mail
+message references are stored encrypted (AES-GCM) and mail message ids only as an HMAC; audit
+rows carry fingerprints, counts and codes, never a file name, message id or key. The upload tool
+is never offered to an unattended run. A rejected key pauses lookups for 10 minutes and alerts
+the owner at most once a day.
+
+## Scam and phishing checks on new email
+
+Crawler checks every new email in each connected Gmail and Outlook inbox for signs of a scam
+(switch "Check new email for scams" in Settings → Permissions, on by default; the first check of
+each account only records where the inbox is). The checks run on this computer: the receiving
+provider's own topmost Authentication-Results (lower copies, which a sender can forge, are never
+read), look-alike and mixed-script sender domains, Reply-To domains, links whose text names
+another site, code links, forms, risky and disguised attachments, pressure wording, hidden
+characters and text aimed at AI assistants, plus the link reputation service when its key is set
+(URLs sent without query, fragment or user name, at most five per email, one per site). Mail
+that is not flagged leaves only a 16-character hash. Only flagged mail reaches an AI provider,
+and only an excerpt of at most 1,500 characters with link hosts (never full links), inside the
+untrusted-data fence, with contact details replaced by placeholders for a cloud provider; a local
+Ollama can be set with `MAIL_REVIEW_OLLAMA_MODEL`. Reviews have their own daily cap per person and
+never use the shared budget for tasks run while away. The review can make a finding stricter but
+never silence it: a weak finding goes quiet only when the sender authenticated, every sign is
+weak and the review found none, and an answer carrying instructions is withheld. Alerts are
+fixed sentences (the review's lines are stripped of links, addresses and phone numbers and
+checked by PromptGuard), defang every domain, withhold a subject that reads like instructions,
+never quote the body and never call an email safe. Nothing in the mailbox changes without an
+approval card (Move to Spam/Junk, parked with the same checks as any card); Block sender is not
+offered. Audit rows hold ids, counts and signal codes only.
 
 ## Connector sign-in (OAuth broker)
 

@@ -17,7 +17,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 from collections.abc import Awaitable, Coroutine
 
 import structlog
@@ -80,6 +80,7 @@ from services.tools.system import SystemToolkit
 from services.platform import current as current_platform
 from services.tools.browser import guard as browser_guard
 from services.tools.browser import handoff as browser_handoff
+from services.tools.browser.guard import EgressHooks
 from services.tools.browser.act import BrowserActToolkit
 from services.tools.browser.actions import BrowserReadToolkit
 from services.tools.browser.checkout.ledger import PurchaseLedger
@@ -88,6 +89,10 @@ from services.tools.browser.pagememory import PageMemory
 from services.tools.browser.session import BrowserSessionManager
 from services.tools.computer import ComputerToolkit
 from services.tools.computer import backend as computer_backend
+from services.tools.knowledge import KnowledgeToolkit
+from services.tools.net import validated_addresses
+from services.tools.watch import PageSnapshot, WatchToolkit, fetch_snapshot
+from services.tools.web import WebToolkit
 from services.vault.keys import select_key_provider
 from services.vault.service import VaultService
 
@@ -157,6 +162,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # top10:video_transcripts
     await app.state.transcript_janitor.start()
 
+    # Security wave (security10): the background security sweepers. Each
+    # re-reads its owner switch before every pass and sends nothing while it
+    # is off (each is inert until its skill lands).
+    await app.state.mail_scan.start()
+    await app.state.breach_monitor.start()
+    await app.state.file_reputation_sweeper.start()
+
     yield
     logger.info("shutting_down_crawler_ai")
     await reminder_service.stop()
@@ -184,6 +196,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # top10:file_extraction
 
     # top10:secret_pii_redaction
+
+    # Security wave (security10): the security sweepers, in reverse order of
+    # their start, before the channels they send through stop.
+    await app.state.file_reputation_sweeper.stop()
+    await app.state.breach_monitor.stop()
+    await app.state.mail_scan.stop()
+    # Site-rule hit rows (site_rule_blocked from a navigation, site_rule_noted)
+    # are written by background tasks; let the last few land before the
+    # engine goes away. Bounded, and never in the way of the rest of shutdown.
+    site_rules = getattr(app.state, "site_rules", None)
+    if site_rules is not None:
+        try:
+            await asyncio.wait_for(site_rules.drain(), timeout=5.0)
+        except Exception as exc:  # shutdown must finish regardless
+            logger.warning("site_rules_drain_failed", error_type=type(exc).__name__)
 
     await app.state.telegram_manager.stop()
     await app.state.slack_manager.stop()
@@ -217,9 +244,14 @@ def _wire_telegram(
     # /tutor on|off|status (services/tutor): no model call, outside the turn lock.
     service.tutor = agent.build_tutor_applier(app, session_factory, channel="telegram")
     # top10:voice_notes: voice notes go through the process's one
-    # VoiceNoteService (made here on the first start, which comes before
-    # the end of wire_services).
+    # VoiceNoteService (made on first use; wire_services makes it before the
+    # poller first starts, at its very end).
     service.voice = voice_notes_for(app, session_factory)
+    # Security wave (S3): /scam goes through the process's one
+    # ScamCheckService (None until the skill lands: no interceptor runs).
+    from services.scam_check.service import scam_check_for
+
+    service.scam_check = scam_check_for(app, session_factory)
     executor = getattr(app.state, "tool_executor", None)
     if executor is not None:
         service.approval_image = lambda action: executor.approval_image(
@@ -236,6 +268,9 @@ class BrowserToolkits:
     read: BrowserReadToolkit
     act: BrowserActToolkit
     checkout: BrowserCheckoutToolkit
+    # Security wave (S7): the shared page memory, so the site-rules call
+    # check can read the origin of the page a user's last read observed.
+    memory: PageMemory
 
 
 def build_browser_toolkits(
@@ -245,16 +280,23 @@ def build_browser_toolkits(
     vault: VaultService,
     settings_source: Any,
     cancel_flag: Callable[[str], bool],
+    egress_hooks: Optional[EgressHooks] = None,
 ) -> BrowserToolkits:
     """Build the browser toolkits for this process. One PageMemory is shared
     by all three (the read toolkit's _observe remembers every page), so an
     act or a checkout is checked against the page the last read observed.
     checkout pays with the card in *vault* under the caps *settings_source*
     answers (purchases spec §6); in a container the vault is disabled and
-    the toolkit refuses before any card."""
+    the toolkit refuses before any card. *egress_hooks* (security wave: the
+    owner's site rules and the link lookup) are attached to every context
+    each toolkit guards; without them the guard behaves exactly as before."""
     memory = PageMemory()
     read = BrowserReadToolkit(
-        sessions, guard=browser_guard, handoff=browser_handoff, page_memory=memory
+        sessions,
+        guard=browser_guard,
+        handoff=browser_handoff,
+        page_memory=memory,
+        egress_hooks=egress_hooks,
     )
     act = BrowserActToolkit(
         sessions,
@@ -262,6 +304,7 @@ def build_browser_toolkits(
         handoff=browser_handoff,
         memory=memory,
         cancel_flag=cancel_flag,
+        egress_hooks=egress_hooks,
     )
     checkout = BrowserCheckoutToolkit(
         sessions,
@@ -272,8 +315,9 @@ def build_browser_toolkits(
         ledger=PurchaseLedger(session_factory),
         settings=settings_source,
         cancel_flag=cancel_flag,
+        egress_hooks=egress_hooks,
     )
-    return BrowserToolkits(read=read, act=act, checkout=checkout)
+    return BrowserToolkits(read=read, act=act, checkout=checkout, memory=memory)
 
 
 REAP_INTERVAL_S = 60.0
@@ -341,6 +385,11 @@ def _wire_slack(
     channel.chat = agent.build_chat_applier(app, session_factory, channel="slack")
     # "tutor on|off|status" in the DM (services/tutor).
     channel.tutor = agent.build_tutor_applier(app, session_factory, channel="slack")
+    # Security wave (S3): the "scam" keyword and file shares go through the
+    # process's one ScamCheckService (None until the skill lands).
+    from services.scam_check.service import scam_check_for
+
+    channel.scam_check = scam_check_for(app, session_factory)
 
 
 def fan_out_notify(
@@ -458,6 +507,9 @@ async def wire_services(
             {"telegram": telegram_manager.notify_pending, "slack": slack_manager.notify_pending}
         ),
     )
+    # Security wave (S2, S10): background services and routes that park or
+    # read cards out of a turn reach the same store the runtime uses.
+    app.state.approval_store = approval_store
 
     # One installer for the whole process: the agent's approved
     # system.install_capability and the owner's Install button on the
@@ -465,6 +517,59 @@ async def wire_services(
     # two installs of the same component from racing two pip processes.
     system_toolkit = SystemToolkit(report_source=installation.report)
     app.state.system_toolkit = system_toolkit
+
+    # Security wave (security10): core services the browser toolkits, the
+    # executor and the call checks below are built with, each inert until
+    # its skill lands. One owner sender over Telegram and Slack, as the
+    # reminders use (security skills alert through it; it never raises).
+    # The link lookups (S4): local checks always, Google only with the
+    # owner's key. The owner's site rules (S7), read per navigation from an
+    # in-memory snapshot; a switch that cannot be read counts as on, so the
+    # rules fail closed. The browser guard gets both as per-context hooks
+    # (no module-level state). The MCP tool pins (S5), off until their
+    # switch is on, so MCP behaves as before.
+    from services.mcp.pin_store import McpPinService
+    from services.reputation.links import LinkReputation, owner_alert
+    from services.site_rules.service import SiteRulesService
+
+    app.state.owner_send = fan_out_send(
+        {"telegram": telegram_manager.send_text, "slack": slack_manager.send_text}
+    )
+    link_reputation = LinkReputation(
+        installation,
+        owner_alert=owner_alert(
+            session_factory,
+            app.state.owner_send,
+            RuntimeAuditLogger(session_factory=session_factory).log,
+        ),
+    )
+    app.state.link_reputation = link_reputation
+
+    async def _site_rules_enabled() -> bool:
+        try:
+            return "browser_site_rules" in await installation.enabled_keys()
+        except Exception as exc:
+            logger.warning("site_rules_switch_unreadable", error_type=type(exc).__name__)
+            return True
+
+    site_rules = SiteRulesService(session_factory, enabled=_site_rules_enabled)
+    app.state.site_rules = site_rules
+    installation.on_change(site_rules.on_installation_change)
+    egress_hooks = EgressHooks(
+        site_rules=site_rules.guard_hook_for,
+        reputation=lambda _user_id: link_reputation.navigation_check,
+    )
+
+    async def _mcp_pinning_enabled() -> bool:
+        return "mcp_pinning" in await installation.enabled_keys()
+
+    mcp_pins = McpPinService(
+        session_factory,
+        enabled=_mcp_pinning_enabled,
+        notify=app.state.owner_send,
+        audit=RuntimeAuditLogger(session_factory=session_factory).log,
+    )
+    app.state.mcp_pins = mcp_pins
 
     # All security-relevant services own short-lived sessions via the
     # application session factory: the executor decrypts credentials and
@@ -515,7 +620,16 @@ async def wire_services(
         vault=vault,
         settings_source=installation,
         cancel_flag=agent_cancel.is_cancelled,
+        egress_hooks=egress_hooks,
     )
+    # Security wave (S7): the owner's Blocked sites hold for every fetch
+    # that opens a web page for the owner, not only the browser and web.*:
+    # watch.create, every background page-watch check (a watch saved before
+    # its site was Blocked included) and a web page saved to the knowledge
+    # base. These fail closed: while no rules were ever read they fetch
+    # nothing, since a background check has no call check in front of it.
+    # With no rule matching, the plain network policy answers as before.
+    site_resolver = site_rules.wrap_resolver(validated_addresses, fail_closed=True)
     tool_executor = ConnectorToolExecutor(
         session_factory=session_factory,
         capability_gate=installation.capability_statuses,
@@ -524,7 +638,14 @@ async def wire_services(
         computer_toolkit=computer_toolkit,
         act_toolkit=browser_toolkits.act,
         checkout_toolkit=browser_toolkits.checkout,
+        # Security wave (S7): web.fetch_page, research and screenshots refuse
+        # a Blocked host on every hop, before a socket opens.
+        web_toolkit=WebToolkit(resolver=site_rules.wrap_resolver(validated_addresses)),
+        watch_toolkit=WatchToolkit(session_factory, resolver=site_resolver),
+        knowledge_toolkit=KnowledgeToolkit(session_factory, url_resolver=site_resolver),
     )
+    # Security wave (S5): the dispatcher and the catalog read the MCP pins.
+    tool_executor.use_mcp_pins(mcp_pins)
     # The Telegram poller reads a purchase card's picture through it.
     app.state.tool_executor = tool_executor
     app.state.agent_runtime = AgentRuntime(
@@ -542,7 +663,7 @@ async def wire_services(
     logger.info("agent_runtime_initialized")
 
     # Tool discovery for user-registered MCP servers (short-TTL cache).
-    app.state.mcp_catalog = MCPToolCatalog(MCPConnectorLoader(session_factory))
+    app.state.mcp_catalog = MCPToolCatalog(MCPConnectorLoader(session_factory), pins=mcp_pins)
 
     async def _apply_telegram() -> None:
         switches = await installation.capabilities()
@@ -564,14 +685,9 @@ async def wire_services(
             slack_manager.schedule_reconcile()
 
     installation.on_change(_on_change)
-
-    try:
-        await _apply_telegram()
-    except Exception as exc:
-        # A bad token or an unreachable Telegram must not keep the API
-        # down; the owner can fix the token in Settings. Type only: the
-        # message can quote a bot-token URL.
-        logger.warning("telegram_start_failed", error_type=type(exc).__name__)
+    # The Telegram poller itself starts at the very end (below): messages
+    # queued while the server was down arrive as soon as it polls, and the
+    # turns they start must meet the call checks, not an empty pipeline.
 
     # Reminders sweep regardless of whether a delivery channel runs — the
     # rows are still user-visible in the API; only the out-of-band push
@@ -592,10 +708,20 @@ async def wire_services(
     async def _page_watch_enabled() -> bool:
         return "page_watch" in await installation.enabled_keys()
 
+    # Security wave (S7): each check meets the owner's site rules on every
+    # hop (site_resolver, above). Nothing else re-reads the rules for a
+    # background check, so the snapshot (its age and the switch) is brought
+    # up to date first; a Blocked site is then refused with S7's sentence
+    # before a socket opens, and the watch records it as a failed check.
+    async def _page_watch_fetch(url: str) -> PageSnapshot:
+        await site_rules.ensure_fresh()
+        return await fetch_snapshot(url, resolver=site_resolver)
+
     app.state.page_watches = PageWatchService(
         session_factory=session_factory,
         send=telegram_manager.send_text,
         enabled=_page_watch_enabled,
+        fetch=_page_watch_fetch,
     )
 
     # top10:secret_pii_redaction
@@ -788,6 +914,191 @@ async def wire_services(
         tool_executor.video_toolkit.store, keep_days=_keep_transcripts_days
     )
 
+    # Security wave (security10): the skills' services, then the call checks
+    # every one of them plugs into. Each is a stub that changes nothing until
+    # its skill lands; none starts here (the lifespan starts the sweepers).
+    from services.agent.tool_registry import security_toolkit_of
+    from services.notifications.sweeper import capability_gate as security_gate
+
+    # Security wave (S1): outbound message checks. The hidden-character floor
+    # is the executor's default; this adds the audit row, the sent-to
+    # history, the organisation's domains and the call check (slot 4).
+    from services.security.outbound import OutboundCheck, OutboundService
+    from services.security.outbound_store import (
+        KnownRecipientStore,
+        OrganisationDomainStore,
+        OrgDomains,
+        UserEmails,
+    )
+
+    known_recipients = KnownRecipientStore(session_factory)
+    outbound = OutboundService(
+        known=known_recipients, audit=RuntimeAuditLogger(session_factory=session_factory).log
+    )
+    tool_executor.use_outbound(outbound)
+    app.state.outbound = outbound
+    app.state.organisation_domains = OrganisationDomainStore(session_factory)
+    # S9's rule B3 reads one user's organisation domains; it shares the
+    # owner list's cache invalidation.
+    app.state.org_domains = OrgDomains(session_factory, domains=app.state.organisation_domains)
+
+    async def _outbound_checks_enabled() -> bool:
+        return "outbound_checks" in await installation.enabled_keys()
+
+    outbound_check = OutboundCheck(
+        executor=tool_executor,
+        known=known_recipients,
+        org_domains=app.state.organisation_domains,
+        users=UserEmails(session_factory),
+        links=link_reputation,
+        enabled=_outbound_checks_enabled,
+    )
+
+    # Security wave (S9): rules on tool arguments (slot 1). A broken rule
+    # raises a card that names it; the owner edits rules on the Security page.
+    from services.security.tool_rules import DbToolRuleStore, ToolRulesCheck
+
+    tool_rules_store = DbToolRuleStore(session_factory)
+    app.state.tool_rules_store = tool_rules_store
+
+    async def _tool_rules_enabled() -> bool:
+        return "tool_rules" in await installation.enabled_keys()
+
+    app.state.tool_rules_check = ToolRulesCheck(
+        tool_rules_store,
+        enabled=_tool_rules_enabled,
+        org_domains=app.state.org_domains.for_user,
+    )
+
+    # Security wave (S10): file reputation. One service per process (the
+    # VirusTotal client, the quota, the verdict cache and the bytes an
+    # approved upload card may send). The intake fingerprints every upload
+    # through it, and the security.* family's file tools and the upload's
+    # card hooks go through its toolkit.
+    from services.file_reputation.service import FileReputationService
+    from services.file_reputation.sweeper import FileReputationSweeper
+    from services.file_reputation.toolkit import FileReputationToolkit
+
+    runtime = app.state.agent_runtime
+
+    async def _pending_ids(user_id: str) -> set[str]:
+        return {p.action_id for p in await runtime.list_pending_approvals(user_id)}
+
+    file_reputation = FileReputationService(
+        session_factory,
+        settings=installation,
+        audit=RuntimeAuditLogger(session_factory=session_factory).log,
+        send=app.state.owner_send,
+        telegram_fetch=telegram_manager.download_file,
+        connector_read=tool_executor.execute,
+        park_card=runtime.park_card,
+        pending_ids=_pending_ids,
+    )
+    app.state.file_reputation = file_reputation
+    app.state.file_intake.use_screen(file_reputation)
+    security_toolkit_of(tool_executor).use_file_reputation(FileReputationToolkit(file_reputation))
+    app.state.file_reputation_sweeper = FileReputationSweeper(file_reputation)
+
+    # Security wave (S3): scam checks. One ScamCheckService per process (its
+    # quota and recent answers live on it); it reads the scam_check switch per
+    # check. The in-turn security.check_scam tool is registered only once the
+    # service exists; until then the family answers "not available".
+    from services.scam_check.service import scam_check_for
+
+    scam = scam_check_for(app, session_factory)
+    if scam is not None:
+        security_toolkit_of(tool_executor).register("check_scam", scam.check_for_tool)
+
+    # Security wave (S2): every new email in each connected Gmail and Outlook
+    # inbox is checked on this computer; flagged mail gets one AI review (its
+    # own daily cap, not the unattended budget) and an alert to the person's
+    # own chats, then a Move-to-Spam/Junk approval card. Nothing is moved
+    # without one.
+    from services.notifications.mail_scan import MailScanService
+
+    app.state.mail_scan = MailScanService(
+        session_factory,
+        executor=tool_executor,
+        send=app.state.owner_send,
+        enabled=security_gate(installation, "mail_scam_scan"),
+        settings=installation,
+        approvals=approval_store,
+        runtime=runtime,
+        links=link_reputation,
+        files=file_reputation,
+        local_model=settings.MAIL_REVIEW_OLLAMA_MODEL,
+        ollama_base_url=settings.OLLAMA_BASE_URL,
+    )
+
+    # Security wave (S6): weekly Have I Been Pwned lookups of the owners'
+    # addresses with the owner's own key, paced to the key's limit; alerts
+    # only to the owners' own linked chats. The gate is re-read before every
+    # lookup, and a key or switch change runs one sweep at once.
+    from services.notifications.breach_monitor import BreachMonitorService
+
+    async def _hibp_key() -> Optional[str]:
+        return await installation.service_key("hibp")
+
+    breach_monitor = BreachMonitorService(
+        session_factory,
+        api_key=_hibp_key,
+        send=app.state.owner_send,
+        enabled=security_gate(installation, "breach_monitor"),
+    )
+    app.state.breach_monitor = breach_monitor
+
+    async def _breach_on_change(topic: str) -> None:
+        if topic == "capabilities":
+            breach_monitor.kick()
+
+    installation.on_change(_breach_on_change)
+
+    # Security wave: the pre-dispatch call checks, in their fixed order (tool
+    # rules, MCP pins, site rules, outbound, file reputation). The runtime
+    # (turn and approve stages) and the executor's fail-closed backstop run
+    # the same pipeline object; a check that is still a stub applies to no
+    # call, so nothing changes until its skill lands.
+    from services.file_reputation.call_check import FileReputationCallCheck
+    from services.mcp.pin_check import McpPinCallCheck
+    from services.security.call_checks import standard_pipeline
+
+    page_memory = browser_toolkits.memory
+
+    def _page_origin(user_id: str) -> Optional[str]:
+        page = page_memory.get(user_id)
+        return page.origin if page is not None else None
+
+    pipeline = standard_pipeline(
+        tool_rules=app.state.tool_rules_check,
+        mcp_pin=McpPinCallCheck(mcp_pins),
+        site_rules=site_rules.call_check(page_origin=_page_origin),
+        outbound=outbound_check,
+        file_reputation=FileReputationCallCheck(session_factory),
+        audit=RuntimeAuditLogger(session_factory=session_factory).log,
+    )
+    app.state.call_checks = pipeline
+    runtime.use_call_checks(pipeline)
+    tool_executor.use_call_checks(pipeline)
+
+    # The first site-rules snapshot. A failed read is logged by type only;
+    # the rules then fail closed until the next refresh succeeds.
+    try:
+        await site_rules.refresh()
+    except Exception as exc:
+        logger.warning("site_rules_initial_load_failed", error_type=type(exc).__name__)
+
+    # Last: start the Telegram poller, once everything a turn it starts runs
+    # through is wired (the call checks, the outbound floor, the file
+    # screen, the site-rules snapshot). Slack's channels start after
+    # wire_services, in the lifespan.
+    try:
+        await _apply_telegram()
+    except Exception as exc:
+        # A bad token or an unreachable Telegram must not keep the API
+        # down; the owner can fix the token in Settings. Type only: the
+        # message can quote a bot-token URL.
+        logger.warning("telegram_start_failed", error_type=type(exc).__name__)
+
 
 _is_production = settings.ENVIRONMENT == "production"
 
@@ -884,6 +1195,32 @@ app.include_router(permission_grants_routes.router, prefix="/api")
 # top10:voice_notes
 
 # top10:video_transcripts
+
+# Security wave (security10): the Security page's routes, one router per
+# module, all under /api/security. Service keys first (WAVE 0, real); the
+# skills' routers follow in this block.
+from api.routes import security_keys as security_keys_routes
+
+app.include_router(security_keys_routes.router, prefix="/api")
+from api.routes import link_reputation as link_reputation_routes
+from api.routes import security_breach as security_breach_routes
+from api.routes import security_files as security_files_routes
+from api.routes import security_mail as security_mail_routes
+from api.routes import security_mcp as security_mcp_routes
+from api.routes import security_outbound as security_outbound_routes
+from api.routes import security_scam as security_scam_routes
+from api.routes import security_site_rules as security_site_rules_routes
+from api.routes import security_tool_rules as security_tool_rules_routes
+
+app.include_router(link_reputation_routes.router, prefix="/api")
+app.include_router(security_outbound_routes.router, prefix="/api")
+app.include_router(security_mail_routes.router, prefix="/api")
+app.include_router(security_scam_routes.router, prefix="/api")
+app.include_router(security_mcp_routes.router, prefix="/api")
+app.include_router(security_breach_routes.router, prefix="/api")
+app.include_router(security_site_rules_routes.router, prefix="/api")
+app.include_router(security_tool_rules_routes.router, prefix="/api")
+app.include_router(security_files_routes.router, prefix="/api")
 
 
 @app.get("/")

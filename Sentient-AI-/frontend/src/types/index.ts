@@ -278,6 +278,21 @@ export interface PendingApproval {
   /** The account a card for a low-risk change can be allowed on for 7 days ("School Gmail"),
    *  offering "Allow low-risk changes on School Gmail for 7 days". Null or absent: no offer. */
   low_risk_account?: string | null;
+  /** What the server's call checks noticed about this action (security wave), shown above the
+   *  risk warning. A card with a "high" or "warn" note comes with weekly_app and
+   *  low_risk_account null: it is approved once, never for a week. */
+  security_notes?: SecurityNote[] | null;
+}
+
+/** How serious one security note is: "high" (danger), "warn" (warning) or "info". */
+export type SecurityNoteSeverity = "high" | "warn" | "info";
+
+/** One line a card shows about what a call check noticed: a kind for code, a severity, and one
+ *  plain sentence that names hosts or addresses at most (never message text). */
+export interface SecurityNote {
+  kind: string;
+  severity: SecurityNoteSeverity;
+  text: string;
 }
 
 /**
@@ -795,3 +810,522 @@ export interface PermissionGrant {
 // top10:voice_notes
 
 // top10:video_transcripts
+
+// Security wave (S1): outbound message checks (Security ▸ Outgoing messages).
+/** One domain the owner listed as their organisation's, install-wide. */
+export interface OrganisationDomain {
+  id: string;
+  domain: string;
+  added_at: string;
+}
+
+/** GET /security/outbound: the switch, what the sent-to history holds (counts only; it keeps
+ *  fingerprints, never addresses) and the organisation's domains. */
+export interface OutboundSettings {
+  enabled: boolean;
+  known: { addresses: number; domains: number; since: string | null };
+  /** The signed-in account's own domains, which always count as the organisation's. */
+  own_domains: string[];
+  organisation_domains: OrganisationDomain[];
+  can_edit_domains: boolean;
+  domain_limit: number;
+}
+
+// Security wave (S2): scam checks on new email (Security ▸ Mail alerts).
+export type MailVerdict = "likely_scam" | "suspicious" | "no_signs" | "unknown";
+/** What an alert can offer behind an approval card. Only "Move to Spam/Junk" in this wave:
+ *  "Block sender" is deferred (docs/BACKLOG.md, Track F row F9). */
+export type MailActionKind = "move_to_spam";
+
+/** An approval card made from an alert, and where it stands. */
+export interface MailAlertCard {
+  action_id: string;
+  kind: MailActionKind;
+  status: "pending" | "approved" | "denied" | "expired" | "missing";
+  expires_at: string | null;
+}
+
+/** One flagged email: who it claims to be from, why it was flagged, and the AI review's view. */
+export interface MailAlert {
+  id: string;
+  connector_id: string;
+  account: string;
+  provider: "gmail" | "outlook";
+  verdict: MailVerdict;
+  status: "alerted" | "quiet" | "dismissed" | "expired";
+  from_name: string;
+  from_address: string;
+  subject: string;
+  received_at: string | null;
+  detected_at: string;
+  reasons: string[];
+  check_notes: string[];
+  review: { reasons: string[]; advice: string; provider: string; model: string } | null;
+  review_note: string | null;
+  delivered: boolean;
+  alert_note: string | null;
+  cards: MailAlertCard[];
+  actions: MailActionKind[];
+  action_hint: string | null;
+}
+
+export interface MailAlertList {
+  alerts: MailAlert[];
+  next_before: string | null;
+}
+
+/** One of this account's mailboxes the scan reads. */
+export interface MailScanAccount {
+  connector_id: string;
+  account: string;
+  provider: "gmail" | "outlook";
+  status: "starting" | "active" | "paused" | "error" | "no_access";
+  last_checked_at: string | null;
+  checked_count: number;
+  flagged_count: number;
+  skipped_count: number;
+  last_error: string | null;
+  note: string | null;
+}
+
+/** GET /security/mail/status: the switch, today's AI reviews and this account's mailboxes;
+ *  `install` only for the owner. */
+export interface MailScanStatus {
+  enabled: boolean;
+  when_off: string | null;
+  ai_reviews_today: number;
+  ai_reviews_per_day: number;
+  link_checks: "local" | "local_and_remote";
+  file_checks: "off" | "remote";
+  accounts: MailScanAccount[];
+  install: { accounts: number; alerts_7d: number; reviews_today: number } | null;
+}
+
+// Security wave (S3): on-demand scam checks (Security ▸ Check for scams).
+export type ScamVerdict = "likely_scam" | "suspicious" | "no_signs_found" | "not_checked";
+
+/** One link found in what was checked; `shown` is display text, never made clickable. */
+export interface ScamLink {
+  shown: string;
+  host: string;
+  looks_like: string;
+  level: "malicious" | "suspicious" | "no_signs_found" | "not_checked";
+  checked_by: string[];
+  origin: "text" | "picture" | "qr" | "sender";
+}
+
+/** POST /security/scam-check: pasted text and up to four screenshots as data URLs. */
+export interface ScamCheckRequest {
+  text: string;
+  note?: string;
+  images: { media_type: string; data: string }[];
+}
+
+export interface ScamCheckResult {
+  verdict: ScamVerdict;
+  headline: string;
+  /** Crawler's own fixed sentences. */
+  reasons: string[];
+  /** The AI provider's own reasons after filtering (no link, address or phone number), kept
+   *  apart from Crawler's and shown as plain text (S3 4.6, review SEC-M2). */
+  ai_reasons: string[];
+  advice: string[];
+  links: ScamLink[];
+  notes: string[];
+  qr: { present: boolean; readable: boolean };
+  checked: { text_chars: number; images: number; links: number; ai: boolean };
+  conversation_id: string | null;
+  usage: Record<string, number>;
+  provider: string;
+  model: string;
+  cached: boolean;
+}
+
+/** GET /security/scam-check/status: whether checks are on and what they can use right now. */
+export interface ScamCheckStatus {
+  effective: "on" | "off" | "blocked";
+  reason: string;
+  provider: string;
+  sees_images: boolean;
+  google_list: boolean | null;
+  file_reputation: boolean | null;
+  checks_per_day: number;
+  checks_used_today: number;
+}
+
+// Security wave (S4): link reputation and the owner's service keys (Security ▸ Service keys).
+export type SecurityServiceName = "safe_browsing" | "web_risk" | "hibp" | "virustotal";
+
+/** One outside service a key can be saved for. Booleans only: a key is never sent back. */
+export interface SecurityServiceKey {
+  name: SecurityServiceName;
+  label: string;
+  used_for: string;
+  note: string;
+  console_url: string;
+  key_hint: string;
+  key_from_env: boolean;
+  key_stored: boolean;
+}
+
+export interface SecurityServiceKeys {
+  services: SecurityServiceKey[];
+  /** Stored keys do not decrypt with the current ENCRYPTION_KEY: saving is refused until the
+   *  owner restores the key or clears the stored secrets. */
+  secrets_unreadable: boolean;
+}
+
+export interface SecurityKeyTestResult {
+  ok: boolean;
+  detail?: string;
+  error?: string;
+}
+
+export interface LinkReputationProblem {
+  kind: "key_rejected" | "rate_limited" | "timeout" | "error";
+  at: string;
+  http_status: number | null;
+}
+
+/** GET /security/link-reputation/status: counts, limits and the last problem; never a key,
+ *  link or host. */
+export interface LinkReputationStatus {
+  capability: "on" | "off" | "blocked";
+  reason: string;
+  service: "safe_browsing" | "web_risk" | null;
+  both_keys: boolean;
+  lookups_last_minute: number;
+  lookups_per_minute: number;
+  lookups_last_day: number;
+  lookups_per_day: number;
+  counting_since: string;
+  cache_entries: number;
+  dangerous_found_last_day: number;
+  not_checked_last_day: number;
+  cooling_down_until: string | null;
+  last_problem: LinkReputationProblem | null;
+}
+
+// Security wave (S5): MCP tool pinning (Security ▸ MCP reviews and the Connectors chip).
+export type McpPinStatus = "approved" | "needs_review" | "kept_off";
+export type McpReviewKind = "changed" | "new";
+export type McpTrustedHow = "first_use" | "owner_test" | "owner_review";
+
+/** A run of server text; a hidden part is shown as a labelled chip with its decoded text. */
+export interface McpTextPart {
+  text: string;
+  hidden: boolean;
+  decoded: string | null;
+}
+
+export interface McpToolPinView {
+  pin_id: string;
+  tool_name: string;
+  remote_name: McpTextPart[];
+  status: McpPinStatus;
+  review_kind: McpReviewKind | null;
+  removed: boolean;
+  trusted_how: McpTrustedHow | null;
+  hidden_characters: number;
+  change_count: number;
+  first_seen_at: string;
+  approved_at: string | null;
+  changed_at: string | null;
+}
+
+export interface McpServerReview {
+  connector_id: string;
+  display_name: string;
+  is_active: boolean;
+  needs_review_count: number;
+  tools: McpToolPinView[];
+}
+
+export interface McpReviewList {
+  pinning_enabled: boolean;
+  servers: McpServerReview[];
+}
+
+export interface McpReviewLine {
+  op: "context" | "added" | "removed" | "hunk";
+  parts: McpTextPart[];
+}
+
+export interface McpToolReviewDetail {
+  pin: McpToolPinView;
+  connector_id: string;
+  server_name: string;
+  definition_hash: string;
+  previous_hash: string | null;
+  flags: { hidden_characters: number; looks_like_instructions: boolean; too_large: boolean };
+  lines: McpReviewLine[];
+  truncated: boolean;
+}
+
+/** POST /security/mcp/servers/{id}/approve: every tool approved at the hash that was shown. */
+export interface McpServerApproval {
+  approved: McpToolPinView[];
+}
+
+// Security wave (S6): breach monitor and the password check (Security ▸ Breach monitor).
+export type BreachState = "on" | "off" | "blocked";
+
+/** One watched address. `address` is null when it cannot be decrypted; `hint` is always set. */
+export interface BreachAddress {
+  id: string;
+  address: string | null;
+  hint: string;
+  source: "account" | "added";
+  status: "active" | "paused" | "error";
+  readable: boolean;
+  last_checked_at: string | null;
+  next_check_at: string;
+  baseline_at: string | null;
+  breach_count: number;
+  new_count: number;
+  last_error_code: string | null;
+  last_error: string | null;
+}
+
+export interface BreachFinding {
+  id: string;
+  address_id: string;
+  name: string;
+  title: string;
+  domain: string | null;
+  breach_date: string | null;
+  added_at: string | null;
+  pwn_count: number | null;
+  data_classes: string[];
+  verified: boolean;
+  sensitive: boolean;
+  fabricated: boolean;
+  spam_list: boolean;
+  baseline: boolean;
+  first_seen_at: string;
+  alerted_at: string | null;
+  acknowledged_at: string | null;
+}
+
+/** GET /security/breach (owner only): state, watched addresses and breaches seen. */
+export interface BreachOverview {
+  state: BreachState;
+  reason: string;
+  switch_on: boolean;
+  key_configured: boolean;
+  check_every_days: number;
+  max_addresses: number;
+  account_note: string | null;
+  addresses: BreachAddress[];
+  findings: BreachFinding[];
+  attribution: { text: string; url: string };
+}
+
+export interface BreachCheckResult {
+  outcome: "checked" | "not_checked";
+  address: BreachAddress;
+  new_findings: BreachFinding[];
+  note: string;
+}
+
+/** A Pwned Passwords range: hash suffixes for one 5-character SHA-1 prefix, with counts. */
+export interface PwnedRange {
+  prefix: string;
+  suffixes: [string, number][];
+  source: string;
+}
+
+// Security wave (S7): site rules for Crawler's browser (Security ▸ Site rules, owner only).
+export type SiteRuleKind = "blocked" | "always_ask" | "trusted";
+
+export interface SiteRule {
+  id: string;
+  pattern: string;
+  host: string;
+  include_subdomains: boolean;
+  kind: SiteRuleKind;
+  overrides_builtin: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+/** A built-in list of sensitive sites (banks, brokers, ...) and the kind the owner gave it. */
+export interface SiteCategory {
+  key: string;
+  label: string;
+  kind: SiteRuleKind;
+  default_kind: SiteRuleKind;
+  site_count: number;
+  sites: string[];
+}
+
+export interface SiteHit {
+  host: string;
+  kind: "blocked" | "always_ask";
+  where: "navigation" | "read" | "call" | "web";
+  count: number;
+  last_at: string;
+}
+
+export interface SiteRulesView {
+  enabled: boolean;
+  rules: SiteRule[];
+  categories: SiteCategory[];
+  recent: SiteHit[];
+  max_rules: number;
+}
+
+export interface SiteRuleCreate {
+  site: string;
+  include_subdomains: boolean;
+  kind: SiteRuleKind;
+}
+
+/** POST /security/site-rules/check: which rule applies to a site, explained. */
+export interface SiteCheck {
+  host: string;
+  kind: SiteRuleKind | null;
+  source: "owner" | "builtin" | null;
+  category: string | null;
+  rule_id: string | null;
+  pattern: string | null;
+  protected: boolean;
+  enabled: boolean;
+  explanation: string;
+}
+
+// Security wave (S9): rules on tool arguments (Security ▸ Tool rules, owner only).
+export type ToolRuleOp =
+  | "equals"
+  | "not_equals"
+  | "contains"
+  | "regex"
+  | "in_list"
+  | "domain_in"
+  | "domain_not_in"
+  | "number_gt"
+  | "number_lt";
+
+/** One condition on a call's argument; `value` is a list for list ops, a number for number ops. */
+export interface ToolRuleCondition {
+  arg: string;
+  op: ToolRuleOp;
+  value: string | number | string[];
+}
+
+export interface ToolRuleDraft {
+  tool: string;
+  conditions: ToolRuleCondition[];
+}
+
+export interface ToolRuleCreate extends ToolRuleDraft {
+  name: string;
+}
+
+export interface ToolRule extends ToolRuleCreate {
+  id: string;
+  summary: string;
+  created_at: string;
+  /** The email of the account that made the rule, or null once that account is gone. */
+  created_by: string | null;
+}
+
+export interface BuiltinToolRule {
+  key: string;
+  name: string;
+  description: string;
+  enabled: boolean;
+  changed_at: string | null;
+}
+
+/** An operator the form offers, and which value input it takes. */
+export interface ToolRuleOperator {
+  op: ToolRuleOp;
+  label: string;
+  value: "text" | "list" | "number" | "pattern";
+}
+
+export interface ToolRulesView {
+  enabled: boolean;
+  store_ok: boolean;
+  builtins: BuiltinToolRule[];
+  rules: ToolRule[];
+  org_domains: string[];
+  operators: ToolRuleOperator[];
+  limits: {
+    max_rules: number;
+    max_conditions: number;
+    max_list_items: number;
+    max_value_chars: number;
+    max_regex_chars: number;
+    regex_text_cap: number;
+  };
+}
+
+/** POST /security/tool-rules/preview: an invalid draft is `valid: false` with the reason. */
+export interface ToolRulePreview {
+  valid: boolean;
+  error: string | null;
+  summary: string;
+  matches: { tool: string; category: string }[];
+  reads: number;
+  writes: number;
+  mcp: boolean;
+  truncated: boolean;
+}
+
+export interface ToolRuleCatalog {
+  tools: { tool: string; category: string; args: string[] }[];
+  mcp_hint: string;
+}
+
+// Security wave (S10): file reputation through VirusTotal (Security ▸ File checks).
+/** Never "safe": the best a lookup says is that no engine flagged the file. */
+export type FileVerdictName = "malicious" | "suspicious" | "no_detections" | "unknown";
+export type FileCheckState = "queued" | "checked" | "not_checked" | "upload_pending" | "analysing";
+export type FileCheckSource = "page" | "web" | "telegram" | "slack" | "gmail" | "outlook" | "hash" | "scam";
+
+/** One of the caller's own file checks; it never carries where the bytes came from. */
+export interface FileCheck {
+  id: string;
+  sha256: string;
+  name: string;
+  source: FileCheckSource;
+  size_bytes: number | null;
+  state: FileCheckState;
+  verdict: FileVerdictName | null;
+  flagged_by: number | null;
+  engines: number | null;
+  threat_label: string | null;
+  summary: string;
+  reason: string | null;
+  can_upload: boolean;
+  upload_needs_file: boolean;
+  action_id: string | null;
+  checked_at: string | null;
+  updated_at: string;
+}
+
+export interface FileChecksStatus {
+  state: "on" | "off" | "blocked";
+  reason: string | null;
+  lookups_last_24h: number;
+  lookups_per_day: number;
+  your_lookups_last_24h: number;
+  your_lookups_per_day: number;
+  upload_max_bytes: number;
+}
+
+export interface FileChecksResponse {
+  service: FileChecksStatus;
+  checks: FileCheck[];
+}
+
+/** POST /security/files/{id}/upload: the approval card parked for the upload (202), or the one
+ *  already waiting (200, whose expiry the server does not repeat: null). */
+export interface FileUploadRequest {
+  action_id: string;
+  expires_at: string | null;
+  state: "upload_pending";
+  reason: string;
+}

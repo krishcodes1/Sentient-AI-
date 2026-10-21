@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 from services.agent.permissions import ActionCategory
 from services.connectors.base import ConnectorError
-from services.connectors.definition import ToolSpec, _schema
+from services.connectors.definition import Outbound, ToolSpec, _schema
 from services.connectors.shaping import clamp_limit
 
 from .common import (
@@ -105,6 +105,7 @@ ISSUE_ACTIONS: tuple[ToolSpec, ...] = (
             assignees={"type": "array", "items": {"type": "string"}, "description": "Logins"},
         ),
         required_scope="issues.write",
+        outbound=Outbound(content=("title", "body")),
     ),
     ToolSpec(
         "comment",
@@ -118,6 +119,7 @@ ISSUE_ACTIONS: tuple[ToolSpec, ...] = (
         ),
         required_scope="issues.write",
         always_confirm=True,
+        outbound=Outbound(content=("body",)),
     ),
     ToolSpec(
         "update_issue",
@@ -143,6 +145,7 @@ ISSUE_ACTIONS: tuple[ToolSpec, ...] = (
             },
         ),
         required_scope="issues.write",
+        outbound=Outbound(content=("title", "body")),
     ),
 )
 

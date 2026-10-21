@@ -1,7 +1,7 @@
 /**
  * Tests for Dashboard's token usage: they prove today's tokens appear as a stat card with an
  * estimated cost, the usage panel renders the by-model table, and a failed summary is named in the
- * load-error banner.
+ * load-error banner; and that an approval row shows its security notes above the risk warning.
  *
  * Why it exists: Guards against a usage failure blanking the page or going unreported.
  */
@@ -27,7 +27,7 @@ vi.mock("@/services/api", () => ({
 }));
 
 import Dashboard from "@/pages/Dashboard";
-import { getUsageSummary } from "@/services/api";
+import { getPendingApprovals, getUsageSummary } from "@/services/api";
 import { ThemeProvider } from "@/theme";
 
 function renderDashboard() {
@@ -70,6 +70,36 @@ describe("Dashboard token usage", () => {
     expect(within(panel).getByText("Last 30 days")).toBeInTheDocument();
     expect(within(panel).getByRole("table")).toBeInTheDocument();
     expect(within(panel).getByText("gemini-2.5-flash")).toBeInTheDocument();
+  });
+
+  it("shows the card's security notes above the risk warning", async () => {
+    // Security wave: an approval row shows what the server's call checks noticed.
+    vi.mocked(getPendingApprovals).mockResolvedValueOnce([
+      {
+        action_id: "a1",
+        tool_name: "google_workspace.send_email",
+        arguments: { to: "ann@example.com" },
+        reason: "Send an email to ann@example.com from your Gmail",
+        expires_at: "2099-01-01T00:00:00Z",
+        risk_note: "Heads up: this request was shaped by external content.",
+        security_notes: [
+          {
+            kind: "recipient_first_time",
+            severity: "warn",
+            text: "First time Crawler sends to ann@example.com.",
+          },
+        ],
+      },
+    ]);
+    renderDashboard();
+    const section = await screen.findByRole("region", { name: "Security notes" });
+    expect(section).toHaveTextContent("First time Crawler sends to ann@example.com.");
+    // The plain card: its sentence first, then the notes, then the risk
+    // warning ("Check this first") above the buttons.
+    const warning = screen.getByText("Check this first");
+    expect(section.compareDocumentPosition(warning) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const sentence = screen.getByText("Send an email to ann@example.com from your Gmail");
+    expect(sentence.compareDocumentPosition(section) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("names usage in the load-error banner when the summary fails", async () => {

@@ -59,6 +59,10 @@ EXPECTED: dict[str, tuple[ActionCategory, bool]] = {
     "send_email": (W, True), "reply": (W, True), "forward": (W, True),
     "create_draft": (W, False), "send_draft": (W, True), "modify_labels": (W, False),
     "trash_message": (D, True),
+    # Security wave: S1's draft read, S10's attachment fingerprint and S2's two
+    # scam-check reads (Block sender is deferred, owner decision 8a).
+    "get_draft": (R, False), "get_attachment_hash": (R, False),
+    "list_new_message_ids": (R, False), "get_message_security": (R, False),
     "get_events": (R, False), "check_availability": (R, False), "list_calendars": (R, False),
     # respond_to_invite answers the organizer: always-confirm (permission tiers).
     "create_event": (W, False), "update_event": (W, False), "respond_to_invite": (W, True),

@@ -79,6 +79,10 @@ class ReportContext:
     # For voice_notes_cloud: the default provider accepts audio blocks
     # (providers.provider_hears_audio(default_provider)).
     default_provider_audio: bool = False
+    # Security wave: names of outside security services with a usable owner key ("safe_browsing",
+    # "web_risk", "hibp", "virustotal"), env or stored (InstallationService.configured_service_keys),
+    # for the key-gated capabilities. Empty when not gathered, which reads as no key.
+    service_keys: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)

@@ -587,6 +587,9 @@ async def update_connector(
     # For permission tiers (below): what the change is measured against.
     old_tier, old_scopes = connector.permission_tier, list(connector.granted_scopes or [])
     credentials_changed = "credentials" in update_data
+    # Security wave (S5): the blob before this edit, to tell a moved MCP
+    # server (its pins are reset) from a header-only change.
+    previous_credentials = connector.encrypted_credentials
 
     if "credentials" in update_data:
         credentials = update_data.pop("credentials") or {}
@@ -620,6 +623,15 @@ async def update_connector(
     )
     await db.refresh(connector)
     _forget_mcp_state(connector)
+    if credentials_changed and type_key == ConnectorType.mcp.value:
+        # Security wave (S5, MCP pinning): a new server URL is a new server;
+        # its tools are pinned again by the Test the page runs after saving.
+        # A header-only change keeps the pins. Never raises.
+        from services.mcp.pin_store import reset_pins_if_server_moved
+
+        await reset_pins_if_server_moved(
+            db, connector, previous_credentials, user_id=current_user.id
+        )
     await _reconcile_slack_channels(request, db, type_key)
     return _connector_response(connector)
 
@@ -832,6 +844,7 @@ class ConnectorTestResult(BaseModel):
 @router.post("/{connector_id}/test", response_model=ConnectorTestResult)
 async def test_connector(
     connector_id: uuid.UUID,
+    request: Request,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     session_factory: Callable[[], AsyncSession] = Depends(session_factory_dependency),
@@ -907,9 +920,15 @@ async def test_connector(
         try:
             tools = await client.list_tools()
             mcp_activity.record_success(row.id)
+            # Security wave (S5, MCP pinning): the owner's Test pins a new
+            # server's tools and says how many changed or new tools wait for
+            # review. Never raises; "" while pinning is off.
+            from services.mcp.pin_store import pin_note_after_owner_test
+
+            note = await pin_note_after_owner_test(request.app, db, row, tools)
             return ConnectorTestResult(
                 ok=True,
-                detail=f"Connected. Server advertises {len(tools)} tool(s).",
+                detail=f"Connected. Server advertises {len(tools)} tool(s).{note}",
             )
         except MCPError as exc:
             mcp_activity.record_error(row.id, str(exc))

@@ -756,7 +756,14 @@ async def test_wire_services_builds_the_toolkit_for_this_platform(
     saved = dict(app.state._state)
     await wire_services(app, session_factory, telegram_service_factory=FakeService)
     try:
-        assert asked == [platform_name]
+        from services import platform as platform_layer
+
+        # The toolkit is built first, for this platform. Wiring then loads
+        # the first site-rules snapshot (security S7), which reads its switch
+        # from the capability report; that report's computer-control check
+        # asks for the real host's backend, never the platform faked here.
+        assert asked[0] == platform_name
+        assert all(name == platform_layer.current().name for name in asked[1:])
         kit = app.state.agent_runtime._executor._computer
         assert isinstance(kit, ComputerToolkit)
         assert kit._backend is fake

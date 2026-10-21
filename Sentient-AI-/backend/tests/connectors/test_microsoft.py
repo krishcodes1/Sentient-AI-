@@ -107,6 +107,9 @@ def test_actions_match_the_spec_table():
         "search_files", "get_file_text", "list_folder", "upload_file", "create_folder",
         "move_file", "create_share_link", "delete_file", "list_task_lists", "list_tasks",
         "create_task", "update_task", "complete_task", "delete_task", "search_contacts",
+        # Security wave: S10's attachment fingerprint and S2's two scam-check
+        # reads (Block sender is deferred, owner decision 8a).
+        "get_attachment_hash", "list_new_message_ids", "get_message_security",
     }
     assert {spec.action for spec in ACTIONS} == expected
     assert MicrosoftConnector._ACTIONS == frozenset(expected)

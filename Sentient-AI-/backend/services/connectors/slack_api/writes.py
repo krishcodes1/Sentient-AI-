@@ -26,7 +26,7 @@ import httpx
 
 from services.agent.permissions import ActionCategory
 from services.connectors.base import ConnectorError, UserConfirmationRequired
-from services.connectors.definition import ToolSpec, _schema
+from services.connectors.definition import Outbound, ToolSpec, _schema
 
 from .client import (
     FILE_ID_RE,
@@ -62,6 +62,7 @@ WRITE_ACTIONS: tuple[ToolSpec, ...] = (
         _schema(channel=_CHANNEL, text=_TEXT),
         required_scope="messages.send",
         always_confirm=True,
+        outbound=Outbound(content=("text",)),
     ),
     ToolSpec(
         "reply_in_thread",
@@ -82,6 +83,7 @@ WRITE_ACTIONS: tuple[ToolSpec, ...] = (
         ),
         required_scope="messages.send",
         always_confirm=True,
+        outbound=Outbound(content=("text",)),
     ),
     ToolSpec(
         "add_reaction",
@@ -111,6 +113,7 @@ WRITE_ACTIONS: tuple[ToolSpec, ...] = (
         ),
         required_scope="files.write",
         always_confirm=True,
+        outbound=Outbound(content=("content", "title", "filename")),
     ),
     ToolSpec(
         "set_status",
@@ -122,6 +125,7 @@ WRITE_ACTIONS: tuple[ToolSpec, ...] = (
             expires_in_minutes={"type": "integer", "description": "Clear it after this long"},
         ),
         required_scope="status.write",
+        outbound=Outbound(content=("text",)),
     ),
     ToolSpec(
         "create_channel",
@@ -162,6 +166,7 @@ WRITE_ACTIONS: tuple[ToolSpec, ...] = (
         ),
         required_scope="messages.send",
         always_confirm=True,
+        outbound=Outbound(content=("text",)),
     ),
     ToolSpec(
         "delete_message",

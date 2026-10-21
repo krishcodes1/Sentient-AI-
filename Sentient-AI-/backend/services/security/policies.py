@@ -65,6 +65,20 @@ LOG_KEY_NAMES: frozenset[str] = frozenset(
         "secret_key",
         "access_token",
         "refresh_token",
+        # Security wave: the owner's outside-service keys, by the header
+        # names they travel in and the names they are stored and configured
+        # under (services/reputation/keys.py).
+        "x-goog-api-key",
+        "x_goog_api_key",
+        "hibp-api-key",
+        "hibp_api_key",
+        "x-apikey",
+        "x_apikey",
+        "service_key",
+        "security_service_keys",
+        "safe_browsing_api_key",
+        "web_risk_api_key",
+        "virustotal_api_key",
     }
 )
 _LOG_KEY_NAMES_RE = re.compile(

@@ -58,6 +58,18 @@ class EgressBlocked(Exception):
     """
 
 
+class OwnerRuleBlocked(EgressBlocked):
+    """Raised when the owner's own rules refuse a destination (the Site
+    rules of security S7: a Blocked site, or rules that could not be read)
+    rather than the network policy.
+
+    Its message is already the plain sentence the owner and the model read
+    (``services.site_rules.messages``), so a fetcher that words network
+    refusals its own way, such as a page watch, passes this one on as is.
+    Every ``except EgressBlocked`` still catches it.
+    """
+
+
 def validated_addresses(url: str) -> tuple[str, ...]:
     """Resolve *url*'s host once and return every address that passed.
 

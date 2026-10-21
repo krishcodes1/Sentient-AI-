@@ -166,6 +166,14 @@ _TOOL_PHRASES: dict[str, Optional[str]] = {
     # top10:video_transcripts
     "video.list": "Checking your saved transcripts…",
 
+    # Security wave (security10): the security.* checks (S3, S10) and the
+    # mail connectors' attachment fingerprints (S10).
+    "security.check_scam": "Checking for signs of a scam…",
+    "security.check_file": "Checking a file with VirusTotal…",
+    "security.upload_to_virustotal": "Sending a file to VirusTotal…",
+    "google_workspace.get_attachment_hash": "Fingerprinting an attachment…",
+    "microsoft.get_attachment_hash": "Fingerprinting an attachment…",
+
 }
 
 # Phrases that name the host of the page being opened, with the wording
@@ -237,6 +245,9 @@ _FAMILY_PHRASES: dict[str, str] = {
 
     # top10:video_transcripts
     "video": "Working with a video…",
+
+    # Security wave (security10): a security.* action with no entry above.
+    "security": "Running a safety check…",
 
 }
 

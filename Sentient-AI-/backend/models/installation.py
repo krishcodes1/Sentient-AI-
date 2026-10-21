@@ -57,6 +57,10 @@ class Installation(Base):
     # AES-256-GCM blobs (core.security.encrypt_credentials) — never plaintext.
     llm_api_keys: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
     telegram_bot_token: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
+    # Owner keys for outside security services (Safe Browsing / Web Risk,
+    # HIBP, VirusTotal): one AES-256-GCM blob of {name: key}, like
+    # llm_api_keys, but never listed as an AI provider. Migration 0025.
+    security_service_keys: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
     allow_registration: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=false()
     )

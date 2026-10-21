@@ -185,6 +185,61 @@ server {
         proxy_buffering off;
     }
 
+    # Security wave (S10): a file the owner sends to VirusTotal from
+    # Security → File checks. The raw file is the request body, up to 20 MB,
+    # so, as for /api/files, this block allows 21 MB (the backend refuses
+    # anything over 20 MB with its own sentence) and streams the body through
+    # unbuffered. Otherwise proxied exactly like /api/ (keep the blocks in sync).
+    location /api/security/files/ {
+        client_max_body_size 21m;
+        proxy_request_buffering off;
+        proxy_pass http://backend:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+        proxy_buffering off;
+    }
+
+    # Security wave (S3): an out-of-turn scam check from Security → Check for
+    # scams carries up to four pasted screenshots inline as base64 (the same
+    # ~28 MB ceiling as chat, api/routes/agent.py MAX_IMAGE_BYTES); nginx's
+    # 1 MB default would answer 413. Otherwise proxied exactly like /api/
+    # (keep the blocks in sync).
+    location /api/security/scam-check {
+        client_max_body_size 28m;
+        proxy_pass http://backend:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+        proxy_buffering off;
+    }
+
+    # Chat messages carry up to four pasted images inline as base64
+    # (api/routes/agent.py MAX_IMAGE_BYTES); nginx's 1 MB default would answer
+    # 413. Otherwise proxied exactly like /api/ (keep the blocks in sync).
+    # A regex location, so it wins over the /api/ prefix for these two
+    # routes only (a message and its stream).
+    location ~ ^/api/agent/conversations/[^/]+/messages(/stream)?$ {
+        client_max_body_size 28m;
+        proxy_pass http://backend:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+        proxy_buffering off;
+    }
+
     # A flashcard deck's one-time download link (top10:flashcards_quizzes):
     # /api/study/export?t=cse_... carries a token that stays a secret until
     # it is used, so, like the OAuth callback, this location is access-logged

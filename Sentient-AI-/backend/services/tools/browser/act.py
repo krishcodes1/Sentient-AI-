@@ -107,7 +107,7 @@ from services.tools.browser._shared import (
 from services.tools.browser.actions import LOOP_REPEATS, Guard, mode_for
 from services.tools.browser.checkout import markers
 from services.tools.browser.checkout.amounts import fmt_usd, parse_money
-from services.tools.browser.guard import SENDING_REASONS
+from services.tools.browser.guard import SENDING_REASONS, EgressHooks
 from services.tools.browser.pagememory import (
     LastPage,
     PageMemory,
@@ -510,9 +510,13 @@ class BrowserActToolkit:
         cancel_flag: Callable[[str], bool],
         clock: Callable[[], float] = time.monotonic,
         picture_ttl_s: Optional[float] = None,
+        egress_hooks: Optional[EgressHooks] = None,
     ) -> None:
         self._sessions = sessions
         self._guard = guard
+        # Security wave (S4, S7): the owner's site rules and the link
+        # lookup, bound to each context this toolkit guards (None: neither).
+        self._egress_hooks = egress_hooks
         self._handoff = handoff
         self._memory = memory
         self._cancel_flag = cancel_flag
@@ -907,6 +911,7 @@ class BrowserActToolkit:
         if self._guarded.get(session.user_id) is context:
             return
         await self._guard.install_egress_guard(context, account_mode=session.mode == "account")
+        _shared.attach_egress_hooks(self._guard, session, self._egress_hooks)
         self._guarded[session.user_id] = context
 
     @staticmethod

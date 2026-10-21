@@ -36,9 +36,12 @@ CREDENTIAL_RULE = "credential_in_arguments"
 HIDDEN_EVENT = "sensitive_data_hidden"
 
 # Tools whose stored card arguments carry what the runtime bound them to
-# under a reserved "_" key (the screen or page the card was made from),
-# which the model can never set and which is never sent anywhere.
-_RESERVED_KEY_TOOLS = frozenset({"desktop.act", "browser.act", "browser.checkout"})
+# under a reserved "_" key (the screen or page the card was made from, or
+# the file a VirusTotal upload card holds, security S10), which the model
+# can never set and which is never sent anywhere as text.
+_RESERVED_KEY_TOOLS = frozenset(
+    {"desktop.act", "browser.act", "browser.checkout", "security.upload_to_virustotal"}
+)
 
 
 @dataclass(frozen=True)
