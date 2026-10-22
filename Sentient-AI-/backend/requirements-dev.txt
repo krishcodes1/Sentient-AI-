@@ -1,7 +1,7 @@
 # Development/test-only dependencies. Production runtime uses
 # requirements.txt; install both for local development:
 #   pip install -r requirements.txt -r requirements-dev.txt
-pytest>=9.0.3,<10.0.0
+pytest>=9.1.1,<10.0.0
 # 1.3.0 is the first pytest-asyncio release that accepts pytest 9.
 pytest-asyncio>=1.4.0,<2.0.0
 # Async SQLite driver used by the test suite's in-memory database
