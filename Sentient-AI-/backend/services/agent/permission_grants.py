@@ -932,6 +932,18 @@ class StandingConsent:
             decision.kind, decision.grant_id = None, None
         return reason
 
+    def withdraw(self, tc: Any) -> None:
+        """A call check turned this call into a card after standing consent
+        covered it (security wave, services/security/call_checks.py): it no
+        longer counts as a low-risk run, and its card offers no grant."""
+        decision = self._decision_for(tc)
+        if decision is None:
+            return
+        if decision.kind in _LOW_KINDS:
+            self.count = max(0, self.count - 1)
+        decision.kind, decision.grant_id = None, None
+        decision.covered = True
+
     # -- card_create ----------------------------------------------------------
 
     async def card_fields(

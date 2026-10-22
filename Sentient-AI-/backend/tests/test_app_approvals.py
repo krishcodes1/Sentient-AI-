@@ -23,6 +23,7 @@ from services.agent.app_approvals import (
     Channel,
     DbAppApprovalStore,
     InMemoryAppApprovalStore,
+    may_run_weekly,
     target_app,
     weekly_app_for,
     weekly_arguments,
@@ -185,6 +186,38 @@ def test_a_weekly_approval_covers_looking_around(arguments):
 )
 def test_a_weekly_approval_never_covers_typing_or_a_consequential_control(arguments):
     assert weekly_covers(arguments) is False
+
+
+# Security wave: the call checks' "would this run without a card" test for an
+# unbound act (services.agent.app_approvals.may_run_weekly, scaffold A29).
+@pytest.mark.parametrize(
+    ("arguments", "may_run"),
+    [
+        ({"action": "scroll", "direction": "down"}, True),
+        ({"action": "open_app", "app": "Calendar"}, True),
+        ({"action": "focus_window", "app": "Calendar"}, True),
+        ({"action": "key", "keys": "pagedown"}, True),
+        ({"action": "key", "keys": "cmd+right"}, True),
+        ({"action": "click", "ref": "d4"}, True),
+        ({"action": "double_click", "ref": "d4"}, True),
+        ({"action": "type", "text": "Jordan", "ref": "d4"}, False),
+        ({"action": "key", "keys": "enter"}, False),
+        ({"action": "key", "keys": "not a combo +"}, False),
+        ({"action": "click", "x": 10, "y": 10}, False),
+        ({"action": "click", "ref": 4}, False),
+        ("not a mapping", False),
+        (None, False),
+    ],
+)
+def test_may_run_weekly_accepts_every_shape_weekly_covers_can_and_never_type(arguments, may_run):
+    assert may_run_weekly(arguments) is may_run
+    # A superset of weekly_covers: whatever it refuses, weekly_covers refuses
+    # too, bound or not (so a call it calls carded can never run unasked).
+    if not may_run:
+        assert weekly_covers(arguments) is False
+        if isinstance(arguments, dict):
+            bound = {**arguments, CARD_KEY: {"app": "Calendar", "target": {"role": "cell", "name": "15"}}}
+            assert weekly_covers(bound) is False
 
 
 def test_a_weekly_run_is_marked_on_its_screen():

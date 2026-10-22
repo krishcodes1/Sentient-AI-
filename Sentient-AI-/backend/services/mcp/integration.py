@@ -24,6 +24,13 @@ most conservative in the platform:
 - An exposed name is bound to one remote tool at discovery. A server
   cannot reorder or extend its catalog to make an already-approved name
   execute a different remote tool.
+- Every tool's raw definition is pinned (services/mcp/pin_store.py, while
+  the owner's "mcp_pinning" switch is on): a tool whose description or
+  inputs changed, or a new tool on a server already in use, is not offered
+  and not run until the owner approves that exact version on the Security
+  page. Pinned exposed names survive restarts. Hidden characters are
+  stripped from every description, schema string and schema key before the
+  model reads them, in every mode.
 """
 
 from __future__ import annotations
@@ -33,8 +40,9 @@ import re
 import time
 import uuid as uuid_module
 import weakref
-from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
+from typing import Any, Callable, Optional, Union
 
 import structlog
 
@@ -42,6 +50,14 @@ from services.agent.runtime import Tool
 from services.connectors.base import PromptGuard
 from services.mcp.activity import mcp_activity
 from services.mcp.client import HttpMCPTransport, MCPClient, MCPError, MCPToolInfo
+from services.mcp.pin_store import McpPinService, PinServer, PinStoreUnavailable
+from services.mcp.pinning import (
+    RULE_PIN_UNAVAILABLE,
+    SeenTool,
+    refusal_result,
+    seen_tool,
+    strip_hidden,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -190,6 +206,12 @@ def sanitized_tool_entries(
 
     exposed: list[str] = [""] * len(resolvable)
     used: set[str] = set()
+    # Where each base's suffix search stopped. ``used`` only grows, so every
+    # suffix a base already walked past is still taken: resuming there gives
+    # exactly the names a search from "_2" would, without walking the same
+    # suffixes again. Restarting from "_2" made a server that sends many
+    # names normalizing to one base cost quadratic time on every discovery.
+    next_suffix: dict[str, int] = {}
     # sorted() is stable, so duplicate remote names still fall back to
     # advertisement order — they are indistinguishable anyway.
     for index in sorted(
@@ -197,11 +219,12 @@ def sanitized_tool_entries(
     ):
         base = resolvable[index][0]
         candidate = base
-        suffix_n = 2
+        suffix_n = next_suffix.get(base, 2)
         while candidate in used:
             suffix = f"_{suffix_n}"
             candidate = base[: max(1, budget - len(suffix))] + suffix
             suffix_n += 1
+        next_suffix[base] = suffix_n
         used.add(candidate)
         exposed[index] = candidate
 
@@ -301,6 +324,40 @@ def invalidate_mcp_connector(connector_id: uuid_module.UUID) -> None:
         catalog.forget(connector_id)
 
 
+def forget_mcp_catalog_cache(connector_id: uuid_module.UUID) -> None:
+    """Drop every live catalog's cached tool list for one server, keeping the
+    sticky name bindings (unlike invalidate_mcp_connector). Called after an
+    owner review, so the next build lists the server fresh; the bindings stay,
+    because a review is the owner deciding about a tool, not a server move."""
+    for catalog in list(_live_catalogs):
+        catalog.forget(connector_id)
+
+
+def _is_financial_tool(label: str, remote_name: str) -> bool:
+    """A money-moving tool, judged on its remote name and on the exposed name it
+    would get: such a tool is never offered, never pinned and never listed for
+    review (the catalog re-checks every offered name as well)."""
+    if is_financial_action(remote_name):
+        return True
+    budget = min(_MAX_FULL_NAME_LEN - len(MCP_PREFIX) - 2 - len(label), _MAX_TOOL_COMPONENT_LEN)
+    exposed = sanitize_tool_name(remote_name)[: max(budget, 0)]
+    return bool(exposed) and classify_mcp_tool(f"{MCP_PREFIX}.{label}.{exposed}") == "blocked"
+
+
+def _fresh_seen(raw: MCPToolInfo) -> SeenTool:
+    """One fresh discovery's SeenTool: fingerprinted from the RAW info (text past
+    the sanitiser's caps and inside spans it redacts still counts), then carrying
+    the sanitised info, so no raw server text travels any further."""
+    return replace(seen_tool(raw), info=sanitize_tool_info(raw))
+
+
+def seen_tools_for(label: str, infos: Sequence[MCPToolInfo]) -> list[SeenTool]:
+    """Fresh SeenTools for one tools/list of the server labelled *label*,
+    financial tools left out (they are never pinned). Used by the dispatcher and
+    the owner's Test (services/mcp/pin_store.py)."""
+    return [_fresh_seen(raw) for raw in infos if not _is_financial_tool(label, raw.name)]
+
+
 def _sanitize_schema_value(value: Any, depth: int = 0) -> Any:
     """Recursively clean a tools/list ``inputSchema`` fragment.
 
@@ -311,7 +368,12 @@ def _sanitize_schema_value(value: Any, depth: int = 0) -> Any:
     if depth > _MAX_SCHEMA_DEPTH:
         return None
     if isinstance(value, str):
-        cleaned, _ = PromptGuard.scan(value)
+        # Hidden characters go first (S5): tool schemas reach the provider
+        # outside the untrusted fence, the scan does not touch them, and a
+        # zero-width character spliced into an injection would hide it from
+        # the scan's patterns.
+        visible, _ = strip_hidden(value)
+        cleaned, _ = PromptGuard.scan(visible)
         return cleaned[:_MAX_SCHEMA_STRING_LEN]
     if isinstance(value, bool) or isinstance(value, (int, float)) or value is None:
         return value
@@ -328,7 +390,7 @@ def _sanitize_schema_value(value: Any, depth: int = 0) -> Any:
         for key, item in value.items():
             if not isinstance(key, str):
                 continue  # non-string junk key
-            cleaned_key, _ = PromptGuard.scan(key)
+            cleaned_key, _ = PromptGuard.scan(strip_hidden(key)[0])
             cleaned_item = _sanitize_schema_value(item, depth + 1)
             if cleaned_item is None and item is not None:
                 continue  # dropped junk
@@ -338,10 +400,16 @@ def _sanitize_schema_value(value: Any, depth: int = 0) -> Any:
 
 
 def sanitize_tool_info(info: MCPToolInfo) -> MCPToolInfo:
-    """Return a copy of *info* safe to expose to the LLM: description
-    scanned for injection patterns and capped, schema cleaned of
-    injection-shaped strings and non-JSON junk."""
-    description, was_modified = PromptGuard.scan(str(info.description or ""))
+    """Return a copy of *info* safe to expose to the LLM: hidden characters
+    stripped (zero-width, bidi, tag characters; exotic spaces become plain
+    ones), description scanned for injection patterns and capped, schema
+    cleaned of injection-shaped strings and non-JSON junk. The copy never
+    carries the raw entry (``raw``), so the catalog cache never holds it."""
+    visible, hidden = strip_hidden(str(info.description or ""))
+    if hidden:
+        # Counts only: the description is third-party text.
+        logger.warning("mcp_tool_hidden_characters_stripped", count=hidden)
+    description, was_modified = PromptGuard.scan(visible)
     if was_modified:
         logger.warning("mcp_tool_description_sanitized", tool=info.name)
     description = description[:_MAX_DESCRIPTION_LEN]
@@ -400,6 +468,9 @@ class McpServerRef:
     headers: dict[str, str]
     rate_limit_per_minute: int
     config_error: Optional[str] = None
+    # The owner's own name for the connector: what a pin message calls the
+    # server (S5). Never the server's words.
+    display_name: str = ""
 
 
 class _PooledMCPClient(MCPClient):
@@ -573,6 +644,7 @@ class MCPConnectorLoader:
                 headers={},
                 rate_limit_per_minute=row.rate_limit_per_minute,
                 config_error=reason,
+                display_name=str(row.display_name),
             )
 
         try:
@@ -605,6 +677,7 @@ class MCPConnectorLoader:
             url=url,
             headers=headers,
             rate_limit_per_minute=row.rate_limit_per_minute,
+            display_name=str(row.display_name),
         )
 
     async def find(self, user_id: str, label: str) -> Optional[McpServerRef]:
@@ -614,31 +687,74 @@ class MCPConnectorLoader:
         return None
 
 
+@dataclass(frozen=True)
+class _Discovered:
+    """One cached tool: the sanitised info and its fingerprint. The raw
+    definition is never cached (sanitise before caching)."""
+
+    info: MCPToolInfo
+    name_key: str
+    definition_hash: str
+    hidden_chars: int
+
+    def seen(self) -> SeenTool:
+        # A cache hit: no definition, so the pin plan reads but never records.
+        return SeenTool(
+            info=self.info,
+            remote_name=self.info.name,
+            name_key=self.name_key,
+            definition_hash=self.definition_hash,
+            hidden_chars=self.hidden_chars,
+            definition=None,
+        )
+
+
+def _default_pins(loader: Any) -> McpPinService:
+    """The pin service a catalog or dispatcher built without ``pins=`` uses: on
+    (no switch hook), no audit sink, no notifier, on the loader's database. Tests
+    and older call sites therefore pin on first use like production does."""
+    return McpPinService(getattr(loader, "_session_factory", None))
+
+
 class MCPToolCatalog:
     """Discovers MCP tools for a user, with a short in-process cache so a
-    chat turn does not hammer the server with tools/list calls."""
+    chat turn does not hammer the server with tools/list calls.
+
+    With pinning on (S5), every build reads the user's pins once (one query
+    for all servers, so an approval in another worker takes effect at the next
+    turn) and offers only tools whose current definition is the approved one;
+    a changed or new tool is recorded and held for the owner's review, and a
+    server never seen is trusted on first use. A pin read that fails offers no
+    MCP tool this turn; a write that fails withholds that server's tools only.
+    """
 
     def __init__(
         self,
         loader: MCPConnectorLoader,
         client_factory: Callable[[McpServerRef], MCPClient] = default_client_factory,
         ttl_seconds: float = 60.0,
+        pins: Optional[McpPinService] = None,
     ) -> None:
         self._loader = loader
         self._client_factory = client_factory
         self._ttl = ttl_seconds
-        self._cache: dict[uuid_module.UUID, tuple[float, list[MCPToolInfo]]] = {}
+        # Security wave (S5): the MCP tool pin service main.py hands in, else
+        # one on the loader's database that is always on.
+        self._pins = pins if pins is not None else _default_pins(loader)
+        self._cache: dict[uuid_module.UUID, tuple[float, list[_Discovered]]] = {}
         _live_catalogs.add(self)
 
     def forget(self, connector_id: uuid_module.UUID) -> None:
         """Drop the cached tool list for one server."""
         self._cache.pop(connector_id, None)
 
-    async def _tools_for_server(self, ref: McpServerRef) -> list[MCPToolInfo]:
+    async def _tools_for_server(self, ref: McpServerRef) -> tuple[list[SeenTool], bool]:
+        """The server's tools as SeenTools, and whether they come from a fresh
+        tools/list (True) or the cache (False, without definitions)."""
         cached = self._cache.get(ref.connector_id)
         now = time.monotonic()
         if cached and (now - cached[0]) < self._ttl:
-            return cached[1]
+            return [item.seen() for item in cached[1]], False
 
         client = self._client_factory(ref)
         try:
@@ -648,22 +764,30 @@ class MCPToolCatalog:
             raise
         finally:
             await client.close()
-        # Sanitize BEFORE caching so poisoned metadata never sits in the
-        # cache in raw form.
-        tools = [sanitize_tool_info(t) for t in tools]
-        self._cache[ref.connector_id] = (now, tools)
+        # Fingerprint the RAW entries, then sanitise BEFORE caching so
+        # poisoned metadata never sits in the cache in raw form.
+        seen = [_fresh_seen(tool) for tool in tools]
+        self._cache[ref.connector_id] = (
+            now,
+            [
+                _Discovered(tool.info, tool.name_key, tool.definition_hash, tool.hidden_chars)
+                for tool in seen
+            ],
+        )
         mcp_activity.record_success(ref.connector_id)
-        return tools
+        return seen, True
 
     async def tools_for_user(self, user_id: str) -> list[Tool]:
         """Runtime ``Tool`` objects for every reachable MCP server.
 
         A server that fails discovery is skipped (logged) rather than
         breaking the whole chat turn. Financial-looking tools are never
-        offered.
+        offered. With pinning on, only tools whose definition is the approved
+        one are offered (see the class docstring).
         """
-        out: list[Tool] = []
-        for ref in await self._loader.load_for_user(user_id):
+        refs = await self._loader.load_for_user(user_id)
+        usable: list[McpServerRef] = []
+        for ref in refs:
             if ref.config_error:
                 logger.warning(
                     "mcp_server_misconfigured",
@@ -671,18 +795,41 @@ class MCPToolCatalog:
                     error=ref.config_error,
                 )
                 continue
+            usable.append(ref)
+        if not usable:
+            return []
+
+        pinning = await self._pins.is_enabled()
+        index: dict[uuid_module.UUID, Any] = {}
+        if pinning:
             try:
-                infos = await self._tools_for_server(ref)
+                index = await self._pins.read_pins([ref.connector_id for ref in usable])
+            except PinStoreUnavailable:
+                # Fail closed: no MCP tool this turn; every other tool is
+                # unaffected and the turn goes on.
+                logger.warning("mcp_pins_unavailable", servers=len(usable))
+                return []
+
+        out: list[Tool] = []
+        for ref in usable:
+            try:
+                seen, fresh = await self._tools_for_server(ref)
             except (MCPError, Exception) as exc:
                 logger.warning(
                     "mcp_tool_discovery_failed", server=ref.label, error=str(exc)
                 )
                 continue
-            entries = sanitized_tool_entries(ref.label, infos)
-            # Pin what each exposed name means *now*, before the user sees
-            # (and approves) it — the dispatcher replays this instead of
-            # re-deriving against a catalog the server may have mutated.
-            mcp_name_bindings.record(ref.connector_id, entries)
+            entries: Optional[list[tuple[str, MCPToolInfo]]]
+            if pinning:
+                entries = await self._pinned_entries(ref, user_id, seen, fresh, index)
+                if entries is None:
+                    continue
+            else:
+                entries = sanitized_tool_entries(ref.label, [tool.info for tool in seen])
+                # Pin what each exposed name means *now*, before the user sees
+                # (and approves) it — the dispatcher replays this instead of
+                # re-deriving against a catalog the server may have mutated.
+                mcp_name_bindings.record(ref.connector_id, entries)
             for exposed_name, info in entries:
                 full_name = f"{MCP_PREFIX}.{ref.label}.{exposed_name}"
                 # Classify on both the exposed and the original remote name
@@ -709,6 +856,45 @@ class MCPToolCatalog:
                 )
         return out
 
+    async def _pinned_entries(
+        self,
+        ref: McpServerRef,
+        user_id: str,
+        seen: list[SeenTool],
+        fresh: bool,
+        index: dict[uuid_module.UUID, Any],
+    ) -> Optional[list[tuple[str, MCPToolInfo]]]:
+        """The (exposed, info) pairs of one server that may be offered, after
+        reconciling this discovery with its pins; None when the pins could not
+        be written (that server's tools are withheld this turn)."""
+        pinnable = [tool for tool in seen if not _is_financial_tool(ref.label, tool.remote_name)]
+        server = PinServer(
+            connector_id=ref.connector_id,
+            user_id=uuid_module.UUID(user_id),
+            label=ref.label,
+            display_name=ref.display_name or ref.label,
+        )
+        try:
+            result = await self._pins.reconcile(
+                server,
+                pinnable,
+                known=index.get(ref.connector_id, []),
+                source="first_use",
+                fresh=fresh,
+            )
+        except PinStoreUnavailable:
+            logger.warning("mcp_pins_unavailable", connector_id=str(ref.connector_id))
+            return None
+        if result.needs_discovery:
+            # A change needs a fresh listing to be recorded: list the server
+            # fresh at the next build (the tool is held meanwhile).
+            self.forget(ref.connector_id)
+        offered = result.offered_entries()
+        # The in-process bindings follow the persisted names, so the
+        # off-switch path and anything reading them stay in step.
+        mcp_name_bindings.record(ref.connector_id, offered)
+        return offered
+
 
 class MCPDispatcher:
     """Executes an approved ``mcp.<label>.<tool>`` call.
@@ -719,15 +905,26 @@ class MCPDispatcher:
     discovery, which is what the user actually approved — and sanitizes
     output with the same PromptGuard used for first-party connectors
     before it returns to the runtime.
+
+    With pinning on (S5) the dispatcher is the real gate: the card was made
+    from a definition seen up to 60 s earlier, and only the fresh tools/list
+    made here shows what the server says now. That listing is reconciled with
+    the pins (a server never seen is trusted on first use here too; any change
+    found is recorded, audited and told like in the catalog), the exposed name
+    is resolved through the persisted names, and a held tool is refused in the
+    call-check shape (``call_check: "mcp_pin"``) without any tools/call.
     """
 
     def __init__(
         self,
         loader: MCPConnectorLoader,
         client_factory: Callable[[McpServerRef], MCPClient] = default_client_factory,
+        pins: Optional[McpPinService] = None,
     ) -> None:
         self._loader = loader
         self._client_factory = client_factory
+        # Security wave (S5): the MCP tool pin service, as for the catalog.
+        self._pins = pins if pins is not None else _default_pins(loader)
         # connector_id -> RateLimiter (same in-process posture as the
         # executor's per-config limiters for first-party connectors).
         self._limiters: dict[uuid_module.UUID, Any] = {}
@@ -744,6 +941,92 @@ class MCPDispatcher:
         except RateLimitExceededError as exc:
             return str(exc)
         return None
+
+    @staticmethod
+    def _pin_refusal(ref: McpServerRef, rule: str, *, tool: str, label: str) -> dict[str, Any]:
+        """A pin refusal: the rule name (never server text) goes to the health
+        record, and nothing is called."""
+        mcp_activity.record_error(ref.connector_id, rule)
+        return refusal_result(rule, tool=tool, label=label)
+
+    async def _resolve_pinned(
+        self,
+        ref: McpServerRef,
+        user_id: str,
+        label: str,
+        remote_tool: str,
+        infos: list[MCPToolInfo],
+    ) -> Union[str, dict[str, Any]]:
+        """The remote name to call, or the answer that refuses the call."""
+        try:
+            server = PinServer(
+                connector_id=ref.connector_id,
+                user_id=uuid_module.UUID(user_id),
+                label=label,
+                display_name=ref.display_name or label,
+            )
+            result = await self._pins.reconcile(
+                server, seen_tools_for(label, infos), source="first_use", fresh=True
+            )
+        except (PinStoreUnavailable, ValueError):
+            return self._pin_refusal(ref, RULE_PIN_UNAVAILABLE, tool=remote_tool, label=label)
+        info, rule = result.resolve(remote_tool)
+        if rule is not None:
+            # Held (changed, new, kept off), or only a removed pin holds the
+            # name: the removed sentence is the one this dispatcher has always
+            # given for an approved tool that disappeared.
+            return self._pin_refusal(ref, rule, tool=remote_tool, label=label)
+        if info is None:
+            mcp_activity.record_error(ref.connector_id, f"tool '{remote_tool}' not advertised")
+            return {
+                "ok": False,
+                "error": f"MCP server '{label}' does not advertise a tool '{remote_tool}'.",
+            }
+        return str(info.name)
+
+    @staticmethod
+    def _resolve_bound(
+        ref: McpServerRef, label: str, remote_tool: str, infos: list[MCPToolInfo]
+    ) -> Union[str, dict[str, Any]]:
+        """Pinning off: today's resolution through the in-process bindings."""
+        entries = sanitized_tool_entries(label, infos)
+        advertised = {info.name for _, info in entries}
+
+        remote_name = mcp_name_bindings.resolve(ref.connector_id, remote_tool)
+        if remote_name is not None and remote_name not in advertised:
+            # The tool the user approved is gone. Re-deriving here
+            # would silently hand the approval to whichever remote
+            # tool now owns the exposed name.
+            mcp_activity.record_error(
+                ref.connector_id, f"tool '{remote_tool}' no longer advertised"
+            )
+            return {
+                "ok": False,
+                "error": (
+                    f"MCP server '{label}' no longer advertises the tool "
+                    f"approved as '{remote_tool}'."
+                ),
+            }
+        if remote_name is None:
+            # No discovery in this process (restart, or dispatch
+            # without a preceding tool listing): fall back to the
+            # order-independent derivation.
+            for exposed_name, info in entries:
+                if exposed_name == remote_tool:
+                    remote_name = info.name
+                    break
+        if remote_name is None:
+            mcp_activity.record_error(
+                ref.connector_id, f"tool '{remote_tool}' not advertised"
+            )
+            return {
+                "ok": False,
+                "error": (
+                    f"MCP server '{label}' does not advertise a tool "
+                    f"'{remote_tool}'."
+                ),
+            }
+        return remote_name
 
     async def execute(
         self, tool_name: str, arguments: dict[str, Any], user_id: str
@@ -785,43 +1068,14 @@ class MCPDispatcher:
             # Resolve the exposed (normalized) name back to the server's
             # real tool name. Only advertised tools are callable.
             infos = await client.list_tools()
-            entries = sanitized_tool_entries(label, infos)
-            advertised = {info.name for _, info in entries}
-
-            remote_name = mcp_name_bindings.resolve(ref.connector_id, remote_tool)
-            if remote_name is not None and remote_name not in advertised:
-                # The tool the user approved is gone. Re-deriving here
-                # would silently hand the approval to whichever remote
-                # tool now owns the exposed name.
-                mcp_activity.record_error(
-                    ref.connector_id, f"tool '{remote_tool}' no longer advertised"
-                )
-                return {
-                    "ok": False,
-                    "error": (
-                        f"MCP server '{label}' no longer advertises the tool "
-                        f"approved as '{remote_tool}'."
-                    ),
-                }
-            if remote_name is None:
-                # No discovery in this process (restart, or dispatch
-                # without a preceding tool listing): fall back to the
-                # order-independent derivation.
-                for exposed_name, info in entries:
-                    if exposed_name == remote_tool:
-                        remote_name = info.name
-                        break
-            if remote_name is None:
-                mcp_activity.record_error(
-                    ref.connector_id, f"tool '{remote_tool}' not advertised"
-                )
-                return {
-                    "ok": False,
-                    "error": (
-                        f"MCP server '{label}' does not advertise a tool "
-                        f"'{remote_tool}'."
-                    ),
-                }
+            resolved: Union[str, dict[str, Any]]
+            if await self._pins.is_enabled():
+                resolved = await self._resolve_pinned(ref, user_id, label, remote_tool, infos)
+            else:
+                resolved = self._resolve_bound(ref, label, remote_tool, infos)
+            if isinstance(resolved, dict):
+                return resolved
+            remote_name = resolved
             if is_financial_action(remote_name):
                 return {
                     "ok": False,

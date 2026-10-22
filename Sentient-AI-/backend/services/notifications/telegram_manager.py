@@ -108,3 +108,19 @@ class TelegramManager:
         if self.current is None:
             return None
         return await self.current.bot_username()
+
+    async def download_file(self, file_id: str, max_bytes: int) -> Optional[bytes]:
+        """The bytes of Telegram file *file_id*, at most *max_bytes*, through
+        the running poller (security wave, S10: an approved upload of a file
+        someone sent the bot). None while no poller runs, or when Telegram
+        does not hand the file over (logged by code only)."""
+        from services.notifications.telegram_files import TelegramFileError
+
+        service = self.current
+        if service is None:
+            return None
+        try:
+            return await service.download_file(file_id, max_bytes=max_bytes)
+        except TelegramFileError as exc:
+            logger.warning("telegram_manager_download_failed", code=exc.code)
+            return None

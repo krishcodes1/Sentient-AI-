@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Optional, Protocol
 
@@ -70,6 +71,23 @@ class MCPToolInfo:
     name: str
     description: str = ""
     input_schema: dict[str, Any] = field(default_factory=dict)
+    # The raw tools/list entry, limited to the keys a definition covers, exactly as the
+    # server sent them (before any sanitising). Only for fingerprinting
+    # (services/mcp/pinning.py); never shown to the model. Excluded from equality and
+    # repr so existing comparisons and logs are unchanged.
+    raw: Optional[Mapping[str, Any]] = field(default=None, compare=False, repr=False)
+
+
+# The keys of a tools/list entry that make up a tool's definition: what the
+# owner approves and what pinning fingerprints (services/mcp/pinning.py).
+RAW_DEFINITION_KEYS: tuple[str, ...] = (
+    "name",
+    "description",
+    "inputSchema",
+    "title",
+    "annotations",
+    "outputSchema",
+)
 
 
 class MCPTransport(Protocol):
@@ -318,6 +336,10 @@ class MCPClient:
                     input_schema=schema
                     if isinstance(schema, dict)
                     else {"type": "object", "properties": {}},
+                    # Kept as the server sent it so a change the sanitiser
+                    # would hide (text past the length cap, a redacted span)
+                    # still changes the tool's fingerprint.
+                    raw={k: entry[k] for k in RAW_DEFINITION_KEYS if k in entry},
                 )
             )
         if raw_tools and not tools:

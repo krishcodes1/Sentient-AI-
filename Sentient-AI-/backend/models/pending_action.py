@@ -115,6 +115,13 @@ class PendingAction(Base):
         JSON,
         nullable=True,
     )
+    # Typed security notes the call checks put on this card ([{kind,
+    # severity, text}], at most 8), written by the runtime, never by the
+    # model (services/security/call_checks.py). Migration 0025.
+    security_notes: Mapped[Optional[list]] = mapped_column(
+        JSON,
+        nullable=True,
+    )
 
     def __repr__(self) -> str:
         return f"<PendingAction {self.id} tool={self.tool_name} status={self.status}>"

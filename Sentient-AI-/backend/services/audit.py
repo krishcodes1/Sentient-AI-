@@ -152,6 +152,13 @@ _LENGTH_ONLY_ARGUMENTS: dict[tuple[str, str], frozenset[str]] = {
 
     # top10:video_transcripts
 
+    # Security wave (S3): a message someone sent the user, its sender and its
+    # links; the log keeps their lengths and the link count.
+    ("security", "check_scam"): frozenset({"text", "sender", "reply_to", "urls"}),
+    # Security wave (S10): the card's file facts (its name) are kept in the
+    # card row, not in the append-only log.
+    ("security", "upload_to_virustotal"): frozenset({"_upload"}),
+
 }
 
 
@@ -173,9 +180,11 @@ def _length_marker(value: Any, *, count: bool = False) -> str:
 
 # Length-only fields that are lists of records, kept as their item count
 # ("<12 items>") rather than hidden outright (top10:flashcards_quizzes:
-# study.save's items).
+# study.save's items; security.check_scam's links).
 _COUNT_ONLY_ARGUMENTS: dict[tuple[str, str], frozenset[str]] = {
     ("study", "save"): frozenset({"items"}),
+    # Security wave (S3): how many links a scam check was given.
+    ("security", "check_scam"): frozenset({"urls"}),
 }
 
 
@@ -530,6 +539,91 @@ _EVENT_STATUS: dict[str, AuditStatus] = {
     # video.transcript: the window, tokens and estimated cost only.
     "video_provider_read": AuditStatus.approved,
 
+    # Security wave (call checks): a call that would have run without a card
+    # was turned into one by a check (services/security/call_checks.py): the
+    # checks, rule ids and note kinds only. Its card follows.
+    "call_check_escalated": AuditStatus.pending,
+
+    # Security wave (owner keys): the owner stored, replaced or removed a
+    # service key (services/installation.py): the service and whether a key is
+    # stored now, never the key.
+    "service_key_updated": AuditStatus.approved,
+
+    # Security wave (S1, outbound checks): hidden characters were removed from
+    # a write, the owner changed the organisation's domains, or cleared the
+    # known recipients. Kinds, counts and keyed hashes only.
+    "outbound_cleaned": AuditStatus.approved,
+    "outbound_domains_changed": AuditStatus.approved,
+    "known_recipients_cleared": AuditStatus.approved,
+
+    # Security wave (S2, mail scam scan): an email was flagged, the scan was
+    # reset, paused, resumed or stopped, an alert was dismissed, or an action
+    # on the mail was asked for (its card follows). Codes and counts only,
+    # never the mail's text or addresses.
+    "mail_scam_flagged": AuditStatus.approved,
+    "mail_scan_reset": AuditStatus.approved,
+    "mail_scan_paused": AuditStatus.approved,
+    "mail_scan_resumed": AuditStatus.approved,
+    "mail_scam_dismissed": AuditStatus.approved,
+    "mail_scam_action_requested": AuditStatus.approved,
+    "mail_scan_stopped": AuditStatus.blocked,
+
+    # Security wave (S3, scam check): an on-demand scam check ran or was
+    # refused (services/scam_check): verdict, counts, codes and picture sha256
+    # only, never the text or a link.
+    "scam_check_ran": AuditStatus.approved,
+    "scam_check_refused": AuditStatus.blocked,
+
+    # Security wave (S4, link reputation): Google refused the owner's key, so
+    # lookups stopped until it is replaced. Never the key.
+    "link_reputation_key_rejected": AuditStatus.blocked,
+
+    # Security wave (S5, MCP tool pinning): a server's tools were pinned the
+    # first time they were seen, or a tool's definition changed (or a new tool
+    # appeared) and it is held for the owner's review. Ids, kinds, counts and
+    # hashes only. (Reviews and resets go through append_auth_event with an
+    # explicit status.)
+    "mcp_tool_pinned": AuditStatus.approved,
+    "mcp_tool_changed": AuditStatus.blocked,
+
+    # Security wave (S6, breach monitor): a watched address was checked or
+    # found in a breach, an address was added, removed, paused or resumed,
+    # findings were acknowledged, or a check failed. Keyed hashes and counts,
+    # never an address.
+    "breach_checked": AuditStatus.approved,
+    "breach_found": AuditStatus.approved,
+    "breach_address_added": AuditStatus.approved,
+    "breach_address_removed": AuditStatus.approved,
+    "breach_address_paused": AuditStatus.approved,
+    "breach_address_resumed": AuditStatus.approved,
+    "breach_findings_acknowledged": AuditStatus.approved,
+    "breach_check_failed": AuditStatus.blocked,
+
+    # Security wave (S7, browser site rules): the owner created, changed or
+    # deleted a site rule or a category, a sensitive site was noted, or a
+    # Blocked site was refused. Patterns and kinds only.
+    "site_rule_created": AuditStatus.approved,
+    "site_rule_updated": AuditStatus.approved,
+    "site_rule_deleted": AuditStatus.approved,
+    "site_category_changed": AuditStatus.approved,
+    "site_rule_noted": AuditStatus.approved,
+    "site_rule_blocked": AuditStatus.blocked,
+
+    # Security wave (S9, tool rules): the owner added or deleted a tool rule,
+    # or switched a built-in one. Rule ids only.
+    "tool_rule_created": AuditStatus.approved,
+    "tool_rule_deleted": AuditStatus.approved,
+    "tool_rule_builtin_changed": AuditStatus.approved,
+
+    # Security wave (S10, file reputation): fingerprints, counts and codes
+    # only, never a file name, message id or key. A refused upload and a key
+    # VirusTotal rejected are filed as blocked.
+    "file_reputation_checked": AuditStatus.approved,
+    "file_reputation_alerted": AuditStatus.approved,
+    "file_reputation_uploaded": AuditStatus.approved,
+    "file_reputation_upload_refused": AuditStatus.blocked,
+    "file_reputation_key_rejected": AuditStatus.blocked,
+
 }
 
 
@@ -575,7 +669,10 @@ class RuntimeAuditLogger:
         # "low_risk_grant" on a call standing consent ran, with its risk
         # grade, the grade's fixed reason and the grant's id (permission
         # tiers), which a permission_grant_granted row also carries with the
-        # connection and the kind.
+        # connection and the kind. "check" and "note_kinds" name the call
+        # checks that escalated a call and the kinds of the notes its card
+        # carries (never a note's text); "origin" is the job that parked a
+        # card outside a turn (security wave, services/security/call_checks.py).
         for key in (
             "reason",
             "policy",
@@ -592,6 +689,9 @@ class RuntimeAuditLogger:
             "grant_id",
             "connector_id",
             "kind",
+            "check",
+            "note_kinds",
+            "origin",
         ):
             if entry.get(key) is not None:
                 reasoning[key] = entry[key]

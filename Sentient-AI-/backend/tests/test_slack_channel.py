@@ -1455,6 +1455,16 @@ def test_card_helpers_come_from_cards_not_the_telegram_channel():
     assert cards.expires_in_text("not a time") == "a few minutes"
 
 
+def test_a_virustotal_upload_card_leaves_out_its_reserved_key():
+    # Security wave (S10): "_upload" is the file the runtime holds for the
+    # card, never set by the model; every other argument is shown.
+    upload = {"sha256": "ab" * 32, "file_name": "invoice.pdf", "_upload": {"holder": "h-1"}}
+    assert cards.card_arguments("security.upload_to_virustotal", upload) == {
+        "sha256": "ab" * 32,
+        "file_name": "invoice.pdf",
+    }
+
+
 @pytest.mark.asyncio
 async def test_pinned_dialer_error_never_quotes_the_url(monkeypatch):
     async def fake_dial(ip: str, port: int) -> Any:

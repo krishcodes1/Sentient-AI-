@@ -27,7 +27,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Coroutine
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from typing import Any, Callable, Mapping, Optional, Protocol, TypeVar
+from typing import Any, Callable, Mapping, Optional, Protocol, Sequence, TypeVar
 from urllib.parse import urlsplit
 
 import structlog
@@ -42,6 +42,7 @@ from services.agent.app_approvals import (
     Channel,
     InMemoryAppApprovalStore,
     WeeklyApproval,
+    may_run_weekly,
     weekly_app_for,
     weekly_arguments,
     weekly_covers,
@@ -113,6 +114,19 @@ from services.security.guard import (
     check_call,
     check_stored,
     record_hidden,
+)
+from services.security.call_checks import (
+    EMPTY_OUTCOME,
+    CallCheckPipeline,
+    CallFacts,
+    CheckOutcome,
+    Refusal,
+    Stage,
+    TurnFacts,
+    arguments_not_object,
+    call_check_refusal,
+    has_warnings,
+    notes_from,
 )
 from services.study.prompt import STUDY_SYSTEM_PROMPT, offers_study  # top10:flashcards_quizzes
 from services.usage.pricing import _PRICES as _LISTED_PRICES
@@ -406,6 +420,10 @@ class PendingApproval:
     # ("School Gmail"), for its "Allow low-risk changes" button
     # (services.agent.permission_grants); None when it offers no grant.
     low_risk_account: Optional[str] = None
+    # What the call checks noticed (services/security/call_checks.py), shown
+    # on the card: each {"kind", "severity", "text"}. A card with a high or
+    # warn note offers neither the week nor the low-risk grant.
+    security_notes: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -1233,6 +1251,10 @@ def estimate_usd(
 
 
 def _stored_to_pending(action: StoredAction, image: Optional[str] = None) -> PendingApproval:
+    stored_notes = getattr(action, "security_notes", ())
+    # A card that carries a warning offers no standing consent (A18): the
+    # owner approves this one call, and nothing for a week.
+    warns = has_warnings(stored_notes)
     return PendingApproval(
         action_id=action.action_id,
         tool_name=action.tool_name,
@@ -1243,9 +1265,22 @@ def _stored_to_pending(action: StoredAction, image: Optional[str] = None) -> Pen
         conversation_id=action.conversation_id,
         risk_note=action.risk_note,
         image=image,
-        weekly_app=weekly_app_for(action.tool_name, action.arguments),
-        low_risk_account=_low_risk_account(action.grant_offer),
+        weekly_app=None if warns else weekly_app_for(action.tool_name, action.arguments),
+        low_risk_account=None if warns else _low_risk_account(action.grant_offer),
+        security_notes=notes_from(list(stored_notes or ())),
     )
+
+
+def _with_check_reason(reason: str, suffix: str) -> str:
+    """A card's reason with the call checks' escalation sentences after it
+    (A19): *reason* unchanged when there are none, else *reason* ending in a
+    full stop, one space, then *suffix*."""
+    if not suffix:
+        return reason
+    if not reason:
+        return suffix
+    head = reason if reason.endswith((".", "!", "?")) else reason + "."
+    return f"{head} {suffix}"
 
 
 def _low_risk_account(offer: Any) -> Optional[str]:
@@ -1269,6 +1304,17 @@ def _weekly_audit_fields(weekly: Optional[_WeeklyRun]) -> dict[str, Any]:
         "channel": weekly.approval.channel_kind,
         "expires_at": weekly.approval.expires_at.isoformat(),
     }
+
+
+def _weekly_execute_kwargs(weekly: Optional[_WeeklyRun], execute: Any) -> dict[str, Any]:
+    """``{"weekly": True}`` for an act a weekly app approval runs, when the
+    executor takes the keyword: its call-check backstop then treats the act
+    as one no person approved (security wave, scaffold D6), so a check that
+    escalates the bound arguments stops it. Empty otherwise, so a call that
+    is not a weekly act (or a fake executor without it) is made as before."""
+    if weekly is None or not accepts_keyword(execute, "weekly"):
+        return {}
+    return {"weekly": True}
 
 
 # Policies recorded when a tool is refused by its capability
@@ -1342,6 +1388,12 @@ _BIND_REFUSAL_POLICIES: dict[str, str] = {
     # top10:voice_notes
 
     # top10:video_transcripts
+
+    # Security wave (S10): the upload card's bind refuses a file whose bytes
+    # are gone or that VirusTotal already knows (or file checks are not wired):
+    # services.file_reputation.toolkit.FILE_REPUTATION_RULE_POLICY and the
+    # executor's FILE_REPUTATION_RULE_POLICY (a test holds them equal).
+    "security.upload_to_virustotal": "file_reputation_rule",
 
 }
 
@@ -1860,6 +1912,7 @@ class AgentRuntime:
         app_approval_store: AppApprovalStore | None = None,
         personal_details_hidden: Optional[Callable[[], Awaitable[bool]]] = None,
         permission_grant_store: PermissionGrantStore | None = None,
+        call_checks: Optional[CallCheckPipeline] = None,
     ):
         self._config = config
         # The owner's "Hide personal details from the AI provider" switch,
@@ -1893,6 +1946,12 @@ class AgentRuntime:
         # injects the database store (use_permission_grants).
         self._permission_grants: PermissionGrantStore = (
             permission_grant_store or InMemoryPermissionGrantStore()
+        )
+        # The pre-dispatch call checks (services/security/call_checks.py):
+        # empty unless main.py wires the production pipeline
+        # (use_call_checks), so a runtime built without one runs no check.
+        self._call_checks: CallCheckPipeline = (
+            call_checks if call_checks is not None else CallCheckPipeline()
         )
         # Told each browser round's estimated cost so the toolkit's per-task
         # spend cap can see it (spec §10); None when no browser is wired.
@@ -2773,7 +2832,10 @@ class AgentRuntime:
         otherwise, and the card counts as approved once. The grant is
         audited; one whose audit row cannot be written is taken back, since
         acts nobody looks at must never run on an approval the log does not
-        show."""
+        show. A card that carries a call check's warning offered no week, so
+        none is made from it (A18)."""
+        if has_warnings(getattr(action, "security_notes", ())):
+            return None
         app = weekly_app_for(action.tool_name, action.arguments)
         if app is None or channel is None:
             return None
@@ -3142,6 +3204,88 @@ class AgentRuntime:
         page, Telegram's /grants and Slack's "grants")."""
         return self._permission_grants
 
+    def use_call_checks(self, pipeline: CallCheckPipeline) -> None:
+        """Wire the call-checks pipeline after construction (main.py hands
+        the same object to the executor's backstop)."""
+        self._call_checks = pipeline
+
+    @property
+    def call_checks(self) -> CallCheckPipeline:
+        """The call-checks pipeline this runtime runs (main.py, tests)."""
+        return self._call_checks
+
+    def _call_facts(
+        self,
+        *,
+        stage: Stage,
+        tool_name: str,
+        arguments: Any,
+        user_id: str,
+        **fields: Any,
+    ) -> CallFacts:
+        """One call as the call checks see it: its canonical name, whether it
+        is an MCP tool, and its ToolSpec when the registry knows it (None for
+        MCP tools and unknown names). *fields* are CallFacts' own."""
+        # Deferred: tool_registry imports this module.
+        from services.agent.tool_registry import resolve_tool
+        from services.mcp.integration import is_mcp_tool
+
+        is_mcp = is_mcp_tool(tool_name)
+        spec = None
+        if not is_mcp:
+            resolved = resolve_tool(tool_name)
+            spec = resolved.spec if resolved is not None else None
+        return CallFacts(
+            stage=stage,
+            user_id=user_id,
+            tool_name=tool_name,
+            canonical=canonical_tool_name(tool_name),
+            arguments=arguments if isinstance(arguments, Mapping) else {},
+            spec=spec,
+            is_mcp=is_mcp,
+            **fields,
+        )
+
+    def _security_note_kwargs(self, notes: list[dict[str, str]]) -> dict[str, Any]:
+        """``{"security_notes": notes}`` for the approval store's create when
+        there are notes and the store takes the keyword; {} otherwise, so a
+        store (or a fake) without it is called exactly as before."""
+        if not notes or not accepts_keyword(self._approvals.create, "security_notes"):
+            return {}
+        return {"security_notes": notes}
+
+    async def _log_call_check_escalated(
+        self, user_id: str, tc: ToolCall, checks: CheckOutcome
+    ) -> None:
+        """The one ``call_check_escalated`` row for a call the checks turned
+        from running unasked into a card: which checks, their rule ids and the
+        notes' kinds, never an argument value or a note's text. Best effort:
+        the card that follows is audited anyway."""
+        first = checks.escalations[0]
+        try:
+            await self._audit.log(
+                {
+                    "event": "call_check_escalated",
+                    "user_id": user_id,
+                    "tool": tc.name,
+                    "policy": first.policy,
+                    "rule": checks.rule(),
+                    "reason": checks.reason_suffix(auto_run=True),
+                    "check": ",".join(e.check for e in checks.escalations),
+                    "note_kinds": checks.note_kinds(),
+                    "arguments": {
+                        "checks": [e.check for e in checks.escalations],
+                        "rules": [e.rule for e in checks.escalations if e.rule],
+                        "notes": len(checks.notes),
+                    },
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        except Exception as exc:
+            logger.error(
+                "audit_write_failed_call_check_escalated", error_type=type(exc).__name__
+            )
+
     def _low_risk_switch(self) -> Optional[Callable[[], Awaitable[bool]]]:
         """How a turn reads the owner's low_risk_actions switch: the
         permission adapter's (the capability report); None (on, the
@@ -3159,10 +3303,13 @@ class AgentRuntime:
         hard_blocked). None otherwise: the card counts as approved once.
         The grant is audited; one whose audit row cannot be written is taken
         back, since runs nobody looks at must never rest on a grant the log
-        does not show."""
+        does not show. A card that carries a call check's warning offered no
+        grant, so none is made from it (A18)."""
         from services.agent.risk import grade_tool
         from services.agent.tool_registry import connector_slug, resolve_tool
 
+        if has_warnings(getattr(action, "security_notes", ())):
+            return None
         offer = action.grant_offer
         if not isinstance(offer, Mapping) or offer.get("kind") != KIND_LOW_RISK:
             return None
@@ -3395,6 +3542,10 @@ class AgentRuntime:
         consent = StandingConsent(
             user_id=user_id, grants=self._permission_grants, switch=self._low_risk_switch()
         )
+        # Security wave: per-turn state the call checks share, keyed by check
+        # name (services/security/call_checks.py TurnFacts.scratch), so a
+        # check reads its switch or snapshot once per turn, not per call.
+        check_scratch: dict[str, Any] = {}
 
         # top10:turn_start:voice_notes
         # Someone else's words fenced into a user message (a forwarded voice
@@ -3563,6 +3714,16 @@ class AgentRuntime:
                 if len(pending_approvals) > parked_before_round:
                     await self._record_not_run(user_id, llm_response.tool_calls[index:])
                     break
+
+                # Security wave: arguments that are not a JSON object (a
+                # provider can hand back a list) are refused before anything
+                # else looks at them: the call checks would read them as no
+                # arguments, a card would show none, and dict() would turn a
+                # list of pairs into real arguments at dispatch (fail closed).
+                if not isinstance(tc.arguments, Mapping):
+                    await self._refuse_call(emit, user_id, tc, arguments_not_object().precheck(),
+                                            blocked_actions, (round_results, tool_results))
+                    continue
 
                 # top10:call_pre_permission:scheduler_briefing
                 fenced = None if unattended is None else fence_refusal(
@@ -3765,6 +3926,53 @@ class AgentRuntime:
                     tool_results.append(record)
                     continue
 
+                # Security wave: the pre-dispatch call checks (services/security/call_checks.py),
+                # in the order S9 tool rules, S5 MCP pin, S7 site rules, S1 outbound, S10. They add
+                # notes for the card, turn a call that would run without a card into a card, or
+                # refuse it before any card. They never let a call skip a card. tools.find is
+                # answered by the runtime below and never dispatched, so it is not checked; with
+                # no pipeline wired nothing is built or awaited.
+                checks = EMPTY_OUTCOME
+                if tc.name != FIND_TOOL_NAME and self._call_checks:
+                    runs_without_card = permission == "approved" or (
+                        permission == "requires_approval"
+                        and taint_reason is None
+                        and canonical_tool_name(tc.name) == WEEKLY_APPROVAL_TOOL
+                        # only the act shapes a weekly approval can run (app_approvals.py)
+                        and may_run_weekly(tc.arguments)
+                    )
+                    checks = await self._call_checks.run(self._call_facts(
+                        stage="turn", tool_name=tc.name, arguments=tc.arguments, user_id=user_id,
+                        runs_without_card=runs_without_card,
+                        will_card=permission == "requires_approval" and not runs_without_card,
+                        unattended=unattended is not None, task_id=task_id,
+                        turn=TurnFacts(messages=messages, taint=taint,
+                                       trusted_text=unattended.trusted_text if unattended is not None else "",
+                                       unattended=unattended is not None,
+                                       conversation_id=conversation_id, scratch=check_scratch),
+                    ))
+                if checks.refusal is not None:
+                    await self._refuse_call(emit, user_id, tc, checks.refusal.precheck(),
+                                            blocked_actions, (round_results, tool_results))
+                    continue
+                # True once this call really would have run without a card: only then does a
+                # sentence that merely explains the escalation go on the card (A29).
+                escalated_auto_run = False
+                if checks.escalated and permission == "approved":
+                    permission, approved_via_tier = "requires_approval", False
+                    consent.withdraw(tc)
+                    escalated_auto_run = True
+                    if taint_reason is None:
+                        # A write the policy runs unasked (reminders, study)
+                        # was never taint-checked above; now that it gets a
+                        # card, the card says so when untrusted results
+                        # shaped its arguments, like any other card.
+                        taint_reason = consent.taint_reason(tc, taint, taint.taint_reason(
+                            tc.arguments,
+                            trusted=unattended.trusted_text if unattended is not None else "",
+                        ))
+                    await self._log_call_check_escalated(user_id, tc, checks)
+
                 # A desktop.act in an app the owner allowed for a week, from
                 # this same chat or browser, runs now instead of parking a
                 # card (services.agent.app_approvals), with the arguments a
@@ -3772,8 +3980,15 @@ class AgentRuntime:
                 # screen. Never on tainted arguments: those get a card with
                 # the risk note.
                 weekly: Optional[_WeeklyRun] = None
-                if permission == "requires_approval" and taint_reason is None:
+                # not escalated_auto_run: a call the checks just turned from "approved" into a
+                # card needs no weekly lookup (it is carded and already logged above).
+                if permission == "requires_approval" and taint_reason is None and not escalated_auto_run:
                     weekly = await self._weekly_run(user_id, tc.name, tc.arguments, channel, task_id)
+                    if weekly is not None and checks.escalated:
+                        # A check asked for a card: the weekly approval does not run this act,
+                        # and the card says why (it really would have run unasked).
+                        weekly, escalated_auto_run = None, True
+                        await self._log_call_check_escalated(user_id, tc, checks)
                     if weekly is not None:
                         permission = "approved"
 
@@ -3895,7 +4110,8 @@ class AgentRuntime:
                     # untainted, attended LOW card (no origin).
                     card_note, card_extra = await consent.card_fields(
                         tc, taint_reason, card_note, card_extra,
-                        accepts_offer=accepts_keyword(self._approvals.create, "grant_offer"),
+                        # A card with a call check's warning offers no grant (A18).
+                        accepts_offer=accepts_keyword(self._approvals.create, "grant_offer") and not checks.warns,
                     )
 
                     # From storing the card to its audit row, nothing stops
@@ -3912,14 +4128,19 @@ class AgentRuntime:
                                 arguments=card_arguments,
                                 # Standing consent's routine "why" (a tier or
                                 # grant did not cover it) reads as part of the
-                                # reason, not as a risk warning.
-                                reason=consent.card_reason(
-                                    tc, self._approval_reason(tc.name, card_arguments, user_id)
+                                # reason, not as a risk warning; then any call
+                                # check's escalation sentence (A19, A29).
+                                reason=_with_check_reason(
+                                    consent.card_reason(
+                                        tc, self._approval_reason(tc.name, card_arguments, user_id)
+                                    ),
+                                    checks.reason_suffix(auto_run=escalated_auto_run),
                                 ),
                                 conversation_id=conversation_id,
                                 ttl_minutes=card_ttl,
                                 risk_note=card_note,
                                 **card_extra,
+                                **self._security_note_kwargs(checks.note_dicts()),
                             )
                         )
                         if stored is None:
@@ -3951,6 +4172,7 @@ class AgentRuntime:
                                         "image": pending.image,
                                         "weekly_app": pending.weekly_app,
                                         "low_risk_account": pending.low_risk_account,
+                                        "security_notes": pending.security_notes,
                                     },
                                 }
                             )
@@ -3964,6 +4186,7 @@ class AgentRuntime:
                                     "arguments": tc.arguments,
                                     "action_id": stored.action_id,
                                     "risk_note": stored.risk_note,
+                                    **checks.audit_fields(),
                                     "timestamp": datetime.now(timezone.utc).isoformat(),
                                 }
                             )
@@ -4069,6 +4292,7 @@ class AgentRuntime:
                                 approved=approved_via_tier or weekly is not None,
                                 task_id=task_id,
                                 **consent.execute_kwargs(tc, self._executor.execute),
+                                **_weekly_execute_kwargs(weekly, self._executor.execute),
                             )
                         )
                 except Exception as exc:
@@ -4080,6 +4304,14 @@ class AgentRuntime:
                 # was caught above, so a call that raised is still recorded.
                 try:
                     refusal = _capability_refusal(tc.name, result)
+                    # Security wave: the executor's call-check backstop refused a
+                    # call the turn let run (a rule added mid-turn, a Blocked site
+                    # reached through a redirect): filed the same way, with its rule.
+                    refusal_rule: dict[str, Any] = {}
+                    check_refusal = call_check_refusal(result) if refusal is None else None
+                    if check_refusal is not None:
+                        refusal = check_refusal[0], check_refusal[1]
+                        refusal_rule = {"rule": check_refusal[2]} if check_refusal[2] else {}
                     if refusal is not None:
                         # Backstop: the permission adapter blocks these before
                         # the intent row; one that got past it (the switch
@@ -4102,6 +4334,7 @@ class AgentRuntime:
                                         "tool": tc.name,
                                         "reason": refusal_reason,
                                         "policy": refusal_policy,
+                                        **refusal_rule,
                                     },
                                 }
                             )
@@ -4116,6 +4349,7 @@ class AgentRuntime:
                                         "arguments": tc.arguments,
                                         "reason": refusal_reason,
                                         "policy": refusal_policy,
+                                        **refusal_rule,
                                         "timestamp": datetime.now(timezone.utc).isoformat(),
                                     }
                                 )
@@ -4508,6 +4742,37 @@ class AgentRuntime:
             )
         }
 
+    async def _refuse_approved_by_check(
+        self, action: StoredAction, action_id: str, user_id: str, refusal: Refusal
+    ) -> dict[str, Any]:
+        """Refuse an approved card that a call check refuses at approval time
+        (a site that became Blocked, an MCP tool that changed since the card,
+        a hidden character swapped into a stored recipient), before
+        ``tool_approved``: one ``tool_blocked`` row with the check's policy
+        and rule (best effort: nothing ran) and the check's fixed sentence.
+        The card is consumed, as the stored-argument re-scan consumes it."""
+        try:
+            await self._audit.log(
+                {
+                    "event": "tool_blocked",
+                    "user_id": user_id,
+                    "tool": action.tool_name,
+                    "arguments": action.arguments,
+                    "reason": refusal.message,
+                    "policy": refusal.policy,
+                    "rule": refusal.rule,
+                    "action_id": action_id,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        except Exception as exc:
+            logger.error(
+                "audit_write_failed_call_check_refusal",
+                tool=action.tool_name,
+                error_type=type(exc).__name__,
+            )
+        return {"error": refusal.message, "policy": refusal.policy, "rule": refusal.rule}
+
     async def _end_stopped_turn(
         self,
         emit: Callable[[dict[str, Any]], Awaitable[None]],
@@ -4787,6 +5052,7 @@ class AgentRuntime:
                         "risk_note": pa.risk_note,
                         "image": pa.image,
                         "low_risk_account": pa.low_risk_account,
+                        "security_notes": pa.security_notes,
                     }
                     for pa in response.pending_approvals
                 ],
@@ -4918,6 +5184,28 @@ class AgentRuntime:
         if stored_guard is not None:
             return await self._refuse_stored_arguments(action, action_id, user_id, stored_guard)
 
+        # Security wave: stored arguments that are not a JSON object (a row
+        # changed in the database; a turn never cards one) are refused like a
+        # check's refusal: no check could read them (fail closed).
+        if not isinstance(action.arguments, Mapping):
+            return await self._refuse_approved_by_check(
+                action, action_id, user_id, arguments_not_object()
+            )
+
+        # Security wave: the call checks again on the stored card arguments. A person just
+        # approved, so only a refusal counts (a site that became Blocked, an MCP tool that
+        # changed, a hidden character swapped into a stored recipient).
+        if self._call_checks:
+            approve_checks = await self._call_checks.run(self._call_facts(
+                stage="approve", tool_name=action.tool_name, arguments=action.arguments,
+                user_id=user_id, person_approved=True, origin=action.origin,
+                task_id=task_id or action.conversation_id or user_id,
+            ))
+            if approve_checks.refusal is not None:
+                return await self._refuse_approved_by_check(
+                    action, action_id, user_id, approve_checks.refusal
+                )
+
         # top10:approve_action:permission_tiers
         # "Allow low-risk changes on <account> for 7 days": re-checked here,
         # made before the act runs, audited (revoked if it cannot be).
@@ -4998,6 +5286,14 @@ class AgentRuntime:
         # switches); the executor then refused it, and the audit row must
         # say so rather than record an approved action as executed.
         refusal = _capability_refusal(action.tool_name, result)
+        # Security wave: the executor's call-check backstop refused the
+        # approved call (S5: the MCP tool changed since the card): filed as a
+        # block with its rule, never as executed.
+        refusal_rule: dict[str, Any] = {}
+        check_refusal = call_check_refusal(result) if refusal is None else None
+        if check_refusal is not None:
+            refusal = check_refusal[0], check_refusal[1]
+            refusal_rule = {"rule": check_refusal[2]} if check_refusal[2] else {}
         if refusal is not None:
             refusal_reason, refusal_policy = refusal
             entry: dict[str, Any] = {
@@ -5007,6 +5303,7 @@ class AgentRuntime:
                 "arguments": action.arguments,
                 "reason": refusal_reason,
                 "policy": refusal_policy,
+                **refusal_rule,
                 "action_id": action_id,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
@@ -5055,6 +5352,204 @@ class AgentRuntime:
             # call and resumes no turn (api/routes/agent._apply_decision).
             ran["origin"] = action.origin
         return ran
+
+    # Longest origin a parked card may carry (pending_actions.origin).
+    _ORIGIN_CHARS = 64
+
+    async def park_card(
+        self,
+        *,
+        user_id: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        origin: str,
+        ttl_minutes: int = 60,
+        reason: Optional[str] = None,
+        risk_note: Optional[str] = None,
+        security_notes: Sequence[Mapping[str, str]] = (),
+    ) -> StoredAction | PrecheckRefusal:
+        """Park one approval card outside a turn (a mail action, an upload to
+        VirusTotal): no conversation, and approving it runs the one call and
+        never resumes a turn (the origin, api/routes/agent.py). Runs what a
+        turn's card path runs: the permission adapter (a blocked tool gets no
+        card), the secret guard, the PromptGuard argument scan (of the
+        caller's arguments and of the bound copy the card stores),
+        precheck_approval, the bind and its refusal, the call checks (stage
+        "turn", going to a card, no turn facts), the store
+        (NotifyingApprovalStore pushes it to Telegram and Slack) and the
+        tool_pending_approval row. A refusal is filed as tool_blocked and
+        returned instead of a card. Raises ValueError for an origin that is
+        empty or longer than 64 characters."""
+        if not isinstance(origin, str) or not origin or len(origin) > self._ORIGIN_CHARS:
+            raise ValueError("park_card needs an origin of 1 to 64 characters")
+        if not isinstance(arguments, Mapping):
+            # Never dict() a list of pairs into arguments no check has read.
+            refused = arguments_not_object().precheck()
+            await self._file_parked_refusal(user_id, tool_name, arguments, refused, origin)
+            return refused
+        arguments = dict(arguments)
+
+        # The same adapter a turn asks first (capability gate and policy
+        # engine), so an admin-only or hard-blocked tool never gets a card.
+        permission = await self._permissions.check(user_id, tool_name, arguments)
+        if permission == "blocked":
+            block_reason = await self._permissions.get_block_reason(user_id, tool_name, arguments)
+            policy = await self._permissions.get_policy_name(user_id, tool_name)
+            refused = PrecheckRefusal(
+                reason=block_reason,
+                policy=policy,
+                result={"ok": False, "error": block_reason},
+                rule="permission_blocked",
+            )
+            await self._file_parked_refusal(user_id, tool_name, arguments, refused, origin)
+            return refused
+
+        guard = check_call("park", arguments, None)
+        if guard is not None:
+            refused = PrecheckRefusal(
+                reason=guard.reason, policy=SECRET_GUARD_POLICY, result=guard.result, rule=guard.rule
+            )
+            await self._file_parked_refusal(
+                user_id, tool_name, guard.audit_arguments, refused, origin
+            )
+            return refused
+
+        # The PromptGuard scan a turn runs on a call's arguments before any
+        # card (after the secret guard here, so a key never reaches this
+        # refusal's row). approve_action re-scans what the card stores, so a
+        # card that would fail it is never shown, approved, then refused.
+        flagged = await self._scan_parked_arguments(user_id, tool_name, arguments, origin)
+        if flagged is not None:
+            return flagged
+
+        precheck = await self._precheck_approval(tool_name, arguments, user_id)
+        card_arguments: dict[str, Any] = arguments
+        if precheck is None:
+            card_arguments = await self._approval_arguments(
+                tool_name, arguments, user_id, task_id=origin
+            )
+            precheck = self._bind_refusal(tool_name, card_arguments)
+        if precheck is not None:
+            await self._file_parked_refusal(user_id, tool_name, arguments, precheck, origin)
+            return precheck
+        if card_arguments is not arguments:
+            # The bind added to what the card stores (S10's _upload names the
+            # file): that copy is what approval re-scans, so scan it too.
+            flagged = await self._scan_parked_arguments(
+                user_id, tool_name, card_arguments, origin, audit_arguments=arguments
+            )
+            if flagged is not None:
+                return flagged
+
+        checks = EMPTY_OUTCOME
+        if self._call_checks:
+            checks = await self._call_checks.run(self._call_facts(
+                stage="turn", tool_name=tool_name, arguments=arguments, user_id=user_id,
+                will_card=True, runs_without_card=False, origin=origin, task_id=origin,
+                turn=None,
+            ))
+        if checks.refusal is not None:
+            refused = checks.refusal.precheck()
+            await self._file_parked_refusal(user_id, tool_name, arguments, refused, origin)
+            return refused
+
+        # A parked card was never going to run unasked, so only a sentence
+        # that names a rule joins its reason.
+        card_reason = _with_check_reason(
+            reason or self._approval_reason(tool_name, card_arguments, user_id),
+            checks.reason_suffix(auto_run=False),
+        )
+        notes = notes_from([*security_notes, *checks.note_dicts()])
+        stored = await self._approvals.create(
+            user_id=user_id,
+            tool_name=tool_name,
+            arguments=card_arguments,
+            reason=card_reason,
+            conversation_id=None,
+            ttl_minutes=ttl_minutes,
+            risk_note=risk_note,
+            origin=origin,
+            **self._security_note_kwargs(notes),
+        )
+        try:
+            await self._audit.log(
+                {
+                    "event": "tool_pending_approval",
+                    "user_id": user_id,
+                    "tool": tool_name,
+                    "arguments": arguments,
+                    "action_id": stored.action_id,
+                    "risk_note": stored.risk_note,
+                    "origin": origin,
+                    **checks.audit_fields(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        except Exception as exc:
+            # The card is stored either way, and approving it writes
+            # tool_approved first (fail closed); raising here would only make
+            # the caller park a second card for the same action.
+            logger.error(
+                "audit_write_failed_parked_card", tool=tool_name, error_type=type(exc).__name__
+            )
+        return stored
+
+    async def _file_parked_refusal(
+        self,
+        user_id: str,
+        tool_name: str,
+        arguments: Any,
+        refusal: PrecheckRefusal,
+        origin: str,
+    ) -> None:
+        """The ``tool_blocked`` row of a card ``park_card`` refused to make.
+        Best effort: nothing ran and nothing was parked."""
+        rule = {"rule": refusal.rule} if refusal.rule else {}
+        try:
+            await self._audit.log(
+                {
+                    "event": "tool_blocked",
+                    "user_id": user_id,
+                    "tool": tool_name,
+                    "arguments": arguments,
+                    "reason": refusal.reason,
+                    "policy": refusal.policy,
+                    **rule,
+                    "origin": origin,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        except Exception as exc:
+            logger.error(
+                "audit_write_failed_parked_refusal", tool=tool_name, error_type=type(exc).__name__
+            )
+
+    async def _scan_parked_arguments(
+        self,
+        user_id: str,
+        tool_name: str,
+        scanned: Mapping[str, Any],
+        origin: str,
+        *,
+        audit_arguments: Optional[Mapping[str, Any]] = None,
+    ) -> Optional[PrecheckRefusal]:
+        """``park_card``'s PromptGuard scan: the turn's argument scan
+        (``scan_input`` on the arguments' text), so arguments that carry an
+        injection are refused before a card, filed as ``tool_blocked`` under
+        ``prompt_guard`` and returned; None when they pass. *audit_arguments*
+        is what the row records (the caller's arguments, not a bound copy)."""
+        verdict = await self._guard.scan_input(str(scanned), user_id)
+        if verdict.get("safe", True):
+            return None
+        refused = _refused(str(verdict.get("reason") or "tool arguments flagged"), "prompt_guard")
+        await self._file_parked_refusal(
+            user_id,
+            tool_name,
+            scanned if audit_arguments is None else audit_arguments,
+            refused,
+            origin,
+        )
+        return refused
 
     # ------------------------------------------------------------------
     # Unattended turns and one-shot model calls

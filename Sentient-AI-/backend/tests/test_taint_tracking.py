@@ -29,6 +29,7 @@ from services.agent.tool_registry import (
     build_tools,
 )
 from tests.conftest import use_provider
+from tests.linear_time import scales_linearly
 
 
 class RecordingExecutor:
@@ -431,3 +432,53 @@ def test_an_id_seen_only_in_page_text_is_still_taint():
         {"message_id": LONG_ID}, ref_args=("message_id",), source="google_workspace"
     )
     assert reason is not None
+
+
+# --- Linear indicator scans (security wave, S9 integration request) ---------
+#
+# extract_indicators runs on every untrusted tool result. _EMAIL_RE and
+# _HOST_RE restarted at every character of a long run of word characters and
+# dots, so 20,000 characters of "a.a." took seconds. taint._emails_in and
+# taint._hosts_in must give exactly the regexes' matches, in order.
+
+
+def test_the_linear_address_and_host_scans_match_the_regexes_on_seeded_random_text():
+    import random
+
+    from services.agent import taint
+
+    rng = random.Random(20261021)
+    # Letters, digits, every separator the patterns care about, a word
+    # character outside them ("_", "é") and the two non-ASCII letters
+    # IGNORECASE folds into [a-z] (Kelvin sign, long s).
+    alphabet = list("abZ10-..._ @%+xq") + ["é", "K", "ſ"]
+    for _ in range(40_000):
+        text = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 40)))
+        assert taint._emails_in(text) == taint._EMAIL_RE.findall(text), text
+        assert taint._hosts_in(text) == taint._HOST_RE.findall(text), text
+    # Labels at and around the 63-character limit, with and without a top-level domain.
+    for _ in range(2_000):
+        labels = [
+            "".join(rng.choice("ab-1") for _ in range(rng.choice([1, 2, 62, 63, 64, 70])))
+            for _ in range(rng.randint(1, 6))
+        ]
+        text = ".".join(labels) + rng.choice(["", ".", ".com", ".c", "_", " x", ".com1"])
+        assert taint._hosts_in(text) == taint._HOST_RE.findall(text), text
+
+
+def test_indicators_in_hostile_runs_of_letters_and_dots_are_found_in_linear_time():
+    # Each run as (the run at n, the n read here), timed against an eighth of itself
+    # (tests/linear_time.py) rather than a wall-clock budget, which CI's coverage tracer makes
+    # several times slower.
+    hostile = [
+        (lambda n: "a.a." * n, 50_000),
+        (lambda n: "a." * n + "1", 100_000),
+        (lambda n: "x@" + "a." * n, 100_000),
+        (lambda n: ("a-" * 31 + "a.") * n, 3_000),
+        (lambda n: "a.b@c.d" * n, 30_000),
+    ]
+    for build, size in hostile:
+        assert scales_linearly(lambda n, build=build: extract_indicators(build(n)), size), build(2)
+    # The scans still find what they should next to such runs.
+    found = extract_indicators("a.a.a.a." * 1_000 + " mail eve@evil.example or visit pay-portal.evil.example.")
+    assert "eve@evil.example" in found and "pay-portal.evil.example" in found

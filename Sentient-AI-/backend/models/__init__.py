@@ -50,6 +50,15 @@ from models.permission_grant import PermissionGrantRow
 # top10:video_transcripts
 from models.media_transcript import MediaTranscript
 
+# Security wave (security10, migrations 0025-0032): one import per skill table module.
+from models.known_recipient import KnownRecipient, OrganisationDomain
+from models.mail_security import MailScamFinding, MailScanCursor
+from models.mcp_tool_pin import McpToolPin
+from models.breach_watch import BreachWatchAddress, BreachWatchFinding
+from models.browser_site_rule import BrowserSiteRule
+from models.tool_rule import ToolRule, ToolRuleBuiltin
+from models.file_reputation import FileReputationCall, FileReputationCheck, FileReputationVerdict
+
 # isort: on
 
 __all__ = [
@@ -119,4 +128,18 @@ __all__ = [
     # top10:video_transcripts
     "MediaTranscript",
 
+    # Security wave (security10, migrations 0025-0032): one import per skill table module.
+    "KnownRecipient",
+    "OrganisationDomain",
+    "MailScamFinding",
+    "MailScanCursor",
+    "McpToolPin",
+    "BreachWatchAddress",
+    "BreachWatchFinding",
+    "BrowserSiteRule",
+    "ToolRule",
+    "ToolRuleBuiltin",
+    "FileReputationCall",
+    "FileReputationCheck",
+    "FileReputationVerdict",
 ]

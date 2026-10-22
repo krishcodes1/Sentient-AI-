@@ -24,7 +24,7 @@ from services.agent import risk
 from services.agent.permissions import ActionCategory
 
 from ..base import ConnectorError, UserConfirmationRequired, path_segment
-from ..definition import ToolSpec, _schema
+from ..definition import Outbound, ToolSpec, _schema
 from ..shaping import clamp_limit
 from .common import (
     MAX_LONG_TEXT,
@@ -207,6 +207,9 @@ CALENDAR_ACTIONS: tuple[ToolSpec, ...] = (
             risk.when_given("calendar_id", "medium", "it writes to a calendar that may be shared"),
         ),
         low_risk_note="add private events with no guests to your main calendar",
+        outbound=Outbound(
+            content=("subject", "body", "location"), recipients=("attendees",), shares_content=True
+        ),
     ),
     ToolSpec(
         "update_event",
@@ -222,6 +225,7 @@ CALENDAR_ACTIONS: tuple[ToolSpec, ...] = (
             body={"type": "string", "description": "Plain-text description"},
         ),
         required_scope="calendar.write",
+        outbound=Outbound(content=("subject", "body", "location")),
     ),
     ToolSpec(
         "respond_to_invite",
@@ -236,6 +240,7 @@ CALENDAR_ACTIONS: tuple[ToolSpec, ...] = (
         required_scope="calendar.write",
         # The answer goes to the organizer: it speaks for the user.
         always_confirm=True,
+        outbound=Outbound(content=("comment",)),
     ),
     ToolSpec(
         "delete_event",

@@ -1,5 +1,6 @@
 """Reads and updates the single installation row: capability switches, default LLM
-provider and keys, Telegram token, registration and setup state.
+provider and keys, Telegram token, the owner's security service keys,
+registration and setup state.
 
 Why it exists: Routes, the runtime and main.py need one cached, locked and
 audited view of owner configuration with env-over-database precedence; its
@@ -8,8 +9,9 @@ change events are what restart the Telegram poller and drop cached providers.
 Owner-level configuration of this Crawler install.
 
 One row (models.installation) holds the capability switches, the default
-AI provider/model, encrypted provider keys and the encrypted Telegram bot
-token. Precedence is environment > database > default: a key in .env
+AI provider/model, encrypted provider keys, the encrypted Telegram bot
+token and the encrypted keys for outside security services (Safe Browsing,
+Web Risk, Have I Been Pwned, VirusTotal). Precedence is environment > database > default: a key in .env
 (Docker, CI) always wins, so nothing there changes; the wizard fills the
 row for native installs where there is no .env to edit.
 
@@ -58,7 +60,7 @@ import structlog
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
-from core.config import LLM_PROVIDERS, PROVIDER_KEY_FIELDS, settings
+from core.config import LLM_PROVIDERS, PROVIDER_KEY_FIELDS, SERVICE_KEY_FIELDS, settings
 from core.security import decrypt_credentials, encrypt_credentials
 from models.audit import AuditStatus
 from models.installation import INSTALLATION_ROW_ID, Installation
@@ -74,6 +76,13 @@ ChangeCallback = Callable[[str], Awaitable[None]]
 UNREADABLE_KEYS_MESSAGE = (
     "Stored provider keys cannot be decrypted with the current ENCRYPTION_KEY; "
     "restore the key or clear the stored keys"
+)
+
+# Security wave: the same refusal for the owner's outside-service keys
+# (Security -> Service keys), whose blob is separate from the provider keys.
+UNREADABLE_SERVICE_KEYS_MESSAGE = (
+    "Stored service keys cannot be decrypted with the current ENCRYPTION_KEY; "
+    "restore the key or clear the stored secrets"
 )
 
 REGISTRATION_LOCKED_MESSAGE = (
@@ -132,6 +141,11 @@ class _Snapshot:
     token_unreadable: bool = False
     # Owner-set capability settings, by capability key (the purchases caps).
     capability_settings: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Security wave: the owner's stored outside-service keys ({name: key},
+    # SERVICE_KEY_FIELDS names), never in a repr; and whether their blob
+    # exists but does not decrypt.
+    service_keys: dict[str, str] = field(default_factory=dict, repr=False)
+    service_keys_unreadable: bool = False
 
 
 @dataclass(frozen=True)
@@ -199,17 +213,20 @@ class InstallationService:
         # The ciphertext's hash identifies the blob without revealing it.
         logger.warning(event, blob_sha256=fingerprint[:16])
 
-    def _decrypt_keys(self, blob: Optional[bytes]) -> tuple[dict[str, str], bool]:
+    def _decrypt_keys(
+        self, blob: Optional[bytes], *, event: str = "installation_keys_undecryptable"
+    ) -> tuple[dict[str, str], bool]:
         """(keys, unreadable). An undecryptable or corrupt blob reads as no
-        keys, flagged so no write path overwrites it."""
+        keys, flagged so no write path overwrites it. *event* names the blob
+        in the one warning it logs (provider keys or service keys)."""
         if not blob:
             return {}, False
         try:
             data = json.loads(decrypt_credentials(blob))
             if not isinstance(data, dict):
-                raise ValueError("provider keys blob is not a mapping")
+                raise ValueError("keys blob is not a mapping")
         except Exception:  # wrong ENCRYPTION_KEY or corrupt blob
-            self._warn_unreadable("installation_keys_undecryptable", blob)
+            self._warn_unreadable(event, blob)
             return {}, True
         return {str(k): str(v) for k, v in data.items()}, False
 
@@ -230,6 +247,9 @@ class InstallationService:
             # triggers a lazy (and, under asyncio, illegal) refresh.
             keys, keys_unreadable = self._decrypt_keys(row.llm_api_keys)
             token, token_unreadable = self._decrypt_token(row.telegram_bot_token)
+            service_keys, service_keys_unreadable = self._decrypt_keys(
+                row.security_service_keys, event="installation_service_keys_undecryptable"
+            )
             snap = _Snapshot(
                 capabilities={str(k): bool(v) for k, v in (row.capabilities or {}).items()},
                 llm_provider=row.llm_provider,
@@ -241,6 +261,8 @@ class InstallationService:
                 keys_unreadable=keys_unreadable,
                 token_unreadable=token_unreadable,
                 capability_settings=_stored_settings(row),
+                service_keys=service_keys,
+                service_keys_unreadable=service_keys_unreadable,
             )
             await session.commit()
         return snap
@@ -442,6 +464,10 @@ class InstallationService:
             slack_configured=bool(self._slack_running()),
             telegram_enabled=configured and switches.get("telegram") is True,
             default_provider=default_provider,
+            # Security wave: which outside-service keys exist (env or stored),
+            # for the key-gated capabilities. A key change runs
+            # _changed("capabilities"), which drops this cached report.
+            service_keys=await self.configured_service_keys(),
         )
 
     def _cached_view(self) -> Optional[_ReportView]:
@@ -582,29 +608,126 @@ class InstallationService:
         )
         await self._changed("telegram")
 
+    # ── security service keys ──────────────────────────────────────────
+    #
+    # The owner's own keys for outside security services (Google Safe
+    # Browsing / Web Risk, Have I Been Pwned, VirusTotal): environment first,
+    # then the encrypted installation.security_service_keys blob, the same
+    # precedence as the provider keys. Nothing here hands a key to a route:
+    # api/routes/security_keys.py sees booleans only.
+
+    def _env_service_key(self, name: str) -> str:
+        """The environment's key for service *name*, stripped; "" when it is
+        unset or the name is unknown."""
+        attr = SERVICE_KEY_FIELDS.get(name)
+        return (getattr(self._config, attr, "") or "").strip() if attr else ""
+
+    async def service_key(self, name: str) -> Optional[str]:
+        """The key for security service *name*: the environment's
+        (SERVICE_KEY_FIELDS) first, then the stored one; None when neither,
+        or for an unknown name. The environment's key is answered even while
+        the stored blob does not decrypt."""
+        if name not in SERVICE_KEY_FIELDS:
+            return None
+        env_value = self._env_service_key(name)
+        if env_value:
+            return env_value
+        stored = (await self._load()).service_keys.get(name, "").strip()
+        return stored or None
+
+    async def service_key_status(self) -> dict[str, dict[str, bool]]:
+        """{name: {"key_from_env": bool, "key_stored": bool}} for every
+        SERVICE_KEY_FIELDS name, in that order. Never a key."""
+        stored = (await self._load()).service_keys
+        return {
+            name: {
+                "key_from_env": bool(self._env_service_key(name)),
+                "key_stored": bool(stored.get(name, "").strip()),
+            }
+            for name in SERVICE_KEY_FIELDS
+        }
+
+    async def configured_service_keys(self) -> frozenset[str]:
+        """Names with a usable key (environment or stored): the report's
+        ``service_keys`` fact."""
+        return frozenset(
+            [name for name in SERVICE_KEY_FIELDS if await self.service_key(name) is not None]
+        )
+
+    async def service_keys_unreadable(self) -> bool:
+        """True while a stored service-keys blob exists that the current
+        ENCRYPTION_KEY cannot decrypt."""
+        return (await self._load()).service_keys_unreadable
+
+    async def set_service_key(
+        self, name: str, key: Optional[str], *, actor_id: uuid.UUID
+    ) -> None:
+        """Store (*key*) or remove (None) one service key in the encrypted
+        blob, audited as service_key_updated {"service", "key_stored"} with
+        the endpoint /api/security/keys/<name>. ValueError for an unknown
+        name, never echoing it (a key pasted into the wrong field must not
+        come back); RuntimeError(UNREADABLE_SERVICE_KEYS_MESSAGE) when the
+        stored blob does not decrypt, which is never overwritten. The
+        report's ``service_keys`` fact changes, so listeners hear
+        "capabilities"."""
+        if name not in SERVICE_KEY_FIELDS:
+            raise ValueError("Unknown service")
+        key = (key or "").strip() or None
+
+        def mutate(row: Installation) -> Mapping[str, Any]:
+            keys, unreadable = self._decrypt_keys(
+                row.security_service_keys, event="installation_service_keys_undecryptable"
+            )
+            if unreadable:
+                # Re-encrypting would replace every stored service key with
+                # just this one; the owner must decide explicitly.
+                raise RuntimeError(UNREADABLE_SERVICE_KEYS_MESSAGE)
+            if key is None:
+                keys.pop(name, None)
+            else:
+                keys[name] = key
+            # Only names with a key appear; no key at all leaves no blob.
+            row.security_service_keys = encrypt_credentials(json.dumps(keys)) if keys else None
+            return {"service": name, "key_stored": key is not None}
+
+        await self._write(
+            mutate,
+            actor_id=actor_id,
+            action="service_key_updated",
+            endpoint=f"/api/security/keys/{name}",
+        )
+        await self._changed("capabilities")
+
     # ── secrets ────────────────────────────────────────────────────────
 
     async def secrets_unreadable(self) -> bool:
-        """True while a stored provider-key or bot-token blob exists that
-        the current ENCRYPTION_KEY cannot decrypt."""
+        """True while a stored provider-key, bot-token or service-keys blob
+        exists that the current ENCRYPTION_KEY cannot decrypt."""
         snap = await self._load()
-        return snap.keys_unreadable or snap.token_unreadable
+        return snap.keys_unreadable or snap.token_unreadable or snap.service_keys_unreadable
 
     async def clear_stored_secrets(self, actor_id: uuid.UUID) -> None:
-        """Discard every stored provider key and the stored bot token. The
-        explicit escape hatch when they no longer decrypt; environment
-        values are untouched."""
+        """Discard every stored provider key, the stored bot token and the
+        stored security service keys. The explicit escape hatch when they no
+        longer decrypt; environment values are untouched."""
         cleared: dict[str, bool] = {}
 
         def mutate(row: Installation) -> Mapping[str, Any]:
             cleared["llm"] = bool(row.llm_api_keys)
             cleared["telegram"] = bool(row.telegram_bot_token)
+            cleared["service_keys"] = bool(row.security_service_keys)
             row.llm_api_keys = None
             row.telegram_bot_token = None
-            return {
+            row.security_service_keys = None
+            payload: dict[str, Any] = {
                 "provider_keys_cleared": cleared["llm"],
                 "telegram_cleared": cleared["telegram"],
             }
+            # Named only when a blob was really discarded, so an install
+            # without service keys keeps exactly the payload it had.
+            if cleared["service_keys"]:
+                payload["service_keys_cleared"] = True
+            return payload
 
         await self._write(
             mutate,
@@ -616,6 +739,9 @@ class InstallationService:
             await self._changed("llm")
         if cleared["telegram"]:
             await self._changed("telegram")
+        if cleared["service_keys"]:
+            # The report's service_keys fact changed.
+            await self._changed("capabilities")
 
     # ── setup state ────────────────────────────────────────────────────
 

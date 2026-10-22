@@ -22,7 +22,7 @@ from typing import Any, Optional
 from services.agent import risk
 from services.agent.permissions import ActionCategory
 from services.connectors.base import ConnectorError, UserConfirmationRequired, path_segment
-from services.connectors.definition import ToolSpec, _schema
+from services.connectors.definition import Outbound, ToolSpec, _schema
 from services.connectors.documents import is_document_type, read_connector_document
 from services.connectors.shaping import clamp_limit, collect_pages
 
@@ -182,6 +182,7 @@ DRIVE_ACTIONS: tuple[ToolSpec, ...] = (
         policy_key="google_drive",
         required_scope="drive.write",
         always_confirm=True,
+        outbound=Outbound(recipients=("email",), shares_content=True),
     ),
     ToolSpec(
         "trash_file",

@@ -67,6 +67,62 @@ PROTECTED_ROUTES = [
     ("GET", "/api/triggers"),
     ("PATCH", f"/api/triggers/{SOME_ID}"),
     ("DELETE", f"/api/triggers/{SOME_ID}"),
+    # Security wave (security10): the Security page's routes, one group per
+    # module (WAVE 0 mounts every one, stubs answer 501 behind their auth).
+    # S4: link-check status and the owner's service keys.
+    ("GET", "/api/security/link-reputation/status"),
+    ("GET", "/api/security/keys"),
+    ("POST", "/api/security/keys/safe_browsing/test"),
+    ("PUT", "/api/security/keys/safe_browsing"),
+    ("DELETE", "/api/security/keys/safe_browsing"),
+    # S1: outgoing messages.
+    ("GET", "/api/security/outbound"),
+    ("DELETE", "/api/security/outbound/known-recipients"),
+    ("POST", "/api/security/outbound/domains"),
+    ("DELETE", f"/api/security/outbound/domains/{SOME_ID}"),
+    # S2: mail alerts.
+    ("GET", "/api/security/mail/status"),
+    ("GET", "/api/security/mail/alerts"),
+    ("POST", f"/api/security/mail/alerts/{SOME_ID}/actions"),
+    ("POST", f"/api/security/mail/alerts/{SOME_ID}/dismiss"),
+    ("PATCH", f"/api/security/mail/accounts/{SOME_ID}"),
+    # S3: check for scams.
+    ("POST", "/api/security/scam-check"),
+    ("GET", "/api/security/scam-check/status"),
+    # S5: MCP reviews.
+    ("GET", "/api/security/mcp/reviews"),
+    ("GET", f"/api/security/mcp/pins/{SOME_ID}"),
+    ("POST", f"/api/security/mcp/pins/{SOME_ID}/approve"),
+    ("POST", f"/api/security/mcp/pins/{SOME_ID}/keep-off"),
+    ("POST", f"/api/security/mcp/servers/{SOME_ID}/approve"),
+    # S6: breach monitor and the password range proxy.
+    ("GET", "/api/security/breach"),
+    ("POST", "/api/security/breach/addresses"),
+    ("PATCH", f"/api/security/breach/addresses/{SOME_ID}"),
+    ("DELETE", f"/api/security/breach/addresses/{SOME_ID}"),
+    ("POST", f"/api/security/breach/addresses/{SOME_ID}/check"),
+    ("POST", f"/api/security/breach/findings/{SOME_ID}/acknowledge"),
+    ("POST", "/api/security/breach/findings/acknowledge-all"),
+    ("POST", "/api/security/pwned-passwords/range"),
+    # S7: site rules.
+    ("GET", "/api/security/site-rules"),
+    ("POST", "/api/security/site-rules"),
+    ("PATCH", f"/api/security/site-rules/{SOME_ID}"),
+    ("DELETE", f"/api/security/site-rules/{SOME_ID}"),
+    ("PUT", "/api/security/site-rules/categories/banks"),
+    ("POST", "/api/security/site-rules/check"),
+    # S9: tool rules.
+    ("GET", "/api/security/tool-rules"),
+    ("POST", "/api/security/tool-rules"),
+    ("DELETE", f"/api/security/tool-rules/{SOME_ID}"),
+    ("PUT", "/api/security/tool-rules/builtins/many_recipients"),
+    ("POST", "/api/security/tool-rules/preview"),
+    ("GET", "/api/security/tool-rules/catalog"),
+    # S10: file checks.
+    ("GET", "/api/security/files"),
+    ("POST", "/api/security/files/check"),
+    ("POST", f"/api/security/files/{SOME_ID}/upload"),
+    ("DELETE", f"/api/security/files/{SOME_ID}"),
 ]
 
 # The /api routes that answer without a signed-in user, each on purpose.

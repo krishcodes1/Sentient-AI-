@@ -27,9 +27,11 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Literal, Optional, Protocol
+from typing import Any, Callable, Literal, Mapping, Optional, Protocol, Sequence
 
 import structlog
+
+from services.security.call_checks import notes_from
 
 logger = structlog.get_logger(__name__)
 
@@ -60,6 +62,11 @@ class StoredAction:
     # "Allow low-risk changes on <account> for 7 days" (permission tiers),
     # set by the runtime only; None otherwise.
     grant_offer: Optional[dict[str, Any]] = None
+    # What the call checks noticed (services/security/call_checks.py): each
+    # {"kind", "severity", "text"}, validated and at most eight, shown on the
+    # card on every channel. A card with a high or warn note offers no
+    # standing consent. Never part of the arguments or their digest.
+    security_notes: tuple[dict[str, str], ...] = ()
 
 
 class ApprovalStore(Protocol):
@@ -75,6 +82,7 @@ class ApprovalStore(Protocol):
         risk_note: Optional[str] = None,
         origin: Optional[str] = None,
         grant_offer: Optional[dict[str, Any]] = None,
+        security_notes: Optional[Sequence[Mapping[str, str]]] = None,
     ) -> StoredAction: ...
 
     async def list_pending(self, user_id: str) -> list[StoredAction]: ...
@@ -93,6 +101,13 @@ def _as_utc(dt: datetime) -> datetime:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt
+
+
+def _stored_notes(value: Any) -> Optional[list[dict[str, str]]]:
+    """The notes a card stores: validated and capped (``notes_from``), or
+    None when there are none, so a card without notes stores NULL."""
+    notes = notes_from(value)
+    return notes or None
 
 
 def _grant_offer_of(value: Any) -> Optional[dict[str, Any]]:
@@ -132,6 +147,7 @@ class InMemoryApprovalStore:
         risk_note: Optional[str] = None,
         origin: Optional[str] = None,
         grant_offer: Optional[dict[str, Any]] = None,
+        security_notes: Optional[Sequence[Mapping[str, str]]] = None,
     ) -> StoredAction:
         now = _utcnow()
         expires = now + timedelta(minutes=ttl_minutes)
@@ -147,6 +163,7 @@ class InMemoryApprovalStore:
             risk_note=risk_note,
             origin=origin,
             grant_offer=dict(grant_offer) if grant_offer else None,
+            security_notes=tuple(_stored_notes(security_notes) or ()),
         )
         self._records[action.action_id] = _MemRecord(action=action, expires=expires)
         return action
@@ -210,6 +227,8 @@ class DbApprovalStore:
             risk_note=getattr(row, "risk_note", None),
             origin=getattr(row, "origin", None),
             grant_offer=_grant_offer_of(getattr(row, "grant_offer", None)),
+            # A corrupt column (not a list of notes) reads as no notes.
+            security_notes=tuple(notes_from(getattr(row, "security_notes", None))),
         )
 
     async def create(
@@ -224,6 +243,7 @@ class DbApprovalStore:
         risk_note: Optional[str] = None,
         origin: Optional[str] = None,
         grant_offer: Optional[dict[str, Any]] = None,
+        security_notes: Optional[Sequence[Mapping[str, str]]] = None,
     ) -> StoredAction:
         from models.pending_action import PendingAction
 
@@ -237,6 +257,7 @@ class DbApprovalStore:
             risk_note=risk_note,
             origin=origin,
             grant_offer=dict(grant_offer) if grant_offer else None,
+            security_notes=_stored_notes(security_notes),
             created_at=now,
             expires_at=now + timedelta(minutes=ttl_minutes),
         )

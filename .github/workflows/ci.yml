@@ -360,8 +360,21 @@ jobs:
       # from the tzdata package, not the OS (top10:scheduler_briefing). The
       # transcribe suite starts and kills real speech-worker stand-ins
       # (top10:voice_notes).
+      # Security wave (security10): the skills' pure suites (no database,
+      # browser or network; clients run on mocked transports):
+      # the call-checks pipeline (WAVE 0);
+      # S4 look-alike hosts, local link checks and the Google lookup client;
+      # S1 outgoing text and recipients (Unicode classes, CRLF kept);
+      # S2 mail security facts and checks (CRLF header values, IDNA, NFKC), alert texts;
+      # S3 scam signals, AI review parsing and verdicts;
+      # S5 MCP canonical definitions and the pin plan;
+      # S6 address rules and the Have I Been Pwned and Pwned Passwords clients;
+      # S7 site patterns, the sensitive list, snapshots, guard hook, call check, observe,
+      # web resolver and the switch;
+      # S9 the tool-rules engine and grammar;
+      # S10 the VirusTotal client, file hashing and the byte holder.
       - name: Unit tests
-        run: python -m pytest tests/test_platform.py tests/test_browser_snapshot.py tests/test_browser_session.py tests/test_browser_handoff.py tests/test_browser_guard.py tests/test_browser_runtime.py tests/test_capability_gating.py tests/test_capabilities_report.py tests/test_connector_registry.py tests/connectors/ tests/files/test_files_sandbox.py tests/files/test_files_worker_limits.py tests/test_schedule_recurrence.py tests/test_transcribe.py -q -p no:cacheprovider
+        run: python -m pytest tests/test_platform.py tests/test_browser_snapshot.py tests/test_browser_session.py tests/test_browser_handoff.py tests/test_browser_guard.py tests/test_browser_runtime.py tests/test_capability_gating.py tests/test_capabilities_report.py tests/test_connector_registry.py tests/connectors/ tests/files/test_files_sandbox.py tests/files/test_files_worker_limits.py tests/test_schedule_recurrence.py tests/test_transcribe.py tests/test_call_checks.py tests/test_lookalike.py tests/test_link_checks.py tests/test_link_reputation_client.py tests/test_link_reputation_browser.py tests/test_outbound_text.py tests/test_outbound_recipients.py tests/test_mail_security_facts.py tests/test_mail_security_checks.py tests/test_mail_scan_messages.py tests/test_scam_signals.py tests/test_scam_check_review.py tests/test_scam_check_verdict.py tests/test_mcp_pinning_canonical.py tests/test_mcp_pin_plan.py tests/test_breach_addresses.py tests/test_breach_hibp_client.py tests/test_pwned_passwords_client.py tests/test_site_rules_patterns.py tests/test_site_rules_sensitive_list.py tests/test_site_rules_snapshot.py tests/test_site_rules_guard.py tests/test_site_rules_call_check.py tests/test_site_rules_observe.py tests/test_site_rules_web.py tests/test_site_rules_capability.py tests/test_tool_rules_engine.py tests/test_tool_rules_grammar.py tests/file_reputation/test_virustotal_client.py tests/file_reputation/test_file_hashing.py tests/file_reputation/test_byte_holder.py -q -p no:cacheprovider
 
       - name: Types
         run: python -m mypy services/platform services/tools/browser

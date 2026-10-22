@@ -68,6 +68,17 @@ comes back through here and is judged like any navigation, however many
 hops the chain has. What the fetch cannot carry is Chrome's own TLS and
 HTTP/2 fingerprint; the browser-control spec (§9) says when that matters
 and what would carry it without losing a hop.
+
+Security wave (S4 link reputation, S7 site rules): each toolkit hands its
+``EgressHooks`` to ``_shared.attach_egress_hooks``, which binds them to the
+context's ``EgressState`` for the session's user, so no hook is module
+state. A top-level navigation and every client-hop redirect target then
+pass the owner's site rules (``_site_reason``, after ``check_url``) and the
+link lookup (``_reputation_reason``), in that order, before the order
+checks; a frame's navigation passes the site rules only, and the bound
+order POST's redirect the lookup only. A hook that raises blocks with its
+named reason (``SITE_RULES_FAILED``, ``NAVIGATION_CHECK_FAILED``). Without
+hooks every path behaves as before.
 """
 
 from __future__ import annotations
@@ -81,7 +92,7 @@ import socket
 import time
 import weakref
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Optional, Protocol
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import structlog
@@ -239,7 +250,13 @@ class EgressState:
     ``read_click`` only ever narrow, so they hold for every page, and so
     does ``human_driving``, which lifts no order block (the person's
     sign-in may open a popup).
-    ``in_flight`` and ``last_request`` are what ``wait_for_quiet`` reads."""
+    ``in_flight`` and ``last_request`` are what ``wait_for_quiet`` reads.
+
+    ``site_rules`` and ``reputation`` are the security wave's hooks for this
+    context's user (``EgressHooks``, attached by the toolkits): the owner's
+    site rules (``SiteRuleHook``) and the link lookup (``NavigationCheck``).
+    None runs neither. ``notes`` collects what a hook noticed without
+    blocking (``{"kind", "text"}``), which browser.read hands back."""
 
     account_mode: bool
     write_allowed: bool = False
@@ -253,6 +270,13 @@ class EgressState:
     blocked: list[dict[str, str]] = field(default_factory=list)
     in_flight: set[Any] = field(default_factory=set)
     last_request: float = 0.0
+    # Security wave: the hooks bound to this context (see the docstring).
+    site_rules: Any = None
+    reputation: Any = None
+    # Non-blocking notes for the toolkit to pass on, {"kind", "text"} (security wave: S4 link
+    # reputation, S7 site rules); browser.read open() and click() return the ones added during
+    # their navigation as security_notes.
+    notes: list[dict[str, str]] = field(default_factory=list)
 
 
 def _origin(url: str) -> str:
@@ -402,6 +426,49 @@ async def settle_blocked_navigation(page: "Page", *, timeout_ms: int = 1500) -> 
 LOOPBACK_TOGGLE = "CRAWLER_ALLOW_LOOPBACK_FOR_TESTS"
 Resolver = Callable[[str], list[str]]
 
+# Security wave (S4, S7): the hooks a navigation passes after check_url.
+# A link lookup for one URL: its block reason, or None.
+NavigationCheck = Callable[[str, "EgressState"], Awaitable[Optional[str]]]
+
+
+@dataclass(frozen=True)
+class PageNotice:
+    """What the owner's site rules say about the page a read is about to
+    describe: ``blocked`` (the page is blanked and nothing is described) or
+    ``always_ask`` (described, with *text* added as a notice)."""
+
+    kind: Literal["blocked", "always_ask"]
+    rule: str
+    text: str
+
+
+class SiteRuleHook(Protocol):
+    """The owner's site rules for one user (security S7). Pure and in memory;
+    *exempt* is True inside an approved checkout's window (the order POST and
+    the 3-D Secure hand-off right after it)."""
+
+    def navigation_reason(self, url: str, *, exempt: bool) -> Optional[str]: ...
+
+    def page_notice(self, url: str, *, exempt: bool) -> Optional[PageNotice]: ...
+
+
+@dataclass(frozen=True)
+class EgressHooks:
+    """Per-user hook factories a toolkit binds to each context it guards
+    (``_shared.attach_egress_hooks``): ``site_rules(user_id)`` (S7) and
+    ``reputation(user_id)`` (S4). Either may be None; with neither, the
+    guard behaves exactly as before."""
+
+    site_rules: Optional[Callable[[str], SiteRuleHook]] = None
+    reputation: Optional[Callable[[str], NavigationCheck]] = None
+
+
+# Why a navigation was stopped when a hook itself failed: an unread rule
+# must not let a Blocked site open. Neither joins SENDING_REASONS or
+# READ_CLICK_REASONS: nothing was sent, and no click caused it.
+SITE_RULES_FAILED = "the owner's site rules could not be checked"
+NAVIGATION_CHECK_FAILED = "a safety check on this address could not run"
+
 
 def _system_resolver(host: str) -> list[str]:
     try:
@@ -548,6 +615,13 @@ class Guard:
             orders_open = write_allowed or (
                 state.checkout_handoff and page is not None and page is state.handoff_page
             )
+            # Security wave (S7, review SEC-F4): an approved checkout's
+            # window (the bound order POST, the 3-D Secure hand-off right
+            # after it), where the site rules exempt only protected and bank
+            # hosts. browser.act's window and an ordinary hand-off are not.
+            checkout_window = (write_allowed and state.write_origin is not None) or (
+                state.checkout_handoff and page is not None and page is state.handoff_page
+            )
             if not request.is_navigation_request():
                 # A page's own request (fetch, XHR, beacon, an image): one
                 # that sends to an order address outside a write window is
@@ -598,6 +672,12 @@ class Guard:
                 await self._block(route, state, url=url, reason=READ_TIER_ORDER_REQUEST)
                 return
             if not _is_top_level(request):
+                # Security wave (S7): a frame never loads a site the owner
+                # blocked (the link lookup is for top-level pages only).
+                reason = self._site_reason(state, url, exempt=checkout_window)
+                if reason is not None:
+                    await self._block(route, state, url=url, reason=reason)
+                    return
                 # A frame's own navigation is left alone, except that a
                 # bound write window admits no POST from a frame to any
                 # other origin (an order form aimed at a hidden iframe and
@@ -635,6 +715,10 @@ class Guard:
                     )
                     return
             reason = await asyncio.to_thread(self.check_url, url)
+            if reason is None:
+                reason = self._site_reason(state, url, exempt=checkout_window)
+            if reason is None:
+                reason = await self._reputation_reason(state, url)
             if reason is not None:
                 await self._block(route, state, url=url, reason=reason)
                 return
@@ -661,6 +745,10 @@ class Guard:
             if 300 <= response.status < 400 and location:
                 target = urljoin(url, location)
                 reason = await asyncio.to_thread(self.check_url, target)
+                if reason is None:
+                    reason = self._site_reason(state, target, exempt=checkout_window)
+                if reason is None:
+                    reason = await self._reputation_reason(state, target)
                 if reason is None and state.changing and _order_address(target):
                     reason = ORDER_ADDRESS
                 if reason is None and state.read_click and _read_link(target):
@@ -709,6 +797,11 @@ class Guard:
                 f"{_origin(target) or 'an unreadable address'} (a {response.status} sends the card again), "
                 f"not by POST to {state.write_origin}"
             )
+        if reason is None:
+            # Security wave (S4): the merchant's redirect after the order is
+            # looked up too (it is always inside the checkout window, so the
+            # site rules are left to the navigation it becomes).
+            reason = await self._reputation_reason(state, target)
         if reason is not None:
             await self._block(route, state, url=target, reason=reason, via=url)
             return
@@ -722,6 +815,44 @@ class Guard:
             headers=headers,
             body=_client_redirect(target),
         )
+
+    def _site_reason(self, state: EgressState, url: str, *, exempt: bool) -> Optional[str]:
+        """The owner's site rules' block reason for *url*, or None (no hook
+        attached: None). A hook that raises blocks: an unread rule list
+        must not let a Blocked site open (an exception escaping ``_route``
+        would abort the navigation silently instead)."""
+        hook = getattr(state, "site_rules", None)
+        if hook is None:
+            return None
+        try:
+            reason = hook.navigation_reason(url, exempt=exempt)
+        except Exception as exc:  # noqa: BLE001 - fail closed with a named reason
+            logger.warning(
+                "browser_site_rules_failed",
+                url=_without_query(url),
+                error_type=type(exc).__name__,
+            )
+            return SITE_RULES_FAILED
+        return reason if isinstance(reason, str) and reason else None
+
+    async def _reputation_reason(self, state: EgressState, url: str) -> Optional[str]:
+        """The link lookup's block reason for *url*, or None (no hook
+        attached: None). The lookup owns its own failure policy (it fails
+        open on a slow or broken service); one that raises anyway blocks
+        here with a named reason."""
+        check = getattr(state, "reputation", None)
+        if check is None:
+            return None
+        try:
+            reason = await check(url, state)
+        except Exception as exc:  # noqa: BLE001 - fail closed with a named reason
+            logger.warning(
+                "browser_navigation_check_failed",
+                url=_without_query(url),
+                error_type=type(exc).__name__,
+            )
+            return NAVIGATION_CHECK_FAILED
+        return reason if isinstance(reason, str) and reason else None
 
     async def _block(
         self, route: "Route", state: EgressState, *, url: str, reason: str, via: Optional[str] = None

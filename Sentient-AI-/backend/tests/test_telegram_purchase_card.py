@@ -323,6 +323,18 @@ def test_card_arguments_hide_reserved_keys_for_act_and_checkout_only():
     assert _card_arguments("browser.checkout", None) == {}
 
 
+def test_card_arguments_hide_the_reserved_key_of_a_virustotal_upload_card():
+    # Security wave (S10): the upload card holds the file the runtime keeps
+    # under "_upload", which the model can never set; the card shows the rest.
+    from services.notifications.telegram import _card_arguments
+
+    upload = {"sha256": "ab" * 32, "file_name": "invoice.pdf", "_upload": {"holder": "h-1"}}
+    assert _card_arguments("security.upload_to_virustotal", upload) == {
+        "sha256": "ab" * 32,
+        "file_name": "invoice.pdf",
+    }
+
+
 # ── /pending and the press ───────────────────────────────────────────────
 
 

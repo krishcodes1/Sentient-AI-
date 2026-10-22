@@ -94,11 +94,244 @@ Still open: a Telegram `/stop` writes no audit row of its own (the web stop's `s
 | F1 | **Panic action**: revoke connector tokens, pause all tools, stop the poller; Telegram `/panic` and a Settings button | `api/routes/`, `telegram.py` | one tap stops everything, audited | S |
 | F2 | **Taint check on every `web.*` call** (URL host/path/query and the search query, including `web.research`'s query, which is sent to DuckDuckGo unattended and whose results pick up to 8 pages it then reads), allowing values from the user's own message | `runtime.py` taint gate | regression test with the flight URL | M |
 | F3 | **Mostly done on `feat/connectors`.** **Approval cards never truncate** recipients/URLs/paths; show a hash of the exact arguments. Telegram and Slack cards now show every argument in full, split into labelled parts sent about one per second (buttons on the last part), and end with `Arguments digest: <16 hex>` (sha256 of the canonical arguments). A card that would need more than 8 messages is replaced by a notice pointing to the web app, with no buttons | `services/notifications/cards.py`, `telegram.py` approval card, Slack card in `services/notifications/slack.py` | tests in `test_notification_cards.py`. Still open, after `feat/purchases` merges: move Telegram's private card helpers (`_card_arguments`, `_usage_line`, `_with_turn_notes`, `_expires_in_text`, `_chunks`) into `cards.py` and drop the unused `_short_json`; show the digest on the web approval card too (`Chat.tsx`, Dashboard) | S |
-| F4 | **Partly done on `feat/connectors`.** Irreversible-action policy: delete, new recipient, shell side effects never auto-approved. Registry connectors must mark every DELETE `always_confirm` (validated at import), and every send, reply, forward, post, comment, review, merge, publish, share, workflow dispatch and run cancel is marked too. `always_confirm` is enforced at three layers (offer, permission adapter, executor), and an `auto_approve` connector tier never lifts it. The gmail, google_calendar and github DELETE rows moved from `admin_only` to `user_confirm` so the card can appear | `services/connectors/registry.py`, `services/agent/tool_registry.py`, `services/agent/permissions.py` | tests in `test_connector_registry.py`, `test_tool_registry.py`. Still open: it is a per-action flag, not a general rule in `permissions.py`; no separate "new recipient" check (sends are covered only because every send asks), and nothing for shell side effects | S |
+| F4 | **Partly done on `feat/connectors`.** Irreversible-action policy: delete, new recipient, shell side effects never auto-approved. Registry connectors must mark every DELETE `always_confirm` (validated at import), and every send, reply, forward, post, comment, review, merge, publish, share, workflow dispatch and run cancel is marked too. `always_confirm` is enforced at three layers (offer, permission adapter, executor), and an `auto_approve` connector tier never lifts it. The gmail, google_calendar and github DELETE rows moved from `admin_only` to `user_confirm` so the card can appear | `services/connectors/registry.py`, `services/agent/tool_registry.py`, `services/agent/permissions.py` | tests in `test_connector_registry.py`, `test_tool_registry.py`. Still open: it is a per-action flag, not a general rule in `permissions.py`; no separate "new recipient" check (sends are covered only because every send asks), and nothing for shell side effects. New recipient: done by security S1 (a note, not a rule). Partly addressed by tool rules (security S9): built-in rules ask before an address seen only in read content, more than 10 recipients, sharing outside the organisation and a link seen only in read content, and owners can add their own argument rules (Security → Tool rules). Shell side effects are still open | S |
 | F5 | Host header allowlist + Origin check on SSE and state-changing requests | `api/middleware/security.py` | tests | S |
 | F6 | **Shared secret detector** (NemoClaw regex set + entropy) on memory writes, audit sanitiser, outbound Telegram text, write-tool args; fails closed. `memory.remember` already refuses secrets with its own `services/tools/memory.py:looks_like_secret` (audit's patterns plus `_SECRET_RE`); move both into the shared module, together with the token formats the connectors spec (§4.3, Redaction) adds to `audit.py`, so each format lands once | `services/security/secrets.py` (new) | a pasted key never lands in memory or Telegram | M |
 | F7 | Refuse an Ollama endpoint that listens on a non-loopback address | `core/config.py` startup check | test | S |
 | F8 | JWT out of localStorage into an HttpOnly SameSite=Strict cookie | `api/routes/auth.py`, `api.ts` | login/refresh/logout still work | M |
+| F9 | **Block sender on a scam alert (deferred from the security wave, owner decision 2026-10-14).** Mail alerts offer only "Move to Spam/Junk" behind an approval card. Blocking needs a new scope and a re-consent per account: Gmail `gmail.settings.basic` (a filter; the API cannot send future mail to Spam, only to Trash) and Outlook `MailboxSettings.ReadWrite` (an inbox rule moving it to Junk Email) | `google_api/mail_security.py` and `microsoft_api/mail_security.py` (S2), the `GMAIL_ACTIONS` / `MAIL_ACTIONS` specs, the two scope maps, `audit.py` `_LENGTH_ONLY_ARGUMENTS`, `automation/fence.py` `NEVER_TOOLS` | an always-confirm WRITE per provider taking `user_confirmed`, offered only for a sender its domain vouches for (DMARC, compauth, or aligned SPF or DKIM), never to an unattended run, and checked once against a real account | M |
+| F10 | **Red-team regression harness (S8): deferred (owner decision 2026-10-14).** The security wave's adversarial harness (an obedient fake model that follows injected instructions, an attack corpus run against the real executor and the nine security skills, structural checks that every write still asks, known gaps recorded as expected failures, and an optional live mode) was not built in this wave, and nothing of it ships. The existing `tests/test_prompt_injection_redteam.py` corpus is unchanged | a new test package under `backend/tests/`, its Windows CI entry | the harness runs in CI against the integrated security wave and reports which layer stopped each attack | L |
+| F11 | **The "clear stored keys" banner on Settings ▸ Server also shows when only the security service keys fail to decrypt**, worded for AI provider keys (security wave scaffold J17). The Security ▸ Service keys tab shows its own banner | `components/ProviderForm.tsx`, `GET /setup/status` `secrets_unreadable` | the banner names which stored keys cannot be read | S |
+| F12 | **Reserved card-argument keys are listed four times and disagree for browser cards on Slack** (pre-existing; the security wave added only `security.upload_to_virustotal`'s `_upload` to all four, scaffold J20) | `services/security/guard.py` `_RESERVED_KEY_TOOLS`, `services/notifications/telegram.py` `_RESERVED_KEY_TOOLS`, `cards.py` `card_arguments`, `frontend/src/pages/approvalArguments.ts` `RESERVED_KEY_TOOLS` | one list, read by all four, with a test | S |
+| F13 | **A request-body size limit in the backend itself.** nginx now accepts 28 MB on the two chat message routes and the scam check (the backend's own documented ceiling for four images); the backend has no general limit, so outside Docker a large JSON body is read in full before a route can refuse it (scaffold J27) | `api/middleware/` | an oversized body is refused with 413 before it is read, on every route, with per-route ceilings | S |
+
+### Security wave (security10): status and follow-ups
+
+One block per skill, filled at integration from each skill's spec doc. Red-team harness (S8): deferred, see F10. Block sender: deferred, see F9.
+
+### Outbound message checks (security S1)
+
+Done (security S1): the hidden-character floor on every write (full rules on declared outbound
+text and MCP arguments, tag and bidi characters everywhere else, argument names included), the
+recipient refusal, typed card notes for first-time, outside-organisation, look-alike and
+unusual-letter recipients, the real recipients of replies and saved drafts, remote images, coded
+values and mismatched link text, S4's lookups of `scheme://host/` only, escalation of a flagged
+call that would have run without a card, the keyed-fingerprint sent-to history (migration
+`0026_known_recipients`), the owner's organisation domains and the Security page's "Outgoing
+messages" tab.
+
+Follow-ups:
+- Web reads that carry data in a URL (`web.fetch`, the browser) are not S1's: S7 and S9.
+- Gmail `forward` quotes the original body inside the connector; S1 does not clean that
+  third-party text.
+- Converge S1's link reading (`outbound_text.find_links`, WHATWG URL reading) and S4's
+  (`link_checks`) if both keep growing; S4's `check_local` is handed `scheme://host/` so the two
+  never disagree on a host meanwhile.
+- A basic variation selector after a non-ASCII letter is kept (no StandardizedVariants table in
+  Python); counting it as `kept` would need that table.
+- Slack user ids are not recipients S1 can classify.
+
+### Scam checks on new email (security S2)
+
+**S2 Automatic scam check on new mail: done.** Every new email in each connected Gmail and
+Outlook inbox is checked on this computer; flagged mail gets one AI review (its own daily cap,
+pseudonymised for a cloud provider) and an alert on the person's own Telegram and Slack, with a
+Move-to-Spam/Junk approval card for a likely scam; everything is listed on Security ▸ Mail alerts.
+Block sender is deferred (F9). Follow-ups:
+
+- Urgency and payment wording in languages other than English.
+- Outlook immutable ids (`Prefer: IdType="ImmutableId"`), so a card survives the person moving
+  the mail before approving it.
+- Feeding the DMARC verdict into trigger sender matching.
+- A Telegram `/mailalerts` command.
+- Sender history ("first mail from this sender").
+- The organisation's other domains (northwind.co for northwind.com) for the look-alike and
+  Reply-To checks, which need a list the owner keeps.
+- Text a stylesheet adds with `content:` is not read; the regional-ending and brand-owned domain
+  lists are kept by hand.
+
+### Scam checks when asked (security S3)
+
+**S3 On-demand scam check: done.** `/scam` in a web chat (with screenshots or files), Security ▸
+Check for scams, `security.check_scam` in a chat turn, and `/scam` in Telegram and "scam"
+in a Slack DM. Local checks always; links through Crawler's own lists and Google's only with the
+owner's key; one look by the account's own AI provider out of turn; the answer is never "safe".
+Follow-ups:
+
+- Wording patterns in languages other than English (the AI review covers them today).
+- A Slack message shortcut ("Check for scams") on any message.
+- Per-model vision (Ollama llava) instead of the per-provider flag.
+- Offer a check when a forwarded Telegram message arrives.
+- Show a `/scam` message's fenced text as a quoted block in the web chat (today the stored row
+  shows the fence markup).
+
+### Link reputation (security S4)
+
+Done: local link checks for every consumer (S1, S2, S3, the browser); the owner's Google Safe
+Browsing or Web Risk lookup with key-in-header, query-free policy checks, Google-bounded cache,
+owner limits with a half share for mail, cool-downs and a once-a-day key-rejected alert; the
+browser guard's reputation step (also inside a checkout's 3-D Secure window); the Service keys
+tab and the link-check status line. Follow-ups:
+
+- web.fetch and web.screenshot (a separate, unguarded Playwright) are not looked up.
+- Subframes and WebSockets are not looked up; neither are back/forward cache restores.
+- Privacy upgrade: Safe Browsing v5 / Web Risk hash-prefix lookups, so no URL leaves at all.
+- Counters and cool-downs are per process and reset on restart; persist them if owners hit
+  Google's quota.
+- Feed the owner's Blocked sites (S7) into mail and chat link reports.
+- Brand typos still collide with some dictionary words of five letters or more
+  (`cooking.com` reads near `booking.com`); an allowlist of common words, or warn instead of
+  high for a raw-edit typo, would cut the noise.
+- Duo's and the CAPTCHA vendors' subdomains are exempt from the lookup like their bare hosts;
+  review whether any of them serve tenant-authored pages (Okta tenants already are looked up).
+- A host with characters DNS names never use (`x$y.listed.example.org`) is looked up as its
+  nearest DNS ancestor but carries no signal of its own (the signal codes are fixed for S1, S2
+  and S3); a dedicated warning would need their wording too.
+- Python 3.12's Unicode database is 15.0. `lookalike._NEWER_MAPPINGS` holds what current
+  Chromium maps for letters added later (Unicode 16 and 17 capitals, the outlined Latin letters
+  and digits, the modifier capital S); re-sweep against the browser and trim it when the backend
+  moves to a Python whose database has them.
+- Browsers older than UTS 46 15.1 read the capital sharp s as "ss"; such a link is looked up as
+  current browsers read it ("ß"). A second lookup of the older reading would cover them.
+- The joiner rule is wider than CONTEXTJ (the standard library has no Joining_Type table): a
+  ZWNJ beside a non-joining letter of a joining script is kept, so a host the browser refuses
+  is looked up. That costs a lookup, never a miss.
+
+### MCP tool pinning (security S5)
+
+Done: MCP tool-definition pinning (`mcp_pinning`, on by default): every tool's raw definition is
+fingerprinted per connector, a changed or new tool on a pinned server is neither offered nor run
+until the owner approves that exact version on Security ▸ MCP reviews (diff with hidden characters
+labelled, approve by hash with 409 on a newer change, approve all shown, keep off), servers are
+trusted on first use (a server first seen with no tools gets a sentinel row), exposed names
+survive restarts, hidden characters are stripped from every tool description and schema before
+the model reads them, the owner's chats are told once per change (at most every 6 h per server),
+migration 0028. Follow-ups:
+
+- A one-click "trust this server's current tools again" for an owner who just reinstalled a
+  server (today: Approve all shown, or edit the URL to reset).
+- Show `title`, `annotations` and `outputSchema` to the model (fingerprinted already).
+- Decide whether a token carried in the server URL's query should count as a credential (today a
+  rotation there resets the pins like a new server).
+- The review-action limiter is per process; move it to a shared store with the other limiters.
+
+### Breach monitor (security S6)
+
+**S6 Breach monitor and password check: done.** Every owner's sign-in address plus up to 10
+typed addresses are looked up in Have I Been Pwned once a week with the owner's own key (blocked
+until a key is saved; nothing is sent without one); new breaches reach the owner's Telegram and
+Slack and always show on Security ▸ Breach monitor; anyone signed in can check a password there
+with only a 5-character SHA-1 prefix leaving the browser. Follow-ups:
+
+- An owner-editable check interval (today a fixed week).
+- A Pwned Passwords warning on change-password, register and owner setup (computed in the
+  browser with the same helper).
+- HIBP's k-anonymity `breachedaccount/range` for plans with `IncludesKAnon`, so the address
+  itself is never sent.
+- A Telegram `/breaches` command.
+- Check now does not refuse an address the sweeper is checking at that moment (both lookups are
+  sent; the seen list's unique index still alerts each breach once).
+
+### Site rules for the browser (security S7)
+
+Done: owner site rules (Blocked / Always ask / Trusted, exact host or site with subdomains, at most
+500), a built-in list of 161 sensitive sites in four categories (Always ask by default, overridable
+per category or per site), enforced by the call checks (slot 3), the browser guard (navigations,
+redirects, popups, frames), the observe step and the resolvers of the web toolkit, page watches
+(watch.create and every background check) and knowledge-base web imports; approved checkout
+windows exempt only protected and bank hosts (SEC-F4); audit rows carry keyed host hashes only;
+Security page tab with Check a site and recent hits. Deviations D1 (web tools covered), D2 (frames
+covered), D3 (the switch off suspends every rule).
+
+Open:
+- Subresources and WebSockets to a Blocked host are not judged (Blocked means "never navigate
+  there").
+- `web.screenshot`'s intermediate redirects inside its own browser are not judged (first and final
+  URL are).
+- `desktop.act` in the owner's real browser is out of scope.
+- Rerun the Chromium host-mapping parity check when Playwright's Chromium or Python is upgraded.
+
+### Tool rules (security S9)
+
+**S9 tool rules: shipped.** `services/security/tool_rules/`, `api/routes/security_tool_rules.py`,
+`ToolRulesTab.tsx`, migration `0031_tool_rules`. Cards name the rule; rules only add cards. Four
+built-in rules are on by default and the owner adds argument rules on Security → Tool rules.
+Follow-ups:
+
+- Reply and `send_draft` recipients are not visible to B1-B3 before the card (they always ask).
+- The regex choice budget refuses some reasonable patterns (an optional element beside an
+  open-ended repeat); widening it needs the owner's decision.
+- Rule changes made in another process apply within 30 s.
+
+### File reputation (security S10)
+
+**S10 File reputation with VirusTotal: done.** With the owner's VirusTotal key (Security →
+Service keys), every file people send Crawler and the email attachments S2 or the model ask about
+are looked up by SHA-256; only the fingerprint is sent, answers are cached, and VirusTotal's
+public limits hold across restarts with a share for automatic checks and one per person. A
+flagged file reaches its sender's own chats once and the model's `[Attached file]` note. A file
+VirusTotal does not know is sent only after its own approval card, with the bytes fetched again
+and re-hashed; personal documents can be sent only from Security ▸ File checks, picked there.
+Without a key nothing is sent anywhere. Follow-ups:
+
+- Re-fetch Slack files at approval instead of holding them in memory.
+- Fingerprint Drive and OneDrive documents in `read_connector_document`
+  (`connectors/documents.py`).
+- A multi-worker quota (a database lock instead of the process lock).
+- A premium-key mode (higher limits, behaviour reports).
+- A per-sighting `source_key`, so every forwarded copy of a flagged attachment gets the note.
+
+### Deferred and left open at integration (security10, 2026-10-21)
+
+Deferred by the owner: Block sender (F9) and the red-team regression harness, S8 (F10).
+
+- **S2: mail reviews can be starved by a flood (medium, design-level).**
+  `MailScanService.review_pending` starts at most 2 reviews per sweep, oldest first across every
+  user, and does not refill a slot that frees up mid-interval (even when the daily AI cap makes a
+  review return at once). One mailbox receiving a few hundred flagged mails an hour delays every
+  user's alerts by hours, likely scams included, and a finding pending over 24 h expires without
+  an alert. Fix: refill slots as tasks finish, claim likely scams and hard hits first, or
+  round-robin claims per user.
+- S2 (low): the switch is not re-read right before the alert and the card, after up to two file
+  lookups and the AI review; turning mail checks off in that window still sends that alert.
+- S2 (low): a link wrapped twice (Safe Links inside Safe Links, or `google.com/url`) is unwrapped
+  one level only in `mail_facts`, so its real destination escapes the local link checks and the
+  reputation lookup (S4's own `unwrap_redirector` goes two levels).
+- S7 (low): a hostile page can schedule one site-rule audit row per distinct subdomain under a
+  Blocked wildcard, because hits are de-duplicated on the full host; de-duplicate on the matched
+  rule or the registrable domain, or cap rows per user per 10-minute window.
+- S10 (minor): `store.settle_check` writes its computed state with no condition on the state it
+  read, so an approved upload marked `analysing` in that window can be written back and never
+  polled; add `state == current.state` to the UPDATE.
+- S10 (minor): bytes the screen holds are dropped only when the first answer is already a
+  verdict; a pending answer settled later keeps them for the full 30 minutes (at most 3 files and
+  64 MB per person).
+- S10: `POST /api/security/files/check` adds a row for any well-formed fingerprint even when the
+  person's lookups for the day are used up (no VirusTotal request; rows expire after 30 days); a
+  per-person row cap or a route limit would bound it.
+- S6 (low): Check now on the sign-in row while the sign-in address or `ENCRYPTION_KEY` changes
+  answers "No new breaches." for the new address before it is looked up (the sweeper checks it
+  next).
+- S3: Slack "stop", "pending" and "new" do not end a bare "scam" wait (needs a hook in
+  `slack.py`); Telegram album items already turned into a file turn before the `/scam` caption
+  arrived cannot be taken back; "The Delta Team" from deltadental.com reads as naming Delta Air
+  Lines. Observation: `video_provider_read` audit rows carry token counts the audit key rule
+  redacts.
+- S4: Okta tenants are looked up and only the bare Okta, Duo and CAPTCHA hosts are exempt; the
+  designer is to confirm (empty `TENANT_IDP_DOMAINS` to restore the spec's rule).
+- S5: the MCP reviews tab and badge are covered by vitest only, not checked in a real browser.
+- S9 (low): an obsolete dotted local part (`"a".b@x.com`) reads as `b@x.com` (the domain is
+  right; only B1's owner-typed match could differ); IPv6 literal links read as deceptive, so B4
+  asks; `ruff format` would reformat some files from earlier rounds (`ruff check` passes).
+- S1 (low): a single recipient string over 20,000 characters is judged by the token rule only in
+  `hides_characters_in_address` (the connectors allow far less); removing rather than counting
+  meaningless variation selectors, and the wording of `ExfilFinding.size`, are spec-owner points.
+- Tests: `test_capability_gating`'s two "gate raises" cases fail when run after certain files in
+  a hand-written order (a cached structlog logger; alphabetical order passes, as on the base);
+  S7's store and routes were not run against Postgres (`TEST_DATABASE_URL`).
+- Wording: some WAVE 0 security sentences do not use contractions (main's style prefers them,
+  e.g. `CHECK_FAILED_NOTE`), and a few Security page labels still use a dash (the Site rules
+  legend, the Service keys placeholder).
 
 ## Track G — Native install (coordinate with Krish; the installer already exists for Docker)
 | ID | Item | Where | Done when | Size |
@@ -273,7 +506,8 @@ rate limits, token refresh and the network policy all apply). Migration `0022_ev
   or change a trigger. Telegram `/triggers` (Pause/Resume buttons, "/triggers delete 2 yes"),
   Slack "triggers …", REST `GET/PATCH/DELETE /api/triggers` (for the D2 page).
 - Still open: webhooks (D3) could queue `trigger_events` later; more sources (GitHub review
-  requests, Slack mentions, Notion edits); SPF/DKIM checks before trusting a From header;
+  requests, Slack mentions, Notion edits); SPF/DKIM checks before trusting a From header (S2 parses the provider's
+  Authentication-Results in `services/security/mail_facts.py`; triggers do not use it yet);
   quiet hours; a web page for triggers (D2); `web.*` in trigger runs once F2's taint check
   for web calls ships.
 

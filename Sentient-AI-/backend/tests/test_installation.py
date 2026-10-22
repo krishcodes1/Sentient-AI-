@@ -537,10 +537,16 @@ async def test_snapshot_repr_hides_secrets(session_factory):
     user, _ = await make_user(session_factory, "o@example.com")
     await svc.set_llm("anthropic", "claude-sonnet-5", LLM_SECRET, actor_id=user.id)
     await svc.set_telegram_token(BOT_SECRET, actor_id=user.id)
+    # Security wave: a stored outside-service key stays out of the repr too
+    # (built by concatenation so no scanner sees a literal key).
+    service_secret = "AIza" + "FAKEfake" * 4 + "000"
+    await svc.set_service_key("safe_browsing", service_secret, actor_id=user.id)
     snap = await svc._load()
     assert snap.llm_api_keys == {"anthropic": LLM_SECRET}
+    assert snap.service_keys == {"safe_browsing": service_secret}
     assert LLM_SECRET not in repr(snap)
     assert BOT_SECRET not in repr(snap)
+    assert service_secret not in repr(snap)
 
 
 # ---------------------------------------------------------------------------

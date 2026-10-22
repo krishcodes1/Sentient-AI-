@@ -44,7 +44,7 @@ import hashlib
 import json
 import re
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
@@ -56,6 +56,7 @@ from services.action_text import (
     field_value,
     short_phrase,
 )
+from services.security.call_checks import has_warnings, notes_from
 from services.security.policies import CHANNEL
 from services.security.redact import redact_obj
 
@@ -308,12 +309,67 @@ def card_arguments(tool_name: Any, arguments: Any) -> dict[str, Any]:
     """A call's arguments as its approval card shows them: whole, except
     that a desktop.act card leaves out the reserved keys starting with "_"
     (the screen the runtime stored, ``services.tools.computer.CARD_KEY``),
-    which the model can never set. Nothing the owner approves is hidden."""
+    and a VirusTotal upload card its ``_upload`` (the file the runtime
+    holds, security S10), which the model can never set. Nothing the owner
+    approves is hidden."""
     if not isinstance(arguments, dict):
         return {}
-    if tool_name != "desktop.act":
+    if tool_name not in {"desktop.act", "security.upload_to_virustotal"}:
         return arguments
     return {k: v for k, v in arguments.items() if not str(k).startswith("_")}
+
+
+# ── security notes on cards (security wave, services/security/call_checks.py)
+# The mark each note's line starts with, by severity.
+SEVERITY_MARKS: Mapping[str, str] = {"high": "🚨", "warn": "⚠️", "info": "ℹ️"}
+
+
+def security_notes_of(action: Any) -> list[dict[str, str]]:
+    """The card's validated notes (``StoredAction.security_notes``); none
+    for a card without them or with anything that is not a note."""
+    return notes_from(list(getattr(action, "security_notes", None) or ()))
+
+
+def security_note_lines(notes: Sequence[Mapping[str, str]]) -> list[str]:
+    """One "<mark> <text>" line per note, in stored order. The text is the
+    note's own one line (no message text, no markup)."""
+    return [
+        f"{SEVERITY_MARKS.get(note['severity'], SEVERITY_MARKS['warn'])} {note['text']}"
+        for note in notes_from(list(notes))
+    ]
+
+
+def offers_standing_consent(action: Any) -> bool:
+    """False when the card carries a high or warn note: it then offers
+    neither "Allow for 7 days" nor "Allow low-risk changes" (A18)."""
+    return not has_warnings(security_notes_of(action))
+
+
+def more_notes_line(count: int) -> str:
+    """The line that stands for *count* notes a caption had no room for."""
+    return f"{SEVERITY_MARKS['info']} and {count} more security notes"
+
+
+def fit_note_lines(
+    render: Callable[[list[str]], str],
+    note_lines: Sequence[str],
+    *,
+    max_chars: int,
+    length: LengthFn = len,
+) -> str:
+    """``render(lines)`` with as many of *note_lines* as fit in *max_chars*
+    (a photo caption's limit): whole lines are dropped from the end and
+    replaced by one "and N more security notes" line. With no room even for
+    that, the text with the "more" line alone (the channel cuts it)."""
+    lines = list(note_lines)
+    text = render(lines)
+    if length(text) <= max_chars or not lines:
+        return text
+    for keep in range(len(lines) - 1, -1, -1):
+        text = render([*lines[:keep], more_notes_line(len(lines) - keep)])
+        if length(text) <= max_chars:
+            return text
+    return text
 
 
 def usage_line(outcome: dict[str, Any]) -> str | None:

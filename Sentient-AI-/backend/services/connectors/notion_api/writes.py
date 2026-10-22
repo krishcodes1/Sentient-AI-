@@ -20,7 +20,7 @@ from typing import Any, Optional
 
 from services.agent.permissions import ActionCategory
 from services.connectors.base import ConnectorError, UserConfirmationRequired, path_segment
-from services.connectors.definition import ToolSpec, _schema
+from services.connectors.definition import Outbound, ToolSpec, _schema
 from services.connectors.shaping import cap_text
 
 from .common import (
@@ -74,6 +74,7 @@ WRITE_ACTIONS: tuple[ToolSpec, ...] = (
             },
         ),
         required_scope="notion.write",
+        outbound=Outbound(content=("title", "content")),
     ),
     ToolSpec(
         "append_blocks",
@@ -86,6 +87,7 @@ WRITE_ACTIONS: tuple[ToolSpec, ...] = (
             after=id_param("Insert after this child block instead of at the end", required=False),
         ),
         required_scope="notion.write",
+        outbound=Outbound(content=("markdown",)),
     ),
     ToolSpec(
         "update_page_properties",
@@ -102,6 +104,7 @@ WRITE_ACTIONS: tuple[ToolSpec, ...] = (
             },
         ),
         required_scope="notion.write",
+        outbound=Outbound(content=("properties",)),
     ),
     ToolSpec(
         "create_database_row",
@@ -119,6 +122,7 @@ WRITE_ACTIONS: tuple[ToolSpec, ...] = (
             content={"type": "string", "description": "Optional Markdown body"},
         ),
         required_scope="notion.write",
+        outbound=Outbound(content=("properties", "content")),
     ),
     ToolSpec(
         "update_block",
@@ -135,6 +139,7 @@ WRITE_ACTIONS: tuple[ToolSpec, ...] = (
             checked={"type": "boolean", "description": "For a to-do: tick or untick it"},
         ),
         required_scope="notion.write",
+        outbound=Outbound(content=("text",)),
     ),
     ToolSpec(
         "add_comment",
@@ -150,6 +155,7 @@ WRITE_ACTIONS: tuple[ToolSpec, ...] = (
         ),
         required_scope="notion.comment",
         always_confirm=True,
+        outbound=Outbound(content=("text",)),
     ),
 )
 

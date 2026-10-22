@@ -120,6 +120,9 @@ async def test_export_is_valid_json_and_contains_the_account(client, session_fac
     assert {"study_decks", "study_items", "study_quiz_attempts", "study_reviews"} <= set(data)
     # top10:video_transcripts
     assert "media_transcripts" in data
+    # Security wave (S1, S2, S6, S10): one section each, empty until the
+    # skill keeps something for the account.
+    assert {"known_recipients", "mail_scam_findings", "breach_watch", "file_checks"} <= set(data)
 
 
 @pytest.mark.asyncio
@@ -289,3 +292,59 @@ async def test_export_includes_study_decks_items_reviews_and_quizzes(client, ses
     )
     assert [r["rating"] for r in data["study_reviews"]] == [3]
     assert [q["status"] for q in data["study_quiz_attempts"]] == ["active"]
+
+
+# Security wave (S10)
+@pytest.mark.asyncio
+async def test_export_lists_file_checks_without_their_source_card_or_analysis_ids(
+    client, session_factory
+):
+    """A file check is exported with its verdict and counts; the encrypted
+    source reference, the source key, the card id and the VirusTotal analysis
+    id are operational and never leave in the file."""
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import select
+
+    from models.file_reputation import FileReputationCheck
+    from models.user import User
+
+    headers = await _account(client, "filechecks@example.com")
+    now = datetime.now(timezone.utc)
+    async with session_factory() as session:
+        user = (
+            await session.execute(select(User).where(User.email == "filechecks@example.com"))
+        ).scalar_one()
+        session.add(
+            FileReputationCheck(
+                user_id=user.id,
+                sha256="a" * 64,
+                name="invoice.pdf",
+                source="web",
+                source_ref=b"sealed-source-reference",
+                source_key="b" * 64,
+                state="checked",
+                verdict="malicious",
+                malicious=41,
+                engines=72,
+                action_id="c" * 36,
+                analysis_id="analysis-id-not-for-export",
+                expires_at=now + timedelta(days=30),
+            )
+        )
+        await session.commit()
+
+    resp = await client.get("/api/auth/export", headers=headers)
+    data = json.loads(resp.text)
+
+    [check] = data["file_checks"]
+    assert (check["sha256"], check["name"], check["verdict"], check["malicious"], check["engines"]) == (
+        "a" * 64,
+        "invoice.pdf",
+        "malicious",
+        41,
+        72,
+    )
+    assert not {"source_ref", "source_key", "action_id", "analysis_id"} & set(check)
+    for leaked in ("sealed-source-reference", "b" * 64, "c" * 36, "analysis-id-not-for-export"):
+        assert leaked not in resp.text

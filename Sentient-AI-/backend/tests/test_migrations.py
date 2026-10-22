@@ -229,6 +229,17 @@ def test_user_owned_rows_cascade_on_delete(migrated):
         "event_triggers",
         "trigger_events",
         "permission_grants",
+        # Security wave (security10). organisation_domains, browser_site_rules,
+        # tool_rules, tool_rule_builtins and file_reputation_calls are left
+        # out on purpose: install policy and the request log outlive an
+        # account (ON DELETE SET NULL).
+        "known_recipients",
+        "mail_scan_cursors",
+        "mail_scam_findings",
+        "mcp_tool_pins",
+        "breach_watch_addresses",
+        "breach_watch_findings",
+        "file_reputation_checks",
     ):
         cascades = {
             fk[3]
@@ -637,6 +648,16 @@ def test_permission_grants_cascade_with_their_connector(migrated):
         False,
     )
     assert "grant_offer" in migrated["pending_actions"]["columns"]
+
+
+def test_security_rows_cascade_with_their_connector(migrated):
+    """Security wave (security10): a mail-scan cursor, a mail finding and an
+    MCP tool pin die with their connection (and their user), so removing a
+    connector leaves nothing that still points at it."""
+    for table in ("mail_scan_cursors", "mail_scam_findings", "mcp_tool_pins"):
+        foreign_keys = migrated[table]["foreign_keys"]
+        assert (("connector_id",), "connector_configs", ("id",), "CASCADE") in foreign_keys, table
+        assert (("user_id",), "users", ("id",), "CASCADE") in foreign_keys, table
 
 
 def test_0023_downgrade_maps_low_risk_tiers_to_user_confirm(tmp_path):

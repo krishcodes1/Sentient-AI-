@@ -21,7 +21,9 @@ changes. Four constraints shape the module:
   the network policy when it is saved (``validated_addresses``: http(s),
   no private or loopback address) and every check goes through
   ``build_guarded_client`` (SSRF check and DNS pinning on every hop), with a
-  timeout, a body cap and HTML only.
+  timeout, a body cap and HTML only. main.py wraps the resolver in the
+  owner's Site rules (security S7), so a Blocked site is refused when a
+  watch is saved and at every check after it, redirects included.
 - **Trust.** Page text is untrusted data. It is hashed and excerpted, never
   returned to the model by these tools and never used to decide anything
   but "did it change".
@@ -57,6 +59,7 @@ from services.tools.html_text import extract_readable_text
 from services.tools.net import (
     AddressResolver,
     EgressBlocked,
+    OwnerRuleBlocked,
     build_guarded_client,
     validated_addresses,
 )
@@ -110,7 +113,19 @@ _LINE_SEPARATORS = (chr(0x2028), chr(0x2029))
 
 class WatchFetchError(Exception):
     """A check that could not read the page. The message is this module's
-    own short sentence (safe to store and show), never text from the page."""
+    own short sentence, or the owner's Site rules' own (both safe to store
+    and show), never text from the page."""
+
+
+_NOT_ALLOWED = "I'm not allowed to open that address."
+
+
+def _refused(exc: EgressBlocked) -> str:
+    """Why an address was refused, as the owner reads it: the owner's own
+    Site rules (security S7) give their own plain sentence, which names the
+    site and where to change the rule; the network policy's reasons stay
+    one plain line."""
+    return str(exc) if isinstance(exc, OwnerRuleBlocked) else _NOT_ALLOWED
 
 
 @dataclass(frozen=True)
@@ -212,7 +227,7 @@ async def fetch_snapshot(
             transport=transport,
         )
     except EgressBlocked as exc:
-        raise WatchFetchError("I'm not allowed to open that address.") from exc
+        raise WatchFetchError(_refused(exc)) from exc
 
     try:
         async with client:
@@ -232,7 +247,7 @@ async def fetch_snapshot(
                         break
                 encoding = response.charset_encoding or "utf-8"
     except EgressBlocked as exc:
-        raise WatchFetchError("I'm not allowed to open that address.") from exc
+        raise WatchFetchError(_refused(exc)) from exc
     except httpx.TimeoutException as exc:
         raise WatchFetchError("The page did not answer in time.") from exc
     except httpx.TooManyRedirects as exc:
@@ -525,6 +540,10 @@ class WatchToolkit:
         # not resolve) is refused rather than saved. getaddrinfo blocks.
         try:
             await asyncio.to_thread(self._resolver, request.url)
+        except OwnerRuleBlocked as exc:
+            # The owner's Site rules (main.py wraps the resolver): their own
+            # sentence names the site and where the rule can be changed.
+            return _error(str(exc), blocked=True)
         except EgressBlocked as exc:
             return _error(f"That address cannot be watched: {exc}", blocked=True)
 

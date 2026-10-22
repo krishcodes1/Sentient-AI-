@@ -655,6 +655,10 @@ def test_described_tools_have_phrases_too() -> None:
         "browser.read",
         "desktop.screenshot",
         "web.fetch_page",
+        # Security wave (security10): the safety checks' own actions.
+        "security.check_scam",
+        "security.check_file",
+        "security.upload_to_virustotal",
     ):
         phrase = short_phrase(tool)
         assert not phrase.startswith("use "), tool

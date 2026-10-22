@@ -46,8 +46,10 @@ from services.connectors.definition import (
     CredentialField,
     NetworkSpec,
     OAuthSpec,
+    Outbound,
     ToolSpec,
     _schema,
+    outbound_problems,
 )
 from services.connectors.google_workspace import GoogleWorkspaceConnector
 from services.connectors.robinhood import RobinhoodConnector
@@ -343,6 +345,72 @@ def test_schema_required_names_must_be_properties():
 
 def test_duplicate_action_names_are_refused():
     _only(registry.validate_registry([_with((_LIST, _LIST, _DELETE))]), "declared twice")
+
+
+# Security wave (S1): ToolSpec.outbound names the arguments that leave the
+# account. The registry checks the declaration against the schema at import,
+# so a typo in a path stops the app instead of silently skipping a check.
+
+_SEND = ToolSpec(
+    "send_thing",
+    "Send a thing to people.",
+    W,
+    _schema(
+        to={"type": "string", "required": True},
+        message_id={"type": "string"},
+        details={"type": "object"},
+        body={"type": "string"},
+    ),
+    required_scope="things.write",
+    always_confirm=True,
+)
+
+
+async def _send_thing(self, to, message_id=None, details=None, body=None, *, user_confirmed=False):
+    return {}
+
+
+def test_a_write_whose_outbound_paths_name_its_parameters_passes_the_registry():
+    send = dataclasses.replace(
+        _SEND,
+        outbound=Outbound(
+            content=("body", "details.summary"),
+            recipients=("to", "details.attendees"),
+            history=True,
+            shares_content=True,
+        ),
+    )
+    assert registry.validate_registry([_with((_LIST, send), {"send_thing": _send_thing})]) == []
+    assert outbound_problems(send, ("to", "message_id", "details", "body")) == []
+
+
+def test_an_outbound_declaration_on_a_read_is_refused():
+    read = dataclasses.replace(_LIST, outbound=Outbound(content=("limit",)))
+    _only(registry.validate_registry([_with((read, _DELETE))]), "only a non-READ action")
+
+
+@pytest.mark.parametrize(
+    "outbound,fragment",
+    [
+        (Outbound(), "names no argument"),
+        (Outbound(content=("subject",)), "path 'subject' does not start with a parameter"),
+        (Outbound(recipients=("details.",)), "path 'details.' does not start with a parameter"),
+        (Outbound(content=("body", "body")), "names a path twice"),
+        (Outbound(content=("body",), resolve="thread"), "resolve must be one of"),
+        (Outbound(content=("body",), resolve="draft"), "needs the 'draft_id' parameter"),
+        (Outbound(content=("body",), history=True), "history needs recipients or resolve"),
+        (Outbound(recipients=("to",), delivers=False, history=True), "only for an action that delivers"),
+        (Outbound(content=("body",), shares_content=True), "shares_content needs recipients"),
+    ],
+)
+def test_each_broken_outbound_declaration_is_refused_with_its_own_line(outbound, fragment):
+    send = dataclasses.replace(_SEND, outbound=outbound)
+    _only(registry.validate_registry([_with((_LIST, send), {"send_thing": _send_thing})]), fragment)
+
+
+def test_a_reply_resolve_reads_its_message_id_parameter():
+    reply = dataclasses.replace(_SEND, outbound=Outbound(content=("body",), resolve="reply", history=True))
+    assert outbound_problems(reply, ("to", "message_id", "details", "body")) == []
 
 
 def test_dispatch_allow_map_must_equal_the_actions():
@@ -936,15 +1004,32 @@ def _literal_network_policies(monkeypatch) -> dict[str, Any]:
 
 
 def test_literal_network_policies_are_subsets_of_the_registry_ones(monkeypatch):
-    from core.network_security import CANVAS_SCHOOL_SEARCH_POLICY
+    from core.network_security import (
+        CANVAS_SCHOOL_SEARCH_POLICY,
+        HIBP_POLICY,
+        LINK_REPUTATION_POLICY,
+        PWNED_PASSWORDS_POLICY,
+        VIRUSTOTAL_LOOKUP_POLICY,
+        VIRUSTOTAL_UPLOAD_POLICY,
+    )
 
     literal = _literal_network_policies(monkeypatch)
     derived = registry.network_policies()
-    # The school search is not a connector: the registry neither derives
-    # nor replaces it, and the live table keeps the literal entry.
-    school_search = literal.pop(CANVAS_SCHOOL_SEARCH_POLICY)
-    assert CANVAS_SCHOOL_SEARCH_POLICY not in derived
-    assert vars(DEFAULT_POLICIES[CANVAS_SCHOOL_SEARCH_POLICY]) == vars(school_search)
+    # The school search and the security wave's outside services are not
+    # connectors: the registry neither derives nor replaces them, and the
+    # live table keeps each literal entry exactly.
+    for key in (
+        CANVAS_SCHOOL_SEARCH_POLICY,
+        LINK_REPUTATION_POLICY,
+        HIBP_POLICY,
+        PWNED_PASSWORDS_POLICY,
+        VIRUSTOTAL_LOOKUP_POLICY,
+        VIRUSTOTAL_UPLOAD_POLICY,
+    ):
+        popped = literal.pop(key)
+        assert key not in derived, key
+        assert vars(DEFAULT_POLICIES[key]) == vars(popped), key
+        assert popped.https_only is True, key
     assert set(literal) <= set(derived)
     for key, old in literal.items():
         new = derived[key]

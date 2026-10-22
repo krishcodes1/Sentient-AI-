@@ -1,7 +1,9 @@
 /**
  * CapabilitySettings: the per-capability settings under a Permissions row — the spending caps of
  * `purchases`, the shared budgets of `scheduled_tasks`, the minutes and days of
- * `video_transcripts` and the per-person limits of `knowledge_base` — each field saved on blur.
+ * `video_transcripts`, the per-person limits of `knowledge_base` and the security checks' caps
+ * (`mail_scam_scan`, `scam_check`, `link_reputation`, `file_reputation`) — each field saved on
+ * blur.
  *
  * Why it exists: Turning a capability on is only half of the decision; how much it may spend or
  * keep is the other half and belongs right under that switch, where the messages that say "the
@@ -35,8 +37,12 @@ interface SettingsGroup {
 // Keep each list in step with its backend defaults: PURCHASE_SETTINGS_DEFAULTS
 // (services/capabilities/purchases.py), SCHEDULE_SETTINGS_DEFAULTS
 // (services/capabilities/scheduled_tasks.py), VIDEO_SETTINGS_DEFAULTS
-// (services/capabilities/video_transcripts.py) and KNOWLEDGE_SETTINGS_DEFAULTS
-// (services/knowledge/limits.py).
+// (services/capabilities/video_transcripts.py), KNOWLEDGE_SETTINGS_DEFAULTS
+// (services/knowledge/limits.py), and the security wave's MAIL_SCAN_SETTINGS_DEFAULTS
+// (services/capabilities/mail_scam_scan.py), SCAM_CHECK_SETTINGS_DEFAULTS
+// (services/capabilities/scam_check.py), LINK_REPUTATION_SETTINGS_DEFAULTS
+// (services/capabilities/link_reputation.py) and FILE_REPUTATION_SETTINGS_DEFAULTS
+// (services/capabilities/file_reputation.py).
 const SETTINGS: Record<string, SettingsGroup> = {
   purchases: {
     fields: [
@@ -84,6 +90,68 @@ const SETTINGS: Record<string, SettingsGroup> = {
     note:
       "Limits for each person's saved documents. The last one caps how much text a day is sent " +
       "to build the search-by-meaning index.",
+  },
+  // Security wave (security10): the security checks' caps and limits.
+  mail_scam_scan: {
+    fields: [
+      {
+        key: "ai_reviews_per_day",
+        label: "AI reviews per day (per person)",
+        fallback: 20,
+        unit: "count",
+      },
+      { key: "keep_alerts_days", label: "Keep alerts (days)", fallback: 30, unit: "count" },
+    ],
+    note:
+      "Every new email is checked on this computer. Only the ones that look wrong are sent to the " +
+      "AI provider for a second opinion, at most this many per person per day (the day resets at " +
+      "00:00 UTC); past that, alerts use Crawler's own checks only. Alerts are deleted after the " +
+      "days kept.",
+  },
+  scam_check: {
+    fields: [
+      {
+        key: "checks_per_day",
+        label: "Scam checks per person per day",
+        fallback: 30,
+        unit: "count",
+      },
+    ],
+    note:
+      "Checks from Telegram, Slack, a chat's /scam and the Security page that ask your AI " +
+      "provider to look. Checks the model makes during a chat are not counted.",
+  },
+  link_reputation: {
+    fields: [
+      { key: "lookups_per_minute", label: "Lookups per minute", fallback: 60, unit: "count" },
+      { key: "lookups_per_day", label: "Lookups per 24 hours", fallback: 2000, unit: "count" },
+    ],
+    note:
+      "Lookups Crawler may make with your Google key. Google also applies your Cloud project's " +
+      "quota; when either runs out, links are checked on this computer only and cards say so. " +
+      "Background mail checks use at most half of these limits.",
+  },
+  file_reputation: {
+    fields: [
+      { key: "lookups_per_minute", label: "Lookups per minute", fallback: 4, unit: "count" },
+      { key: "lookups_per_day", label: "Lookups per day", fallback: 500, unit: "count" },
+      {
+        key: "automatic_lookups_per_day",
+        label: "Automatic checks per day",
+        fallback: 100,
+        unit: "count",
+      },
+      {
+        key: "lookups_per_user_per_day",
+        label: "Lookups per person per day",
+        fallback: 100,
+        unit: "count",
+      },
+    ],
+    note:
+      "VirusTotal's free public key allows 4 lookups a minute and 500 a day. Automatic checks " +
+      "(uploads, email attachments) stop at their own share so you can always check a file " +
+      "yourself.",
   },
 };
 

@@ -19,7 +19,7 @@ from typing import Any, Optional
 from services.agent import risk
 from services.agent.permissions import ActionCategory
 from services.connectors.base import ConnectorError, UserConfirmationRequired, path_segment
-from services.connectors.definition import ToolSpec, _schema
+from services.connectors.definition import Outbound, ToolSpec, _schema
 from services.connectors.shaping import cap_text, clamp_limit
 
 from .client import (
@@ -102,6 +102,11 @@ CALENDAR_ACTIONS: tuple[ToolSpec, ...] = (
         risk="low",
         risk_check=event_data_risk,
         low_risk_note="add private events with no guests to your calendar",
+        outbound=Outbound(
+            content=("event_data.summary", "event_data.description", "event_data.location"),
+            recipients=("event_data.attendees",),
+            shares_content=True,
+        ),
     ),
     ToolSpec(
         "list_calendars",
@@ -131,6 +136,11 @@ CALENDAR_ACTIONS: tuple[ToolSpec, ...] = (
         required_scope="calendar.write",
         # Changing the guest list invites or removes other people.
         risk_check=risk.when_given("attendees", "high", "it invites or removes other people"),
+        outbound=Outbound(
+            content=("summary", "description", "location"),
+            recipients=("attendees",),
+            shares_content=True,
+        ),
     ),
     ToolSpec(
         "respond_to_invite",

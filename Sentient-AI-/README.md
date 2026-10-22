@@ -398,6 +398,15 @@ them read-only.
 | **Install optional software** | Installing optional components from a fixed list (e.g. the hidden browser above), asking you before every install | On |
 | **Telegram chat and approvals** | Chatting with Crawler from Telegram and approving pending actions from your phone. Needs a bot token configured (`.env` or the wizard's Telegram step). | On |
 | **Slack chat and approvals** | Chatting with Crawler in a Slack DM and approving pending actions from Slack. Needs a Slack connector with an app-level token (`xapp-`), linked from its card; see [Integrations](#integrations). | On |
+| **Check messages before they go out** | Checks who an email, post or comment goes to (first time, outside your organisation, look-alike addresses) and what it carries, and notes it on the approval card; anything flagged that would have run without asking gets a card. Hidden characters are always removed. | On |
+| **Check new email for scams** | Checks every new email in your connected Gmail and Outlook for signs of phishing on this computer, asks your AI provider about the ones that look wrong, and alerts you; nothing is moved to Spam/Junk without your approval. | On |
+| **Check messages for scams when asked** | Checks a message, link, screenshot or QR code you send with `/scam` in Telegram, "scam" in Slack, the Security page or a chat, and says whether it looks like a scam and why (`security.check_scam`). | On |
+| **Check links with Google Safe Browsing** | Looks up links in mail alerts, scam checks, outgoing messages and pages the browser opens in Google's list of dangerous sites, with your own key (Security → Service keys); nothing is sent without a key. | On |
+| **Hold changed MCP tools for review** | When an MCP server changes a tool's description or inputs, or adds a tool, Crawler stops offering it to the AI until you review the change on the Security page. | On |
+| **Watch my email addresses for data breaches** | Asks Have I Been Pwned once a week, with your own key, whether your addresses appear in a new breach; also allows the Security page's password check, which never sends your password. | On |
+| **Site rules for Crawler's browser** | Never opens sites you block, and warns on every approval for banks, brokers, crypto exchanges, tax and government sites or any site you mark Always ask (Security → Site rules). | On |
+| **Ask before calls that break a tool rule** | Checks every action against a few built-in safety rules and the rules you add on the Security page; a call that breaks one waits for your approval, and the card names the rule. | On |
+| **Check files with VirusTotal** | Looks up the fingerprint (SHA-256) of files people send Crawler and of email attachments, with your own key; a file is uploaded only after you approve a card for it (`security.check_file`, `security.upload_to_virustotal`). | On |
 
 See `backend/services/capabilities/README.md` if you're adding a new one —
 declaring a capability there is what drives the switch, the gating, and the

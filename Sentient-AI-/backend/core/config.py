@@ -37,6 +37,15 @@ PROVIDER_KEY_FIELDS: dict[str, str] = {
     "mistral": "MISTRAL_API_KEY",
 }
 
+# Security-service name -> the Settings attribute that holds its key (.env wins over the
+# stored key, as for provider keys). Never listed as AI providers.
+SERVICE_KEY_FIELDS: dict[str, str] = {
+    "safe_browsing": "SAFE_BROWSING_API_KEY",
+    "web_risk": "WEB_RISK_API_KEY",
+    "hibp": "HIBP_API_KEY",
+    "virustotal": "VIRUSTOTAL_API_KEY",
+}
+
 # Every LLM provider the platform can construct, in display order: the
 # keyed ones plus Ollama, which needs no key. The one list LLM_PROVIDER,
 # the Settings page (auth) and the setup wizard all validate against.
@@ -164,6 +173,9 @@ class Settings(BaseSettings):
     # accounts off it (to NULL, "follow the install default") at startup.
     LLM_MODEL: str = "claude-sonnet-5"
     OLLAMA_BASE_URL: str = "http://localhost:11434"
+    # A local Ollama model for the mail scam check's AI reviews; empty uses
+    # each person's own provider.
+    MAIL_REVIEW_OLLAMA_MODEL: str = ""
     ANTHROPIC_API_KEY: Optional[str] = None
     OPENAI_API_KEY: Optional[str] = None
     GEMINI_API_KEY: Optional[str] = None
@@ -178,6 +190,13 @@ class Settings(BaseSettings):
     DEEPSEEK_API_KEY: Optional[str] = None
     GROQ_API_KEY: Optional[str] = None
     MISTRAL_API_KEY: Optional[str] = None
+    # Security wave: the owner's keys for outside security services
+    # (SERVICE_KEY_FIELDS). A value here wins over the key stored from
+    # Security -> Service keys, which then cannot be changed in the app.
+    SAFE_BROWSING_API_KEY: Optional[str] = None
+    WEB_RISK_API_KEY: Optional[str] = None
+    HIBP_API_KEY: Optional[str] = None
+    VIRUSTOTAL_API_KEY: Optional[str] = None
 
     # Tool-call rounds one message may chain (search → open pages → act).
     # Each round is another provider call, so this bounds cost and loops.

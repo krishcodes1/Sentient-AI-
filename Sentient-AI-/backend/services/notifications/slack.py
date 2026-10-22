@@ -643,6 +643,15 @@ class SlackChannel:
 
         # top10:video_transcripts
 
+        # Security wave (S3): "scam ...", "is this a scam ..." and a bare "scam"
+        # (the next message is checked), ahead of the audio and files handlers
+        # so a shared screenshot is checked, not read as a document
+        # (services/scam_check). The service main.py wires here (None until then).
+        self.scam_check: Optional[Any] = None
+        from services.scam_check import channels as scam_channels
+
+        scam_channels.register_slack(self)
+
     # ── lifecycle ────────────────────────────────────────────────────────
 
     @property
@@ -1559,7 +1568,8 @@ class SlackChannel:
             Okay to go ahead? This expires in 14 minutes.
             Check code 6d3b dfca 7bf8 cfc5
 
-        The plain sentence (``_card_sentence``) and any risk note, then every
+        The plain sentence (``_card_sentence``), any risk note and any
+        security notes the call checks left (security wave), then every
         value in full as labelled lines (secrets masked), split into paced,
         labelled parts when long, the Approve and Deny buttons on the last.
         Every message's notification text is the sentence, never a tool
@@ -1577,8 +1587,17 @@ class SlackChannel:
                 # On one line, like the sentence: a value quoted in the note
                 # can't pass for a line of the details.
                 lines += ["", f"⚠️ {' '.join(risk_note.split())}"]
-            # A LOW action's card may offer "Allow small changes on <account>".
-            low_risk_account = cards.low_risk_account(action)
+            # Security wave: the call checks' notes right after the risk
+            # note, only when there are any (a card without notes is today's
+            # text byte for byte).
+            note_lines = cards.security_note_lines(cards.security_notes_of(action))
+            if note_lines:
+                lines += ["", *note_lines]
+            # A LOW action's card may offer "Allow small changes on <account>",
+            # unless it carries a call check's warning (A18).
+            low_risk_account = (
+                cards.low_risk_account(action) if cards.offers_standing_consent(action) else None
+            )
             card = cards.layout_card(
                 lines,
                 cards.card_arguments(action.tool_name, action.arguments or {}),

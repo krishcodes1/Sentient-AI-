@@ -688,3 +688,125 @@ async def test_browser_spend_sink_adds_to_the_task(session_factory):
     await sink("u1", "t1", 0.01)
     await sink("u1", "t1", 0.02)
     assert Session.task.spend_usd == pytest.approx(0.03)
+
+
+# ── security wave (security10) ──────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_every_security_service_is_on_app_state_and_the_call_checks_run_in_the_fixed_order(
+    wired_app,
+):
+    """main wires every security skill's service (each a stub until its skill
+    lands) and one call-checks pipeline with all five checks in the order
+    every skill codes against; the runtime and the executor's backstop hold
+    that same pipeline object (scaffold A4, F54)."""
+    from services.notifications.mail_scan import MailScanService
+    from services.security.call_checks import CHECK_ORDER
+
+    state = wired_app.state
+    for name in (
+        "owner_send",
+        "link_reputation",
+        "site_rules",
+        "mcp_pins",
+        "outbound",
+        "org_domains",
+        "tool_rules_store",
+        "file_reputation",
+        "mail_scan",
+        "breach_monitor",
+        "call_checks",
+    ):
+        assert getattr(state, name, None) is not None, name
+    assert isinstance(state.mail_scan, MailScanService)
+    assert state.call_checks.names == CHECK_ORDER
+    assert state.agent_runtime.call_checks is state.call_checks
+    assert state.tool_executor.call_checks is state.call_checks
+
+
+class ChecksAtStart(FakeService):
+    """A Telegram poller that notes, as it starts, what a turn it starts
+    would meet: the runtime's and the executor's call checks, the executor's
+    outbound service and the intake's file screen."""
+
+    seen: list[tuple[Any, ...]] = []
+
+    async def start(self):
+        from main import app
+
+        state = app.state
+        intake = getattr(state, "file_intake", None)
+        ChecksAtStart.seen.append(
+            (
+                state.agent_runtime.call_checks.names,
+                state.tool_executor.call_checks.names,
+                state.tool_executor._outbound is getattr(state, "outbound", None),
+                intake is not None
+                and getattr(intake, "_screen", None) is getattr(state, "file_reputation", None),
+            )
+        )
+        await super().start()
+
+
+@pytest.mark.asyncio
+async def test_the_call_checks_are_wired_before_the_telegram_poller_starts(session_factory, monkeypatch):
+    """Messages queued while the server was down arrive as soon as the poller
+    starts, so the turns they start must already meet the full pipeline, the
+    outbound floor and the file screen, never the empty defaults (WAVE 0
+    review). Slack's channels start later, in the lifespan."""
+    from main import app, wire_services
+    from services.security.call_checks import CHECK_ORDER
+
+    monkeypatch.setattr(settings, "TELEGRAM_BOT_TOKEN", BOT_TOKEN, raising=False)
+    ChecksAtStart.seen.clear()
+    saved = dict(app.state._state)
+    await wire_services(app, session_factory, telegram_service_factory=ChecksAtStart)
+    try:
+        assert app.state.telegram_manager.is_running
+        assert ChecksAtStart.seen == [(CHECK_ORDER, CHECK_ORDER, True, True)]
+        assert app.state.slack_manager.is_running is False
+    finally:
+        await app.state.telegram_manager.stop()
+        await app.state.slack_manager.stop()
+        app.state._state.clear()
+        app.state._state.update(saved)
+
+
+@pytest.mark.asyncio
+async def test_the_approval_store_on_app_state_is_the_one_the_runtime_parks_cards_in(wired_app):
+    """Out-of-turn cards (mail alerts, file uploads) and the routes that read
+    them must see the runtime's own store, not a second one."""
+    assert wired_app.state.approval_store is wired_app.state.agent_runtime._approvals
+
+
+@pytest.mark.asyncio
+async def test_the_security_seams_hold_the_services_main_wired(wired_app):
+    """Each shared seam carries the one service main built: the executor's
+    outbound floor and MCP pins, the MCP catalog's pins, the intake's file
+    screen, the security family's file tools and the browser guard hooks of
+    the read toolkit."""
+    from services.agent.tool_registry import security_toolkit_of
+    from services.file_reputation.toolkit import FileReputationToolkit
+
+    state = wired_app.state
+    executor = state.tool_executor
+    assert executor._outbound is state.outbound
+    assert executor._mcp_pins is state.mcp_pins
+    assert state.mcp_catalog._pins is state.mcp_pins
+    assert state.file_intake._screen is state.file_reputation
+    assert isinstance(security_toolkit_of(executor).file_reputation, FileReputationToolkit)
+    hooks = executor._browser._egress_hooks
+    # Each browser context gets the owner's site rules and the one link
+    # reputation service, bound per user.
+    assert hooks is not None
+    assert hooks.site_rules == state.site_rules.guard_hook_for
+    assert hooks.reputation("u1") == state.link_reputation.navigation_check
+
+
+@pytest.mark.asyncio
+async def test_the_owner_sender_reports_not_delivered_while_no_channel_runs(wired_app):
+    """app.state.owner_send is the security skills' one way to tell an owner
+    something (scaffold A34): it never raises, and with no Telegram poller
+    or Slack channel running it reports that nothing was delivered."""
+    assert await wired_app.state.owner_send("u1", "hello") is False

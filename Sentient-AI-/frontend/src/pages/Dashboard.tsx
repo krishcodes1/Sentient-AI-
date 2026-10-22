@@ -55,6 +55,7 @@ import {
   ApprovalDetailList,
   ApprovalTechnicalDetails,
 } from "@/components/ApprovalDetails";
+import SecurityNotes from "@/components/SecurityNotes";
 import WeeklyAppButton, {
   WeeklyAllowedNote,
   type ApprovalDecision,
@@ -144,6 +145,8 @@ function ApprovalRow({
       <p className="text-sm font-medium mb-2" style={{ color: "var(--text-primary)" }}>
         {approval.reason}
       </p>
+      {/* What the server's call checks noticed (security wave), on every card type. */}
+      <SecurityNotes notes={approval.security_notes} />
       {/* Backend-flagged risk: the request was shaped by external/untrusted
           content. Danger colors, ABOVE the action row: placing it below the
           buttons meant the reader reached Approve before the warning. */}

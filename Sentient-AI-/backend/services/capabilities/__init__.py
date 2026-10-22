@@ -65,6 +65,17 @@ from services.capabilities import voice_notes, voice_notes_cloud
 # top10:video_transcripts
 from services.capabilities import video_transcripts
 
+# Security wave (security10): one capability per skill, S1 to S10.
+from services.capabilities import outbound_checks
+from services.capabilities import mail_scam_scan
+from services.capabilities import scam_check
+from services.capabilities import link_reputation
+from services.capabilities import mcp_pinning
+from services.capabilities import breach_monitor
+from services.capabilities import browser_site_rules
+from services.capabilities import tool_rules
+from services.capabilities import file_reputation
+
 # isort: on
 
 logger = structlog.get_logger(__name__)
@@ -116,6 +127,18 @@ REGISTRY: tuple[Capability, ...] = (
     # top10:video_transcripts
     video_transcripts.CAPABILITY,
 
+    # Security wave (security10), in skill order. Every one is on by default;
+    # link_reputation, breach_monitor and file_reputation read blocked until
+    # their key exists.
+    outbound_checks.CAPABILITY,
+    mail_scam_scan.CAPABILITY,
+    scam_check.CAPABILITY,
+    link_reputation.CAPABILITY,
+    mcp_pinning.CAPABILITY,
+    breach_monitor.CAPABILITY,
+    browser_site_rules.CAPABILITY,
+    tool_rules.CAPABILITY,
+    file_reputation.CAPABILITY,
 )
 
 # Owner-editable settings a capability carries, by key, with their defaults
@@ -147,6 +170,13 @@ _SETTINGS_DEFAULTS: Mapping[str, Mapping[str, Any]] = {
     # top10:video_transcripts
     video_transcripts.CAPABILITY.key: video_transcripts.VIDEO_SETTINGS_DEFAULTS,
 
+    # Security wave (security10): the mail check's AI-review cap and retention,
+    # the scam checks a person may run per day, the Google lookup limits and
+    # the VirusTotal lookup limits.
+    mail_scam_scan.CAPABILITY.key: mail_scam_scan.MAIL_SCAN_SETTINGS_DEFAULTS,
+    scam_check.CAPABILITY.key: scam_check.SCAM_CHECK_SETTINGS_DEFAULTS,
+    link_reputation.CAPABILITY.key: link_reputation.LINK_REPUTATION_SETTINGS_DEFAULTS,
+    file_reputation.CAPABILITY.key: file_reputation.FILE_REPUTATION_SETTINGS_DEFAULTS,
 }
 
 
@@ -218,6 +248,7 @@ def default_context(
     telegram_enabled: bool = False,
     default_provider: str = "",
     embedding_backend: Optional[str] = None,
+    service_keys: frozenset[str] = frozenset(),
 ) -> ReportContext:
     """Gather the environment facts for one report. This is the only place
     that touches the OS for availability; availability() reads the result.
@@ -225,7 +256,8 @@ def default_context(
     token configured. *default_provider* is the install's default AI
     provider, as the caller read it. *embedding_backend* defaults to the
     knowledge base's rule for that provider and KB_EMBEDDINGS
-    (top10:knowledge_base)."""
+    (top10:knowledge_base). *service_keys* names the outside security
+    services with an owner key, as the caller read them (security wave)."""
     # Both deferred, like browser_installed: the registry stays importable
     # without the toolkit or the platform package.
     from services import platform as platform_layer
@@ -253,6 +285,8 @@ def default_context(
         # whether the default provider hears audio.
         speech_local_installed=local_engine_installed(),
         default_provider_audio=provider_hears_audio(default_provider),
+        # Security wave: frozen, so the context stays hashable (probe cache).
+        service_keys=frozenset(service_keys),
     )
 
 

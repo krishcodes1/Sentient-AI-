@@ -139,6 +139,8 @@ import {
   type Recognition,
 } from "./connectGuides";
 import { KEY_PAIR_UNSUPPORTED, generateRobinhoodKeyPair, type RobinhoodKeyPair } from "./robinhoodKeys";
+// Security wave (S5): how many of an MCP server's tools wait for review.
+import McpReviewBadge from "@/pages/security/McpReviewBadge";
 
 // ---------------------------------------------------------------------------
 // Shared bits
@@ -3112,6 +3114,7 @@ function ConnectorCard({
       </div>
 
       {!unavailable && connector.connector_type === SLACK_TYPE && <SlackDmLink connector={connector} />}
+      {!unavailable && connector.connector_type === MCP_TYPE && <McpReviewBadge connectorId={connector.id} />}
 
       <div
         className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 px-5 py-2"

@@ -7,10 +7,15 @@ keeping its MIME parsing, message shaping and composing here keeps
 ``google_workspace.py`` small. Email bodies are untrusted input, so every body
 is capped and passed through PromptGuard before it reaches the model.
 
+The security wave's mail READs (new-mail ids and a message's security facts
+for the scam check, an attachment's fingerprint for the file check) are
+one-line delegations here; their bodies live in ``mail_security.py`` and
+``attachment_hash.py``, which those skills own.
+
 External service: the Gmail REST API (https://gmail.googleapis.com/gmail/v1/).
 Depends on ``google_api.client`` (GoogleBase, validation), ``google_api.mime``
 (MIME parsing and composing), ``base`` (PromptGuard, errors, path_segment) and
-``definition`` (ToolSpec).
+``definition`` (ToolSpec, Outbound).
 """
 
 from __future__ import annotations
@@ -30,14 +35,12 @@ from services.connectors.base import (
     UserConfirmationRequired,
     path_segment,
 )
-from services.connectors.definition import ToolSpec, _schema
-from services.connectors.documents import (
-    MAX_DOCUMENT_BYTES,
-    is_document_type,
-    read_connector_document,
-)
+from services.connectors.definition import Outbound, ToolSpec, _schema
+from services.connectors.documents import is_document_type, read_connector_document
 from services.connectors.shaping import cap_text, clamp_limit
 
+from . import attachment_hash
+from . import mail_security as gmail_security
 from .client import (
     GMAIL_API,
     GoogleBase,
@@ -170,6 +173,7 @@ GMAIL_ACTIONS: tuple[ToolSpec, ...] = (
         # An email leaves the user's account and cannot be recalled, so it
         # gets an approval card under every tier (spec section 4.4).
         always_confirm=True,
+        outbound=Outbound(content=("subject", "body"), recipients=("to",), history=True),
     ),
     ToolSpec(
         "get_thread",
@@ -203,6 +207,32 @@ GMAIL_ACTIONS: tuple[ToolSpec, ...] = (
         policy_key="gmail",
         required_scope="gmail.read",
     ),
+    # Security wave (S1): what send_draft would send, so its card can name the
+    # draft's recipients.
+    ToolSpec(
+        "get_draft",
+        "Read a Gmail draft by its draft id: its recipients, subject and text.",
+        ActionCategory.READ,
+        _schema(draft_id={"type": "string", "description": "Gmail draft id", "required": True}),
+        policy_key="gmail",
+        # gmail.read, not gmail.compose: a scope may not be shared by READ and non-READ actions
+        # (registry.py _action_problems).
+        required_scope="gmail.read",
+    ),
+    # Security wave (S10): an attachment's fingerprint for a malware lookup.
+    ToolSpec(
+        "get_attachment_hash",
+        "Fingerprint an attachment of a Gmail message for a malware lookup: downloads it (at most "
+        "25 MB), returns only its SHA-256, size, name and type, never its content. Use the part_id "
+        "from get_message; check the result with security.check_file.",
+        ActionCategory.READ,
+        _schema(
+            message_id=_MESSAGE_ID,
+            part_id={"type": "string", "description": "Attachment part_id", "required": True},
+        ),
+        policy_key="gmail",
+        required_scope="gmail.read",
+    ),
     ToolSpec(
         "reply",
         "Reply in the same thread to a Gmail message (to its Reply-To address, or its "
@@ -219,6 +249,7 @@ GMAIL_ACTIONS: tuple[ToolSpec, ...] = (
         # drafts and send" scope); gmail.send stays for send_email alone.
         required_scope="gmail.compose",
         always_confirm=True,
+        outbound=Outbound(content=("body",), resolve="reply", history=True),
     ),
     ToolSpec(
         "forward",
@@ -233,6 +264,9 @@ GMAIL_ACTIONS: tuple[ToolSpec, ...] = (
         policy_key="gmail",
         required_scope="gmail.compose",
         always_confirm=True,
+        outbound=Outbound(
+            content=("note",), recipients=("to",), history=True, shares_content=True
+        ),
     ),
     ToolSpec(
         "create_draft",
@@ -247,6 +281,7 @@ GMAIL_ACTIONS: tuple[ToolSpec, ...] = (
         required_scope="gmail.compose",
         risk="low",
         low_risk_note="save email drafts (nothing is sent)",
+        outbound=Outbound(content=("subject", "body"), recipients=("to",), delivers=False),
     ),
     ToolSpec(
         "send_draft",
@@ -256,6 +291,7 @@ GMAIL_ACTIONS: tuple[ToolSpec, ...] = (
         policy_key="gmail",
         required_scope="gmail.compose",
         always_confirm=True,
+        outbound=Outbound(resolve="draft", history=True),
     ),
     ToolSpec(
         "modify_labels",
@@ -282,6 +318,26 @@ GMAIL_ACTIONS: tuple[ToolSpec, ...] = (
         policy_key="gmail",
         required_scope="gmail.modify",
         always_confirm=True,
+    ),
+    # Security wave (S2): the automatic scam check's two reads. Block sender
+    # is deferred (owner decision 8a: no new mail-settings scope this wave).
+    ToolSpec(
+        "list_new_message_ids",
+        "List the ids of mail newly added to the Gmail inbox since a cursor this action returned "
+        "(an empty cursor returns the current position only).",
+        ActionCategory.READ,
+        _schema(cursor={"type": "string"}),
+        policy_key="gmail",
+        required_scope="gmail.read",
+    ),
+    ToolSpec(
+        "get_message_security",
+        "Read a Gmail message's security facts: the receiving server's authentication results, "
+        "From, Reply-To, its links (shown text and real destination) and attachment names.",
+        ActionCategory.READ,
+        _schema(message_id=_MESSAGE_ID),
+        policy_key="gmail",
+        required_scope="gmail.read",
     ),
 )
 
@@ -401,6 +457,30 @@ class GmailActions(GoogleBase):
         """Fetch a single Gmail message by ID with content sanitization."""
         return await self._fetch_message(require_id(message_id, "message_id"), MESSAGE_BODY_CHARS)
 
+    async def get_draft(self, draft_id: str) -> dict[str, Any]:
+        """A draft's recipients, subject and plain-text body (what send_draft would send)."""
+        did = require_id(draft_id, "draft_id")
+        draft = await self._call_object(
+            "GET", f"{GMAIL_API}/drafts/{path_segment(did)}", params={"format": "full"}
+        )
+        message = as_dict(draft.get("message"))
+        payload = as_dict(message.get("payload"))
+        headers = header_map(payload)
+        part = body_part(payload)
+        body, truncated = cap_text(decode_part_data(part) if part else "", 20_000)
+        shaped: dict[str, Any] = {
+            "draft_id": scalar(draft.get("id")) or did,
+            "message_id": scalar(message.get("id")),
+            "to": headers.get("to", "")[:2000],
+            "cc": headers.get("cc", "")[:2000],
+            "bcc": headers.get("bcc", "")[:2000],
+            "subject": headers.get("subject", "")[:1000],
+            "body": body,
+        }
+        if truncated:
+            shaped["truncated"] = True
+        return shaped
+
     async def search_emails(self, query: str) -> list[dict[str, Any]]:
         """Search Gmail using Gmail search syntax."""
         return await self.get_messages(query=require_text(query, "query", max_chars=2000), max_results=25)
@@ -515,31 +595,7 @@ class GmailActions(GoogleBase):
         size = body.get("size")
 
         async def download(cap: int) -> bytes:
-            encoded = body.get("data")
-            if not isinstance(encoded, str) or not encoded:
-                attachment_id = body.get("attachmentId")
-                if not isinstance(attachment_id, str) or not attachment_id:
-                    raise ConnectorError(f"Attachment '{filename or pid}' has no content.")
-                fetched = await self._request_bytes(
-                    "GET",
-                    f"{GMAIL_API}/messages/{path_segment(mid)}/attachments/{path_segment(attachment_id)}",
-                    max_bytes=cap * 4 // 3 + 65536,
-                )
-                if fetched.truncated:
-                    raise ConnectorError(
-                        f"Attachment '{filename or pid}' is too large to read (the limit is "
-                        f"{MAX_DOCUMENT_BYTES // (1024 * 1024)} MB)."
-                    )
-                try:
-                    encoded = json.loads(fetched.content).get("data")
-                except (ValueError, AttributeError):
-                    raise ConnectorError(f"Attachment '{filename or pid}' could not be decoded.") from None
-                if not isinstance(encoded, str):
-                    raise ConnectorError(f"Attachment '{filename or pid}' has no content.")
-            try:
-                return base64.urlsafe_b64decode(encoded + "==")
-            except (binascii.Error, ValueError):
-                raise ConnectorError(f"Attachment '{filename or pid}' could not be decoded.") from None
+            return await self._attachment_bytes(mid, pid, body, filename, cap=cap)
 
         return await read_connector_document(
             download=download,
@@ -548,6 +604,53 @@ class GmailActions(GoogleBase):
             source="gmail",
             size=size if isinstance(size, int) else None,
         )
+
+    async def _attachment_bytes(
+        self, mid: str, pid: str, body: dict[str, Any], filename: str, *, cap: int
+    ) -> bytes:
+        """The decoded bytes of one attachment part, reading at most about *cap*
+        bytes from Gmail. Shared by the document reader and the security wave's
+        attachment fingerprint (S10, attachment_hash.py), so both download the
+        same way and refuse an oversized part with the same sentence."""
+        encoded = body.get("data")
+        if not isinstance(encoded, str) or not encoded:
+            attachment_id = body.get("attachmentId")
+            if not isinstance(attachment_id, str) or not attachment_id:
+                raise ConnectorError(f"Attachment '{filename or pid}' has no content.")
+            fetched = await self._request_bytes(
+                "GET",
+                f"{GMAIL_API}/messages/{path_segment(mid)}/attachments/{path_segment(attachment_id)}",
+                max_bytes=cap * 4 // 3 + 65536,
+            )
+            if fetched.truncated:
+                # The document reader passes cap=MAX_DOCUMENT_BYTES, so its
+                # sentence is unchanged.
+                raise ConnectorError(
+                    f"Attachment '{filename or pid}' is too large to read (the limit is "
+                    f"{cap // (1024 * 1024)} MB)."
+                )
+            try:
+                encoded = json.loads(fetched.content).get("data")
+            except (ValueError, AttributeError):
+                raise ConnectorError(f"Attachment '{filename or pid}' could not be decoded.") from None
+            if not isinstance(encoded, str):
+                raise ConnectorError(f"Attachment '{filename or pid}' has no content.")
+        try:
+            return base64.urlsafe_b64decode(encoded + "==")
+        except (binascii.Error, ValueError):
+            raise ConnectorError(f"Attachment '{filename or pid}' could not be decoded.") from None
+
+    # Security wave: READs whose bodies the skills own (S10 the fingerprint,
+    # S2 the scam check's two reads). They take no user_confirmed: READs.
+
+    async def get_attachment_hash(self, message_id: str, part_id: str) -> dict[str, Any]:
+        return await attachment_hash.gmail_attachment_hash(self, message_id, part_id)
+
+    async def list_new_message_ids(self, cursor: str = "") -> dict[str, Any]:
+        return await gmail_security.list_new_message_ids(self, cursor)
+
+    async def get_message_security(self, message_id: str) -> dict[str, Any]:
+        return await gmail_security.get_message_security(self, message_id)
 
     # -- WRITE -----------------------------------------------------------------
 

@@ -219,6 +219,30 @@ async def test_get_attachment_text_downloads_by_the_fresh_attachment_id():
 
 
 @pytest.mark.asyncio
+async def test_attachment_bytes_decodes_inline_data_downloads_by_id_and_names_its_cap_when_too_large():
+    """The download the document reader and the security wave's attachment
+    fingerprint (S10) share: inline data needs no request, an attachment id
+    is fetched by its own path, and an answer over the bound is refused
+    with a sentence naming the caller's cap (the document reader's cap
+    keeps its "15 MB" sentence)."""
+    connector, seen = make(ok({}))
+    assert await connector._attachment_bytes("m1", "2", {"data": _b64(b"%PDF-1.7")}, "a.pdf", cap=1024) == b"%PDF-1.7"
+    assert seen == []
+
+    connector, seen = make(lambda request: httpx.Response(200, json={"data": _b64(b"x" * 10)}))
+    data = await connector._attachment_bytes("m1", "2", {"attachmentId": "fresh/id"}, "a.pdf", cap=1024)
+    assert data == b"x" * 10
+    assert seen[0].url.raw_path == b"/gmail/v1/users/me/messages/m1/attachments/fresh%2Fid"
+
+    huge = {"data": "A" * (3 * 1024 * 1024)}
+    connector, _ = make(lambda request: httpx.Response(200, json=huge))
+    with pytest.raises(ConnectorError, match=r"'a\.pdf' is too large to read \(the limit is 1 MB\)"):
+        await connector._attachment_bytes("m1", "2", {"attachmentId": "x"}, "a.pdf", cap=1024 * 1024)
+    with pytest.raises(ConnectorError, match="has no content"):
+        await connector._attachment_bytes("m1", "2", {}, "", cap=1024)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "part,message",
     [

@@ -6,6 +6,10 @@ Why it exists: spec section 5.5 (Mail row). Kept apart from the other
 Microsoft areas so each module stays small; ``services/connectors/microsoft.py``
 mixes ``MailActions`` into ``MicrosoftConnector`` and lists ``MAIL_ACTIONS``
 in its ``DEFINITION``.
+The security wave's mail READs (new-mail ids and a message's security facts
+for the scam check, an attachment's fingerprint for the file check) are
+one-line delegations here; their bodies live in ``mail_security.py`` and
+``attachment_hash.py``, which those skills own.
 Talks to Microsoft Graph ``/v1.0/me/messages``, ``/me/mailFolders`` and
 ``/me/sendMail``. Depends on ``common.py`` (validation, shaping, paging),
 ``services/connectors/base.py`` (errors, ``path_segment``) and
@@ -20,9 +24,11 @@ from services.agent import risk
 from services.agent.permissions import ActionCategory
 
 from ..base import ConnectorError, UserConfirmationRequired, path_segment
-from ..definition import ToolSpec, _schema
+from ..definition import Outbound, ToolSpec, _schema
 from ..documents import is_document_type, read_connector_document
 from ..shaping import clamp_limit
+from . import attachment_hash
+from . import mail_security as outlook_security
 from .common import (
     MAX_LONG_TEXT,
     ME,
@@ -113,6 +119,19 @@ MAIL_ACTIONS: tuple[ToolSpec, ...] = (
         ),
         required_scope="mail.read",
     ),
+    # Security wave (S10): an attachment's fingerprint for a malware lookup.
+    ToolSpec(
+        "get_attachment_hash",
+        "Fingerprint an attachment of an Outlook message for a malware lookup: downloads it (at "
+        "most 25 MB), returns only its SHA-256, size, name and type, never its content. Use the "
+        "attachment id from get_message; check the result with security.check_file.",
+        ActionCategory.READ,
+        _schema(
+            message_id=_MESSAGE_ID,
+            attachment_id={"type": "string", "description": "Attachment id from get_message", "required": True},
+        ),
+        required_scope="mail.read",
+    ),
     ToolSpec(
         "list_folders",
         "List the Outlook mail folders with their unread and total counts.",
@@ -133,6 +152,9 @@ MAIL_ACTIONS: tuple[ToolSpec, ...] = (
         ),
         required_scope="mail.send",
         always_confirm=True,
+        outbound=Outbound(
+            content=("subject", "body"), recipients=("to", "cc", "bcc"), history=True
+        ),
     ),
     ToolSpec(
         "reply",
@@ -145,6 +167,7 @@ MAIL_ACTIONS: tuple[ToolSpec, ...] = (
         ),
         required_scope="mail.send",
         always_confirm=True,
+        outbound=Outbound(content=("comment",), resolve="reply", history=True),
     ),
     ToolSpec(
         "forward",
@@ -157,6 +180,9 @@ MAIL_ACTIONS: tuple[ToolSpec, ...] = (
         ),
         required_scope="mail.send",
         always_confirm=True,
+        outbound=Outbound(
+            content=("comment",), recipients=("to",), history=True, shares_content=True
+        ),
     ),
     ToolSpec(
         "create_draft",
@@ -171,6 +197,7 @@ MAIL_ACTIONS: tuple[ToolSpec, ...] = (
         required_scope="mail.write",
         risk="low",
         low_risk_note="save email drafts (nothing is sent)",
+        outbound=Outbound(content=("subject", "body"), recipients=("to", "cc"), delivers=False),
     ),
     ToolSpec(
         "move_message",
@@ -211,6 +238,25 @@ MAIL_ACTIONS: tuple[ToolSpec, ...] = (
         _schema(message_id=_MESSAGE_ID),
         required_scope="mail.write",
         always_confirm=True,
+    ),
+    # Security wave (S2): the automatic scam check's two reads. Block sender
+    # is deferred (owner decision 8a: no new mail-settings scope this wave).
+    ToolSpec(
+        "list_new_message_ids",
+        "List the ids of mail newly added to the Outlook inbox since a cursor this action "
+        "returned (an empty cursor returns the current position only).",
+        ActionCategory.READ,
+        _schema(cursor={"type": "string"}),
+        required_scope="mail.read",
+    ),
+    ToolSpec(
+        "get_message_security",
+        "Read an Outlook message's security facts: the receiving server's authentication "
+        "results, From, Reply-To, its links (shown text and real destination) and attachment "
+        "names.",
+        ActionCategory.READ,
+        _schema(message_id=_MESSAGE_ID),
+        required_scope="mail.read",
     ),
 )
 
@@ -375,6 +421,18 @@ class MailActions(GraphBase):
             "size": info["size"],
             **text,
         }
+
+    # Security wave: READs whose bodies the skills own (S10 the fingerprint,
+    # S2 the scam check's two reads). They take no user_confirmed: READs.
+
+    async def get_attachment_hash(self, message_id: str, attachment_id: str) -> dict[str, Any]:
+        return await attachment_hash.outlook_attachment_hash(self, message_id, attachment_id)
+
+    async def list_new_message_ids(self, cursor: str = "") -> dict[str, Any]:
+        return await outlook_security.list_new_message_ids(self, cursor)
+
+    async def get_message_security(self, message_id: str) -> dict[str, Any]:
+        return await outlook_security.get_message_security(self, message_id)
 
     async def list_folders(self, limit: Any = None) -> list[dict[str, Any]]:
         top = clamp_limit(limit)

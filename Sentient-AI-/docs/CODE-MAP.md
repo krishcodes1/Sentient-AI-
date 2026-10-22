@@ -228,6 +228,7 @@ Top10 wave 1 integration (`test_top10_wave1_integration.py`): where the merged s
 - `Settings.tsx` — profile, password, Permissions (capabilities), owner Server section, account export/delete.
 - `Setup.tsx` — first-run wizard: owner account → provider → Telegram → permissions → summary.
 - `AuditLogs.tsx` — audit log browser + integrity verification.
+- `Security.tsx` — the Security page shell (`/security`, security wave): loads the viewer once, shows the tabs they may see from `security/tabs.tsx` (`SECURITY_TABS`; owner-only tabs are never mounted for a member) and opens the one named by `?tab=`; see "Security wave" below.
 - `approvalCountdown.ts` — shared TTL-countdown hook for approval cards (kept out of Chat's chunk so Dashboard doesn't pull in react-markdown).
 - `approvalArguments.ts` — `shownArguments`: the arguments an approval card displays, without the reserved keys a `desktop.act` (`_screen`), `browser.act` (`_page`) or `browser.checkout` (`_checkout`) card stores; `isSentenceCard` (a `browser.act` card is its reason sentence alone, no JSON); `purchaseCard` reads a checkout card's facts and `approvalImage` accepts only a base64 image data URL (shared by Chat and Dashboard).
 - `purchaseNotice.ts` — `PURCHASE_NOTICE`, the frontend's copy of the backend's notice ("Crawler can make mistakes…"); a vitest holds it equal to `backend/tests/fixtures/purchase_notice.txt`.
@@ -256,6 +257,7 @@ Top10 wave 1 integration (`test_top10_wave1_integration.py`): where the merged s
 - `usageFormat.ts` — token/cost formatting + `Intl.NumberFormat` (fixed locale).
 - `layout/Layout.tsx` — app shell: sidebar + outlet, mobile drawer.
 - `layout/Sidebar.tsx` — nav links.
+- `SecurityNotes.tsx` — the security notes an approval card carries (`PendingApproval.security_notes`), one row per note coloured by severity, as plain text; shown by Chat's `ApprovalCard` and Dashboard's `ApprovalRow` above the risk warning.
 
 ## Frontend hooks
 
@@ -265,8 +267,8 @@ Top10 wave 1 integration (`test_top10_wave1_integration.py`): where the merged s
 
 ## Frontend services / types
 
-- `services/api.ts` — the entire backend client: auth, conversations, streaming SSE parsing, connectors, capabilities, usage, setup.
-- `types/index.ts` — shared TypeScript types mirroring backend Pydantic models (User, Conversation, CapabilityStatus, UsageSummary, etc).
+- `services/api.ts` — the entire backend client: auth, conversations, streaming SSE parsing, connectors, capabilities, usage, setup; at the end, one `// Security wave (S<n>)` section per security skill.
+- `types/index.ts` — shared TypeScript types mirroring backend Pydantic models (User, Conversation, CapabilityStatus, UsageSummary, etc); at the end, one `// Security wave (S<n>)` section per security skill.
 - `theme.tsx` — `ThemeProvider`/`useTheme` (light/dark/system), synced with `index.html`'s inline bootstrap script.
 - `main.tsx` — app bootstrap: router, QueryClient, ThemeProvider, self-hosted font imports.
 - `App.tsx` — route table; pages other than Login are lazy-loaded for bundle size.
@@ -280,7 +282,7 @@ Purchases (2026-09-25): `CapabilitySettings.test.tsx`, `PaymentCardSettings.test
 ## Docker & CI
 
 - `docker/Dockerfile.backend` — multi-stage: `dev` (hot-reload uvicorn) / `prod` (non-root, healthcheck).
-- `docker/Dockerfile.frontend` — multi-stage: `dev` (Vite server) / `prod` (static build behind nginx, inlined config, `/api` reverse proxy).
+- `docker/Dockerfile.frontend` — multi-stage: `dev` (Vite server) / `prod` (static build behind nginx, inlined config, `/api` reverse proxy). Locations with their own body limit, each otherwise proxied like `/api/`: `/api/files` (documents), `/api/security/files/` (a file sent to VirusTotal, 21 MB, unbuffered), `/api/security/scam-check` (up to four screenshots as base64, 28 MB) and the regex location for the two chat message routes `^/api/agent/conversations/[^/]+/messages(/stream)?$` (pasted images, 28 MB).
 - `docker/docker-compose.yml` — dev stack: Postgres, backend, frontend, bind-mounted source.
 - `docker/docker-compose.prod.yml` — prod stack: built images, Postgres/Redis not published to host, required `POSTGRES_PASSWORD`, `ALLOWED_HOSTS` note.
 - `.github/workflows/ci.yml` — 5 jobs: `lint` (ruff+mypy), `frontend` (build/lint/vitest+coverage/npm audit), `backend` (pytest on sqlite, coverage), `backend-postgres` (migrate + pytest against real Postgres), secret scan (gitleaks). Runs on every branch push, not just PRs.
@@ -415,3 +417,283 @@ Telegram voice notes and audio files become text, a silent "🎤 Heard: “…�
 - `backend/services/notifications/transcripts.py` — `TranscriptJanitor` on `SweepLoop` (expiry and the 200-row cap).
 - `backend/services/capabilities/video_transcripts.py` — the switch and `VIDEO_SETTINGS_DEFAULTS`; `InstallationService.video_limits()` reads them.
 - `backend/models/media_transcript.py` + `alembic/versions/0024_media_transcripts.py` — the `media_transcripts` table (exported with the account).
+
+## Security wave (security10)
+
+Nine security skills on one shared base. The skills' own sections below are pasted at integration; the shared pieces are:
+
+- `backend/services/security/call_checks.py` — the pre-dispatch call checks: one ordered pipeline (tool rules, MCP pins, site rules, outbound, file reputation) run per call in `AgentRuntime._run_turn`, again in `approve_action`, and as the fail-closed backstop in `ConnectorToolExecutor.execute`; `CallFacts`, `Allow`/`Note`/`Escalate`/`Refuse`, `SecurityNote`, `standard_pipeline` (wired in `main.py`). `AgentRuntime.park_card` makes a card outside a turn through the same checks.
+- Security notes on cards — `pending_actions.security_notes` (migration `0025_security_service_keys`), `services/notifications/cards.py` (`security_notes_of`, `security_note_lines`, `offers_standing_consent`: a card with a warning never offers "Allow for 7 days" or "Allow low-risk changes"), Telegram and Slack rendering, `frontend/src/components/SecurityNotes.tsx`.
+- The owner's service keys — `InstallationService.service_key` and friends (one AES-256-GCM blob, `.env` wins), `backend/services/reputation/keys.py` (`ServiceKeySpec`, `KeyTestResult`, the four key rows and their testers), `backend/api/routes/security_keys.py` (`/api/security/keys`: test before store, never return a key), `ReportContext.service_keys`.
+- `backend/services/tools/security_checks.py` — the `security.*` built-in family (`SecurityToolkit`), filled by the scam check and file reputation.
+- `ToolSpec.outbound` (`services/connectors/definition.py`) — which arguments of a write leave the machine, declared on every send, post, comment and share.
+- `EgressHooks` (`services/tools/browser/guard.py`) — the site-rules and link-reputation hooks every browser toolkit's guard runs on a navigation.
+- `backend/tests/security_stubs.py` and `tests/test_security_scaffold.py` — `STUB_MODULES`, `is_stub`, `requires_real`; every WAVE 0 stub module says `SCAFFOLD_STUB = True` until its skill lands.
+- Frontend: `pages/Security.tsx` (the shell, `/security?tab=<id>`), `pages/security/tabs.tsx` (`SECURITY_TABS`: id, label, owner-only, render), one tab component per skill under `pages/security/`, and one `// Security wave (S<n>)` section per skill in `services/api.ts` and `types/index.ts` (`services/api.security.test.ts` pins each call to its route).
+
+### Outbound message checks (security S1)
+
+- `backend/services/security/outbound_text.py` — pure: hidden-character cleaning
+  (`clean_text`, `clean_safe_subset`, `hidden_count`, `hides_characters_in_address`), link
+  finding in Markdown, HTML, CSS, Slack and bare text (`find_links`), data-carrying links
+  (`exfil_findings`), `origin_only`.
+- `backend/services/security/outbound_recipients.py` — pure: recipient parsing and
+  normalisation, `note_address`, the HMAC (`recipient_hmac`, `hmac_key_id`), `OrgView`,
+  `classify`, `address_concern`, `validate_organisation_domain`.
+- `backend/services/security/outbound_store.py` — `KnownRecipientStore` (the sent-to history),
+  `OrganisationDomainStore`, `UserEmails`, `OrgDomains.for_user` (S9's rule B3),
+  `export_for_user`.
+- `backend/services/security/outbound.py` — `outbound_fields`, `OutboundFloor` (the executor's
+  floor and card bind), `OutboundService` (audit row `outbound_cleaned`, recording after a
+  send), `OutboundCheck` (slot 4 of the call checks).
+- `backend/api/routes/security_outbound.py` — `/api/security/outbound` (counts, own and
+  organisation domains, forget, owner add/remove).
+- `backend/services/capabilities/outbound_checks.py`, `backend/models/known_recipient.py`,
+  `backend/alembic/versions/0026_known_recipients.py`, Gmail `get_draft`
+  (`services/connectors/google_api/gmail.py`), `ToolSpec.outbound` declarations.
+- `frontend/src/pages/security/OutgoingMessagesTab.tsx` — Security ▸ Outgoing messages.
+- Tests: `test_outbound_text.py`, `test_outbound_recipients.py`, `test_known_recipients_store.py`,
+  `test_outbound_check.py`, `test_outbound_executor_floor.py`, `test_outbound_runtime.py`,
+  `test_security_outbound_routes.py`, `test_outbound_declarations.py`,
+  `test_known_recipients_migration.py`, `tests/connectors/test_gmail_get_draft.py`,
+  `OutgoingMessagesTab.test.tsx`.
+
+### Scam checks on new email (security S2)
+
+- `backend/services/security/mail_facts.py` — pure: one email's security facts (the provider's
+  topmost Authentication-Results, From, Reply-To, links with shown text and real destination,
+  attachment names, a capped visible-text excerpt) from Gmail and Graph payloads; the
+  `MailSecurityFacts` answer S1 also reads (scaffold A7).
+- `backend/services/security/mail_checks.py` — pure: the signal table, weights, group caps, the
+  authenticated-sender dampener, the levels, `may_go_quiet` / `pushes_without_review` /
+  `combine`, the reason sentences, the URL list for S4 and the display facts a finding keeps.
+- `backend/services/connectors/google_api/mail_security.py`,
+  `backend/services/connectors/microsoft_api/mail_security.py` — the bodies of the Gmail and
+  Outlook READs `list_new_message_ids` (history and delta cursors) and `get_message_security`
+  (answers `{"id", "gone": true}` for a deleted message).
+- `backend/services/mail_scan/` — `review.py` (the AI review: provider choice, fenced input,
+  parsing, line cleaning, `combine`), `messages.py` (every alert and card text, model-free),
+  `actions.py` (the Move-to-Spam/Junk card plan, `park_card` wrapper, account export).
+- `backend/services/notifications/mail_scan.py` — `MailScanService`: the sweeper (reconcile,
+  detect, review and alert, housekeeping) and the methods the routes call
+  (`app.state.mail_scan`).
+- `backend/api/routes/security_mail.py` — `/api/security/mail/*`: status, alerts, a card for an
+  alert, dismiss, pause or resume a mailbox.
+- `backend/services/capabilities/mail_scam_scan.py` — the `mail_scam_scan` switch and its two
+  settings.
+- `backend/models/mail_security.py` / `alembic/versions/0027_mail_security.py` —
+  `mail_scan_cursors` and `mail_scam_findings`.
+- `frontend/src/pages/security/MailAlertsTab.tsx` — Security ▸ Mail alerts;
+  `mailAlertFormat.ts` — its wording (verdict badges, card lines, mailbox states, notes).
+- Backend tests: `test_mail_security_facts.py`, `test_mail_security_checks.py`,
+  `tests/connectors/test_google_workspace_mail_security.py`,
+  `tests/connectors/test_microsoft_mail_security.py`, `test_mail_scan_service.py`,
+  `test_mail_scan_review.py`, `test_mail_scan_messages.py`, `test_mail_scan_routes.py`,
+  `test_mail_scan_capability.py`, `test_mail_security_migration.py`.
+
+### Scam checks when asked (security S3)
+
+- `backend/services/scam_check/` — the on-demand "is this a scam?" check: `service.py`
+  (`ScamCheckService`: switch, quota, local pass, link and file reputation, one tool-less
+  `complete_once` review, verdict, audit; `check_for_tool` for `security.check_scam`;
+  `scam_check_for` keeps one per process on `app.state.scam_check`), `review.py` (inputs, the
+  fenced review prompt, strict reply parsing, the AI-reason filter), `verdict.py` (the fixed
+  rules, reasons and advice, `render_plain` / `render_markdown` / `to_json`, audit facts),
+  `links.py` (the S4 and S10 adapters, sender look-alike checks), `quota.py` (`ScamQuota`,
+  `RecentChecks`), `records.py` (the fenced user row and the verdict row with usage), `web.py`
+  (the web chat's `/scam`), `channels.py` (Telegram `message_interceptors` hook and the Slack
+  `scam` keyword).
+- `backend/services/security/scam_signals.py` — the local half: wording and hidden-character
+  signals, link extraction and label/address pairs, punycode display, `clean_ai_reason`. Stdlib
+  only, no network, no model.
+- `backend/api/routes/security_scam.py` — `POST /api/security/scam-check` and `GET
+  /api/security/scam-check/status` (any signed-in user).
+- `backend/services/capabilities/scam_check.py` — the `scam_check` switch and its
+  `checks_per_day` setting.
+- `frontend/src/pages/security/ScamCheckTab.tsx` — Security ▸ Check for scams;
+  `scamVerdict.ts` — headlines, labels and the screenshot reader.
+- Backend tests: `test_scam_signals.py`, `test_scam_check_review.py`,
+  `test_scam_check_verdict.py`, `test_scam_check_service.py`, `test_scam_check_web.py`,
+  `test_scam_check_tool.py`, `test_scam_check_telegram.py`, `test_scam_check_slack.py`.
+
+### Link reputation (security S4)
+
+- `backend/services/security/link_checks.py` — free link checks with no network (look-alike
+  letters, brand typos and homographs, bare IPs in every browser spelling, credentials before an
+  "@", shorteners, abused endings, script links, link text naming another site), links read the
+  way a browser reads them, `lookup_url` (the one rule for what may be sent to Google),
+  `display_url`, the card notes (`security_notes`, `coverage_note`, `model_safe_text`), and the
+  `LinkChecker` protocol S1, S2 and S3 take (`LocalOnlyLinkChecker` is the null object).
+- `backend/services/security/lookalike.py` — look-alike host facts shared by checkout, mail,
+  outgoing-message and link checks: confusables, `decode_host` (IDNA 2003, checkout's refusal),
+  `browser_host` / `ascii_host` (the host a browser opens, UTS 46), `fold_host` (the UTS 46
+  mapping, per code point), `strip_ignored`,
+  `registrable_domain`, `lookalike_of`, `mixed_script_reading`, `is_ip_literal`,
+  `WELL_KNOWN_BRANDS`, `CONSUMER_MAIL_DOMAINS`.
+- `backend/services/reputation/links.py` — `LinkReputation` (`app.state.link_reputation`): the
+  owner-keyed Google Safe Browsing / Web Risk lookups, the in-memory verdict cache, the owner's
+  limits (mail held to half), cool-downs, single-flight, the browser guard's
+  `navigation_check` (`EgressHooks.reputation`), `status()`, `test_google_key` (the key routes'
+  tester) and `owner_alert` (key rejected).
+- `backend/services/capabilities/link_reputation.py` — the `link_reputation` switch and its
+  two limits; blocked until a Google key exists.
+- `backend/api/routes/link_reputation.py` — `GET /api/security/link-reputation/status` (owner
+  only).
+- `frontend/src/pages/security/ServiceKeysTab.tsx` — Security ▸ Service keys: every service a
+  key can be saved for, Test / Save / Remove, and the link-check line under the Google rows.
+
+### MCP tool pinning (security S5)
+
+- `backend/services/mcp/pinning.py` — canonical tool definitions and their sha256 fingerprints
+  (from the raw tools/list entry), hidden-character handling (`strip_hidden`, `count_hidden`, tag
+  decoding), review lines and diffs as text parts, persisted exposed names, the pure reconcile plan
+  (trust on first use, the server sentinel, new, changed, reverted, kept off, removed, the cap and
+  the 180-day prune; a cached listing never writes), the call decision, the refusal sentences, and
+  the owner's review helpers (detail, order, approve, keep off, server-URL comparison).
+- `backend/services/mcp/pin_store.py` — `McpPinService` (`app.state.mcp_pins`): reads and writes
+  `mcp_tool_pins` (one light query per catalog build, conditional updates, one retry on a racing
+  insert), audits `mcp_tool_pinned` / `mcp_tool_changed`, tells the owner's linked chats (fact-only,
+  once per pending hash, at most every 6 h per server), `check_call`; route helpers
+  (`list_reviews`, `get_owned_pin`, `approve_pin`, `keep_pin_off`), `pin_note_after_owner_test`
+  and `reset_pins_if_server_moved` for the connectors routes.
+- `backend/services/mcp/pin_check.py` — `McpPinCallCheck`, the `mcp_pin` entry of the pre-dispatch
+  call checks. `backend/services/mcp/pin_notify.py` — the channel message, the throttle, the Test
+  note and the `mcp_hidden_text` card note.
+- `backend/services/mcp/integration.py` — the catalog and dispatcher reconcile every discovery with
+  the pins while `mcp_pinning` is on; `sanitize_tool_info` strips hidden characters in every mode;
+  `forget_mcp_catalog_cache`.
+- Routes: `backend/api/routes/security_mcp.py` (`/api/security/mcp/*`); model
+  `backend/models/mcp_tool_pin.py`; migration `0028_mcp_tool_pins`; capability `mcp_pinning`;
+  Security page tab `frontend/src/pages/security/McpReviewsTab.tsx` (helpers `mcpReviews.ts`) and
+  the Connectors chip `McpReviewBadge.tsx`.
+
+### Breach monitor (security S6)
+
+- `backend/services/breach/` — the breach monitor's building blocks: `addresses.py` (normalise,
+  HMAC-digest, seal, open and hint a watched address; pure), `egress.py` (the guarded client's
+  resolver for a fixed vendor: policy check on the full URL, SSRF check on the origin only, so no
+  log line carries the address), `hibp.py` (HIBP v3 `breachedaccount` and `subscription/status`,
+  the process-wide `Pacer`, `parse_breaches`, `check_key` for the Service keys tab),
+  `pwned_passwords.py` (the k-anonymity range lookup behind the password-check proxy, its
+  per-user limiter), `store.py` (`BreachStore`: every read and write of the two tables, the seen
+  list, claims, failures, key holds; `export_for_user`), `messages.py` (model-free alert texts and
+  the owner-facing failure sentences).
+- `backend/services/notifications/breach_monitor.py` — `BreachMonitorService`: the weekly
+  `SweepLoop` sweeper, the owner's Check now, the kick on a "capabilities" change, the audit
+  writer (`app.state.breach_monitor`).
+- `backend/api/routes/security_breach.py` — `/api/security/breach/*` (owner only) and `POST
+  /api/security/pwned-passwords/range` (any signed-in user, gated by the owner's switch).
+- `backend/services/capabilities/breach_monitor.py` — the `breach_monitor` policy switch, blocked
+  until an HIBP key is configured.
+- `backend/models/breach_watch.py` / `alembic/versions/0029_breach_watch.py` —
+  `breach_watch_addresses` (sealed address, HMAC digest, schedule, health) and
+  `breach_watch_findings` (the seen list).
+- `frontend/src/pages/security/BreachMonitorTab.tsx` — Security ▸ Breach monitor (status line,
+  watched addresses, breaches, the password check); `pwnedPasswords.ts` — SHA-1 in the browser
+  (crypto.subtle or a pure fallback) and the prefix-only check.
+- Backend tests: `test_breach_addresses.py`, `test_breach_hibp_client.py`,
+  `test_pwned_passwords_client.py`, `test_breach_monitor_service.py`, `test_breach_monitor_api.py`,
+  `test_breach_monitor_capability.py`, `test_breach_watch_migration.py`.
+
+### Site rules for the browser (security S7)
+
+- `backend/services/site_rules/` — the owner's site rules for Crawler's browser and web reads (local
+  only: no network, no model, no key).
+  - `patterns.py` — what a typed site means (`parse_site`, `validate_kind`), how a browser reads a
+    host (`host_of`, Chromium's UTS #46 mapping, linear on hostile input), `PatternIndex` (exact,
+    then longest `*.` suffix), the keyed `host_hash` for audit rows.
+  - `sensitive_sites.py` — the built-in categories (banks, brokers, crypto, government; Always ask by
+    default) and `PROTECTED_PATTERNS` (sign-in, CAPTCHA and payment hosts that are never Blocked).
+  - `snapshot.py` — `SiteRuleSnapshot`: the immutable view every reader asks (precedence, the
+    protected downgrade, the checkout-window exemption), plus the card notes and read notices.
+  - `messages.py` — every sentence the owner, the approver or the model reads.
+  - `store.py` — rows of `browser_site_rules` (model `models/browser_site_rule.py`, migration 0030):
+    create/update/delete/set_category, each audited in the same transaction.
+  - `service.py` — `SiteRulesService`: the cached snapshot (refreshed after owner changes, on a
+    "capabilities" change and every 60 s), the per-user guard hook, the resolver wrapper, the call
+    check, recent hits and the de-duplicated hit audit rows.
+  - `hooks.py` — `SiteRuleGuardHook` (`EgressHooks.site_rules`: `Guard._route` and
+    `_shared.observe`) and `wrap_resolver` (the web toolkit's hops).
+  - `check.py` — `SiteRulesCallCheck`, slot 3 of the call checks.
+- `backend/api/routes/security_site_rules.py` — owner-only `/api/security/site-rules` (list, add,
+  change, remove, set a category, check a site).
+- `backend/services/capabilities/browser_site_rules.py` — the `browser_site_rules` switch.
+- `frontend/src/pages/security/SiteRulesTab.tsx`, `siteRulesFormat.ts` — the Security page's "Site
+  rules" tab.
+- Hook points: `main.wire_services` builds the service, passes `EgressHooks(site_rules=...)` to the
+  three browser toolkits, wraps the executor's `WebToolkit` resolver, and registers the call check
+  third.
+- Tests: `test_site_rules_patterns.py`, `test_site_rules_sensitive_list.py`,
+  `test_site_rules_snapshot.py`, `test_site_rules_service.py`, `test_site_rules_call_check.py`,
+  `test_site_rules_guard.py`, `test_site_rules_observe.py`, `test_site_rules_web.py`,
+  `test_site_rules_routes.py`, `test_site_rules_capability.py`, `test_site_rules_wiring.py`,
+  `test_site_rules_browser.py`, `test_site_rules_migration.py` (helper `tests/site_rules_fakes.py`);
+  frontend `SiteRulesTab.test.tsx`, `siteRulesFormat.test.ts`.
+
+### Tool rules (security S9)
+
+- `backend/services/security/tool_rules/` — rules on tool-call arguments (security S9): a call
+  that breaks one becomes an approval card naming the rule.
+  - `grammar.py` — the rule grammar and its validation (name, glob, conditions, the regex safety
+    check with its step estimate), summaries, the audit digest, the catalog and the preview's
+    matching.
+  - `values.py` — leaf selection, text normalisation (NFKC, invisible characters, homoglyph
+    folding), address, link and host extraction in linear time, domain matching, numbers.
+  - `engine.py` — `evaluate`: the pure evaluator (built-ins B1-B4 first, then owner rules oldest
+    first; anything that cannot be checked asks).
+  - `builtins.py` — the four built-in rules (address seen only in read content, more than 10
+    recipients, sharing outside the organisation, link seen only in read content).
+  - `context.py` — what the person wrote versus what Crawler only read, from the turn's messages.
+  - `texts.py` — every user-facing sentence: card reasons and notes, the executor's fixed
+    refusal, owner notices, validation reasons.
+  - `store.py` — `DbToolRuleStore` (rows, audit rows, the 30 s snapshot cache) and
+    `InMemoryToolRuleStore`.
+  - `check.py` — `ToolRulesCheck`, first in the call-checks pipeline (turn, approve and execute
+    stages).
+- `backend/api/routes/security_tool_rules.py` — owner-only tool rules (list, add, remove,
+  built-in switches, preview, catalog), with the loosening notices.
+- `backend/services/capabilities/tool_rules.py` — the `tool_rules` policy switch.
+- `backend/models/tool_rule.py` / `alembic/versions/0031_tool_rules.py` — `tool_rules`,
+  `tool_rule_builtins`.
+- `frontend/src/pages/security/ToolRulesTab.tsx` — Security → Tool rules.
+- Backend tests: `test_tool_rules_grammar.py`, `test_tool_rules_engine.py`,
+  `test_tool_rules_store.py`, `test_tool_rules_runtime.py`, `test_tool_rules_routes.py`,
+  `test_tool_rules_migration.py`, `test_tool_rules_capability.py`.
+
+Under "API routes": `security_tool_rules.py — owner-only tool rules (list, add, remove, built-in
+switches, preview, catalog)`. Under "Models & migrations": `tool_rule.py — tool_rules,
+tool_rule_builtins (0031)`.
+
+### File reputation (security S10)
+
+- `backend/services/file_reputation/` — VirusTotal hash lookups with the owner's key:
+  `virustotal.py` (`VirusTotalClient`: lookup, upload, analysis under the `virustotal_lookup` and
+  `virustotal_upload` network policies; `parse_file_report`, `verdict_of`, `test_key` for the
+  Service keys tab), `quota.py` (`VirusTotalQuota`: reserve-before-request limits from the request
+  log, the 429 cool-down, the rejected-key pause), `store.py` (`FileReputationStore`: every read
+  and write of the three tables, `source_ref` encryption, the `source_key` HMAC, claims, purge),
+  `holder.py` (`ByteHolder`: bytes an approved upload may send, in memory with a TTL),
+  `byte_sink.py` (stdlib: the 25 MB cap, the hash helpers, the contextvar sink the mail hash
+  actions hand bytes to), `kinds.py` (risky files by magic bytes, extension and type),
+  `verdicts.py` (`FileVerdict` and every sentence; never "safe"), `alerts.py` (alert texts,
+  defanged), `service.py` (`FileReputationService`: switch and key, cache, quota, in-flight
+  dedupe, rows, alerts, the intake screen and annotate, mail checks, uploads, sweep, status;
+  `app.state.file_reputation`), `toolkit.py` (`FileReputationToolkit`: `security.check_file` and
+  `security.upload_to_virustotal` with the upload card's precheck, bind and describe),
+  `sweeper.py` (`FileReputationSweeper` on `SweepLoop`: queued lookups, analysis polls, purges;
+  `kick()` after an upload), `call_check.py` (`FileReputationCallCheck`: a `file_flagged` note on
+  forwarding mail with a flagged attachment or saving a flagged upload to the knowledge base).
+- `backend/services/connectors/google_api/attachment_hash.py`,
+  `backend/services/connectors/microsoft_api/attachment_hash.py` — the bodies of the
+  `get_attachment_hash` READs (SHA-256, size, name and type only; 25 MB cap before download).
+- `backend/api/routes/security_files.py` — `/api/security/files` (list, check a browser-computed
+  fingerprint, request an upload card, forget).
+- `backend/services/capabilities/file_reputation.py` — the `file_reputation` switch, blocked until
+  a VirusTotal key exists; four owner-editable limits.
+- `backend/models/file_reputation.py` / `alembic/versions/0032_file_reputation.py` —
+  `file_reputation_verdicts`, `file_reputation_checks`, `file_reputation_calls`.
+- `frontend/src/pages/security/FileChecksTab.tsx` — Security ▸ File checks; `fileHash.ts`
+  (SHA-256 in the browser), `fileCheckFormat.ts` (labels and tones, never a success colour).
+- Intake hooks: `services/files/intake.py` calls `screen` for every inbound file and `annotate`
+  for attachment entries; `services/files/prompting.py` appends `attachment_check_line`.
+- Backend tests: `backend/tests/file_reputation/` and `backend/tests/connectors/test_attachment_hash.py`.

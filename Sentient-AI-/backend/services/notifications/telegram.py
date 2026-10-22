@@ -74,6 +74,7 @@ from services.action_text import GENERIC_SENTENCE, approval_sentence
 from services.agent import cancel as agent_cancel
 from services.agent.app_approvals import REMEMBER_WEEK, Channel, weekly_app_for
 from services.agent.permission_grants import REMEMBER_LOW_RISK
+from services.agent.shared_content import fence_forwarded
 from services.notifications import cards, telegram_format
 from services.notifications.progress import TurnProgress, takes_keyword, takes_on_event
 from services.notifications.voice import (  # top10:voice_notes
@@ -124,6 +125,11 @@ CallbackRoute = Callable[[Optional[int], str, Callable[[str], Awaitable[None]]],
 # (chat_id, user_id, rest_of_caption, files) once the files are downloaded.
 MediaRoute = Callable[[int, str, dict[str, Any]], Awaitable[None]]
 FileCaptionRoute = Callable[[int, str, str, list[Any]], Awaitable[None]]
+# Security wave (S3). A message interceptor in TelegramService.message_interceptors,
+# called with (chat_id, user_id, message) once the chat passed the A1 link check
+# and before any command, media route or chat turn; True means it took the
+# message (services/scam_check: /scam, and the message after a bare /scam).
+MessageInterceptor = Callable[[int, str, dict[str, Any]], Awaitable[bool]]
 # The media kinds _handle_message recognises, in the order they are looked for.
 MEDIA_KINDS: tuple[str, ...] = ("document", "photo", "voice", "audio", "video_note")
 # An album's messages arrive one by one; they are gathered this long into
@@ -188,6 +194,11 @@ HELP_LINES: list[str] = [
 
     # top10:video_transcripts
 
+    # Security wave (S3): on-demand scam checks (services/scam_check).
+    "/scam: ask me if something looks like a scam. Send /scam with the text or link, reply "
+    "/scam to a message, add /scam as a photo's caption, or send /scam and then forward "
+    "the message",
+
 ]
 _HELP_LAST_LINE = "/help: show this list"
 
@@ -210,6 +221,9 @@ _MESSAGE_CHUNK = 3900
 # Telegram's own limit: a message's text after its formatting is read, in
 # UTF-16 code units.
 _TELEGRAM_MAX_UNITS = 4096
+# Telegram's limit on a photo's caption, in UTF-16 code units: an approval
+# card sent as a photo drops whole security-note lines to fit (security wave).
+_CAPTION_UNITS = 1024
 # The longest plain out-of-band message send_text sends (the assistant's
 # Markdown goes whole, in parts of up to _TELEGRAM_MAX_UNITS).
 _SEND_TEXT_LIMIT = 3500
@@ -281,8 +295,10 @@ def _short_json(data: dict[str, Any], limit: int = 700) -> str:
 # toolkit refuses a call that brings its own): desktop.act's screen
 # (``services.tools.computer.CARD_KEY``), browser.act's page (``_page``) and
 # browser.checkout's page facts (``_checkout``, which the purchase card
-# renders itself).
-_RESERVED_KEY_TOOLS = frozenset({"desktop.act", "browser.act", "browser.checkout"})
+# renders itself), and a VirusTotal upload's file (``_upload``, security S10).
+_RESERVED_KEY_TOOLS = frozenset(
+    {"desktop.act", "browser.act", "browser.checkout", "security.upload_to_virustotal"}
+)
 
 # The reserved key a browser.checkout card carries its facts under
 # (services.tools.browser.checkout.toolkit.CARD_KEY).
@@ -562,6 +578,15 @@ _FORWARD_KEYS: tuple[str, ...] = (
 )
 
 
+def _is_forwarded(message: dict[str, Any]) -> bool:
+    """Whether Telegram marks *message* as forwarded (any _FORWARD_KEYS key, or
+    a channel's automatic forward): someone else's words or recording, never
+    the owner's own (top10:voice_notes; text too since the security wave)."""
+    return any(message.get(key) is not None for key in _FORWARD_KEYS) or bool(
+        message.get("is_automatic_forward")
+    )
+
+
 def _voice_meta(kind: str, message: dict[str, Any]) -> VoiceNoteMeta:
     """What the message declares about its recording (top10:voice_notes).
     Every value is checked again after the download."""
@@ -569,9 +594,7 @@ def _voice_meta(kind: str, message: dict[str, Any]) -> VoiceNoteMeta:
     media = media if isinstance(media, dict) else {}
     size = media.get("file_size")
     duration = media.get("duration")
-    forwarded = any(message.get(key) is not None for key in _FORWARD_KEYS) or bool(
-        message.get("is_automatic_forward")
-    )
+    forwarded = _is_forwarded(message)
     mime = media.get("mime_type")
     return VoiceNoteMeta(
         kind=kind,
@@ -811,6 +834,14 @@ class TelegramService:
         self.voice: Optional[VoiceNoteService] = None
         for kind in _VOICE_KINDS:
             self.media_routes[kind] = self._route_voice_message
+        # Security wave (S3): scam checks (services/scam_check). The service
+        # main.py wires here (None until then), and the interceptors that take
+        # /scam messages before any command, media route or chat turn.
+        self.scam_check: Optional[Any] = None
+        self.message_interceptors: list[MessageInterceptor] = []
+        from services.scam_check import channels as scam_channels
+
+        scam_channels.register_telegram(self)
 
     def _register_builtin_commands(self) -> None:
         """Fill ``_commands``. Each handler looks its method up when called,
@@ -1217,9 +1248,11 @@ class TelegramService:
 
         Every other card reads as docs/bot-message-style.md lays out: the
         plain sentence ("🔐 Send an email to priya@acme.com from your
-        Gmail"), any risk note, every detail as "Label: value" lines
-        (cards.layout_card, secrets masked), "Okay to go ahead? This expires
-        in 14 minutes." and the check code, then any 7-day offer.
+        Gmail"), any risk note, any security notes the call checks left
+        (one marked line each, security wave), every detail as "Label:
+        value" lines (cards.layout_card, secrets masked), "Okay to go ahead?
+        This expires in 14 minutes." and the check code, then any 7-day
+        offer (none on a card that carries a warning).
 
         A browser.checkout card is a photo of the checkout page with the
         purchase caption (the amount and the site, the items, the card
@@ -1238,6 +1271,12 @@ class TelegramService:
             # A LOW action's card may offer "Allow small changes on <account>"
             # (services.agent.permission_grants).
             low_risk_account = cards.low_risk_account(action)
+            # Security wave: a card that carries a call check's warning
+            # offers neither (A18); its notes follow the risk note, and a
+            # card without notes is today's text byte for byte.
+            if not cards.offers_standing_consent(action):
+                weekly_app, low_risk_account = None, None
+            note_lines = cards.security_note_lines(cards.security_notes_of(action))
             keyboard = _approval_keyboard(action.action_id, weekly_app, low_risk_account)
             purchase = _purchase_card(action)
             # Any risk note, on one line like the sentence: a value quoted in
@@ -1252,6 +1291,16 @@ class TelegramService:
                 caption = _purchase_caption(purchase, action.expires_at)
                 if risk_line:
                     caption = f"{caption}\n\n{risk_line}"
+                if note_lines:
+                    # The call checks' notes after the risk note; a caption
+                    # holds 1,024 units, so whole note lines give way.
+                    head = caption
+                    caption = cards.fit_note_lines(
+                        lambda kept: head + "\n\n" + "\n".join(kept),
+                        note_lines,
+                        max_chars=_CAPTION_UNITS,
+                        length=cards.utf16_len,
+                    )
                 image = self._approval_image_of(action)
                 if image is not None and await self._send_photo(
                     chat_id, image, caption, reply_markup=keyboard
@@ -1265,6 +1314,13 @@ class TelegramService:
             lines = [f"🔐 {_card_sentence(action)}"]
             if risk_line:
                 lines += ["", risk_line]
+            # The act card's lines before its notes, for trimming its caption.
+            head_lines = list(lines)
+            # Security wave: the call checks' notes right after the risk
+            # note, only when there are any (a card without notes is today's
+            # text byte for byte).
+            if note_lines:
+                lines += ["", *note_lines]
             ask = cards.ask_line(action.expires_at)
             # The 7-day offer goes under the question, on the button message.
             footer: list[str] = []
@@ -1320,8 +1376,17 @@ class TelegramService:
                 # the sentence as its caption. Without one (it could not be
                 # taken, or a restart dropped it) the same text goes alone.
                 image = self._approval_image_of(action)
+                caption = text
+                if note_lines:
+                    # A caption holds 1,024 units: whole note lines give way.
+                    caption = cards.fit_note_lines(
+                        lambda kept: "\n".join([*head_lines, "", *kept, "", ask, *footer]),
+                        note_lines,
+                        max_chars=_CAPTION_UNITS,
+                        length=cards.utf16_len,
+                    )
                 if image is not None and await self._send_photo(
-                    chat_id, image, text, reply_markup=keyboard
+                    chat_id, image, caption, reply_markup=keyboard
                 ):
                     return
             await self._api("sendMessage", chat_id=chat_id, text=text, reply_markup=keyboard)
@@ -1465,6 +1530,10 @@ class TelegramService:
             if media_user is None:
                 logger.info("telegram_message_from_unlinked_chat_ignored", chat_id=chat_id)
                 return
+            # Security wave (S3): a /scam caption, or the picture after a bare
+            # /scam, is checked instead of routed.
+            if await self._intercepted(chat_id, media_user, message):
+                return
             route = self.media_routes.get(media)
             if route is None:
                 await self._api(
@@ -1475,9 +1544,18 @@ class TelegramService:
                 return
             await route(chat_id, media_user, message)
             return
-        command, _, argument = text.partition(" ")
-        # Clients may suffix commands with the bot's name ("/start@bot").
-        command = command.split("@", 1)[0].lower()
+        # Security wave (A31, decision 8b): a forwarded message is someone
+        # else's words, so it is never parsed as a command, /start included.
+        # This is decided before any command branch: a forwarded "/start CODE"
+        # would otherwise move this chat onto the account that owns the code.
+        # With no command, a forwarded message from an unlinked chat is dropped
+        # below like any other text.
+        forwarded = _is_forwarded(message)
+        command, argument = "", ""
+        if not forwarded:
+            command, _, argument = text.partition(" ")
+            # Clients may suffix commands with the bot's name ("/start@bot").
+            command = command.split("@", 1)[0].lower()
         if command == "/start":
             # Linking is the one thing an unlinked chat may do: the one-time
             # code proves control of the Crawler AI account.
@@ -1489,6 +1567,18 @@ class TelegramService:
         if user_id is None:
             logger.info("telegram_message_from_unlinked_chat_ignored", chat_id=chat_id)
             return
+        # Security wave (S3): /scam, and the message after a bare /scam (a
+        # forwarded one included), is checked instead of answered.
+        if await self._intercepted(chat_id, user_id, message):
+            return
+        # Security wave (A31): a forwarded message is someone else's words,
+        # never the owner's. After the S3 interceptor (a chat armed by a bare
+        # /scam still takes it for checking), it reaches the turn fenced as
+        # untrusted, so the taint gate and the tool rules treat its addresses
+        # and links as such. Its command was never parsed (see above).
+        if forwarded:
+            await self._handle_chat(chat_id, user_id, fence_forwarded(text))
+            return
         handler = self._commands.get(command)
         if handler is not None:
             await handler(chat_id, user_id, argument.strip())
@@ -1496,6 +1586,18 @@ class TelegramService:
             await self._handle_help(chat_id)
         else:
             await self._handle_chat(chat_id, user_id, text)
+
+    async def _intercepted(self, chat_id: int, user_id: str, message: dict[str, Any]) -> bool:
+        """Whether an interceptor took this linked chat's message (security
+        wave, S3). One that raises is logged (error type only) and skipped,
+        so the message routes as it always did."""
+        for interceptor in self.message_interceptors:
+            try:
+                if await interceptor(chat_id, user_id, message):
+                    return True
+            except Exception as exc:
+                logger.warning("telegram_interceptor_failed", error_type=type(exc).__name__)
+        return False
 
     async def _handle_stop(self, chat_id: int, user_id: str) -> None:
         """Cancel this chat's running turn, and any messages queued behind
@@ -1992,6 +2094,15 @@ class TelegramService:
             name=f"telegram-chat-{chat_id}",
         )
 
+    async def download_file(self, file_id: str, *, max_bytes: int) -> bytes:
+        """The bytes of Telegram file *file_id*, at most *max_bytes* (security
+        wave, S10: a file someone sent the bot, fetched again for an approved
+        upload; TelegramManager.download_file). Raises TelegramFileError like
+        services.notifications.telegram_files.download_telegram_file."""
+        from services.notifications.telegram_files import download_telegram_file
+
+        return await download_telegram_file(self._client, self._token, file_id, max_bytes=max_bytes)
+
     async def _download_media(
         self, chat_id: int, messages: list[dict[str, Any]]
     ) -> tuple[list[Any], list[dict[str, str]], Optional[str]]:
@@ -2030,6 +2141,9 @@ class TelegramService:
                         media_type=str(document.get("mime_type") or "")[:100],
                         data=data,
                         source="telegram",
+                        # Security wave (S10): where the bytes can be had again
+                        # (Telegram's file_id), for a file check's later upload.
+                        source_ref=str(document.get("file_id")),
                     )
                 )
                 continue

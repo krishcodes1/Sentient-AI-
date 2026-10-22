@@ -138,8 +138,8 @@ To take page watch out again, undo the merge and then that line only:
 `upgrade()`/`downgrade()` (docs/CODE-MAP.md lists what each adds). The ids were fixed up front
 so parallel branches never pick the same parent: fill only your own file,
 never change a `down_revision`, and add no revision or merge revision
-inside the chain. `tests/test_integration_seams.py` pins it. The next new
-migration after the chain revises `0024_media_transcripts`.
+inside the chain. `tests/test_integration_seams.py` pins it. The security
+wave's chain (below) continues from `0024_media_transcripts`.
 
 `0023_permission_grants` (permission tiers) creates `permission_grants`
 (7-day low-risk grants, cascading with their user and their connector) and
@@ -151,6 +151,42 @@ needs nothing, the label fits the VARCHAR(12)). Its downgrade maps every
 (the stricter neighbour) and drops the column and the table. **Postgres
 cannot drop an enum label, so `low_risk` stays in the type after a
 downgrade**; no row uses it, and upgrading again is a no-op for the type.
+
+## Reserved revisions (0025 to 0032)
+
+`0025_security_service_keys` to `0032_file_reputation` form one linear chain on
+`0024_media_transcripts`, reserved for the security wave (security10): the
+shared key store, then one revision for each skill that adds schema (each file
+names its skill). The ids were fixed up front so parallel branches never pick
+the same parent: fill only your own file, never change a `down_revision`, and
+add no revision or merge revision inside the chain.
+`tests/test_integration_seams.py` pins it. The next new migration after the
+chain revises `0032_file_reputation`.
+
+- `0025_security_service_keys` (WAVE 0, the key store S4 reads first) adds the
+  encrypted `installation.security_service_keys` (one AES-256-GCM blob of the
+  owner's Safe Browsing, Web Risk, Have I Been Pwned and VirusTotal keys) and the
+  nullable JSON `pending_actions.security_notes` (the typed notes the call
+  checks put on an approval card). Its downgrade drops both columns.
+- `0026_known_recipients` (S1, outbound checks) creates `known_recipients`
+  (HMACs of the addresses and domains Crawler sent mail to, cascading with the
+  user) and `organisation_domains` (install policy; `added_by` is set to NULL
+  when that account is deleted).
+- `0027_mail_security` (S2, mail scam check) creates `mail_scan_cursors` and
+  `mail_scam_findings`, both cascading with their user and their connector.
+- `0028_mcp_tool_pins` (S5, MCP tool pinning) creates `mcp_tool_pins`, cascading
+  with the user and the connector.
+- `0029_breach_watch` (S6, breach monitor) creates `breach_watch_addresses` and
+  `breach_watch_findings`, both cascading with the user (findings also with
+  their address).
+- `0030_browser_site_rules` (S7, site rules) creates `browser_site_rules`,
+  install policy whose `created_by`/`updated_by` are set to NULL on delete.
+- `0031_tool_rules` (S9, tool rules) creates `tool_rules` and
+  `tool_rule_builtins`, install policy whose `created_by`/`changed_by` are set
+  to NULL on delete.
+- `0032_file_reputation` (S10, file reputation) creates `file_reputation_verdicts`,
+  `file_reputation_checks` (cascading with their user) and
+  `file_reputation_calls` (user id set to null on delete).
 
 ## Writing a new migration
 

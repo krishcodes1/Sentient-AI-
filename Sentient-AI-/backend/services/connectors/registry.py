@@ -35,6 +35,7 @@ from services.connectors.definition import (
     AuthSpec,
     ConnectorDefinition,
     ToolSpec,
+    outbound_problems,
 )
 
 
@@ -298,6 +299,8 @@ def _action_problems(d: ConnectorDefinition) -> list[str]:
                 f"action '{name}': policy_key '{spec.policy_key}' is invalid or reserved"
             )
         properties, _, shape = _schema_properties(spec)
+        # Security wave (S1): an outbound declaration must name real parameters.
+        problems.extend(outbound_problems(spec, properties))
         problems.extend(shape)
         for param in properties:
             if param in FORBIDDEN_PARAMS:

@@ -70,6 +70,7 @@ from services.agent.runtime import (
 )
 from services.agent.tool_registry import ConnectorSpec, build_tools, effective_tier, resolve_tool
 from services.files.intake import InboundFile  # top10:file_extraction
+from services.scam_check.web import answer_web_scam_command, parse_scam_command  # security S3
 from services.scheduler.timezones import TIMEZONE_HEADER, remember_zone
 from services.tutor import service as tutor_service
 from services.tutor.commands import parse_tutor_command
@@ -455,6 +456,16 @@ class ApprovalDetailOut(BaseModel):
     value: str
 
 
+class SecurityNoteOut(BaseModel):
+    """One line an approval card shows about what a call check noticed
+    (services/security/call_checks.py): a kind, a severity and one plain
+    sentence that names hosts or addresses at most."""
+
+    kind: str
+    severity: Literal["high", "warn", "info"]
+    text: str
+
+
 class PendingApprovalOut(BaseModel):
     action_id: str
     tool_name: str
@@ -489,6 +500,9 @@ class PendingApprovalOut(BaseModel):
     # days ("School Gmail"), or None when the card offers no grant
     # (services.agent.permission_grants).
     low_risk_account: Optional[str] = None
+    # What the call checks noticed, shown above the risk warning; a card
+    # with a high or warn note has neither weekly_app nor low_risk_account.
+    security_notes: List[SecurityNoteOut] = []
 
 
 class BlockedActionOut(BaseModel):
@@ -550,6 +564,7 @@ def _pending_approval_out(pa: Any) -> PendingApprovalOut:
         image=pa.image,
         weekly_app=pa.weekly_app,
         low_risk_account=pa.low_risk_account,
+        security_notes=[SecurityNoteOut.model_validate(n) for n in pa.security_notes],
         **_approval_card_fields(pa.tool_name, pa.arguments),
     )
 
@@ -891,7 +906,9 @@ def _history_from_rows(rows: list[Any], *, skip_id: Any = None) -> list[dict[str
 
 async def _file_attachments(request: Request, user: User, file_ids: list[uuid.UUID]) -> list[dict[str, Any]]:
     """The attachment entries for a web message's ``file_ids``, in order;
-    422 when one is not this user's upload (or has expired)."""
+    422 when one is not this user's upload (or has expired). A flagged
+    file's check is added by the intake's screen (security wave, S10;
+    entries unchanged without one)."""
     if not file_ids:
         return []
     intake = getattr(request.app.state, "file_intake", None)
@@ -913,7 +930,7 @@ async def _file_attachments(request: Request, user: User, file_ids: list[uuid.UU
                 detail="An attached file was not found: it expired, was forgotten or is not yours.",
             )
         entries.append(info.attachment())
-    return entries
+    return await intake.annotate(str(user.id), entries)
 
 
 async def _channel_attachments(
@@ -939,6 +956,8 @@ async def _channel_attachments(
                 "file_error": first.code,
             }
         entries.extend(info.attachment() for info in result.files)
+        # Security wave (S10): a flagged file's check goes on its entry.
+        entries = await intake.annotate(user_id, entries)
     for image in (images or [])[:MAX_IMAGES_PER_MESSAGE]:
         try:
             validated = image if isinstance(image, ImageAttachment) else ImageAttachment.model_validate(image)
@@ -1258,6 +1277,22 @@ async def send_message(
             assistant_message=MessageResponse.model_validate(tutor_reply_row),
         )
 
+    # Security wave (S3): "/scam <message>" (with any screenshots or files) is
+    # checked out of turn (services/scam_check): no chat turn and no PromptGuard
+    # input block on the pasted message, which is stored fenced as someone
+    # else's words. Attached files are checked by fingerprint (review SEC-F11:
+    # with files it is still someone else's message).
+    scam_text = parse_scam_command(body.content)
+    if scam_text is not None:
+        scam_user_row, scam_reply_row = await answer_web_scam_command(
+            db, request.app, current_user, conversation, scam_text, body.images,
+            file_ids=body.file_ids,
+        )
+        return AgentTurnResponse(
+            user_message=MessageResponse.model_validate(scam_user_row),
+            assistant_message=MessageResponse.model_validate(scam_reply_row),
+        )
+
     # 1. Persist the user message. Only attachment METADATA is stored; see
     #    models.conversation.Message.attachments for why the bytes are not.
     user_message = Message(
@@ -1510,6 +1545,21 @@ async def stream_message(
         await db.commit()
         return StreamingResponse(
             _tutor_command_frames(tutor_user_row, tutor_reply_row),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+        )
+
+    # Security wave (S3): /scam is checked out of turn (see send_message) and
+    # answered over the same frames a /tutor command uses.
+    scam_text = parse_scam_command(body.content)
+    if scam_text is not None:
+        scam_user_row, scam_reply_row = await answer_web_scam_command(
+            db, request.app, current_user, conversation, scam_text, body.images,
+            file_ids=body.file_ids,
+        )
+        await db.commit()
+        return StreamingResponse(
+            _tutor_command_frames(scam_user_row, scam_reply_row),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
         )

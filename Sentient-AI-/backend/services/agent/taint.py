@@ -53,6 +53,124 @@ _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 _URL_RE = re.compile(r"https?://[^\s\"'<>)\]]+", re.IGNORECASE)
 _HOST_RE = re.compile(r"\b(?:[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?\.)+[a-z]{2,}\b", re.IGNORECASE)
 
+# _EMAIL_RE.findall and _HOST_RE.findall restart at every character of a long
+# run of word characters and dots, so hostile text ("a.a.a." x 5,000) costs
+# quadratic time on every turn that reads it (security wave, S9 integration
+# request). _emails_in and _hosts_in give exactly the same matches, in the
+# same order, in linear time: an address can only start at the beginning of
+# the run of local-part characters right before an "@", and a host's labels
+# are whole dot-separated tokens (only the first may start after a hyphen),
+# so the regex's backtracking is replaced by one pass over the tokens.
+# tests/test_taint_tracking.py compares both with the regexes on random text.
+_EMAIL_LOCAL = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._%+-")
+_HOST_RUN_RE = re.compile(r"(?:[a-z0-9\-]|\.)+", re.IGNORECASE)
+_HOST_START_RE = re.compile(r"[a-z0-9]", re.IGNORECASE)
+_HOST_TLD_RE = re.compile(r"[a-z]+", re.IGNORECASE)
+_WORD_RE = re.compile(r"\w")
+_MAX_LABEL = 63
+
+
+def _emails_in(text: str) -> list[str]:
+    """_EMAIL_RE.findall(text), in linear time."""
+    found: list[str] = []
+    end = 0
+    at = text.find("@")
+    while at != -1:
+        start = at
+        while start > end and text[start - 1] in _EMAIL_LOCAL:
+            start -= 1
+        if start < at:
+            match = _EMAIL_RE.match(text, start)
+            if match is not None:
+                found.append(match.group())
+                end = match.end()
+        at = text.find("@", max(at + 1, end))
+    return found
+
+
+def _is_word(text: str, index: int) -> bool:
+    return 0 <= index < len(text) and _WORD_RE.match(text[index]) is not None
+
+
+def _label_to_dot(text: str, at: int, stop: int, followed_by_dot: bool) -> bool:
+    """Whether text[at:stop] (no dot inside) is one host label followed by a dot."""
+    return (
+        followed_by_dot
+        and 0 < stop - at <= _MAX_LABEL
+        and _HOST_START_RE.match(text, at) is not None
+        and _HOST_START_RE.match(text[stop - 1]) is not None
+    )
+
+
+def _tld_end(text: str, at: int, stop: int) -> int:
+    """Where a top-level domain starting at *at* ends (two or more letters,
+    then a word boundary), or -1."""
+    letters = _HOST_TLD_RE.match(text, at, stop)
+    if letters is None or letters.end() - at < 2 or _is_word(text, letters.end()):
+        return -1
+    return letters.end()
+
+
+def _hosts_in_run(text: str, lo: int, hi: int, found: list[str]) -> None:
+    """The _HOST_RE matches inside text[lo:hi], one run of label characters
+    and dots, appended to *found*."""
+    tokens: list[tuple[int, int]] = []  # each dot-separated piece of the run
+    start = lo
+    while True:
+        dot = text.find(".", start, hi)
+        if dot == -1:
+            tokens.append((start, hi))
+            break
+        tokens.append((start, dot))
+        start = dot + 1
+    last = len(tokens) - 1
+    # best[k]: the last token, in the chain of whole labels starting at token
+    # k, that starts a top-level domain (the regex's longest match), or -1.
+    best: list[int] = [-1] * (last + 2)
+    for k in range(last, -1, -1):
+        t_start, t_end = tokens[k]
+        if _label_to_dot(text, t_start, t_end, k < last) and best[k + 1] != -1:
+            best[k] = best[k + 1]
+        elif _tld_end(text, t_start, t_end) != -1:
+            best[k] = k
+    done = lo
+    for k, (t_start, t_end) in enumerate(tokens):
+        at = max(t_start, done)
+        while at < t_end:
+            # A match starts at a word boundary: a token's start (after a
+            # dot, or the run's start after a non-word character) or right
+            # after a hyphen.
+            if (
+                (at == t_start or text[at - 1] == "-")
+                and not _is_word(text, at - 1)
+                and best[k + 1] != -1
+                and _label_to_dot(text, at, t_end, k < last)
+            ):
+                tld_start, tld_stop = tokens[best[k + 1]]
+                done = _tld_end(text, tld_start, tld_stop)
+                found.append(text[at:done])
+                break
+            hyphen = text.find("-", at, t_end)
+            if hyphen == -1:
+                break
+            at = hyphen + 1
+
+
+def _hosts_in(text: str) -> list[str]:
+    """_HOST_RE.findall(text), in linear time.
+
+    A match lies inside one run of label characters and dots. Its first
+    label runs from a word boundary to the next dot; every later label is a
+    whole dot-separated token; the regex takes as many labels as it can,
+    then backs off one label at a time until the next token starts with a
+    top-level domain (two or more letters ending at a word boundary)."""
+    found: list[str] = []
+    for run in _HOST_RUN_RE.finditer(text):
+        lo, hi = run.span()
+        if text.find(".", lo, hi) != -1:
+            _hosts_in_run(text, lo, hi, found)
+    return found
+
 # An opaque identifier / code / token: a run this long that carries a digit
 # or several separators, so it is not an ordinary natural-language word.
 # Copied verbatim from untrusted data into a write argument (an account
@@ -101,11 +219,11 @@ def extract_indicators(text: str) -> set[str]:
     if not text:
         return set()
     indicators: set[str] = set()
-    for match in _EMAIL_RE.findall(text):
+    for match in _emails_in(text):
         indicators.add(match.lower())
     for match in _URL_RE.findall(text):
         indicators.add(match.rstrip(".,);").lower())
-    for match in _HOST_RE.findall(text):
+    for match in _hosts_in(text):
         # Skip hosts that are only the domain half of an email already
         # captured; the email itself is the stronger indicator.
         indicators.add(match.lower())
@@ -162,6 +280,11 @@ class TaintTracker:
         if isinstance(value, int) and not isinstance(value, bool):
             value = str(value)
         return isinstance(value, str) and value in self._object_ids.get(source, ())
+
+    def seen_untrusted(self, value: str) -> bool:
+        """Whether *value* (an email address, URL or host; compared lower-case) is one of the
+        indicators untrusted results carried this turn (the exact value, not a part of it)."""
+        return isinstance(value, str) and value.strip().lower() in self._indicators
 
     def taint_reason(
         self,
