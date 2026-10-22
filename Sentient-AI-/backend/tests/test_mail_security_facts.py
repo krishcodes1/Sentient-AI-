@@ -26,9 +26,8 @@ from __future__ import annotations
 
 import base64
 import json
-import time
 import unicodedata
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Callable, Iterable, Optional, Sequence
 
 import pytest
 
@@ -36,6 +35,7 @@ from services.connectors.base import PromptGuard
 from services.security import mail_facts
 from services.security.mail_facts import (
     MAX_ANCHORS,
+    MAX_HTML_CHARS,
     MAX_LINKS,
     MAX_REPLY_TO,
     TEXT_CHARS,
@@ -56,6 +56,7 @@ from services.security.mail_facts import (
     wording_excerpt,
     wording_kinds,
 )
+from tests.linear_time import scales_linearly
 
 # == Shared fixtures ==========================================================================
 # Real-shaped Gmail (messages.get format=full) and Microsoft Graph (message +
@@ -712,29 +713,39 @@ def test_links_are_deduplicated_and_capped_while_the_total_keeps_counting():
     assert total == 5
 
 
-def test_unclosed_tags_and_comments_cannot_make_parsing_slow():
+def _reads_linearly(read: Callable[[str], object], build: Callable[[int], str], size: int) -> bool:
+    """scales_linearly for *read* on *build*'s text, written at *size* and at the eighth of it
+    the check times it against before the clock starts."""
+    texts = {n: build(n) for n in (size // 8, size)}
+    return scales_linearly(lambda n: read(texts[n]), size)
+
+
+def test_unclosed_tags_and_comments_are_parsed_in_linear_time():
     # The stdlib parser rescanned to the end for every "<" that never closes
     # (minutes at 500 KB, blocking the event loop). The tokenizer is linear:
-    # every 500 KB shape below, including the tag-heavy ones, reads in well
-    # under a second; the bound is generous because the machine may be busy.
-    for hostile in (
-        "<a" * 250_000,
-        "<" * 500_000,
-        "</" * 250_000,
-        "<!--" * 125_000,
-        "<!---->" * 71_000,
-        "<!----!>" * 62_000,
-        '<a href="x>' * 45_000,
-        "<p>" * 166_000,
-        "<table>" + "<td>" * 125_000,
-        "<style>" * 71_000,
-        '<p style="' + "/*" * 250_000 + '">x</p>',
-        '<div style="display:none">' * 300 + "x" * 500_000,
+    # each 500 KB shape below (MAX_HTML_CHARS), including the tag-heavy ones,
+    # is timed against an eighth of the same shape in the same process, where
+    # rescanning to the end from every "<" grows 64x. Not a wall-clock budget:
+    # coverage's tracer made the linear tokenizer miss a fixed one on CI.
+    size = MAX_HTML_CHARS
+    for build in (
+        lambda n: "<a" * (n // 2),
+        lambda n: "<" * n,
+        lambda n: "</" * (n // 2),
+        lambda n: "<!--" * (n // 4),
+        lambda n: "<!---->" * (n // 7),
+        lambda n: "<!----!>" * (n // 8),
+        lambda n: '<a href="x>' * (n // 11),
+        lambda n: "<p>" * (n // 3),
+        lambda n: "<table>" + "<td>" * (n // 4),
+        lambda n: "<style>" * (n // 7),
+        lambda n: '<p style="' + "/*" * (n // 2) + '">x</p>',
+        # The hidden ancestors stay deeper than the parser's stack; the text grows.
+        lambda n: '<div style="display:none">' * 300 + "x" * n,
     ):
-        start = time.perf_counter()
-        extract_links(hostile, "")
-        visible_text(hostile, TEXT_CHARS)
-        assert time.perf_counter() - start < 6.0, hostile[:20]
+        shape = build(size)[:20]
+        assert _reads_linearly(lambda html: extract_links(html, ""), build, size), shape
+        assert _reads_linearly(lambda html: visible_text(html, TEXT_CHARS), build, size), shape
     # Outlook shows what its conditional blocks hold, so it is read too; an
     # ordinary comment, closed or not, hides what it holds.
     conditional = (
@@ -1198,20 +1209,21 @@ def test_the_answer_keeps_the_wave_0_contract_s1_codes_against():
 # -- Review findings of 2026-10-14 (recheck): slow patterns, link evasion, crowd-out -----------
 
 
-def test_long_css_values_never_make_reading_slow():
+def test_long_css_values_are_read_in_linear_time():
     # A value like "0000...0001" once made the zero-length patterns backtrack
     # quadratically (40 KB took over 30 s); values that long are not lengths.
+    # Each 60 KB value is timed against an eighth of it, where that backtracking
+    # grew 64x.
     wording = "Your account has been suspended. Update your payment immediately."
-    for html in (
-        '<span style="opacity:' + "0" * 60_000 + '1">' + wording + "</span>",
-        '<span style="font-size:' + "0" * 60_000 + '1px">' + wording + "</span>",
-        '<span style="font:' + "1" * 60_000 + '">' + wording + "</span>",
-        '<span style="font-size:0"><b style="font-size:' + "1" * 60_000 + 'px">' + wording + "</b></span>",
+    for build in (
+        lambda n: '<span style="opacity:' + "0" * n + '1">' + wording + "</span>",
+        lambda n: '<span style="font-size:' + "0" * n + '1px">' + wording + "</span>",
+        lambda n: '<span style="font:' + "1" * n + '">' + wording + "</span>",
+        lambda n: '<span style="font-size:0"><b style="font-size:' + "1" * n + 'px">' + wording + "</b></span>",
     ):
-        start = time.perf_counter()
-        text = visible_text(html, 500)
-        assert time.perf_counter() - start < 2.0, html[:30]
-        assert wording in text, html[:30]
+        html = build(60_000)
+        assert wording in visible_text(html, 500), html[:30]
+        assert _reads_linearly(lambda text: visible_text(text, 500), build, 60_000), html[:30]
     assert visible_text('<span style="opacity:0">gone</span>', 100) == ""
     assert visible_text('<span style="font-size:-0.00em">gone</span>', 100) == ""
     assert visible_text('<span style="font-size:0">gone<b style="font-size:13.5px">shown</b></span>', 100) == "shown"
@@ -1219,13 +1231,15 @@ def test_long_css_values_never_make_reading_slow():
 
 def test_overlong_non_ascii_host_labels_are_refused_before_they_are_encoded():
     # No DNS label is longer than 63 characters; encoding one is quadratic,
-    # and 400 such links once took over a minute to read.
-    label = "\u00e9" * 1000
-    html = "".join(f'<a href="https://{label}{i}.example/">x{i}</a>' for i in range(400))
-    start = time.perf_counter()
-    links, total, _, _ = extract_links(html, "")
-    assert time.perf_counter() - start < 3.0
+    # and 400 such links once took over a minute to read. Timed against labels
+    # an eighth as long (still far over 63), where the encoding grew 64x.
+    def anchors(length: int) -> str:
+        label = "\u00e9" * length
+        return "".join(f'<a href="https://{label}{i}.example/">x{i}</a>' for i in range(400))
+
+    links, total, _, _ = extract_links(anchors(1000), "")
     assert total == MAX_ANCHORS and all(link.host == "" for link in links)
+    assert _reads_linearly(lambda html: extract_links(html, ""), anchors, 1000)
     assert extract_links('<a href="https://b\u00fccher.example/">x</a>', "")[0][0].host == "xn--bcher-kva.example"
     assert address_parts("a@" + "\u00e9" * 64 + ".example") == ("", "")
 
@@ -1295,10 +1309,11 @@ def test_wording_excerpt_keeps_the_start_and_a_passage_of_each_kind_within_the_l
     cut = wording_excerpt(filler, 100)
     assert len(cut) <= 100 and cut.endswith("\u2026")
     assert wording_excerpt("", 10) == "" and wording_excerpt("abc", 0) == ""
-    # Linear on a long text full of wording.
-    start = time.perf_counter()
-    flood = wording_excerpt("Urgent: invoice overdue, sign in now. " * 13_000, TEXT_CHARS)
-    assert time.perf_counter() - start < 3.0 and len(flood) <= TEXT_CHARS
+    # Linear on a long text full of wording: 13,000 sentences of it, timed
+    # against an eighth as many.
+    sentence = "Urgent: invoice overdue, sign in now. "
+    assert len(wording_excerpt(sentence * 13_000, TEXT_CHARS)) <= TEXT_CHARS
+    assert scales_linearly(lambda n: wording_excerpt(sentence * n, TEXT_CHARS), 13_000)
 
 
 def test_end_tags_a_browser_ignores_never_close_a_hidden_element_early():

@@ -43,6 +43,7 @@ from services.scam_check.review import (
 )
 from services.scam_check.service import LinkFinding, ScamCheckRequest, ScamImage
 from services.security.scam_signals import analyse_text
+from tests.linear_time import scales_linearly
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 40
 JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 40
@@ -287,29 +288,49 @@ def test_an_unknown_verdict_bad_types_or_missing_keys_make_the_review_unreadable
     assert parse_review(reply) is None
 
 
+def _nested_urls(depth: int) -> str:
+    return '{"verdict":"no_signs_found","reasons":[],"urls":' + "[" * depth + "]" * depth + "}"
+
+
+def _nested_qr(depth: int) -> str:
+    return '{"verdict":"no_signs_found","reasons":[],"qr":' + '{"":' * depth + "1" + "}" * depth + "}"
+
+
+def _fenced_objects(depth: int) -> str:
+    return "Here is my answer:\n```json\n" + '{"":' * depth + "1" + "}" * depth + "\n```"
+
+
+def _deep_then_valid(depth: int) -> str:
+    # Deep nesting first, then a well-formed review: the reply is hostile and read as a whole.
+    return '{"x":' + "[" * depth + ' {"verdict":"no_signs_found","reasons":[]}'
+
+
 @pytest.mark.parametrize(
-    "reply",
+    ("build", "depth"),
     [
-        '{"verdict":"no_signs_found","reasons":[],"urls":' + "[" * 3_000 + "]" * 3_000 + "}",
-        '{"verdict":"no_signs_found","reasons":[],"urls":' + "[" * 9_000 + "]" * 9_000 + "}",
-        '{"verdict":"no_signs_found","reasons":[],"qr":' + '{"":' * 3_200 + "1" + "}" * 3_200 + "}",
-        "Here is my answer:\n```json\n" + '{"":' * 3_200 + "1" + "}" * 3_200 + "\n```",
-        # Deep nesting first, then a well-formed review: the reply is hostile and read as a whole.
-        '{"x":' + "[" * 9_000 + ' {"verdict":"no_signs_found","reasons":[]}',
+        (_nested_urls, 3_000),
+        (_nested_urls, 9_000),
+        (_nested_qr, 3_200),
+        (_fenced_objects, 3_200),
+        (_deep_then_valid, 9_000),
     ],
     ids=["urls-3000", "urls-9000", "qr-objects-3200", "fenced-objects-3200", "deep-then-valid"],
 )
-def test_a_reply_nested_deeper_than_the_interpreter_allows_is_unreadable_quickly_and_never_raises(reply):
-    """Batch 2 finding: json's raw_decode raises RecursionError (not ValueError) on deep
-    nesting (about 3,000 levels on CPython 3.12). A pasted scam can steer the provider's
-    reply, so such a reply, well under the 20,000-character cap, must read as unreadable
-    (None) and never escape parse_review."""
-    import time
-
+def test_a_reply_nested_deeper_than_the_interpreter_allows_is_unreadable_in_linear_time_and_never_raises(
+    build, depth
+):
+    """A pasted scam can steer the provider's reply, so a reply nested this deep, well under
+    the 20,000-character cap, must read as unreadable (None) and never escape parse_review.
+    How deep json itself can go depends on the platform (RecursionError near 3,000 levels on
+    Windows CPython, far deeper on the Linux CI runners), so review.py applies its own limit
+    and the answer is the same everywhere. Reading it is timed against the same reply nested an
+    eighth as deep (still far past that limit), in the same process: linear work grows 8x at
+    most, retrying the decoder from every brace grows 64x."""
+    reply = build(depth)
     assert len(reply) < 20_000
-    started = time.perf_counter()
     assert parse_review(reply) is None
-    assert time.perf_counter() - started < 2.0
+    assert parse_review(build(depth // 8)) is None
+    assert scales_linearly(lambda n: parse_review(build(n)), depth)
     # Nesting the interpreter can read is not itself a problem; unknown keys are ignored.
     shallow = '{"verdict":"likely_scam","reasons":["It rushes you."],"x":' + "[" * 50 + "]" * 50 + "}"
     parsed = parse_review(shallow)

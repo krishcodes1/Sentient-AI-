@@ -58,9 +58,13 @@ async def test_every_upload_is_fingerprinted_and_looked_up_without_waiting(sessi
     intake = _intake(session_factory, service)
     pdf = b.make_pdf(["Quarterly numbers"])
 
+    # The lookup is held until gate.set() below, so an ingest that waited for it would never
+    # finish; the timeout only stops that from hanging the suite. It is generous because the
+    # first upload in a process imports the PDF and image readers, about 0.1 s alone but over
+    # 5 s under the coverage tracer CI runs.
     result = await asyncio.wait_for(
         intake.ingest(str(user.id), [InboundFile("numbers.pdf", "application/pdf", pdf, "web")]),
-        timeout=5,
+        timeout=60,
     )
 
     assert [f.name for f in result.files] == ["numbers.pdf"]

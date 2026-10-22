@@ -54,6 +54,7 @@ from services.security.tool_rules.engine import (
     applies_to,
     evaluate,
 )
+from tests.linear_time import scales_linearly
 
 WRITE = ActionCategory.WRITE
 READ = ActionCategory.READ
@@ -116,6 +117,14 @@ def run(view, *owner_rules, snapshot=None, turn_view=None, org=frozenset()):
 
 def ids(hits):
     return [h.rule_id for h in hits]
+
+
+def reads_linearly(read, build, size):
+    """True when read(build(size)) costs at most 32 times read(build(size // 8)): *build* makes
+    the hostile input at any size, so the same shape is timed against an eighth of itself in this
+    process (tests/linear_time.py) rather than against a wall-clock budget, which CI's coverage
+    tracer, slowing every line several times over, made fail for linear code."""
+    return scales_linearly(lambda n: read(build(n)), size)
 
 
 def holds(condition, arguments):
@@ -520,10 +529,17 @@ def test_regex_runs_on_normalised_text_and_a_value_over_four_thousand_characters
     assert not holds(Condition("parts", "regex", r"wire\s+now"), {"parts": many["parts"][:2]})
 
 
-def test_every_regex_shape_the_validator_accepts_finishes_on_adversarial_input_within_a_second():
+# The validator bounds an owner pattern's worst-case steps on a REGEX_TEXT_CAP-character value, not
+# its shape: "a.*c" is quadratic by design, so these searches are checked against a fixed budget
+# at that one size rather than for linear growth. The search runs in C, which coverage's tracer
+# does not slow; each budget is at least ten times what the searches cost under coverage (and
+# never under 2 s), while a shape the validator refuses takes tens of seconds.
+
+
+def test_every_regex_shape_the_validator_accepts_finishes_on_adversarial_input_in_bounded_time():
     # One worst case per kind of shape the validator accepts: one open-ended repeat (leading,
     # inner, of a group), bounded repeats multiplying to the bounded cap, optional characters,
-    # alternatives, a fixed repeat inside a bounded one.
+    # alternatives, a fixed repeat inside a bounded one. About 0.25 s of CPU in all.
     shapes = [
         ("a.*c", "a" * 4000),
         (".*c", "a" * 4000),
@@ -553,14 +569,16 @@ def test_every_regex_shape_the_validator_accepts_finishes_on_adversarial_input_w
             regex_budget_s=10.0,  # measure the searches themselves, not the budget
         )
         assert all(h.note != texts.rule_failed_note(owner_rule.name, owner=True) for h in hits)
-    assert time.process_time() - started < 1.0
+    assert time.process_time() - started < 3.0
 
 
-def test_the_slowest_pattern_shapes_the_validator_accepts_each_finish_well_within_a_second_on_hostile_input():
+def test_the_slowest_pattern_shapes_the_validator_accepts_each_finish_in_bounded_time_on_hostile_input():
     # The accepted shapes whose step estimate sits closest to grammar.MAX_SEARCH_STEPS, each on
     # the text that makes it work hardest: an open-ended repeat before a class run or a word,
-    # and a bounded repeat before seven fixed ones. About 0.1 s each on an idle machine; the
-    # bound is generous because other processes slow even CPU time down.
+    # and a bounded repeat before seven fixed ones. 0.02-0.36 s each, with or without coverage;
+    # the bound is ten times the slowest because other processes slow even CPU time down.
+    # test_tool_rules_grammar.py pins the fix for the recheck's shapes below (groups compiled
+    # non-capturing, multi-character repeat bodies weighted) without a clock.
     shapes = [
         (r".*\d{4}", "111a" * 1000),
         (r"inv.*\d{4}", "inv111a" * 571),
@@ -589,13 +607,14 @@ def test_the_slowest_pattern_shapes_the_validator_accepts_each_finish_well_withi
         )
         spent = time.process_time() - started
         assert all(h.note != texts.rule_failed_note("Near the limit", owner=True) for h in hits)
-        assert spent < 1.0, (pattern, spent)
+        assert spent < 4.0, (pattern, spent)
 
 
 def test_a_stored_rule_whose_pattern_todays_checks_refuse_asks_without_running_the_search():
     # A row saved before the nested-repeat and step checks (or edited in the database) is never
     # searched: compiling it fails, so the rule asks at once instead of holding the server for
-    # the twenty seconds ".*(?:a{50}){50}b" takes on 4,000 "a"s.
+    # the twenty seconds ".*(?:a{50}){50}b" takes on 4,000 "a"s. Asking costs about a
+    # millisecond; the bound only has to tell that from a search.
     engine.applies_to("mcp.x.send")
     hits = []
     started = time.process_time()
@@ -610,7 +629,7 @@ def test_a_stored_rule_whose_pattern_todays_checks_refuse_asks_without_running_t
                 regex_budget_s=10.0,
             )
         )
-    assert time.process_time() - started < 1.0
+    assert time.process_time() - started < 2.0
     assert [h.note for h in hits] == [
         texts.rule_failed_note(f"Stale {index}", owner=True) for index in range(3)
     ]
@@ -902,42 +921,49 @@ def test_parse_number_reads_amounts_and_refuses_everything_else():
 
 
 def test_a_long_hostile_value_is_read_in_linear_time():
+    # Each value as (the value at n, the n this test reads), so it can be timed against an
+    # eighth of itself.
     hostile = {
-        "a": "x" * 200_000 + "@",
-        "b": "a@" * 50_000,
-        "c": "a." * 50_000 + "b",
-        "d": "https://" + "a" * 100_000,
-        "e": "1-" * 100_000,
+        "a": (lambda n: "x" * n + "@", 200_000),
+        "b": (lambda n: "a@" * n, 50_000),
+        "c": (lambda n: "a." * n + "b", 50_000),
+        "d": (lambda n: "https://" + "a" * n, 100_000),
+        "e": (lambda n: "1-" * n, 100_000),
         # An unclosed display name padded with spaces or tabs: the old "<\s*...+?\s*>" pattern
         # split the run three ways (about 25 s for 4,000 spaces, hours for these).
-        "f": "a@b.com, <" + " " * 20_000 + "x",
-        "g": "a@b.com, <" + "\t" * 20_000 + "x",
-        "h": "Bob <" + " " * 20_000 + "bob@x.com" + " " * 20_000,
+        "f": (lambda n: "a@b.com, <" + " " * n + "x", 20_000),
+        "g": (lambda n: "a@b.com, <" + "\t" * n + "x", 20_000),
+        "h": (lambda n: "Bob <" + " " * n + "bob@x.com" + " " * n, 20_000),
     }
-    started = time.process_time()
-    values.addresses_in(hostile)
-    values.whole_addresses(hostile)
-    values.links_in(hostile)
-    for text in hostile.values():
-        values.bare_hosts_in(text)
-        values.simple_form(text)
-    assert time.process_time() - started < 2.0
+    readers = (
+        lambda text: values.addresses_in({"value": text}),
+        lambda text: values.whole_addresses({"value": text}),
+        lambda text: values.links_in({"value": text}),
+        values.bare_hosts_in,
+        values.simple_form,
+    )
+    for key, (build, size) in hostile.items():
+        for read in readers:
+            assert reads_linearly(read, build, size), (key, read)
+
+
+def _padded_write(n):
+    padded = "a@b.com, <" + " " * n + "x"
+    return {
+        "to": padded,
+        "cc": ["x@y.com", "a@b.com, <" + "\t" * n + "x"],
+        "fields": {"text": padded, "list": "c@d.com; <" + " " * n},
+    }
 
 
 def test_the_builtin_rules_read_a_hostile_unclosed_display_name_on_an_mcp_write_in_linear_time():
     # B1 and B2 read every whole-address leaf of a write that declares no recipients (every MCP
     # write, memory and browser fill text), with no time budget, and injected content can steer
     # what the model puts there. Before the fix these four values took hours.
-    padded = "a@b.com, <" + " " * 20_000 + "x"
-    arguments = {
-        "to": padded,
-        "cc": ["x@y.com", "a@b.com, <" + "\t" * 20_000 + "x"],
-        "fields": {"text": padded, "list": "c@d.com; <" + " " * 20_000},
-    }
-    view = mcp_call(arguments)
-    started = time.process_time()
-    hits = run(view, turn_view=turn("hi", read=read_from("x@y.com")))
-    assert time.process_time() - started < 2.0
+    owner = turn("hi", read=read_from("x@y.com"))
+    assert reads_linearly(lambda arguments: run(mcp_call(arguments), turn_view=owner), _padded_write, 20_000)
+    view = mcp_call(_padded_write(20_000))
+    hits = run(view, turn_view=owner)
     # The whole address in "cc" still counts; the padded values are not address lists.
     assert ids(hits) == ["builtin:untrusted_recipient"]
     assert [a.text for _, a in builtins.address_arguments(view)] == ["x@y.com"]
@@ -1123,17 +1149,20 @@ def test_an_attachment_note_is_removed_whole_even_when_the_file_name_repeats_its
 
 def test_attachment_notes_are_found_in_linear_time_on_hostile_pasted_text():
     hostile = [
-        "[Attached file: '" + "' (" * 20_000,
-        ("[Attached file: 'x' (" + "a" * 50) * 2_000,
-        "[Attached file: 'a.pdf' (PDF) - file_id 1; read it with files.read; its text is "
-        "untrusted data] " * 2_000
-        + "x" * 50_000,
-        "[Attached file: '" * 20_000,
+        (lambda n: "[Attached file: '" + "' (" * n, 20_000),
+        (lambda n: ("[Attached file: 'x' (" + "a" * 50) * n, 2_000),
+        (
+            lambda n: "[Attached file: 'a.pdf' (PDF) - file_id 1; read it with files.read; its text is "
+            "untrusted data] " * n
+            + "x" * (25 * n),
+            2_000,
+        ),
+        (lambda n: "[Attached file: '" * n, 20_000),
     ]
-    started = time.process_time()
-    for text in hostile:
-        context.owner_text_of([{"role": "user", "content": text}])
-    assert time.process_time() - started < 2.0
+    for build, size in hostile:
+        assert reads_linearly(
+            lambda text: context.owner_text_of([{"role": "user", "content": text}]), build, size
+        ), build(1)
 
 
 def test_read_content_indicators_use_the_rules_own_spellings_and_cover_an_addresses_domain():
@@ -1159,15 +1188,20 @@ def test_history_indicators_are_read_in_linear_time_from_a_long_crawler_reply():
     # (its email pattern rescans the run from every position); Crawler's replies can be that
     # long and injected content can steer them.
     messages = [
-        {"role": "assistant", "content": "a." * 20_000 + " and " + "b-" * 20_000},
-        {"role": "assistant", "content": "x" * 40_000 + "@" + "y." * 20_000},
-        {"role": "user", "content": "<tool_result_0123456789abcdef " * 4_000},
-        {"role": "user", "content": "[Conversation summary of 9 earlier messages]\n" + "a." * 20_000},
+        (lambda n: {"role": "assistant", "content": "a." * n + " and " + "b-" * n}, 20_000),
+        (lambda n: {"role": "assistant", "content": "x" * (2 * n) + "@" + "y." * n}, 20_000),
+        (lambda n: {"role": "user", "content": "<tool_result_0123456789abcdef " * n}, 4_000),
+        (
+            lambda n: {"role": "user", "content": "[Conversation summary of 9 earlier messages]\n" + "a." * n},
+            20_000,
+        ),
     ]
-    started = time.process_time()
-    context.history_indicators_of(messages)
-    context.owner_text_of(messages)
-    assert time.process_time() - started < 2.0
+    for build, size in messages:
+        for read in (context.history_indicators_of, context.owner_text_of):
+            assert reads_linearly(lambda message, read=read: read([message]), build, size), (
+                read,
+                build(1),
+            )
 
 
 def test_an_unclosed_tool_result_block_counts_as_read_to_the_end_of_the_message():
@@ -1258,18 +1292,16 @@ def test_untrusted_recipient_and_many_recipients_see_through_any_display_name_on
 
 def test_address_lists_with_hostile_quotes_comments_and_brackets_are_read_in_linear_time():
     hostile = [
-        '"' * 40_000 + "@",
-        "(" * 40_000 + "a@b.com",
-        "a@b.com, " + '"a' * 20_000,
-        "T" * 40_000 + ":a@b.com",
-        "<" * 40_000 + "a@b.com",
-        "a@b.com," * 10_000,
-        '"\\' * 20_000 + "@",
+        (lambda n: '"' * n + "@", 40_000),
+        (lambda n: "(" * n + "a@b.com", 40_000),
+        (lambda n: "a@b.com, " + '"a' * n, 20_000),
+        (lambda n: "T" * n + ":a@b.com", 40_000),
+        (lambda n: "<" * n + "a@b.com", 40_000),
+        (lambda n: "a@b.com," * n, 10_000),
+        (lambda n: '"\\' * n + "@", 20_000),
     ]
-    started = time.process_time()
-    for value in hostile:
-        values.whole_addresses(value)
-    assert time.process_time() - started < 2.0
+    for build, size in hostile:
+        assert reads_linearly(values.whole_addresses, build, size), build(2)
 
 
 # ---------------------------------------------------------------------------
@@ -1829,35 +1861,41 @@ async def test_the_call_check_escalates_an_auto_run_invite_to_an_rfc_5322_addres
 
 
 def test_rfc_5322_local_parts_quoted_local_parts_and_lenient_link_spellings_are_read_in_linear_time():
+    # A fixed 4 s for the lot failed under CI's coverage tracer (4.37 s); each input is now timed
+    # against an eighth of itself, per reader, so a reader that turns super-linear on one of them
+    # fails on its own.
     hostile = [
-        ('"' + BACKSLASH) * 40_000 + '"@x.com',
-        (BACKSLASH + '"') * 40_000 + '"@x.com',
-        ('"' + BACKSLASH + '"x') * 20_000 + '"@x.com',
-        ('"' + "a" * 63) * 2_000 + '"@x.com',
-        "'" * 100_000 + "@x.com",
-        "=" * 100_000 + "@",
-        "!#$%&'*+/=?^`{|}~" * 6_000 + "@x.com",
-        "a@" * 50_000,
-        "@" * 100_000,
-        "＠" * 100_000,
-        "a@[" * 30_000,
-        "a(b)@c.d, " * 10_000,
-        "https:" + "/" * 100_000 + "x",
-        "https:" + (BACKSLASH + "/") * 50_000,
-        "https:/" * 30_000,
-        "https://" + "@" * 100_000,
-        "https://a" + "%" * 100_000,
-        ("https://x.com" + BACKSLASH) * 20_000,
-        "https://[" * 30_000,
+        (lambda n: ('"' + BACKSLASH) * n + '"@x.com', 40_000),
+        (lambda n: (BACKSLASH + '"') * n + '"@x.com', 40_000),
+        (lambda n: ('"' + BACKSLASH + '"x') * n + '"@x.com', 20_000),
+        (lambda n: ('"' + "a" * 63) * n + '"@x.com', 2_000),
+        (lambda n: "'" * n + "@x.com", 100_000),
+        (lambda n: "=" * n + "@", 100_000),
+        (lambda n: "!#$%&'*+/=?^`{|}~" * n + "@x.com", 6_000),
+        (lambda n: "a@" * n, 50_000),
+        (lambda n: "@" * n, 100_000),
+        (lambda n: "＠" * n, 100_000),
+        (lambda n: "a@[" * n, 30_000),
+        (lambda n: "a(b)@c.d, " * n, 10_000),
+        (lambda n: "https:" + "/" * n + "x", 100_000),
+        (lambda n: "https:" + (BACKSLASH + "/") * n, 50_000),
+        (lambda n: "https:/" * n, 30_000),
+        (lambda n: "https://" + "@" * n, 100_000),
+        (lambda n: "https://a" + "%" * n, 100_000),
+        (lambda n: ("https://x.com" + BACKSLASH) * n, 20_000),
+        (lambda n: "https://[" * n, 30_000),
     ]
-    started = time.process_time()
-    for text in hostile:
-        values.address_scan(text)
-        values.whole_address_scan(text)
-        values.links_in(text)
-        values.hosts_in(text)
-        context.read_indicators(text)
-        context.owner_hosts_of(text)
-        context.owner_addresses_of(text)
-    run(forward(hostile), turn_view=turn("hi"), org=ORG)
-    assert time.process_time() - started < 4.0
+    owner = turn("hi")
+    readers = (
+        values.address_scan,
+        values.whole_address_scan,
+        values.links_in,
+        values.hosts_in,
+        context.read_indicators,
+        context.owner_hosts_of,
+        context.owner_addresses_of,
+        lambda text: run(forward([text]), turn_view=owner, org=ORG),
+    )
+    for build, size in hostile:
+        for read in readers:
+            assert reads_linearly(read, build, size), (read, build(2))

@@ -35,6 +35,7 @@ from services.site_rules.snapshot import (
     overlapping_builtin,
     read_notice,
 )
+from tests.linear_time import scales_linearly
 from tests.site_rules_fakes import snapshot_of
 
 BLOCKED = messages.NAVIGATION_BLOCKED
@@ -460,24 +461,28 @@ def test_a_blocked_site_stays_blocked_however_invisible_or_newer_letters_spell_i
     assert snapshot.navigation_reason(url, exempt=False) == BLOCKED
 
 
+def _casino_url(host: str) -> str:
+    return "https://" + host + ".example-casino.com/"
+
+
 @pytest.mark.parametrize(
-    "url",
+    ("host", "size"),
     [
         # The checker's case: a megabyte host of ten-letter labels (36 s before).
-        "https://" + ".".join(["abcdefghij"] * 100_000) + ".example-casino.com/",
+        (lambda n: ".".join(["abcdefghij"] * n), 100_000),
         # A megabyte of leading dots (each one used to shift the whole label list).
-        "https://" + "." * 1_000_000 + "www.example-casino.com/",
+        (lambda n: "." * n + "www", 1_000_000),
         # One label of 20,000 distinct letters (the punycode encoder is quadratic).
-        "https://" + "".join(chr(0x4E00 + i) for i in range(20_000)) + ".example-casino.com/",
+        (lambda n: "".join(chr(0x4E00 + i) for i in range(n)), 20_000),
         # The recheck's case: combining marks out of canonical order (NFKC
         # sorts them by insertion, quadratic), raw and percent-encoded (9.5 s
         # for a megabyte before the host was mapped label by label).
-        "https://a" + "̖́" * 250_000 + ".example-casino.com/",
-        "https://a" + "%CC%81%CC%96" * 90_000 + ".example-casino.com/",
+        (lambda n: "a" + "\u0301\u0316" * n, 250_000),
+        (lambda n: "a" + "%CC%81%CC%96" * n, 90_000),
         # Many labels of out-of-order marks, each just under the mapping limit.
-        "https://" + ".".join(["̖́" * 1_000] * 250) + ".example-casino.com/",
+        (lambda n: ".".join(["\u0301\u0316" * 1_000] * n), 250),
         # A letter NFKC writes as eighteen (unicodedata grows its buffer slowly).
-        "https://" + "ﷺ" * 100_000 + ".example-casino.com/",
+        (lambda n: "\ufdfa" * n, 100_000),
     ],
     ids=[
         "ten-letter-labels",
@@ -489,20 +494,22 @@ def test_a_blocked_site_stays_blocked_however_invisible_or_newer_letters_spell_i
         "eighteen-fold-letter",
     ],
 )
-def test_judging_a_megabyte_hostile_url_stays_fast_and_still_finds_the_rule(url):
+def test_judging_a_megabyte_hostile_url_takes_linear_time_and_still_finds_the_rule(host, size):
     # The guard judges every frame a page opens, on the event loop, before
-    # any DNS step. The bound is generous (the machine may be busy); the
-    # work is a few passes over the URL, tens of milliseconds.
-    import time
-
+    # any DNS step: a few passes over the URL, tens of milliseconds. The URL
+    # is timed against the same URL with an eighth of its hostile host
+    # (tests/linear_time.py), not against a wall-clock budget, which CI's
+    # coverage tracer makes several times slower.
     snapshot = snapshot_of({"*.example-casino.com": "blocked", "*.chase.com": "trusted"})
-    started = time.perf_counter()
-    reason = snapshot.navigation_reason(url, exempt=True)
-    verdict = snapshot.page_verdict(url, exempt=False)
-    elapsed = time.perf_counter() - started
+
+    def judge(n):
+        url = _casino_url(host(n))
+        return snapshot.navigation_reason(url, exempt=True), snapshot.page_verdict(url, exempt=False)
+
+    assert scales_linearly(judge, size)
+    reason, verdict = judge(size)
     assert reason == BLOCKED
     assert (verdict.kind, verdict.pattern) == ("blocked", "*.example-casino.com")
-    assert elapsed < 5.0, f"{elapsed:.1f} s"
 
 
 def test_a_stored_row_that_decodes_into_a_wildcard_is_skipped_not_read_as_one():

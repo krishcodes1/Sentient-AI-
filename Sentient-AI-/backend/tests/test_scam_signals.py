@@ -4,8 +4,8 @@ text-direction controls are strong signs while joiners inside emoji and Persian 
 counted; the wording patterns catch password, code and odd-payment requests and leave a
 newsletter, an invite and a friend's text alone; Markdown, HTML and Slack links give their
 label and real address; hosts are shown in punycode; a reason the AI wrote is dropped when it
-holds a link, a domain, an address or a phone number; and every pattern stays fast on a
-megabyte of its worst case.
+holds a link, a domain, an address or a phone number; and every pattern reads a megabyte of
+its worst case in linear time.
 
 Why it exists: these checks run on every scam check with no network and no model, and their
 sentences are what a person reads first. A sentence that quoted the message, or showed a
@@ -16,7 +16,7 @@ Non-ASCII test data is written as \\u escapes (this file runs in the Windows CI 
 
 from __future__ import annotations
 
-import time
+import re
 
 import pytest
 
@@ -36,6 +36,7 @@ from services.security.scam_signals import (
     hidden_character_signals,
     language_signals,
 )
+from tests.linear_time import scales_linearly
 
 CYRILLIC_A = "\u0430"
 PAYPAL_LOOKALIKE = f"p{CYRILLIC_A}ypal.com"  # "paypal.com" with a Cyrillic a
@@ -511,6 +512,28 @@ def test_amounts_times_and_sentences_with_dots_are_still_kept():
         assert clean_ai_reason(reason) == reason, reason
 
 
+# The hostile-input checks below time a megabyte against an eighth of the same text in the same
+# process (tests/linear_time.py), not against a wall-clock budget: CI runs the suite under
+# coverage, which slows the Python around each search several times over, and a fixed "under 2
+# seconds" failed linear code there while a fast machine would still pass quadratic code.
+_MEGABYTE = 1_000_000
+
+
+def _repeated(seed: str, size: int) -> str:
+    """*seed* over and over, cut to *size* characters."""
+    return (seed * (size // len(seed) + 1))[:size]
+
+
+def _scans_linearly(pattern: re.Pattern[str], seed: str, *, tail: str = "") -> bool:
+    """finditer over a megabyte of *seed* (then *tail*) scales like an eighth of it."""
+
+    def scan(size: int) -> None:
+        for _ in pattern.finditer(_repeated(seed, size) + tail):
+            pass
+
+    return scales_linearly(scan, _MEGABYTE)
+
+
 _REASON_SEEDS = (
     "1 ", "1-", "1_", "1, ", "12345 -- ", "a:", "aaaa:", "1.1.1 ", "1 . ", "x dot ", "&a",
     "&#1", "1-800-", "(888) ", "555-", "a.", "*.", "a .", "\u00b7", "a::", "\ufe0f.",
@@ -520,16 +543,12 @@ _REASON_SEEDS = (
 @pytest.mark.parametrize(
     "name", ["_PHONE", "_VANITY", "_IP_ADDRESS", "_DEFANGED_DOT", "_PUNCT_AT_DOT", "_CHARACTER_REFERENCE"]
 )
-def test_each_ai_reason_rule_finishes_a_megabyte_of_its_worst_case_in_under_two_seconds(name):
+def test_each_ai_reason_rule_finishes_a_megabyte_of_its_worst_case_in_linear_time(name):
     # clean_ai_reason reads only the first few hundred characters, but each rule must stay
     # linear on its own too, so a later caller cannot make it slow.
     pattern = getattr(sig, name)
     for seed in _REASON_SEEDS:
-        text = _megabyte(seed) + "!"
-        started = time.perf_counter()
-        for _ in pattern.finditer(text):
-            pass
-        assert time.perf_counter() - started < 2.0, f"{name} is slow on {seed!r}"
+        assert _scans_linearly(pattern, seed, tail="!"), f"{name} is super-linear on {seed!r}"
 
 
 # The worst cases of the wording patterns: an ask verb with its object never arriving, a run of
@@ -547,27 +566,27 @@ _SEEDS = (
 )
 
 
-def _megabyte(seed: str) -> str:
-    size = 1_000_000
-    return (seed * (size // len(seed) + 1))[:size]
-
-
 @pytest.mark.parametrize("index", range(len(sig.WORDING_PATTERNS)))
-def test_every_pattern_finishes_a_megabyte_of_its_worst_case_in_under_two_seconds(index):
+def test_every_pattern_finishes_a_megabyte_of_its_worst_case_in_linear_time(index):
     pattern = sig.WORDING_PATTERNS[index]
     for seed in _SEEDS:
-        text = _megabyte(seed)
-        started = time.perf_counter()
-        for _ in pattern.finditer(text):
-            pass
-        assert time.perf_counter() - started < 2.0, f"{pattern.pattern[:60]} is slow on {seed!r}"
+        assert _scans_linearly(pattern, seed), f"{pattern.pattern[:60]} is super-linear on {seed!r}"
+
+
+def _runs_linearly(fn, text: str, size: int) -> bool:
+    """fn on the first *size* characters of *text* scales like fn on an eighth of them."""
+    return scales_linearly(lambda n: fn(text[:n]), size)
 
 
 @pytest.mark.parametrize(
     "seed", ["a.", "1 ", "<a href=", "[a](http://", "<http://x|", "http://", "\u200d", "\U000e0041", "x@y.", "send me the "]
 )
-def test_the_whole_local_pass_on_a_megabyte_of_hostile_text_is_bounded(seed):
-    text = _megabyte(seed)
+def test_the_whole_local_pass_on_a_megabyte_of_hostile_text_runs_in_linear_time(seed):
+    # Each step reads at most MAX_SCAN_CHARS of its text (analyse_text MAX_TEXT_CHARS,
+    # clean_ai_reason a few hundred characters), and past its cut a longer text costs it nothing
+    # more. So the cost is compared at the whole megabyte (a cut that stopped working) and at
+    # each cut (a step that turned super-linear below it), each time against an eighth.
+    text = _repeated(seed, _MEGABYTE)
     for fn in (
         language_signals,
         hidden_character_signals,
@@ -576,6 +595,5 @@ def test_the_whole_local_pass_on_a_megabyte_of_hostile_text_is_bounded(seed):
         lambda t: clean_ai_reason(t, limit=200),
         analyse_text,
     ):
-        started = time.perf_counter()
-        fn(text)
-        assert time.perf_counter() - started < 2.0, f"{fn} is slow on {seed!r}"
+        for size in (len(text), sig.MAX_SCAN_CHARS, MAX_TEXT_CHARS):
+            assert _runs_linearly(fn, text, size), f"{fn} is super-linear on {seed!r} up to {size:,}"

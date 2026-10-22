@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from typing import Any, Callable
 
 import httpx
 import pytest
@@ -48,6 +49,7 @@ from services.scam_check.channels import (
 from services.scam_check.verdict import headline
 from services.scam_check.web import NO_SERVICE
 from tests.conftest import telegram_dm
+from tests.linear_time import scales_linearly
 from tests.test_scam_check_service import (
     JPEG,
     PNG,
@@ -875,23 +877,28 @@ async def test_a_reply_to_a_message_from_another_chat_checks_the_quote_as_someon
     await svc._client.aclose()
 
 
-def test_every_trigger_pattern_finishes_a_long_worst_case_quickly():
-    import time
+def _matches_linearly(pattern: Any, build: Callable[[int], str], size: int) -> bool:
+    """scales_linearly for *pattern*.match on *build*'s text, written at *size* and at the eighth
+    of it the check times it against before the clock starts."""
+    texts = {n: build(n) for n in (size // 8, size)}
+    return scales_linearly(lambda n: pattern.match(texts[n]), size)
 
+
+def test_every_trigger_pattern_matches_a_long_worst_case_in_linear_time():
+    # Each 200,000-character worst case is timed against an eighth of it in the same process:
+    # a linear match grows 8x, a pattern that backtracks over the run from every position 64x.
     from services.scam_check.channels import SCAM_RE, SLACK_RE
 
     worst = [
-        (SCAM_RE, "/scam@" + "a" * 200_000 + "!"),
-        (SCAM_RE, "/scam" + " " * 200_000 + "x"),
-        (SLACK_RE, "is" + " " * 200_000 + "x"),
-        (SLACK_RE, "is this a" + " " * 200_000 + "x"),
-        (SLACK_RE, "scam" + " " * 200_000 + "checks"),
-        (SLACK_RE, "scam" + ":-" * 100_000),
+        (SCAM_RE, lambda n: "/scam@" + "a" * n + "!"),
+        (SCAM_RE, lambda n: "/scam" + " " * n + "x"),
+        (SLACK_RE, lambda n: "is" + " " * n + "x"),
+        (SLACK_RE, lambda n: "is this a" + " " * n + "x"),
+        (SLACK_RE, lambda n: "scam" + " " * n + "checks"),
+        (SLACK_RE, lambda n: "scam" + ":-" * (n // 2)),
     ]
-    for pattern, text in worst:
-        started = time.perf_counter()
-        pattern.match(text)
-        assert time.perf_counter() - started < 1.0, text[:12]
+    for pattern, build in worst:
+        assert _matches_linearly(pattern, build, 200_000), build(200_000)[:12]
 
 
 def test_the_stub_marker_is_gone_and_the_names_are_final():

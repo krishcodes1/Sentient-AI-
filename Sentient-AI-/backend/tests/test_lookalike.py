@@ -15,6 +15,8 @@ place. Written by WAVE 0, owned by S4 in WAVE 1. Pure: no network.
 
 from __future__ import annotations
 
+from typing import Callable
+
 import pytest
 
 from services.security import lookalike
@@ -36,6 +38,7 @@ from services.security.lookalike import (
     skeleton,
 )
 from services.tools.browser.checkout import merchant
+from tests.linear_time import scales_linearly
 
 CYRILLIC_AMAZON = "аmazon.com"  # Cyrillic а, renders exactly like amazon.com
 PUNYCODE_AMAZON = "аmazon".encode("idna").decode("ascii") + ".com"
@@ -276,21 +279,32 @@ def test_browser_host_reads_names_only_idna_2008_allows_and_decode_host_keeps_ch
         assert ascii_host(refused) is None, refused
 
 
+def _reads_linearly(read: Callable[[str], object], build: Callable[[int], str], size: int) -> bool:
+    """scales_linearly for *read* on *build*'s host, written at *size* and at the eighth of it the
+    check times it against before the clock starts. The fold table is built once, on the first
+    host that is not plain ASCII, so it is built here first and never timed."""
+    lookalike.fold_host(chr(0x4E00))
+    hosts = {n: build(n) for n in (size // 8, size)}
+    return scales_linearly(lambda n: read(hosts[n]), size)
+
+
 def test_a_host_too_long_to_be_a_name_is_refused_in_linear_time():
     """Python's punycode encoder is quadratic in a label's length: 20,000 distinct ideographs
-    took about 100 s before the length was checked first. Refused before encoding, a host at the
-    link checks' 32 KB cap takes milliseconds (the bound is generous: the machine may be busy)."""
-    import time
-
+    took about 100 s before the length was checked first. Refused before encoding, a host up to
+    the link checks' 32 KB cap is read in linear time: timed against a host an eighth as long in
+    the same process, where the encoder's cost grew 64x."""
     long_label = "".join(chr(0x4E00 + i) for i in range(32_000))
-    many_labels = ".".join(["ab"] * 10_000) + ".com"
-    start = time.perf_counter()
-    for host in (long_label + ".com", "xn--" + "a" * 32_000 + ".com", many_labels):
+
+    def read(host: str) -> None:
         assert ascii_host(host) is None
         lookalike.browser_host(host)
         decode_host(host)
         mixed_script_reading(host)
-    assert time.perf_counter() - start < 5
+
+    for host, size in ((lambda n: long_label[:n] + ".com", 32_000),
+                       (lambda n: "xn--" + "a" * n + ".com", 32_000),
+                       (lambda n: ".".join(["ab"] * n) + ".com", 10_000)):
+        assert _reads_linearly(read, host, size), host(size)[:20]
 
 
 # ── hosts folded the way a current browser folds them (review of S4, batch 2) ──
@@ -381,19 +395,19 @@ def test_characters_current_browsers_drop_are_dropped_and_joiners_kept_where_a_b
 def test_folding_a_hostile_host_stays_linear_in_its_length():
     """Hosts of a million characters built from what the fold works hardest on (joiners between
     joining letters or after viramas, combining marks, capital sharp s, Cherokee, padded
-    full-width digits, dropped fillers) are read in linear time (a generous bound; the machine
-    may be busy)."""
-    import time
+    full-width digits, dropped fillers) are read in linear time: each is timed against the same
+    unit repeated an eighth as often, in the same process."""
+
+    def fold(host: str) -> None:
+        lookalike.fold_host(host)
+        assert ascii_host(host) is None
+        lookalike.browser_host(host)
 
     units = [
         chr(0x628) + chr(0x200C), chr(0x915) + chr(0x94D) + chr(0x200D), chr(0x200C),
         chr(0x441) + chr(0x345) + chr(0x308), chr(0x1E9E) + "a", chr(0xAB70), chr(0xFF10),
         chr(0x3164) + "a.", OUTLINED["a"],
     ]
-    start = time.perf_counter()
     for unit in units:
-        host = unit * (1_000_000 // len(unit))
-        lookalike.fold_host(host)
-        assert ascii_host(host) is None
-        lookalike.browser_host(host)
-    assert time.perf_counter() - start < 20
+        # unit.__mul__ writes the host of n units; a million characters at the full size.
+        assert _reads_linearly(fold, unit.__mul__, 1_000_000 // len(unit)), hex(ord(unit[0]))

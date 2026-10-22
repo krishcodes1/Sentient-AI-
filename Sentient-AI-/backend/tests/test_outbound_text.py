@@ -14,8 +14,8 @@ that loads by itself); that addresses are read the way a browser reads them (no 
 backslashes, "\\@", escapes and entities); that remote images and encoded data (in one value or
 spread over many, in letters only, in subdomain labels, behind a trusted host's proxy) are
 flagged while platform uploads and ordinary links are not; that only scheme, userinfo, host and
-port survive origin_only; and that a megabyte of adversarial text is scanned in under two seconds
-(the cases the review of the early core found included).
+port survive origin_only; and that a megabyte of adversarial text is scanned in linear time (the
+cases the review of the early core found included).
 
 Why it exists: this module is the floor under every write Crawler makes (security S1). A missed
 tag character lets an injected instruction travel invisibly to another person; an over-eager
@@ -27,7 +27,6 @@ classes and CRLF handling).
 from __future__ import annotations
 
 import random
-import time
 import unicodedata
 from typing import Callable
 
@@ -50,6 +49,7 @@ from services.security.outbound_text import (
     hides_characters_in_address,
     origin_only,
 )
+from tests.linear_time import scales_linearly
 
 ZWSP, ZWNJ, ZWJ, WJ = "\u200b", "\u200c", "\u200d", "\u2060"
 LRM, RLM, ALM, BOM, SHY = "\u200e", "\u200f", "\u061c", "\ufeff", "\u00ad"
@@ -1189,10 +1189,12 @@ def test_a_host_too_long_to_look_up_is_refused_after_measuring_it_without_encodi
     # 6,000-character host of distinct ideographs held the event loop for 9.7 s (8.35 s for a
     # 12 KB body through the call check), which no asyncio bound can pre-empt. DNS carries no
     # label over 63 characters and no name over 253, so such a host loads nothing: it is refused.
-    assert _seconds(lambda: origin_only("https://" + _IDEOGRAPHS + "/")) < 0.1
     assert origin_only("https://" + _IDEOGRAPHS + "/") is None
-    body = "see https://" + _IDEOGRAPHS[:4000]
-    assert _seconds(lambda: findings(body)) < 0.5
+    assert findings("see https://" + _IDEOGRAPHS[:4000]) == []
+    # Timed against an eighth of the host in the same process: measured and refused, the cost
+    # grows with the host's length at most, where the codec's rescans grew with its square.
+    assert scales_linearly(lambda n: origin_only("https://" + _IDEOGRAPHS[:n] + "/"), 6000)
+    assert scales_linearly(lambda n: findings("see https://" + _IDEOGRAPHS[:n]), 4000)
     assert findings(f"![x](https://{_IDEOGRAPHS[:64]}.example/p.png)") == []
     # Thirty letters far apart need more than 63 characters of punycode; thirty neighbours fit.
     spread = "".join(chr(0x4E00 + 97 * index) for index in range(30))
@@ -1384,87 +1386,94 @@ _MB = 1_000_000
 _PROSE = (
     "Hello Ann, the report is at https://docs.example/r?id=7 and [the deck](https://d.example/x). "
 )
-# Built on demand: holding sixteen megabytes for the whole run would only slow the suite down.
-_ADVERSARIAL: dict[str, Callable[[], str]] = {
-    "open brackets": lambda: "[" * _MB,
-    "unclosed markdown links": lambda: "[a](" * (_MB // 4),
-    "one endless markdown url": lambda: "[a](https://x.example/" + "b" * _MB,
-    "unbalanced parentheses": lambda: "[a](https://x.example/" + "(" * _MB,
-    "unclosed titles": lambda: '[a](https://x.example/ "' + "b" * _MB,
-    "image openers": lambda: "![" * (_MB // 2),
-    "anchor openers": lambda: "<a " * (_MB // 3),
-    "anchors without closing tags": lambda: "<a href=x>" * (_MB // 10),
-    "one endless anchor tag": lambda: "<a " + "x" * _MB,
-    "schemes": lambda: "https://" * (_MB // 8),
-    "www prefixes": lambda: "www." * (_MB // 4),
-    "slack openers": lambda: "<https://a.example|" * (_MB // 19),
-    "css openers": lambda: "url(" * (_MB // 4),
-    "reference definitions and uses": lambda: (
-        "[a]: https://r.example/x\n[a][a] ![a]\n" * (_MB // 40)
+# Each builder writes its shape at about n characters (a megabyte in the test, and an eighth of
+# one to time it against). Built on demand: holding sixteen megabytes for the whole run would
+# only slow the suite down.
+_ADVERSARIAL: dict[str, Callable[[int], str]] = {
+    "open brackets": lambda n: "[" * n,
+    "unclosed markdown links": lambda n: "[a](" * (n // 4),
+    "one endless markdown url": lambda n: "[a](https://x.example/" + "b" * n,
+    "unbalanced parentheses": lambda n: "[a](https://x.example/" + "(" * n,
+    "unclosed titles": lambda n: '[a](https://x.example/ "' + "b" * n,
+    "image openers": lambda n: "![" * (n // 2),
+    "anchor openers": lambda n: "<a " * (n // 3),
+    "anchors without closing tags": lambda n: "<a href=x>" * (n // 10),
+    "one endless anchor tag": lambda n: "<a " + "x" * n,
+    "schemes": lambda n: "https://" * (n // 8),
+    "www prefixes": lambda n: "www." * (n // 4),
+    "slack openers": lambda n: "<https://a.example|" * (n // 19),
+    "css openers": lambda n: "url(" * (n // 4),
+    "reference definitions and uses": lambda n: (
+        "[a]: https://r.example/x\n[a][a] ![a]\n" * (n // 40)
     ),
-    "distinct remote images": lambda: "".join(
-        f"![i](https://h{i}.example/a.png) " for i in range(_MB // 32)
+    "distinct remote images": lambda n: "".join(
+        f"![i](https://h{i}.example/a.png) " for i in range(n // 32)
     ),
-    "distinct encoded links": lambda: "".join(
-        f"https://h{i}.example/?d={BASE64_64} " for i in range(_MB // 90)
+    "distinct encoded links": lambda n: "".join(
+        f"https://h{i}.example/?d={BASE64_64} " for i in range(n // 90)
     ),
-    "a long ordinary message": lambda: _PROSE * (_MB // len(_PROSE)),
-    # Added after the review of the early core.
-    "closing brackets after bare links": lambda: ("http://a" + ")" * 4087 + " ") * (_MB // 4096),
-    "dots and brackets after bare links": lambda: ("http://a" + ".)" * 2043 + " ") * (_MB // 4096),
-    "unclosed markdown images": lambda: "![a](" * (_MB // 5),
-    "markdown images inside link text": lambda: "[![a](" * (_MB // 6),
-    "brackets inside link text": lambda: "[a [b] " * (_MB // 7),
-    "balanced parentheses in one destination": lambda: "[a](https://x.example/" + "()" * (_MB // 2),
-    "quoted greater-than signs in one tag": lambda: '<img a="' + '>" b="' * (_MB // 6),
-    "src values without closing quotes": lambda: '<img src="' * (_MB // 10),
-    "tag openers inside one tag": lambda: "<img " * (_MB // 5),
-    "decoy attributes": lambda: '<img title=" src=https://a.example/" ' * (_MB // 36),
-    "srcset candidates": lambda: '<img srcset="' + "https://a.example/p.png 1x, " * (_MB // 28),
-    "letters-only runs": lambda: "https://a.example/?" + "&".join(["d=" + "ab" * 20] * (_MB // 43)),
-    "nested proxy links": lambda: "".join(
+    "a long ordinary message": lambda n: _PROSE * (n // len(_PROSE)),
+    # Added after the review of the early core. The run after each link grows with n and the
+    # 244 links stay, so trimming that rescans a run fails as well as a pass over the text.
+    "closing brackets after bare links": lambda n: (
+        ("http://a" + ")" * (4087 * n // _MB) + " ") * (_MB // 4096)
+    ),
+    "dots and brackets after bare links": lambda n: (
+        ("http://a" + ".)" * (2043 * n // _MB) + " ") * (_MB // 4096)
+    ),
+    "unclosed markdown images": lambda n: "![a](" * (n // 5),
+    "markdown images inside link text": lambda n: "[![a](" * (n // 6),
+    "brackets inside link text": lambda n: "[a [b] " * (n // 7),
+    "balanced parentheses in one destination": lambda n: "[a](https://x.example/" + "()" * (n // 2),
+    "quoted greater-than signs in one tag": lambda n: '<img a="' + '>" b="' * (n // 6),
+    "src values without closing quotes": lambda n: '<img src="' * (n // 10),
+    "tag openers inside one tag": lambda n: "<img " * (n // 5),
+    "decoy attributes": lambda n: '<img title=" src=https://a.example/" ' * (n // 36),
+    "srcset candidates": lambda n: '<img srcset="' + "https://a.example/p.png 1x, " * (n // 28),
+    "letters-only runs": lambda n: "https://a.example/?" + "&".join(["d=" + "ab" * 20] * (n // 43)),
+    "nested proxy links": lambda n: "".join(
         f"![n](https://www.notion.so/image/https%3A%2F%2Fh{i}.example%2Fp.png) "
-        for i in range(_MB // 70)
+        for i in range(n // 70)
     ),
     # Added after the recheck of the early core.
-    "anchors with references before one closing tag": lambda: (
-        ("<a src=x>&#1;" * 153 + "</a>") * (_MB // 2000)
+    "anchors with references before one closing tag": lambda n: (
+        ("<a src=x>&#1;" * 153 + "</a>") * (n // 2000)
     ),
-    "anchors with unfinished references": lambda: ("<a src=x>&#0" * 153 + "</a>") * (_MB // 1900),
-    "anchors with named references": lambda: ("<a src=x>&abcdefgh" * 110 + "</a>") * (_MB // 2000),
-    "anchors before one closing tag": lambda: ("<a src=x>" * 221 + "</a>") * (_MB // 2000),
-    "spaces before an at sign": lambda: " " * _MB + "x" + ZWSP + "@",
-    "spaces and dots": lambda: ". " * (_MB // 2) + "@",
-    "camo proxies": lambda: "".join(
+    "anchors with unfinished references": lambda n: ("<a src=x>&#0" * 153 + "</a>") * (n // 1900),
+    "anchors with named references": lambda n: ("<a src=x>&abcdefgh" * 110 + "</a>") * (n // 2000),
+    "anchors before one closing tag": lambda n: ("<a src=x>" * 221 + "</a>") * (n // 2000),
+    "spaces before an at sign": lambda n: " " * n + "x" + ZWSP + "@",
+    "spaces and dots": lambda n: ". " * (n // 2) + "@",
+    "camo proxies": lambda n: "".join(
         f"![c](https://camo.githubusercontent.com/{i:040x}/{'68747470733a2f2f' * 4}) "
-        for i in range(_MB // 120)
+        for i in range(n // 120)
     ),
-    "css escapes and entities": lambda: "url(&#104;\\68" * (_MB // 14),
-    "link text holding addresses": lambda: (
-        "[https://a.example/x](https://b.example/) " * (_MB // 42)
+    "css escapes and entities": lambda n: "url(&#104;\\68" * (n // 14),
+    "link text holding addresses": lambda n: (
+        "[https://a.example/x](https://b.example/) " * (n // 42)
     ),
-    "srcset commas": lambda: '<img srcset="' + "a.png 1x," * (_MB // 9) + '">',
-    "long numeric references": lambda: '<img src="&#' + "9" * _MB + '">',
+    "srcset commas": lambda n: '<img srcset="' + "a.png 1x," * (n // 9) + '">',
+    "long numeric references": lambda n: '<img src="&#' + "9" * n + '">',
     # Added after the batch-2 check: hosts outside ASCII cost encoding work, and ports past
     # int()'s digit limit.
-    "distinct international image hosts": lambda: "".join(
+    "distinct international image hosts": lambda n: "".join(
         f"![i](https://{_ideographs(i, 18)}.{_ideographs(i + 1, 18)}.example/a.png) "
-        for i in range(_MB // 60)
+        for i in range(n // 60)
     ),
-    "international labels too long to look up": lambda: "".join(
-        f"![i](https://{_ideographs(i, 59)}.example/a.png) " for i in range(_MB // 80)
+    "international labels too long to look up": lambda n: "".join(
+        f"![i](https://{_ideographs(i, 59)}.example/a.png) " for i in range(n // 80)
     ),
-    "half-width kana labels that shrink when mapped": lambda: "".join(
-        f"![i](https://{_kana(i)}.example/a.png) " for i in range(_MB // 270)
+    "half-width kana labels that shrink when mapped": lambda n: "".join(
+        f"![i](https://{_kana(i)}.example/a.png) " for i in range(n // 270)
     ),
-    "css images on international hosts behind entities": lambda: "".join(
+    "css images on international hosts behind entities": lambda n: "".join(
         f"url(https://&#x4e00;{_ideographs(i, 18)}.{_ideographs(i + 2, 18)}/p.png) "
-        for i in range(_MB // 60)
+        for i in range(n // 60)
     ),
-    "one endless international host": lambda: "https://" + (_IDEOGRAPHS * 170)[:_MB],
-    "ports of thousands of digits": lambda: (
+    "one endless international host": lambda n: "https://" + (_IDEOGRAPHS * 170)[:n],
+    "ports of thousands of digits": lambda n: (
         ("https://a.example:" + "1" * 5000 + "/ url(https://b.example:" + "2" * 5000 + "/) ")
-        * (_MB // 10_050)
+        * (n // 10_050)
     ),
 }
 
@@ -1482,24 +1491,34 @@ def _kana(index: int) -> str:
     return "".join(chr(rng.randrange(0xFF66, 0xFF9E)) + "\uff9e" for _ in range(126))
 
 
-def _seconds(step: Callable[[], object]) -> float:
-    started = time.perf_counter()
-    step()
-    return time.perf_counter() - started
+def _both_sizes(build: Callable[[int], str], size: int) -> dict[int, str]:
+    """*build* at *size* and at the eighth of it scales_linearly times it against, built before
+    the clock starts."""
+    return {n: build(n) for n in (size // 8, size)}
 
 
 @pytest.mark.parametrize("name", sorted(_ADVERSARIAL))
-def test_scanning_a_megabyte_of_adversarial_link_text_finishes_within_two_seconds(name):
-    text = _ADVERSARIAL[name]()
-    # Each step is one pass over the megabyte, as the check makes it (one find_links per
-    # field with SCAN_LINK_LIMIT, then exfil_findings): a quadratic blow-up takes many
-    # seconds per step, while a loaded machine only slows each linear pass a little.
-    assert _seconds(lambda: find_links(text)) < 2.0, name
-    found: list[FoundLink] = []
-    assert _seconds(lambda: found.extend(find_links(text, limit=SCAN_LINK_LIMIT))) < 2.0, name
-    assert _seconds(lambda: exfil_findings(found)) < 2.0, name
-    assert _seconds(lambda: clean_text(text)) < 2.0, name
-    assert _seconds(lambda: hides_characters_in_address(text)) < 2.0, name
+def test_a_megabyte_of_adversarial_link_text_is_scanned_in_linear_time(name):
+    # Each step is one pass over the text, as the check makes it (one find_links per field
+    # with SCAN_LINK_LIMIT, then exfil_findings on what it found), timed on the megabyte
+    # against an eighth of the same shape in the same process: a linear pass grows 8x, one
+    # that rescans from every position 64x and more. Not a wall-clock budget: coverage's
+    # tracer made linear passes miss a fixed two seconds on CI.
+    texts = _both_sizes(_ADVERSARIAL[name], _MB)
+    found: dict[int, list[FoundLink]] = {}
+
+    def scan(n: int) -> None:
+        found[n] = find_links(texts[n], limit=SCAN_LINK_LIMIT)
+
+    steps: dict[str, Callable[[int], object]] = {
+        "find_links": lambda n: find_links(texts[n]),
+        "find_links with the scan limit": scan,
+        "exfil_findings": lambda n: exfil_findings(found[n]),  # what scan found at that size
+        "clean_text": lambda n: clean_text(texts[n]),
+        "hides_characters_in_address": lambda n: hides_characters_in_address(texts[n]),
+    }
+    for step, run in steps.items():
+        assert scales_linearly(run, _MB), f"{name}: {step}"
 
 
 def test_closing_brackets_after_a_bare_link_are_trimmed_by_counting_each_bracket_once():
@@ -1512,8 +1531,13 @@ def test_closing_brackets_after_a_bare_link_are_trimmed_by_counting_each_bracket
     assert trim("https://a.example/[x])") == "https://a.example/[x]"
     assert trim("https://a.example/{x}}]") == "https://a.example/{x}"
     assert trim("https://a.example/x") == "https://a.example/x"
-    text = ("http://a" + ")" * 4087 + " ") * (_MB // 4096)
-    assert _seconds(lambda: find_links(text, limit=SCAN_LINK_LIMIT)) < 2.0
+    # Linear in the run of brackets: 8x the run costs at most 32x, where recounting the URL
+    # once per bracket grew with the square of the run. One link with a long run, then the
+    # megabyte of links whose runs grow (the 244 links stay).
+    assert scales_linearly(lambda n: trim("https://a.example/x" + ")" * n), 32_000)
+    assert scales_linearly(lambda n: trim("https://a.example/x.)]}." + ".)" * (n // 2)), 32_000)
+    texts = _both_sizes(_ADVERSARIAL["closing brackets after bare links"], _MB)
+    assert scales_linearly(lambda n: find_links(texts[n], limit=SCAN_LINK_LIMIT), _MB)
 
 
 def test_a_small_limit_returns_exactly_the_first_links_of_a_long_text():
@@ -1529,34 +1553,39 @@ def test_a_small_limit_returns_exactly_the_first_links_of_a_long_text():
         assert find_links(text, limit=limit) == everything[:limit], limit
 
 
-_INVISIBLE_MEGABYTES: dict[str, Callable[[], str]] = {
-    "one run": lambda: ZWSP * _MB,
-    "scattered between letters": lambda: ("a" + ZWSP) * (_MB // 2),
-    "tag characters": lambda: tags("x") * _MB,
-    "chained selectors": lambda: "x" + VS16 * _MB,
-    "emoji joiners": lambda: (chr(0x1F468) + ZWJ) * (_MB // 2),
-    "emoji joiners and sixteen scattered": lambda: (
-        (chr(0x1F468) + ZWJ) * (_MB // 4) + ("a" + ZWSP) * 16
+_INVISIBLE_MEGABYTES: dict[str, Callable[[int], str]] = {
+    "one run": lambda n: ZWSP * n,
+    "scattered between letters": lambda n: ("a" + ZWSP) * (n // 2),
+    "tag characters": lambda n: tags("x") * n,
+    "chained selectors": lambda n: "x" + VS16 * n,
+    "emoji joiners": lambda n: (chr(0x1F468) + ZWJ) * (n // 2),
+    "emoji joiners and sixteen scattered": lambda n: (
+        (chr(0x1F468) + ZWJ) * (n // 4) + ("a" + ZWSP) * 16
     ),
-    "persian non-joiners": lambda: (chr(0x0645) + ZWNJ) * (_MB // 2),
-    "hebrew marks": lambda: (chr(0x05E9) + LRM) * (_MB // 2),
-    "overrides": lambda: (RLO + "a") * (_MB // 2),
-    "flags and tags": lambda: (ENGLAND + tags("x")) * (_MB // 8),
+    "persian non-joiners": lambda n: (chr(0x0645) + ZWNJ) * (n // 2),
+    "hebrew marks": lambda n: (chr(0x05E9) + LRM) * (n // 2),
+    "overrides": lambda n: (RLO + "a") * (n // 2),
+    "flags and tags": lambda n: (ENGLAND + tags("x")) * (n // 8),
 }
 
 
 @pytest.mark.parametrize("name", sorted(_INVISIBLE_MEGABYTES))
-def test_cleaning_a_megabyte_of_invisible_characters_finishes_within_two_seconds(name):
-    text = _INVISIBLE_MEGABYTES[name]()
-    result = TextClean(text, {}, 0)
+def test_cleaning_a_megabyte_of_invisible_characters_takes_linear_time(name):
+    # Timed on the megabyte against an eighth of the same shape, as above.
+    texts = _both_sizes(_INVISIBLE_MEGABYTES[name], _MB)
+    cleaned: dict[int, TextClean] = {}
 
-    def clean() -> None:
-        nonlocal result
-        result = clean_text(text)
+    def clean(n: int) -> None:
+        cleaned[n] = clean_text(texts[n])
 
-    assert _seconds(clean) < 2.0, name
-    assert _seconds(lambda: clean_safe_subset(text)) < 2.0, name
-    assert _seconds(lambda: hidden_count(text)) < 2.0, name
+    steps: dict[str, Callable[[int], object]] = {
+        "clean_text": clean,
+        "clean_safe_subset": lambda n: clean_safe_subset(texts[n]),
+        "hidden_count": lambda n: hidden_count(texts[n]),
+    }
+    for step, run in steps.items():
+        assert scales_linearly(run, _MB), f"{name}: {step}"
+    result = cleaned[_MB]
     assert clean_text(result.text).text is result.text
 
 

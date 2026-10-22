@@ -451,10 +451,44 @@ def build_review_messages(
 # ── The reply ────────────────────────────────────────────────────────────
 
 
+# A real review nests three or four levels deep. Anything far deeper is a reply the pasted
+# message shaped, and how deep json can go before it gives up depends on the platform
+# (CPython raises RecursionError near 3,000 levels on Windows, reads far more on Linux), so
+# the limit is ours, not the interpreter's.
+_MAX_JSON_DEPTH = 100
+
+
+def _nests_deeper_than(text: str, limit: int) -> bool:
+    """True when brackets outside JSON strings nest deeper than *limit* anywhere in *text*.
+    One linear pass; an unclosed string simply ends the count."""
+    depth = 0
+    in_string = False
+    escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "{[":
+            depth += 1
+            if depth > limit:
+                return True
+        elif char in "}]":
+            depth = max(depth - 1, 0)
+    return False
+
+
 def _first_json_object(text: str) -> Optional[dict[str, Any]]:
     """The first JSON object in *text*: code fences and prose around it are tolerated. A reply
-    nested deeper than the interpreter allows (RecursionError, well inside the 20,000-character
-    cap) is unreadable as a whole: no later object in it is read."""
+    nested deeper than _MAX_JSON_DEPTH anywhere (well inside the 20,000-character cap) is
+    unreadable as a whole: no later object in it is read, on every platform."""
+    if _nests_deeper_than(text, _MAX_JSON_DEPTH):
+        return None
     decoder = json.JSONDecoder()
     for attempt, match in enumerate(re.finditer(r"\{", text)):
         if attempt >= _MAX_JSON_STARTS:

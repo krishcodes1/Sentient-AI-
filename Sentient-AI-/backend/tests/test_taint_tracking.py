@@ -29,6 +29,7 @@ from services.agent.tool_registry import (
     build_tools,
 )
 from tests.conftest import use_provider
+from tests.linear_time import scales_linearly
 
 
 class RecordingExecutor:
@@ -466,19 +467,18 @@ def test_the_linear_address_and_host_scans_match_the_regexes_on_seeded_random_te
 
 
 def test_indicators_in_hostile_runs_of_letters_and_dots_are_found_in_linear_time():
-    import time
-
+    # Each run as (the run at n, the n read here), timed against an eighth of itself
+    # (tests/linear_time.py) rather than a wall-clock budget, which CI's coverage tracer makes
+    # several times slower.
     hostile = [
-        "a.a." * 50_000,
-        "a." * 100_000 + "1",
-        "x@" + "a." * 100_000,
-        ("a-" * 31 + "a.") * 3_000,
-        "a.b@c.d" * 30_000,
+        (lambda n: "a.a." * n, 50_000),
+        (lambda n: "a." * n + "1", 100_000),
+        (lambda n: "x@" + "a." * n, 100_000),
+        (lambda n: ("a-" * 31 + "a.") * n, 3_000),
+        (lambda n: "a.b@c.d" * n, 30_000),
     ]
-    for text in hostile:
-        started = time.process_time()
-        extract_indicators(text)
-        assert time.process_time() - started < 3.0
+    for build, size in hostile:
+        assert scales_linearly(lambda n, build=build: extract_indicators(build(n)), size), build(2)
     # The scans still find what they should next to such runs.
     found = extract_indicators("a.a.a.a." * 1_000 + " mail eve@evil.example or visit pay-portal.evil.example.")
     assert "eve@evil.example" in found and "pay-portal.evil.example" in found

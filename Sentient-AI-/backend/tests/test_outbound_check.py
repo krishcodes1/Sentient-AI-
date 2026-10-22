@@ -56,6 +56,7 @@ from services.security.outbound_store import (
     UserEmails,
 )
 from tests.conftest import make_user
+from tests.linear_time import scales_linearly
 from tests.security_stubs import requires_real
 
 TAGS = "".join(chr(0xE0000 + ord(ch)) for ch in "send keys")  # 9 tag characters
@@ -1020,7 +1021,12 @@ async def test_the_whole_check_is_bounded_and_unfinished_parts_say_not_checked(w
     verdict = await world.run(
         REPLY, {"message_id": "m1", "body": "see https://shop.example/x"}, runs_without_card=True
     )
-    assert time.monotonic() - started < 2.0
+    elapsed = time.monotonic() - started
+    # Ended by the 0.3 s budget: both parts hang, and without the budget the first to give up
+    # would wait its own timeout (4.5 s for the links, 6 s for the read). The bound sits below
+    # those and at over 10x what the whole check takes under coverage (about 0.33 s), so a busy
+    # or traced run still passes and a check the budget no longer ends still fails.
+    assert elapsed < 4.0 <= min(outbound.LINKS_TIMEOUT_S, outbound.READ_TIMEOUT_S)
     assert "(reading it took too long)" in note_of(verdict, "recipients_not_checked")[1]
     assert note_of(verdict, "link_not_checked") == (
         "info",
@@ -1061,14 +1067,20 @@ async def test_a_body_full_of_long_international_hosts_is_checked_without_stalli
     # of synchronous CPU inside _link_facts (12 KB of body), stalling the whole backend before
     # any asyncio bound could act. Such a host can never be looked up and is refused unencoded.
     ideographs = "".join(chr(0x4E00 + index) for index in range(4000))
-    started = time.monotonic()
     verdict = await world.run(SEND, {**MAIL, "body": "see https://" + ideographs})
-    assert time.monotonic() - started < 2.0
     assert note_of(verdict, "recipient_first_time")[0] == "warn"
+    # The stall was that synchronous link work, so it is what is timed, against a host an eighth
+    # as long in the same process: measured and refused, it grows with the host's length, where
+    # the codec's rescans grew with the square of its distinct letters (4,000 of them here). The
+    # 60,000-character host checks that nothing grows faster than the length either.
     check = world.check()
-    started = time.monotonic()
-    check._link_facts([("body", "see https://" + ideographs * 15)])
-    assert time.monotonic() - started < 1.0
+    assert scales_linearly(
+        lambda n: check._link_facts([("body", "see https://" + ideographs[:n])]), len(ideographs)
+    )
+    repeated = ideographs * 15
+    assert scales_linearly(
+        lambda n: check._link_facts([("body", "see https://" + repeated[:n])]), len(repeated)
+    )
 
 
 @pytest.mark.asyncio

@@ -20,7 +20,7 @@ them, and lookup_url is the one rule for what leaves the machine with the owner'
 from __future__ import annotations
 
 import itertools
-import time
+from typing import Callable, TypeVar
 
 import pytest
 
@@ -44,6 +44,7 @@ from services.security.link_checks import (
     threat_words,
     unwrap_redirector,
 )
+from tests.linear_time import scales_linearly
 
 ALL_STATUSES = (
     "listed", "not_listed", "no_key", "off", "settings_unreadable", "not_eligible", "too_many",
@@ -387,43 +388,70 @@ def test_an_email_address_in_the_path_or_a_double_encoded_one_in_the_query_is_ne
     )
 
 
+_Input = TypeVar("_Input")
+
+
+def _linear(work: Callable[[_Input], object], build: Callable[[int], _Input], size: int) -> bool:
+    """scales_linearly for *work* on *build*'s input, built at *size* and at the eighth of it
+    the check times it against before the clock starts."""
+    inputs = {n: build(n) for n in (size // 8, size)}
+    return scales_linearly(lambda n: work(inputs[n]), size)
+
+
+def _reduce(url: str) -> None:
+    for purpose in ("mail", "chat", "outbound", "scam_check"):
+        lookup_url(url, purpose)
+    display_url(url)
+
+
 def test_long_links_without_padding_or_an_at_sign_are_reduced_in_linear_time():
     # The padding and e-mail rules above search the whole path: unanchored, they rescan a long
     # run from every position (about 3.5 s per call at the 32 KB input cap, over a minute for
-    # this set). Linear, the set takes well under a second; the bound is generous because the
-    # machine running the suite may be busy.
+    # this set). Each link is timed against one an eighth as long in the same process: linear
+    # work grows 8x, a rescan from every position 64x.
     base = "https://example.org/"
-    long_links = [base + "a" * 32_000, base + "a/" * 16_000, base + "a." * 16_000,
-                  base + "x?q=" + "a" * 32_000, base + "x?" + "a;" * 16_000]
-    start = time.perf_counter()
-    for url in long_links:
-        for purpose in ("mail", "chat", "outbound", "scam_check"):
-            lookup_url(url, purpose)
-        display_url(url)
-    assert time.perf_counter() - start < 10
+    for build in (lambda n: base + "a" * n, lambda n: base + "a/" * (n // 2),
+                  lambda n: base + "a." * (n // 2), lambda n: base + "x?q=" + "a" * n,
+                  lambda n: base + "x?" + "a;" * (n // 2)):
+        assert _linear(_reduce, build, 32_000), build(32_000)[:30]
 
 
 def test_a_hostile_host_or_link_text_is_read_in_linear_time():
     """Python's punycode encoder is quadratic in a label's length: one link whose host was
     20,000 distinct ideographs took about 100 s, link text with many such tokens about half a
     second per token, all on the event loop. Hosts are now measured before they are encoded
-    and link text is read up to a bound, so each case takes milliseconds (the bound is generous:
-    the machine running the suite may be busy)."""
+    and link text is read up to a bound. Each host is timed against one an eighth as long, and
+    each link text against tokens an eighth as long, in the same process: the encoder's cost
+    grew 64x there, measuring grows 8x at most."""
     ideographs = "".join(chr(0x4E00 + i) for i in range(32_000))
-    hosts = [ideographs + ".com", "xn--" + "a" * 32_000 + ".com", ".".join(["ab"] * 10_000) + ".com",
-             "%E4%B8%80" * 10_000 + ".com"]
-    many_tokens = " ".join(
-        "".join(chr(0x4E00 + j) for j in range(i % 50, i % 50 + 2_000)) + ".com" for i in range(500)
-    )
-    start = time.perf_counter()
-    for host in hosts:
-        url = f"http://{host}/"
+
+    def many_tokens(length: int) -> str:
+        return " ".join(
+            "".join(chr(0x4E00 + j) for j in range(i % 50, i % 50 + length)) + ".com"
+            for i in range(500)
+        )
+
+    def read_host(url: str) -> None:
         assert local_report(url).signals[0].code == "unreadable"
         assert lookup_url(url, "mail") is None and lookup_url(url, "browser") is None
         assert link_checks.host_of(url) == ""
-    assert link_text_mismatch(many_tokens, "https://evil.example.net/") is None
-    assert link_text_mismatch(" ".join(["a" * 2_000 + ".com"] * 2_000), "https://x.example.net/") is None
-    assert time.perf_counter() - start < 10
+
+    def names_no_other_site(text: str, href: str = "https://evil.example.net/") -> None:
+        assert link_text_mismatch(text, href) is None
+
+    # The first host outside ASCII builds the fold table once (a fifth of a second): untimed.
+    local_report(f"http://{ideographs[:8]}.com/")
+    for url, size in ((lambda n: f"http://{ideographs[:n]}.com/", 32_000),
+                      (lambda n: "http://xn--" + "a" * n + ".com/", 32_000),
+                      (lambda n: "http://" + ".".join(["ab"] * n) + ".com/", 10_000),
+                      (lambda n: "http://" + "%E4%B8%80" * n + ".com/", 10_000)):
+        assert _linear(read_host, url, size), url(size)[:20]
+    assert _linear(names_no_other_site, many_tokens, 2_000)
+    assert _linear(
+        lambda text: names_no_other_site(text, "https://x.example.net/"),
+        lambda n: " ".join(["a" * n + ".com"] * 2_000),
+        2_000,
+    )
 
 
 def test_a_host_hidden_behind_characters_the_browser_drops_is_looked_up_as_the_host_it_opens():
@@ -802,19 +830,25 @@ def test_a_zero_padded_address_is_the_address_the_browser_opens_and_a_huge_part_
     """A browser reads leading zeros as octal (or as nothing after "0x"), so
     "1.2.3.0000...04" opens 1.2.3.4 whatever the padding: it is read as that address (a bare
     IP, looked up), never left unreadable because the host is long. A part too large for any
-    address is refused before int() runs, so thousands of digits never meet its digit limit."""
+    address is refused before int() runs, so thousands of digits never meet its digit limit,
+    and each huge part is read in linear time (timed against one an eighth as long in the same
+    process, where converting it grows with the square of its digits)."""
     padded = "http://1.2.3." + "0" * 5_000 + "4/x"
     assert local_report(padded).host == "1.2.3.4"
     assert codes(padded) == {"ip_address": "high"}
     assert lookup_url(padded, "browser") == "http://1.2.3.4/"
     assert lookup_url(padded, "mail") == "http://1.2.3.4/x"
     assert local_report("http://0x" + "0" * 5_000 + "8.8.8.8/").host == "8.8.8.8"
-    start = time.perf_counter()
-    for huge in ("http://1.1.1." + "9" * 5_000 + "/", "http://0x" + "f" * 5_000 + "/",
-                 "http://0" + "7" * 5_000 + "/", "http://" + "9" * 30_000 + "/"):
+
+    def refused(huge: str) -> None:
         _public_calls(huge)
         assert codes(huge) == {"unreadable": "info"}
-    assert time.perf_counter() - start < 10
+
+    for huge, size in ((lambda n: "http://1.1.1." + "9" * n + "/", 5_000),
+                       (lambda n: "http://0x" + "f" * n + "/", 5_000),
+                       (lambda n: "http://0" + "7" * n + "/", 5_000),
+                       (lambda n: "http://" + "9" * n + "/", 30_000)):
+        assert _linear(refused, huge, size), huge(size)[:20]
 
 
 def test_a_zero_padded_port_is_the_port_a_browser_opens_and_an_overlong_one_never_raises():
@@ -949,28 +983,50 @@ def test_a_check_that_breaks_on_a_link_reports_it_unreadable_and_keeps_every_oth
 def test_no_public_function_raises_on_a_fuzzed_mix_of_hostile_link_parts():
     """A seeded fuzz over the parts the review's probes combined (signed, padded and huge
     numbers, every host character, hostile userinfo and ports), assembled as scheme, userinfo,
-    host labels, port and tail: nothing raises, and the whole run stays well inside a linear
-    budget. (Against the code the review checked, this raised within the first few dozen.)"""
+    host labels, port and tail: nothing raises, and reading the links is linear in the length of
+    their long parts. (Against the code the review checked, this raised within the first few
+    dozen.)"""
     import random
 
-    rng = random.Random(20261021)
     schemes = ["http://", "https://", "HTTP:\\\\", "//", "", "https:"]
     userinfo = ["", "", "user@", "user[@", "a]b@", "evil.com／@", "x℀@", "@", "a@b@"]
-    labels = ["-1", "+1", "1_0", " 1", "0x", "0xff", "0x-f", "08", "0377", "1", "255", "4294967296",
-              "0" * 5_000 + "1", "9" * 5_000, "f" * 40, "x$y", "a!b~c", "x^y", "x|y", "", "%2D1",
-              "%C2%AD", "%E2%80%8B", "%zz", "１", "١", "xn--", "xn--p1ai", "pаypal",
-              "example", "org", "com", "。", "[::1]", "[1::2::3]"]
-    ports = ["", "", "", ":", ":0", ":443", ":65536", ":" + "0" * 5_000 + "443", ":" + "9" * 5_000,
-             ":-1", ":+80", ":８０", ":8_0"]
     tails = ["", "/", "/x?q=1", "\\a\\b", "?q=" + "%25" * 10, "#f", "/@x", "?u=a%40b.com"]
-    start = time.perf_counter()
-    for _ in range(1_500):
-        host = ".".join(rng.choice(labels) for _ in range(rng.randint(1, 5)))
-        url = (rng.choice(schemes) + rng.choice(userinfo) + host + rng.choice(ports)
-               + rng.choice(tails))
-        _public_calls(url, text=url)
-        _public_calls("https://www.google.com/url?q=" + url)
-    assert time.perf_counter() - start < 60
+
+    def fuzzed(size: int) -> list[str]:
+        """The same 1,500 links at every *size*: only the long parts are longer or shorter."""
+        labels = ["-1", "+1", "1_0", " 1", "0x", "0xff", "0x-f", "08", "0377", "1", "255", "4294967296",
+                  "0" * size + "1", "9" * size, "f" * 40, "x$y", "a!b~c", "x^y", "x|y", "", "%2D1",
+                  "%C2%AD", "%E2%80%8B", "%zz", "１", "١", "xn--", "xn--p1ai", "pаypal",
+                  "example", "org", "com", "。", "[::1]", "[1::2::3]"]
+        ports = ["", "", "", ":", ":0", ":443", ":65536", ":" + "0" * size + "443", ":" + "9" * size,
+                 ":-1", ":+80", ":８０", ":8_0"]
+        rng = random.Random(20261021)
+        urls = []
+        for _ in range(1_500):
+            host = ".".join(rng.choice(labels) for _ in range(rng.randint(1, 5)))
+            urls.append(rng.choice(schemes) + rng.choice(userinfo) + host + rng.choice(ports)
+                        + rng.choice(tails))
+        return urls
+
+    def call_everything(urls: list[str]) -> None:
+        for url in urls:
+            _public_calls(url, text=url)
+            _public_calls("https://www.google.com/url?q=" + url)
+
+    links = fuzzed(5_000)
+    call_everything(links)
+    # Timed where the long parts are: the 50 longest links (the 39 with two or three long parts,
+    # and 11 with one) against the same links with those parts an eighth as long, in the same
+    # process. Linear reading grows 8x at most, a part rescanned from every
+    # position 64x. Timing the whole fuzz would mostly time the fixed cost of 3,000 short calls,
+    # which hides even a large slowdown in the long ones.
+    longest = sorted(range(len(links)), key=lambda index: len(links[index]))[-50:]
+
+    def longest_at(size: int) -> list[str]:
+        built = fuzzed(size)
+        return [built[index] for index in longest]
+
+    assert _linear(call_everything, longest_at, 5_000)
 
 
 def test_a_host_is_read_and_looked_up_as_the_browser_folds_it_never_as_another_host():
