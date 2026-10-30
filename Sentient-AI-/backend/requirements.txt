@@ -8,7 +8,7 @@ email-validator>=2.0.0,<3.0.0
 pydantic-settings>=2.16.0,<3.0.0
 python-jose[cryptography]>=3.3.0,<4.0.0
 passlib[bcrypt]>=1.7.4,<2.0.0
-bcrypt>=4.0.0,<5.0.0
+bcrypt>=5.0.0,<6.0.0
 # 49.0.0 is the first release with every current advisory fixed (bundled
 # OpenSSL in the wheels, EC public key checks, X.509 verifier). Every
 # cryptography release is a major, so the bound stops at the next unknown one.
