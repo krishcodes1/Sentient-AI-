@@ -35,7 +35,7 @@ python-dotenv>=1.2.4,<2.0.0
 # ai-mode aria snapshot format (refs, boxes, cursor markers) and the
 # aria-ref locator, both unstable across minors; tests/test_browser_snapshot.py
 # holds the contract test. Bump deliberately, regenerate tests/fixtures/aria.
-playwright>=1.63,<1.64
+playwright>=1.64.0,<1.65
 # Desktop capture for desktop.screenshot (capability "screen").
 mss>=9.0,<11
 # 12.3.0 fixes decoder memory bugs (PSD, GD, McIdas, fonts) that are reachable
