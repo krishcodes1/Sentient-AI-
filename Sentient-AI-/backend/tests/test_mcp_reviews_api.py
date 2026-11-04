@@ -181,7 +181,11 @@ async def test_the_review_list_reports_the_switch_state(client, session_factory,
     async def broken() -> bool:
         raise RuntimeError("unreadable")
 
-    monkeypatch.setattr(app.state, "mcp_pins", McpPinService(session_factory, enabled=broken), raising=False)
+    # A plain assignment: the patch above already clears this at teardown. A
+    # second patch of the same name fails teardown on pytest 9.2+, which reads
+    # the old value from __dict__ (Starlette's State keeps it elsewhere), so
+    # it records "unset" twice and deletes twice.
+    app.state.mcp_pins = McpPinService(session_factory, enabled=broken)
     body = (await client.get("/api/security/mcp/reviews", headers=me.headers)).json()
     assert body["pinning_enabled"] is True
 
