@@ -59,7 +59,7 @@ uiautomation>=2.0,<3.0; sys_platform == "win32"
 # inside the sandboxed parser worker and are pure Python.
 # pypdf: a PDF's text layer, page labels and metadata; 6.x bounds its own
 # stream decompression (the 2025 decompression-bomb fixes).
-pypdf>=6.1,<7
+pypdf>=6.21.4,<7
 # defusedxml: Word and PowerPoint XML parsed with DTDs, entities and external
 # references forbidden (openpyxl uses it too when it is installed).
 defusedxml>=0.7.1,<0.8
