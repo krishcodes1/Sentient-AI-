@@ -37,7 +37,7 @@ python-dotenv>=1.2.4,<2.0.0
 # holds the contract test. Bump deliberately, regenerate tests/fixtures/aria.
 playwright>=1.64.0,<1.65
 # Desktop capture for desktop.screenshot (capability "screen").
-mss>=9.0,<11
+mss>=10.2.0,<11
 # 12.3.0 fixes decoder memory bugs (PSD, GD, McIdas, fonts) that are reachable
 # through services/files/worker/parsers/image.py, which opens uploaded files.
 Pillow>=12.3.0,<13
