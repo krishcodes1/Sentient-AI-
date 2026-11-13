@@ -84,8 +84,8 @@ export default function Layout() {
           <Menu size={20} strokeWidth={1.75} aria-hidden />
         </button>
         <div className="flex items-center gap-2 min-w-0">
-          <Brand size={26} variant="emblem" rounded={0} alt="" />
-          <Wordmark height={14} />
+          <Brand size={26} rounded={0} alt="" />
+          <Wordmark height={20} />
         </div>
       </header>
 

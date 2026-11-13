@@ -186,7 +186,7 @@ export default function Setup() {
       </div>
       <main className="w-full max-w-[640px] flex flex-col gap-5 pt-10">
         <div className="flex flex-col items-center gap-2 text-center">
-          <Wordmark height={32} />
+          <Wordmark height={48} />
           <div className="eyebrow" style={{ letterSpacing: "0.18em" }}>
             First-run setup
           </div>
