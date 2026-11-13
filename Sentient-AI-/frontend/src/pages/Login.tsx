@@ -129,13 +129,13 @@ export default function Login() {
                 "0 0 0 1px var(--border-accent), var(--shadow-modal)",
             }}
           >
-            <Brand variant="animated" size={150} rounded={999} alt="" />
+            <Brand size={150} rounded={999} alt="" />
           </div>
         </div>
 
         {/* Wordmark + tagline */}
         <div className="flex flex-col items-center gap-2 mt-1 text-center">
-          <Wordmark height={40} />
+          <Wordmark height={60} />
           <div className="eyebrow" style={{ letterSpacing: "0.18em" }}>
             Self-hosted · control UI
           </div>

@@ -26,8 +26,8 @@ const LEGACY_THEME_STORAGE_KEY = "sentientai_theme";
 
 /** Matches the `theme-color` meta the document ships with. */
 const META_COLORS: Record<"light" | "dark", string> = {
-  light: "#f6f6f8",
-  dark: "#0a0a0b",
+  light: "#fbf6ee",
+  dark: "#12100e",
 };
 
 function isMode(value: unknown): value is ThemeMode {
