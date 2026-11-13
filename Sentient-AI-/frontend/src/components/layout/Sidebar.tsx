@@ -105,9 +105,9 @@ export default function Sidebar({
           borderBottom: "1px solid var(--border-subtle)",
         }}
       >
-        <Brand size={44} variant="emblem" rounded={0} alt="" />
+        <Brand size={44} rounded={0} alt="" />
         <div className="flex flex-col leading-none min-w-0">
-          <Wordmark height={18} />
+          <Wordmark height={26} />
           <span className="eyebrow mt-2" style={{ letterSpacing: "0.14em" }}>
             Control UI
           </span>

@@ -438,12 +438,12 @@ export default function Dashboard() {
   // substitute var(), so the tokens are resolved to real colors first and
   // re-resolved whenever the theme changes.
   const chart = useResolvedColors({
-    "--chart-ok": "#22d3ee",
+    "--chart-ok": "#ff7a4d",
     "--chart-block": "#f87171",
-    "--chart-axis": "#a1a1aa",
-    "--claw-panel": "#131316",
-    "--claw-border": "rgba(63,63,70,0.65)",
-    "--text-primary": "#f4f4f5",
+    "--chart-axis": "#ada298",
+    "--claw-panel": "#191613",
+    "--claw-border": "rgba(90,78,68,0.65)",
+    "--text-primary": "#f6f1ea",
   });
 
   const timelineDays = stats?.by_day.length ?? 7;

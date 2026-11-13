@@ -1,89 +1,44 @@
 /**
- * Brand mark and wordmark components: the logo image (or a Shield fallback tile) and the "Crawler
- * AI" text mark.
+ * Brand mark and wordmark components: the Crawler AI knot emblem and the
+ * "Crawler AI" worm wordmark.
  *
  * Why it exists: Login, Layout, Sidebar and Setup all show the brand, and only this file knows
- * which legacy asset is safe to use and which are replaced by styled text until new artwork
- * exists.
+ * which asset files back it.
+ *
+ * Assets in public/brand are transparent PNGs cut from the cream-background
+ * originals. The wordmark ships twice — dark ink for the light theme, light
+ * ink for the dark theme — and globals.css shows the one matching the
+ * resolved theme (`.wordmark-light` / `.wordmark-dark`).
  */
 
-import { Shield } from "lucide-react";
-
-type Variant = "emblem" | "animated" | "shield";
+const MARK_SRC = "/brand/crawler-emblem.png";
 
 interface BrandProps {
   size?: number;
-  variant?: Variant;
   rounded?: number;
   /** "" marks the mark decorative — use it wherever the wordmark is adjacent. */
   alt?: string;
 }
 
-/**
- * The mark.
- *
- * `sentientai-emblem.png` is deliberately not used: it ships with the mark
- * composited onto an opaque black square, which renders as a black tile on
- * any surface that is not pure black — the sidebar, a light theme, the
- * favicon. `sentientai-logo.png` is the same mark with a real alpha channel
- * and reads correctly on both themes, and (unlike the other brand assets)
- * does not bake in the old "SENTIENTAI" name.
- *
- * `sentientai-logo.mp4` — the video the "animated" variant used to play in
- * dark mode — does bake the old name into every frame, so it is not used;
- * "animated" renders this same still mark instead until new artwork exists.
- */
-// TODO(brand): replace with Crawler AI artwork (including re-enabling an
-// animated variant once a video without the old name exists).
-const MARK_SRC = "/brand/sentientai-logo.png";
-
-export default function Brand({
-  size = 32,
-  variant = "emblem",
-  rounded = 8,
-  alt = "Crawler AI",
-}: BrandProps) {
-  const common: React.CSSProperties = {
-    width: size,
-    height: size,
-    borderRadius: rounded,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    overflow: "hidden",
-    flexShrink: 0,
-  };
-
-  if (variant === "emblem" || variant === "animated") {
-    return (
-      <div style={common}>
-        <img
-          src={MARK_SRC}
-          alt={alt}
-          style={{
-            width: "100%",
-            height: "100%",
-            objectFit: "contain",
-            display: "block",
-          }}
-        />
-      </div>
-    );
-  }
-
+export default function Brand({ size = 32, rounded = 8, alt = "Crawler AI" }: BrandProps) {
   return (
     <div
       style={{
-        ...common,
-        background:
-          "linear-gradient(135deg, var(--accent-primary), var(--accent-bright))",
-        color: "var(--text-on-accent)",
+        width: size,
+        height: size,
+        borderRadius: rounded,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        overflow: "hidden",
+        flexShrink: 0,
       }}
-      role={alt ? "img" : undefined}
-      aria-label={alt || undefined}
-      aria-hidden={alt ? undefined : true}
     >
-      <Shield size={Math.round(size * 0.55)} strokeWidth={2.25} />
+      <img
+        src={MARK_SRC}
+        alt={alt}
+        style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }}
+      />
     </div>
   );
 }
@@ -97,25 +52,19 @@ export function Wordmark({
   className?: string;
   alt?: string;
 }) {
-  // `sentientai-wordmark.png` still renders the old "SENTIENTAI" name, so
-  // until new artwork exists this renders styled text instead — reusing the
-  // `.eyebrow` treatment (mono, uppercase, letter-spaced) and design-token
-  // colors rather than a new image asset.
-  // TODO(brand): replace with Crawler AI artwork
+  const img: React.CSSProperties = { height, width: "auto", maxWidth: "100%" };
+  // One accessible name on the wrapper; the two images are interchangeable
+  // art, and only one is ever displayed.
   return (
     <span
-      className={["eyebrow", className].filter(Boolean).join(" ")}
+      className={className}
+      role={alt ? "img" : undefined}
       aria-label={alt || undefined}
       aria-hidden={alt ? undefined : true}
-      style={{
-        display: "block",
-        lineHeight: 1,
-        fontSize: height * 0.85,
-        color: "var(--text-primary)",
-        whiteSpace: "nowrap",
-      }}
+      style={{ display: "inline-flex", lineHeight: 0, minWidth: 0 }}
     >
-      Crawler AI
+      <img src="/brand/crawler-wordmark.png" alt="" className="wordmark-light" style={img} />
+      <img src="/brand/crawler-wordmark-dark.png" alt="" className="wordmark-dark" style={img} />
     </span>
   );
 }
