@@ -162,6 +162,12 @@ class ProviderChoice(BaseModel):
     api_key: Optional[str] = None
 
 
+class ModelListRequest(BaseModel):
+    provider: str = Field(max_length=32)
+    # A key typed into the setup form but not saved yet (admins only).
+    api_key: Optional[str] = None
+
+
 class TelegramTokenBody(BaseModel):
     token: str
 
@@ -186,7 +192,11 @@ def _validated_choice(body: ProviderChoice) -> tuple[str, str, Optional[str]]:
     # Same rule auth.update_settings applies to a per-user model choice.
     if not is_valid_model_id(model):
         raise HTTPException(status_code=_UNPROCESSABLE, detail=MODEL_ID_RULES)
-    api_key = (body.api_key or "").strip() or None
+    return provider, model, _validated_key(body.api_key)
+
+
+def _validated_key(raw: Optional[str]) -> Optional[str]:
+    api_key = (raw or "").strip() or None
     if api_key is not None and (
         len(api_key) > _MAX_API_KEY_LENGTH
         or not api_key.isascii()
@@ -197,7 +207,7 @@ def _validated_choice(body: ProviderChoice) -> tuple[str, str, Optional[str]]:
             status_code=_UNPROCESSABLE,
             detail="That API key is not in a recognisable format.",
         )
-    return provider, model, api_key
+    return api_key
 
 
 def _validated_telegram_token(body: TelegramTokenBody) -> str:
@@ -448,9 +458,12 @@ _MODEL_LIST_URLS: dict[str, str] = {
 _NON_CHAT_MODEL = re.compile(
     r"embed|tts|whisper|transcri|dall-e|image|imagen|veo|lyria|banana|audio|realtime"
     r"|-live|moderation|aqa|robotics|search-preview|computer-use|deep-research|babbage"
-    r"|davinci|ocr|sora|guard",
+    r"|davinci|ocr|sora|guard|gemma",
     re.IGNORECASE,
 )
+# OpenAI's list also holds every legacy and fine-tuned id; only its chat
+# families can run Crawler's tool calls.
+_OPENAI_CHAT_MODEL = re.compile(r"^(gpt-|o\d|chatgpt-)")
 _MODEL_LIST_TTL_S = 600.0
 # ponytail: per-process cache, keyed by provider and key; fine for one backend.
 _model_list_cache: dict[tuple[str, int], tuple[float, list[str]]] = {}
@@ -495,6 +508,8 @@ async def _live_models(provider: str, key: Optional[str]) -> Optional[list[str]]
         ]
     else:
         ids = [m.get("id", "") for m in body.get("data", [])]
+        if provider == "openai":
+            ids = [i for i in ids if _OPENAI_CHAT_MODEL.match(i)]
     models = sorted(
         {i for i in ids if i and is_valid_model_id(i) and not _NON_CHAT_MODEL.search(i)},
         reverse=True,
@@ -503,17 +518,21 @@ async def _live_models(provider: str, key: Optional[str]) -> Optional[list[str]]
     return models
 
 
-@router.get("/models/{provider}")
+@router.post("/models")
 async def list_models(
-    provider: str, request: Request, _user: User = Depends(get_current_user)
+    body: ModelListRequest, request: Request, user: User = Depends(get_current_user)
 ) -> dict[str, Any]:
-    """Every chat model this Crawler's key for *provider* can use, asked of
-    the provider itself; the suggested few when it cannot be asked. Names
-    only: the key never leaves the server."""
-    name = provider.strip().lower()
+    """Every chat model *provider* offers this Crawler's key (or, for an
+    admin, the key just typed into the setup form), asked of the provider
+    itself, so new releases show up without a code change. The suggested
+    few when it cannot be asked. Names only: no key is ever returned."""
+    name = body.provider.strip().lower()
     if name not in LLM_PROVIDERS:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown provider")
-    key = await installation_service(request).llm_api_key(name)
+    supplied = _validated_key(body.api_key)
+    if supplied and not user.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admins only")
+    key = await _resolve_key(installation_service(request), name, supplied)
     live = await _live_models(name, key)
     return {"models": live or list(SUGGESTED_MODELS.get(name, [])), "live": bool(live)}
 

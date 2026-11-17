@@ -113,7 +113,7 @@ export default function ProviderForm({
 }: ProviderFormProps) {
   const groupLabelId = useId();
   const modelId = useId();
-  const modelListId = useId();
+  const modelHelpId = useId();
   const keyId = useId();
   const [data, setData] = useState<SetupProviders | null>(null);
   const [loadError, setLoadError] = useState("");
@@ -149,10 +149,11 @@ export default function ProviderForm({
   }, [attempt]);
 
   const selected = data?.providers.find((p) => p.name === name);
-  const modelOptions = useProviderModels(selected?.name, selected?.models ?? []);
   // Ollama runs on the user's own machine and has no key at all.
   const takesKey = !!selected && !selected.key_from_env && selected.name !== "ollama";
   const keyRequired = takesKey && !selected?.key_stored;
+  const offered = useProviderModels(selected?.name, selected?.models ?? [], takesKey ? apiKey : "");
+  const modelOptions = model && !offered.models.includes(model) ? [model, ...offered.models] : offered.models;
   const keyLink = selected ? keyPageLink(selected.name) : null;
 
   const choice: ProviderChoice = {
@@ -361,22 +362,29 @@ export default function ProviderForm({
             <label htmlFor={modelId} className={labelCls}>
               Model
             </label>
-            <input
+            <select
               id={modelId}
-              type="text"
-              list={modelListId}
+              aria-describedby={modelHelpId}
               value={model}
               onChange={(e) => setModel(e.target.value)}
               className={inputCls}
               style={inputStyle}
-              autoComplete="off"
-              spellCheck={false}
-            />
-            <datalist id={modelListId}>
+            >
               {modelOptions.map((m) => (
-                <option key={m} value={m} />
+                <option key={m} value={m}>
+                  {m}
+                </option>
               ))}
-            </datalist>
+            </select>
+            <p id={modelHelpId} className="text-xs mt-1.5" style={{ color: "var(--text-muted)" }}>
+              {offered.loading
+                ? `Asking ${selected?.name ?? "the provider"} which models it offers…`
+                : offered.live
+                  ? `${offered.models.length} models from ${selected?.name}, newest first.`
+                  : keyRequired && !apiKey.trim()
+                    ? "Enter your API key below to see every model this provider offers."
+                    : "Suggested models. The provider's full list could not be loaded."}
+            </p>
           </div>
 
           {selected?.key_from_env ? (

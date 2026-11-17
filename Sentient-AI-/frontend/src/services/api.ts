@@ -1043,12 +1043,17 @@ export async function getSetupProviders(): Promise<SetupProviders> {
   return request<SetupProviders>("/setup/providers");
 }
 
-/** Every chat model this Crawler's key for *provider* can use (asked of the
- * provider), or the suggested few when it could not be asked. */
+/** Every chat model *provider* offers this Crawler's key (or *apiKey*, one
+ * just typed into the setup form), asked of the provider; the suggested few
+ * when it could not be asked (`live` false). */
 export async function getProviderModels(
   provider: string,
+  apiKey?: string,
 ): Promise<{ models: string[]; live: boolean }> {
-  return request(`/setup/models/${encodeURIComponent(provider)}`);
+  return request("/setup/models", {
+    method: "POST",
+    body: JSON.stringify({ provider, ...(apiKey ? { api_key: apiKey } : {}) }),
+  });
 }
 
 /** Sends one tiny prompt with the given key; nothing is stored. */
