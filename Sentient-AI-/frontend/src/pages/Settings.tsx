@@ -205,7 +205,8 @@ export default function Settings() {
   // provider/model the owner set up, now and after any later change.
   const [llmProvider, setLlmProvider] = useState<string | null>(null);
   const [llmModel, setLlmModel] = useState("");
-  const modelOptions = useProviderModels(llmProvider, llmProvider ? (LLM_MODELS[llmProvider] ?? []) : []);
+  const offered = useProviderModels(llmProvider, llmProvider ? (LLM_MODELS[llmProvider] ?? []) : []);
+  const modelOptions = llmModel && !offered.models.includes(llmModel) ? [llmModel, ...offered.models] : offered.models;
 
   // Per-section saving + feedback
   const [savingProfile, setSavingProfile] = useState(false);
@@ -1057,24 +1058,22 @@ export default function Settings() {
               <label htmlFor={ids.model} className={labelCls}>
                 Model
               </label>
-              <input
+              <select
                 id={ids.model}
-                type="text"
-                list={`${ids.model}-list`}
                 aria-describedby={ids.modelHelp}
                 value={llmModel}
                 onChange={(e) => setLlmModel(e.target.value)}
                 className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
                 style={inputStyle}
-                autoComplete="off"
-                spellCheck={false}
-              />
-              <datalist id={`${ids.model}-list`}>
+              >
                 {modelOptions.map((m) => (
-                  <option key={m} value={m} />
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
                 ))}
-              </datalist>
+              </select>
               <p id={ids.modelHelp} className="text-xs mt-1.5" style={{ color: "var(--text-muted)" }}>
+                {offered.live ? `${offered.models.length} models from ${llmProvider}, newest first. ` : ""}
                 Takes effect on your next message. This Crawler must have an
                 API key for this provider (added during setup or in{" "}
                 <code style={{ color: "var(--accent-primary)" }}>backend/.env</code>)

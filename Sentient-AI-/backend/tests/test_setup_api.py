@@ -1351,6 +1351,7 @@ async def test_live_models_lists_chat_models_and_falls_back(monkeypatch):
             {"name": "models/gemini-3.8-flash", "supportedGenerationMethods": ["generateContent"]},
             {"name": "models/gemini-embedding-001", "supportedGenerationMethods": ["embedContent"]},
             {"name": "models/imagen-5", "supportedGenerationMethods": ["generateContent"]},
+            {"name": "models/gemma-4-31b-it", "supportedGenerationMethods": ["generateContent"]},
         ]
     }
     seen: list[dict] = []
@@ -1373,3 +1374,17 @@ async def test_live_models_lists_chat_models_and_falls_back(monkeypatch):
 
     monkeypatch.setattr(httpx.AsyncClient, "get", failing_get)
     assert await setup_routes._live_models("openai", "bad") is None
+
+
+@pytest.mark.asyncio
+async def test_openai_model_list_keeps_only_chat_families(monkeypatch):
+    setup_routes._model_list_cache.clear()
+    ids = ["gpt-6-luna", "o5-mini", "chatgpt-5-latest", "dall-e-3", "whisper-1",
+           "text-embedding-3-large", "babbage-002", "gpt-6-luna-tts"]
+
+    async def fake_get(self, url, *args, **kwargs):
+        return httpx.Response(200, json={"data": [{"id": i} for i in ids]},
+                              request=httpx.Request("GET", str(url)))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    assert await setup_routes._live_models("openai", "k") == ["o5-mini", "gpt-6-luna", "chatgpt-5-latest"]
