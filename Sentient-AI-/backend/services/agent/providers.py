@@ -28,10 +28,12 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import copy
 import json
 import re
+import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Callable, Literal, Mapping, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -1587,6 +1589,164 @@ class GeminiProvider(LLMProvider):
         self._log_cache_usage(response.usage)
         return response
 
+    # One grounded search: how long one request may take and the whole
+    # search at most, how much it may write, how long a query it takes and
+    # how many sources it reports at most.
+    _SEARCH_TIMEOUT_S = 30.0
+    _SEARCH_DEADLINE_S = 45.0
+    _SEARCH_MAX_OUTPUT_TOKENS = 700
+    _SEARCH_QUERY_CHARS = 400
+    _SEARCH_MAX_SOURCES = 10
+    # A model may answer from memory without searching; such an answer has
+    # no grounding metadata, so no sources. Measured on 2026-11-12:
+    # gemini-3.5-flash-lite did that for about half its answers, whatever
+    # the wording or the thinking setting, and for some queries every time;
+    # gemini-3.5-flash and gemini-3.8-flash searched 12 times out of 12. A
+    # search must not depend on which model the owner chose, so one that
+    # came back without sources (or failed) is asked again on this model
+    # (same key, about 300 tokens, one request with no retries), and after
+    # that once more on the turn's own.
+    _SEARCH_BACKUP_MODEL = "gemini-3.8-flash"
+    _SEARCH_PROMPT = (
+        "Web search query: {query}\n\n"
+        "List the {count} pages that best answer it, most relevant first. One line per page: "
+        "the page's title, a dash, then one short sentence on what it has. "
+        "No links, no introduction."
+    )
+
+    async def search_web(self, query: str, *, max_results: int = 5) -> dict[str, Any]:
+        """Search the web with Gemini's Google Search grounding and return
+        what the search cited: ``{"sources": [{"site", "link", "text"}],
+        "usage": {...}}``, most relevant first, at most *max_results*.
+
+        ``site`` is the page's site name as Google reports it, ``link`` the
+        redirect address Google issues for the page (the caller resolves it
+        to the page's own address) and ``text`` the line written about that
+        page ("" when the search tied no line to that page alone). The
+        model's prose is never returned on its own: it paraphrases, and it
+        invents addresses; only a source the grounding metadata lists comes
+        back.
+
+        One user content with the query, the search tool alone (no function
+        declarations, no system instruction), the lowest thinking setting
+        the model takes. Errors never carry the key or the URL.
+
+        An attempt that has no sources (the model did not search) or fails
+        is followed by the next: this model (with complete()'s retries),
+        then ``_SEARCH_BACKUP_MODEL`` once with no retries (skipped when it
+        is this model), then this model once more. No further attempt is
+        made after the owner's Stop or ``_SEARCH_DEADLINE_S``. ``usage`` is
+        the sum of every answered attempt and is always reported: the first
+        attempt's error is raised only when no attempt was answered at all;
+        otherwise ``sources`` is [] when none of them searched."""
+        text = " ".join(str(query or "").split())[: self._SEARCH_QUERY_CHARS]
+        if not text:
+            raise ValueError("search_web needs a query")
+        limit = max(1, min(int(max_results), self._SEARCH_MAX_SOURCES))
+        prompt = self._SEARCH_PROMPT.format(query=text, count=limit)
+        askers: list[tuple[GeminiProvider, bool]] = [(self, True)]
+        if self._model != self._SEARCH_BACKUP_MODEL:
+            askers.append((self._on_model(self._SEARCH_BACKUP_MODEL), False))
+        askers.append((self, True))
+        deadline = time.monotonic() + self._SEARCH_DEADLINE_S
+        sources: list[dict[str, str]] = []
+        total: dict[str, int] = {}
+        answered = False
+        first_error: Optional[ProviderError] = None
+        for attempt, (asker, retries) in enumerate(askers):
+            if attempt and (agent_cancel.current_work_stopped() or time.monotonic() >= deadline):
+                break
+            generation: dict[str, Any] = {"maxOutputTokens": self._SEARCH_MAX_OUTPUT_TOKENS}
+            generation.update(asker._generation_config(0).get("generationConfig", {}))
+            payload: dict[str, Any] = {
+                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                "tools": [{"google_search": {}}],
+                "generationConfig": generation,
+            }
+            post = asker._post_with_retries if retries else asker._post_once
+            try:
+                data = await post(asker._build_url(), payload, timeout=self._SEARCH_TIMEOUT_S)
+            except ProviderError as exc:
+                # A model that cannot search, is rate limited or is gone:
+                # the next one is asked. Only the status is logged.
+                first_error = first_error or exc
+                logger.warning(
+                    "gemini_search_attempt_failed", attempt=attempt, status_code=exc.status_code
+                )
+                continue
+            answered = True
+            usage = self._usage(data.get("usageMetadata"))
+            self._log_cache_usage(usage)
+            # The backup model's tokens are added to the turn's and priced at
+            # the turn's model: a few hundred tokens, well under a tenth of a
+            # cent apart. Price them apart if that ever matters.
+            for key, value in usage.items():
+                total[key] = total.get(key, 0) + value
+            try:
+                sources = self._cited_sources(data, limit)
+            except Exception as exc:  # noqa: BLE001 - a body of another shape cites nothing
+                logger.warning("gemini_search_unreadable", error_type=type(exc).__name__)
+                sources = []
+            if sources:
+                break
+        if not answered and first_error is not None:
+            raise first_error
+        return {"sources": sources, "usage": total}
+
+    @staticmethod
+    def _cited_sources(data: Mapping[str, Any], limit: int) -> list[dict[str, str]]:
+        """The web pages one grounded answer cited, in the search's order,
+        at most *limit*: each grounding chunk with an https link that some
+        grounding support points at. Its ``text`` is the first line that
+        cites that page alone: a line that cites several pages was written
+        about one of them, and which one cannot be told, so a page only
+        such lines cite gets "" (the caller names the row by its site)."""
+        candidates = data.get("candidates")
+        first = candidates[0] if isinstance(candidates, list) and candidates else {}
+        grounding = first.get("groundingMetadata") if isinstance(first, dict) else None
+        grounding = grounding if isinstance(grounding, dict) else {}
+        chunks = grounding.get("groundingChunks")
+        chunks = chunks if isinstance(chunks, list) else []
+        own: dict[int, str] = {}
+        cited: set[int] = set()
+        supports = grounding.get("groundingSupports")
+        for support in supports if isinstance(supports, list) else []:
+            if not isinstance(support, dict):
+                continue
+            segment = support.get("segment")
+            line = segment.get("text") if isinstance(segment, dict) else None
+            indices = support.get("groundingChunkIndices")
+            if not isinstance(line, str) or not line.strip() or not isinstance(indices, list):
+                continue
+            pages = [i for i in indices if isinstance(i, int) and not isinstance(i, bool)]
+            cited.update(pages)
+            if len(pages) == 1:
+                own.setdefault(pages[0], line.strip())
+        sources: list[dict[str, str]] = []
+        for index, chunk in enumerate(chunks):
+            web = chunk.get("web") if isinstance(chunk, dict) else None
+            link = web.get("uri") if isinstance(web, dict) else None
+            if not isinstance(link, str) or not link.startswith("https://") or index not in cited:
+                continue
+            site = web.get("title") if isinstance(web, dict) else None
+            sources.append(
+                {
+                    "site": site.strip() if isinstance(site, str) else "",
+                    "link": link,
+                    "text": own.get(index, ""),
+                }
+            )
+            if len(sources) >= limit:
+                break
+        return sources
+
+    def _on_model(self, model: str) -> "GeminiProvider":
+        """This provider on another of its models: the same key and the
+        same connection (a shallow copy, so there is nothing more to
+        close), with the URL and the thinking setting of *model*."""
+        other = copy.copy(self)
+        other._model = model
+        return other
 
 # ---------------------------------------------------------------------------
 # Ollama (local)

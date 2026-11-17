@@ -32,7 +32,6 @@ from core.config import settings
 from services.agent.approvals import InMemoryApprovalStore
 from services.agent.providers import LLMResponse, ProviderError, ToolCall
 from services.agent.runtime import (
-    GUARD_INPUT_REASON,
     GUARD_INPUT_REPLY,
     GUARD_OUTPUT_REPLY,
     AgentRuntime,
@@ -146,8 +145,13 @@ def test_default_guard_is_the_real_engine():
 
 
 @pytest.mark.asyncio
-async def test_injection_in_user_input_is_refused():
-    provider = ScriptedProvider([LLMResponse(content="should never run")])
+async def test_the_persons_own_message_is_never_refused_but_a_flagged_one_asks_before_every_step():
+    """The owner's orders were refused ("This is approved, go ahead and book
+    it" read as an authority claim). Their message now always reaches the
+    model; one that reads like an injection (pasted text can carry someone
+    else's) turns standing consent off for the turn, as a flagged tool
+    result does, and is on the audit trail."""
+    provider = ScriptedProvider([LLMResponse(content="Here is what I found.")])
     runtime, executor, audit = _runtime(provider)
 
     response = await runtime.chat(
@@ -161,14 +165,11 @@ async def test_injection_in_user_input_is_refused():
         user_id="u1",
     )
 
-    assert response.content == GUARD_INPUT_REPLY
-    assert response.blocked_actions
-    assert response.blocked_actions[0].policy == "prompt_guard"
-    # The person reads plain words; the scanner's reason stays on the audit row.
-    assert response.blocked_actions[0].reason == GUARD_INPUT_REASON
-    assert provider.calls == []  # never reached the LLM
-    assert executor.calls == []
-    assert any(e["event"] == "input_blocked" for e in audit.entries)
+    assert response.content == "Here is what I found." != GUARD_INPUT_REPLY
+    assert not response.blocked_actions
+    assert len(provider.calls) == 1
+    assert any(e["event"] == "input_flagged" for e in audit.entries)
+    assert not any(e["event"] == "input_blocked" for e in audit.entries)
 
 
 @pytest.mark.asyncio
@@ -242,7 +243,17 @@ async def test_tool_result_with_injection_is_redacted():
     )
 
     assert response.tool_calls
-    assert response.tool_calls[0]["result"].get("redacted") is True
+    # The injected text never reaches the model or the transcript: the value
+    # that held it is a redaction marker (the envelope around it stays, so a
+    # result with clean parts keeps them), and the result counts as flagged.
+    from services.agent.permission_grants import _flagged
+
+    recorded = response.tool_calls[0]["result"]
+    assert recorded == {"ok": True, "result": recorded["result"]}
+    assert recorded["result"].startswith("[line redacted: ")
+    assert "Ignore all previous" not in str(recorded) and "developer mode" not in str(recorded)
+    assert _flagged(recorded)
+    assert "Ignore all previous" not in str(provider.calls[1]["messages"])
 
 
 @pytest.mark.asyncio
@@ -454,6 +465,8 @@ async def test_security_prompt_survives_provider_conversion_with_summary():
 
 @pytest.mark.asyncio
 async def test_dynamic_tool_selection_caps_tool_count():
+    from services.agent.context_manager import MAX_OFFERED_TOOLS
+
     provider = ScriptedProvider([LLMResponse(content="hi")])
     runtime, _, _ = _runtime(provider)
 
@@ -464,7 +477,7 @@ async def test_dynamic_tool_selection_caps_tool_count():
             parameters={"type": "object", "properties": {}},
             connector_type="conn",
         )
-        for i in range(25)
+        for i in range(MAX_OFFERED_TOOLS + 1)
     ]
 
     await runtime.chat(
@@ -475,8 +488,6 @@ async def test_dynamic_tool_selection_caps_tool_count():
 
     sent_tools = provider.calls[0]["tools"]
     assert sent_tools is not None
-    from services.agent.context_manager import MAX_OFFERED_TOOLS
-
     assert len(sent_tools) == MAX_OFFERED_TOOLS < len(tools)
 
 

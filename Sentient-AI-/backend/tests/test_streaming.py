@@ -133,8 +133,10 @@ async def test_stream_chat_emits_realtime_tool_events():
 
 
 @pytest.mark.asyncio
-async def test_stream_chat_input_injection_blocks_before_provider():
-    runtime = _runtime(ScriptedProvider([LLMResponse(content="should not run")]))
+async def test_stream_chat_never_refuses_the_persons_own_message():
+    """The person's own message reaches the model on the streaming path too;
+    a flagged one only turns standing consent off for the turn."""
+    runtime = _runtime(ScriptedProvider([LLMResponse(content="ok")]))
     events = await _collect(
         runtime.stream_chat(
             messages=[
@@ -146,10 +148,9 @@ async def test_stream_chat_input_injection_blocks_before_provider():
     )
     done = events[-1]
     assert done["type"] == "done"
-    # The security refusal is delivered as the (safe) content.
     text = "".join(e["data"].get("text", "") for e in events if e["type"] == "content_delta")
-    assert text == GUARD_INPUT_REPLY
-    assert done["data"]["blocked_actions"]
+    assert text == "ok" != GUARD_INPUT_REPLY
+    assert not done["data"]["blocked_actions"]
 
 
 # ---------------------------------------------------------------------------

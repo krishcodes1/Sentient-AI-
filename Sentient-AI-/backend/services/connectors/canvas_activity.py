@@ -31,9 +31,12 @@ MAX_GRADE_COURSES = 12
 PER_PAGE = 50
 MAX_ROWS = 50
 # The rows' compact JSON, as the model is shown it, stays under this, so
-# the result fits RESULT_CHAR_BUDGETS for these tools (the default budget
+# the result fits RESULT_CHAR_BUDGETS for these tools and for the three
+# lists canvas_assignments.py shapes with the same cap (the default budget
 # otherwise cuts a list in the middle).
 MAX_ITEMS_CHARS = 14_000
+# How much of one item's HTML html_to_text reads; the rest is never seen.
+HTML_READ_CHARS = 200_000
 TITLE_CHARS = 200
 AUTHOR_CHARS = 80
 COURSE_CHARS = 80
@@ -100,7 +103,7 @@ def html_to_text(html: Any, limit: int = TEXT_CHARS) -> str:
         return ""
     from services.tools.html_text import extract_readable_text
 
-    _title, text = extract_readable_text(html[:200_000])
+    _title, text = extract_readable_text(html[:HTML_READ_CHARS])
     lines = []
     for line in text.split("\n"):
         kept = "".join(c if c.isprintable() and c not in _BLANK_LOOKING else " " for c in line)

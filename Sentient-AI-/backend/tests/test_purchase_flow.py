@@ -16,7 +16,11 @@ toolkit's own masked one; a submit the page stops leaves no card on
 screen for the model's next look, nor in that picture; an order form that turns on the card at submit time is
 stopped by the network guard; Deny fills nothing; a cap, an http page, a
 wrong or look-alike merchant and a page that changed after the card are
-refused; and the purchases switch off refuses before any of that. Skipped
+refused; and the purchases switch off refuses before any of that. A
+review page that pays with the card the shop keeps on file gets one card
+naming that card, one press of its order button through the guard, and
+never opens the vault; a script order button there sends the order to
+its own site or not at all. Skipped
 where Playwright's Chromium is not installed. Never a real site, never a
 real card, never a headed window.
 """
@@ -743,6 +747,80 @@ async def test_a_redirect_of_the_order_post_cannot_re_send_the_card_elsewhere(fl
     assert (await flow.purchase_events())[-1] == ("purchase_refused", "submit_blocked")
     assert await flow.ledger.spent_last_24h(flow.user_id) == Decimal("23.40")
     await flow.assert_card_secret_nowhere()
+
+
+@pytest.mark.asyncio
+async def test_a_review_page_that_pays_with_the_card_on_file_is_one_card_then_one_press(flow):
+    """The owner's case: the shop already holds the card. One card names
+    it from the page, Approve presses the bound order button once, the
+    guard lets that one POST through, and the vault is never opened."""
+    runtime = flow.runtime(*BOTH)
+    page = open_call(flow.tls.url("/review-saved"))
+    response = await flow.chat(runtime, page, checkout_call(amount=23.4))
+    assert response.blocked_actions == [], [b.reason for b in response.blocked_actions]
+    [pending] = response.pending_approvals
+    assert pending.reason == f"Pay $23.40 to {HOST} (2 items) with Visa ····4242 on file at {HOST}"
+    assert pending.arguments[CARD_KEY]["submit_to"] == flow.tls.url("/pay")
+    assert pending.image is not None
+    before = len(flow.tls.handled)
+    result = (await flow.approve(runtime, pending))["result"]
+    assert result["ok"] is True, result
+    assert result["amount"] == "23.40"
+    assert "Order number 8841" in result["confirmation_text_summary"]
+    assert [p for m, p in flow.tls.handled[before:] if m == "POST"] == ["/pay"]
+    assert ("POST", "pay", True) in flow.read._guard.seen
+    assert await flow.card_last_used() is None and flow.session().typed_secrets == []
+    assert await flow.purchase_events() == [
+        ("purchase_requested", None), ("purchase_approved", None), ("purchase_completed", None),
+    ]
+    assert await flow.ledger.spent_last_24h(flow.user_id) == Decimal("23.40")
+    await flow.assert_card_secret_nowhere()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path, label",
+    [("/review-saved", f"Visa ····4242 on file at {HOST}"), ("/checkout", "Visa ····4242")],
+)
+async def test_a_payment_page_opened_after_another_page_is_one_card_then_one_order(
+    flow, path, label
+):
+    """The model reaches the payment page from another page, as every real
+    task does: the card is still made and Approve still sends one order,
+    with the card the shop keeps on file or with the vault's card."""
+    runtime = flow.runtime(*BOTH)
+    response = await flow.chat(
+        runtime,
+        open_call(flow.tls.url("/grades")),
+        open_call(flow.tls.url(path)),
+        checkout_call(amount=23.4),
+    )
+    assert response.blocked_actions == [], [b.reason for b in response.blocked_actions]
+    [pending] = response.pending_approvals
+    assert pending.reason == f"Pay $23.40 to {HOST} (2 items) with {label}"
+    before = len(flow.tls.handled)
+    result = (await flow.approve(runtime, pending))["result"]
+    assert result["ok"] is True, result
+    assert [p for m, p in flow.tls.handled[before:] if m == "POST"] == ["/pay"]
+    assert await flow.ledger.spent_last_24h(flow.user_id) == Decimal("23.40")
+    await flow.assert_card_secret_nowhere()
+
+
+@pytest.mark.asyncio
+async def test_a_script_order_button_can_send_the_order_only_to_its_own_site(flow):
+    runtime = flow.runtime(*BOTH)
+    page = open_call(flow.tls.url("/review-saved-away"))
+    [pending] = (await flow.chat(runtime, page, checkout_call())).pending_approvals
+    assert pending.arguments[CARD_KEY]["submit_to"] == ""
+    before = len(flow.tls.handled)
+    result = (await flow.approve(runtime, pending))["result"]
+    assert result["ok"] is False and result["filled"] is True, result
+    assert "could not be sent" in result["error"] and "collector.example.test" in result["error"]
+    assert "not by POST to " + flow.tls.base in result["error"]
+    assert ("POST", "steal", True) in flow.read._guard.seen
+    assert [m for m, _p in flow.tls.handled[before:] if m == "POST"] == []
+    assert (await flow.purchase_events())[-1] == ("purchase_refused", "submit_blocked")
+    assert await flow.card_last_used() is None
 
 
 def guard_state(flow):

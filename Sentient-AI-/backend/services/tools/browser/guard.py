@@ -24,7 +24,22 @@ returns to the shop's payment address) lift that. While browser.read
 clicks (``EgressState.read_click``, the click and its settle time) no
 page script sends anything but a GET and no frame opens an order
 address other than an order history (``markers.READ_LINK_RE``):
-browser.read then answers ``markers.READ_CLICK_MESSAGE``. Loopback is
+browser.read then answers ``markers.READ_CLICK_MESSAGE``. A browser.act
+step that runs with no card (``EgressState.no_orders``: an errand step, a
+site approval's click, for a time browser.act sets) reaches no order
+address or order step by any route, its own write window included, and
+sends nothing from any frame, script or socket but a GET, a request to a
+cart (``CART_PATH_RE``, never one that names an order after the cart,
+``CART_ORDER_RE``; a page script's only on a cart step,
+``EgressState.unasked_cart``) or its own judged form
+(``EgressState.unasked_sends``): an allowlist, so an order endpoint no
+list knows is stopped too. A beacon (resource type ping) is held back
+and not counted as the step sending (``UNASKED_HELD``). What it may send
+is fetched here (``_unasked_send``), and so is every GET of a page or a
+frame (``_unasked_get``, ``_navigate``), with each redirect hop judged:
+a page's request goes on only to a cart or a checkout's entry page
+(``CHECKOUT_ENTRY_RE``), its next hop made here; a 307/308 only to a
+cart of the same site; a form's redirect is a client hop. Loopback is
 allowed only under ``CRAWLER_ALLOW_LOOPBACK_FOR_TESTS=1`` (the fake
 site), read at call time, never in production paths.
 
@@ -36,15 +51,18 @@ the tab is navigated only by its own document (``_started_by``): another
 site's tab that holds it (it opened the shop, or the shop opened it) may
 point it anywhere, even at a page of its own that then opens an order
 step, and is stopped. Outside a write window no request of any method, a
-page's image, GET fetch or beacon included, goes to an order step's
-address, and while browser.read clicks none goes to an address
-``markers.READ_LINK_RE`` matches. The click's window stays open until
-the network is quiet (``wait_for_quiet``). A WebSocket is not a request
-the route sees: ``_socket`` drops what a page sends on one while
-browser.read clicks, and always on a page's socket whose address is an
-order address (a socket's page cannot be told, so it is never inside a
-write window). A socket a worker opens is not routed at all
-(``context.route_web_socket`` sees the page's only).
+page's image, GET fetch or beacon included, is sent to an order step's
+address, and while browser.read clicks none to an address
+``markers.READ_LINK_RE`` matches; a page's own GET is judged by its first
+address only, though, since the browser follows its redirect unseen,
+except while a step runs with no card (above). The click's window stays
+open until the network is quiet (``wait_for_quiet``). A WebSocket is not
+a request the route sees: ``_socket`` drops what a page sends on one
+while browser.read clicks or a step runs with no card, and always on a
+page's socket whose address is an order address (a socket's page cannot
+be told, so it is never inside a write window). A socket a worker opens
+is not routed at all (``context.route_web_socket`` sees the page's
+only).
 
 A bound write window (``EgressState.write_origin``, the checkout's order
 POST) is judged on every frame, not only the top one: a POST from a
@@ -103,7 +121,7 @@ from core.network_security import _blocked_network_for
 from services.tools.browser.checkout.markers import ORDER_ACTION_RE, ORDER_STEP_RE, READ_LINK_RE
 
 if TYPE_CHECKING:
-    from playwright.async_api import BrowserContext, Page, Request, Route, WebSocketRoute
+    from playwright.async_api import BrowserContext, Page, Request, Response, Route, WebSocketRoute
 
 logger = structlog.get_logger(__name__)
 
@@ -119,6 +137,15 @@ _NAME_PATTERN = re.compile(
     r"\b(" + "|".join(re.escape(n).replace(r"\ ", r"[\s-]?") for n in CONSEQUENTIAL_NAMES) + r")\b",
     re.IGNORECASE,
 )
+# Of those names, the ones that on a plain link (an http(s) <a href> to
+# another page, with no script or role of its own) only say where the link
+# leads: "Buy tickets for 7:15 PM" and "Order online" open a page by GET.
+# Such a link is not held back for its words: the purchase rules judge its
+# address next (markers.read_click_pays leaves an order path to an act), and
+# the click window lets no request but a GET and no order address through.
+# A link worded as an act (confirm, delete, accept, send, sign up, pay)
+# keeps the rule: a GET can do those.
+_LINK_NAVIGATION_NAMES = frozenset({"buy", "order"})
 _REF_PATTERN = re.compile(r"(?:f\d+)?e\d+")
 # Why a navigation that would have sent the page was stopped outside a
 # write window: browser.act reports these to the person as a change that
@@ -148,6 +175,43 @@ READ_CLICK_ADDRESS = "a read-tier click tried to open an order address"
 READ_CLICK_REASONS: frozenset[str] = frozenset(
     {READ_CLICK_REQUEST, READ_CLICK_ADDRESS, READ_TIER_POST, READ_TIER_FRAME_POST,
      READ_TIER_ORDER_STEP, READ_TIER_ORDER_REQUEST}
+)
+# Why something was stopped while a step ran with no card
+# (``EgressState.no_orders``): browser.act then answers that the step
+# asks first.
+UNASKED_ORDER = "a step taken without asking tried to reach an order address"
+UNASKED_REQUEST = "a step taken without asking tried to send a request"
+UNASKED_REASONS: frozenset[str] = frozenset({UNASKED_ORDER, UNASKED_REQUEST})
+# Why a page's beacon (navigator.sendBeacon, an <a ping>: resource type
+# "ping"), or its POST to another site than its own (an analytics or ad
+# host), was stopped while a step ran with no card. Not the step's own
+# doing on the site: it is held back and is no reason to say the step
+# tried to send.
+UNASKED_HELD = "a background request was held back while a step ran without asking"
+# A cart's own address, judged by its path: a cart segment (/cart,
+# /cart/change.js, /gp/cart/view.html, Amazon's /gp/add-to-cart/json,
+# /api/cart_items), a basket, a bag or a trolley, and Amazon's buy box
+# form (/gp/product/handle-buy-box/), which adds to the cart. What a
+# quantity or an "Add to cart" sends to while it runs unasked.
+CART_PATH_RE = re.compile(
+    r"(?:[/-]cart|/(?:basket|bag|trolley)|/handle-buy-box)(?![a-z0-9])", re.IGNORECASE
+)
+# A cart address with an order verb after the cart (/cart/complete,
+# /basket/confirm, /cart/payment-information, /api/cart/place): an order
+# sent to a cart-looking address, never a cart. Judged on the path and
+# query.
+CART_ORDER_RE = re.compile(
+    CART_PATH_RE.pattern + r".*?(?<![a-z])(?:complete|submit|confirm|place|finali[sz]e|process|pay|charge)",
+    re.IGNORECASE,
+)
+# The most redirects the guard follows for one request itself (Chrome's
+# own limit): past it the request fails, as it would in the browser.
+_MAX_HOPS = 20
+# A checkout's entry page, which a cart's form answers with and which only
+# shows the order to review (Amazon's /gp/buy/spc/handlers/display.html,
+# /checkout/entry, Shopify's /checkouts/...): opening it orders nothing.
+CHECKOUT_ENTRY_RE = re.compile(
+    r"/gp/buy/spc/handlers/display\.html|/checkout/entry(?=[/?#;]|$)|/checkouts/", re.IGNORECASE
 )
 # Methods that ask and never send: a page's own request by one of these is
 # never stopped (a CORS preflight precedes the request it asks about).
@@ -190,7 +254,19 @@ el => {
     || [...form.elements].some(f => f.matches(SENSITIVE))));
   const buttonish = submit || tag === 'button' || role === 'button'
     || (tag === 'input' && ['button', 'submit', 'image', 'reset'].includes(type));
-  return {tag, type, name, submit, in_form: !!form, method, sensitive, buttonish};
+  // A plain link, as the purchase rules define one (markers._JUDGE_FN): an
+  // http(s) link to another page with no script, role or download of its own.
+  let plain_link = false;
+  if ((tag === 'a' || tag === 'area') && el.hasAttribute('href')) {
+    try {
+      const to = new URL(el.getAttribute('href') || '', document.baseURI);
+      const here = new URL(document.location.href);
+      const samePage = to.origin === here.origin && to.pathname === here.pathname && to.search === here.search;
+      plain_link = (to.protocol === 'https:' || to.protocol === 'http:') && !samePage && !role
+        && !el.hasAttribute('onclick') && !el.hasAttribute('download');
+    } catch (e) { plain_link = false; }
+  }
+  return {tag, type, name, submit, in_form: !!form, method, sensitive, buttonish, plain_link};
 }
 """
 
@@ -203,9 +279,16 @@ def classify_target(facts: dict[str, Any]) -> Optional[str]:
         return "inside a form with a password/payment field"
     if facts.get("submit") and facts.get("in_form"):
         return "submit control"
-    match = _NAME_PATTERN.search(facts.get("name") or "")
-    if match:
-        return "name matches: " + re.sub(r"[\s-]+|(?<=sign)(?=up)", " ", match.group(1).lower())
+    words = [
+        re.sub(r"[\s-]+|(?<=sign)(?=up)", " ", match.group(1).lower())
+        for match in _NAME_PATTERN.finditer(facts.get("name") or "")
+    ]
+    if facts.get("plain_link") is True:
+        # Where a plain link leads is not a reason to hold it (see
+        # _LINK_NAVIGATION_NAMES); any other consequential word is.
+        words = [word for word in words if word not in _LINK_NAVIGATION_NAMES]
+    if words:
+        return "name matches: " + words[0]
     if facts.get("in_form") and facts.get("buttonish") and (facts.get("method") or "get") != "get":
         return "non-GET navigation"
     return None
@@ -226,7 +309,10 @@ class EgressState:
     Crawler's window) passes the read-tier block; the address checks
     still apply, and so do the order ones: the model can ask for a
     handoff whenever it likes, and a page's own script may send its order
-    form while the person looks. ``checkout_handoff`` is set with it only
+    form while the person looks. A top-level POST's order address is then
+    judged by its path only, since a sign-in on the way to checkout names
+    where it goes next in its query (?next=/checkout/payment/); an order
+    step is still judged by the whole address. ``checkout_handoff`` is set with it only
     by browser.checkout, when a challenge follows the approved order (3-D
     Secure): the order addresses are then open to the person as in a
     write window. Both reset on the agent's next action and when the
@@ -259,6 +345,9 @@ class EgressState:
     blocking (``{"kind", "text"}``), which browser.read hands back."""
 
     account_mode: bool
+    # The context's Chrome goes through the egress proxy (egress_proxy.py):
+    # a read-tier page whose fetch here met a bot wall is loaded by Chrome.
+    proxied: bool = False
     write_allowed: bool = False
     write_origin: Optional[str] = None
     write_page: Any = None
@@ -267,6 +356,27 @@ class EgressState:
     handoff_page: Any = None
     changing: bool = False
     read_click: bool = False
+    # Set by browser.act around a step that runs with no card (an errand
+    # step, a site approval's click), until its page has gone quiet (a
+    # plain link: until its page commits a new document): no request,
+    # navigation or socket message of any frame reaches an order address
+    # or an order step (a checkout's entry page opens by GET), its write
+    # window open or not; nothing is sent but to a cart (``CART_PATH_RE``,
+    # never ``CART_ORDER_RE``; a page script only on a cart step,
+    # ``unasked_cart``) or, by a form, to ``unasked_sends``; a beacon is
+    # held back (``UNASKED_HELD``); and what may go, and every GET of a
+    # page or a frame, is fetched here with each redirect hop judged
+    # (``UNASKED_REASONS``).
+    no_orders: bool = False
+    # The paths an unasked step's own form may send to besides a cart: the
+    # form the toolkit judged it by, a cart button's or a cookie banner's.
+    unasked_sends: frozenset[str] = frozenset()
+    # Whether the unasked step is itself a cart step (cart words, a
+    # quantity): only then may a page script send to a cart.
+    unasked_cart: bool = False
+    # How many sends an unasked step was let make went out (``_unasked_send``):
+    # browser.act tells by it that the step itself went through.
+    unasked_went: int = 0
     blocked: list[dict[str, str]] = field(default_factory=list)
     in_flight: set[Any] = field(default_factory=set)
     last_request: float = 0.0
@@ -277,6 +387,60 @@ class EgressState:
     # reputation, S7 site rules); browser.read open() and click() return the ones added during
     # their navigation as security_notes.
     notes: list[dict[str, str]] = field(default_factory=list)
+    # The page's own data requests its own site refused (``_data_refused``):
+    # page -> [(host/path of the page when it asked, HTTP status)]. What tells
+    # that a site turned the browser away at a step (a seat map, a cart)
+    # while the page itself loaded.
+    data_refusals: "weakref.WeakKeyDictionary[Any, list[tuple[str, int]]]" = field(
+        default_factory=weakref.WeakKeyDictionary
+    )
+
+
+# The answers to a page's own data request that mean its site would not
+# give it the data: not a sign-in (401), which a person can clear.
+_REFUSED_DATA = frozenset({403, 404, 410, 429})
+_DATA_REFUSALS_KEPT = 20
+
+
+def page_place(url: str) -> str:
+    """``host/path`` of *url*, lower-case host: the same page whatever its
+    query and fragment say (a single-page app rewrites them as it goes)."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return ""
+    return f"{(parts.hostname or '').lower()}{parts.path}"
+
+
+def _data_refused(state: EgressState, response: "Response") -> None:
+    """Record *response* when it is a page's own fetch or XHR to the page's
+    own host that the site refused (``_REFUSED_DATA`` or a server error)."""
+    try:
+        request = response.request
+        if request.resource_type not in ("fetch", "xhr"):
+            return
+        status = response.status
+        if status not in _REFUSED_DATA and status < 500:
+            return
+        page = request.frame.page
+        page_url = page.url
+        if (urlsplit(response.url).hostname or "").lower() != (urlsplit(page_url).hostname or "").lower():
+            return
+    except Exception:  # noqa: BLE001 - a worker's request has no frame; nothing to record
+        return
+    seen = state.data_refusals.setdefault(page, [])
+    seen.append((page_place(page_url), status))
+    del seen[:-_DATA_REFUSALS_KEPT]
+
+
+def data_refusals(context: "BrowserContext", page: Any) -> list[int]:
+    """The statuses with which *page*'s own site refused its data requests
+    while it showed the page it shows now; [] without a guard."""
+    state = _STATES.get(context)
+    if state is None:
+        return []
+    here = page_place(page.url)
+    return [status for place, status in state.data_refusals.get(page, ()) if place == here]
 
 
 def _origin(url: str) -> str:
@@ -337,6 +501,37 @@ def _order_step(url: str) -> bool:
     return bool(ORDER_STEP_RE.search(parts.path + ("?" + parts.query if parts.query else "")))
 
 
+def _path(url: str) -> str:
+    try:
+        return urlsplit(url).path
+    except ValueError:
+        return ""
+
+
+def _cart_order(url: str) -> bool:
+    """Whether *url* is a cart address that names an order after the cart
+    (``CART_ORDER_RE``, on its path and query)."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return True
+    return bool(CART_ORDER_RE.search(parts.path + ("?" + parts.query if parts.query else "")))
+
+
+def _cart(url: str) -> bool:
+    """Whether *url* is a cart's own address (and names no order)."""
+    return bool(CART_PATH_RE.search(_path(url))) and not _cart_order(url)
+
+
+def _unasked_may_send(state: EgressState, url: str, *, form: bool) -> bool:
+    """Whether a step with no card may send to *url*: for a form (a
+    navigation of any frame) a cart or the path the toolkit judged it by,
+    for a page script a cart while the step itself is a cart step."""
+    # A form gets the cart exemption only on a cart step too: a "Show more"
+    # button's script submitting a hidden form to a cart path is no cart step.
+    return (state.unasked_cart and _cart(url)) or (form and _path(url) in state.unasked_sends)
+
+
 def _client_redirect(target: str) -> str:
     escaped = html.escape(target, quote=True)
     return (
@@ -350,6 +545,60 @@ def _is_top_level(request: "Request") -> bool:
         return request.frame.parent_frame is None
     except Exception:  # noqa: BLE001 - a popup's first navigation has no frame yet: guard it
         return True
+
+
+# What a bot wall answers a client it will not serve.
+_WALL_STATUSES = frozenset({403, 429, 503})
+# The sites whose bot wall refuses the guard's fetch where Chrome gets the
+# page, and whose pages Chrome may load itself. Only a short list: the
+# redirects Chrome then follows are judged by the egress proxy for their
+# address only, never for order steps, site rules or the link lookup, so
+# any other site (one that walls the fetch on purpose, then redirects
+# Chrome to a shop's order step with its cookies) keeps the guard's fetch.
+# ponytail: a fixed list; judging Chrome's own redirects at the protocol
+# level (CDP Fetch at the response stage) would let every site load.
+_CHROME_LOADS_WALLS = frozenset({
+    "amazon.com", "amctheatres.com", "walmart.com", "target.com", "bestbuy.com", "homedepot.com",
+    "lowes.com", "costco.com", "regmovies.com", "fandango.com", "ticketmaster.com", "ebay.com",
+})
+
+
+def _chrome_may_load(
+    state: "EgressState", orders_open: bool, checkout_window: bool, url: str = ""
+) -> bool:
+    """Whether a walled top-level GET to *url* may be loaded by Chrome
+    itself, its redirects unseen here: only through the egress proxy, only
+    on a site of ``_CHROME_LOADS_WALLS``, and only on a plain read (no order
+    or checkout window, no write window, no step with no card, no
+    browser.read click, no change, no handoff)."""
+    from services.security.lookalike import registrable_domain
+
+    site = registrable_domain(urlsplit(url).hostname or "")
+    return state.proxied and site in _CHROME_LOADS_WALLS and not (
+        orders_open or checkout_window or state.write_allowed or state.no_orders
+        or state.read_click or state.changing or state.human_driving
+    )
+
+
+def _frame_or_page(request: Any, page: Any) -> Any:
+    """What a request's own site is read from: its frame (a URL), else its
+    page."""
+    frame = getattr(request, "frame", None)
+    return frame if isinstance(getattr(frame, "url", None), str) else page
+
+
+def _other_site(url: str, page: Any) -> bool:
+    """Whether *url* is on another site (registrable domain) than *page*'s
+    own: an analytics or ad host that a page's script posts to on every
+    click. False when the page cannot be told (a worker's request)."""
+    from services.security.lookalike import registrable_domain
+
+    try:
+        mine = registrable_domain(urlsplit(str(page.url)).hostname or "") if page is not None else ""
+    except Exception:  # noqa: BLE001 - a page that is gone cannot be told
+        return False
+    theirs = registrable_domain(urlsplit(url).hostname or "")
+    return bool(mine and theirs and mine != theirs)
 
 
 def _page_of(request: Any) -> Any:
@@ -514,19 +763,25 @@ class Guard:
         host = parts.hostname or ""
         if not host:
             return "no host in URL"
+        return self.checked_addresses(host)[0]
+
+    def checked_addresses(self, host: str) -> tuple[Optional[str], list[str]]:
+        """``(None, addresses)``: *host* resolved once and every address
+        allowed, to be connected to as they are (services/tools/browser/
+        egress_proxy.py); else ``(reason, [])``."""
         if _loopback_allowed() and self._all_loopback(host):
-            return None
+            return None, self._addresses(host) or ["127.0.0.1"]
         addresses = self._addresses(host)
         if not addresses:
-            return f"could not resolve {host}"
+            return f"could not resolve {host}", []
         for address in addresses:
             try:
                 ip = ipaddress.ip_address(address)
             except ValueError:
-                return f"could not resolve {host} to an address"
+                return f"could not resolve {host} to an address", []
             if _blocked_network_for(ip) is not None:
-                return f"{host} resolves to a private or local address ({address})"
-        return None
+                return f"{host} resolves to a private or local address ({address})", []
+        return None, addresses
 
     def _addresses(self, host: str) -> list[str]:
         """An IP-literal host *is* its address (``http://10.0.0.1/`` connects
@@ -552,7 +807,7 @@ class Guard:
         the toolkit calls this after every ``sessions.get()``."""
         if context in _STATES:
             return
-        state = EgressState(account_mode=account_mode)
+        state = EgressState(account_mode=account_mode, proxied=getattr(context, "_crawler_proxy", None) is not None)
         _STATES[context] = state
 
         async def handler(route: "Route", request: "Request") -> None:
@@ -574,26 +829,35 @@ class Guard:
         def socket_opened(ws: "WebSocketRoute") -> None:
             self._socket(ws, state)
 
+        def responded(response: "Response") -> None:
+            _data_refused(state, response)
+
         context.on("close", closed)
         context.on("request", started)
         context.on("requestfinished", ended)
         context.on("requestfailed", ended)
+        context.on("response", responded)
         await context.route("**/*", handler)
         await context.route_web_socket(lambda _url: True, socket_opened)
 
     def _socket(self, ws: "WebSocketRoute", state: EgressState) -> None:
         """A page's WebSocket, connected through to its server. What the
-        page sends on it is dropped while browser.read clicks, and always
-        when the socket's address is an order address: a socket's page
-        cannot be told, so no write window is ever open for it. What the
-        server sends passes untouched. A worker's socket never comes here
-        (see the module's notes)."""
+        page sends on it is dropped while browser.read clicks, while a
+        step runs with no card (a shop that runs every click over one
+        socket, Phoenix LiveView or Blazor Server, would send the step's
+        order there; recorded like a stopped request, so the step asks
+        first next time), and always when the socket's address is an order
+        address: a socket's page cannot be told, so no write window is ever
+        open for it. What the server sends passes untouched. A worker's
+        socket never comes here (see the module's notes)."""
         server = ws.connect_to_server()
         order = _order_address(ws.url)
 
         def from_page(message: "str | bytes") -> None:
             if state.read_click:
                 self._record(state, url=ws.url, reason=READ_CLICK_REQUEST)
+            elif state.no_orders:
+                self._record(state, url=ws.url, reason=UNASKED_ORDER if order else UNASKED_REQUEST)
             elif order:
                 self._record(state, url=ws.url, reason=READ_TIER_ORDER_REQUEST)
             else:
@@ -637,6 +901,19 @@ class Guard:
                         reason = ORDER_REQUEST
                     elif not orders_open and _order_address(url):
                         reason = READ_TIER_ORDER_STEP if _order_step(url) else READ_TIER_ORDER_REQUEST
+                sending = request.method not in _SAFE_METHODS
+                if reason is None and state.no_orders:
+                    # A step with no card: no order address, no beacon,
+                    # and nothing sent but to a cart, its window open or not.
+                    if _order_step(url) or (sending and (_order_address(url) or _cart_order(url))):
+                        reason = UNASKED_ORDER
+                    elif sending and getattr(request, "resource_type", "") == "ping":
+                        reason = UNASKED_HELD
+                    elif sending and not _unasked_may_send(state, url, form=False):
+                        # Sent to another site than its own frame's (an
+                        # analytics host): held back, not the step's doing.
+                        # A widget's frame posting to its own site counts.
+                        reason = UNASKED_HELD if _other_site(url, _frame_or_page(request, page)) else UNASKED_REQUEST
                 if reason is None and not orders_open:
                     if _order_step(url):
                         reason = ORDER_REQUEST if state.changing else READ_TIER_ORDER_STEP
@@ -644,6 +921,12 @@ class Guard:
                         reason = READ_CLICK_ADDRESS
                 if reason is not None:
                     await self._block(route, state, url=url, reason=reason)
+                    return
+                if sending and state.no_orders:
+                    await self._unasked_send(route, state, url, navigation=False)
+                    return
+                if request.method == "GET" and state.no_orders:
+                    await self._unasked_get(route, state, url)
                     return
                 await route.continue_()
                 return
@@ -653,6 +936,20 @@ class Guard:
                 # while the window is open, not even at a page of its own
                 # that would then open an order step as the tab's own.
                 await self._block(route, state, url=url, reason=OTHER_PAGE_NAVIGATION)
+                return
+            if state.no_orders and (
+                # An entry page is a step only when it is not itself an
+                # order step: /checkouts/abc/place-order sits under the prefix.
+                _order_step(url)
+                or (_order_address(url) and not (request.method == "GET" and CHECKOUT_ENTRY_RE.search(_path(url))))
+                or (request.method != "GET" and _cart_order(url))
+            ):
+                await self._block(route, state, url=url, reason=UNASKED_ORDER)
+                return
+            if state.no_orders and request.method != "GET" and not _unasked_may_send(
+                state, url, form=True
+            ):
+                await self._block(route, state, url=url, reason=UNASKED_REQUEST)
                 return
             if state.changing and _order_address(url):
                 await self._block(
@@ -666,9 +963,13 @@ class Guard:
             if not orders_open and _order_step(url):
                 await self._block(route, state, url=url, reason=READ_TIER_ORDER_STEP)
                 return
-            if request.method != "GET" and state.human_driving and not orders_open and _order_address(url):
+            if request.method != "GET" and state.human_driving and not orders_open and _order_address(
+                _without_query(url) if _is_top_level(request) else url
+            ):
                 # The person's own submit passes below, but not to an order
                 # address: a page may send its order form while they look.
+                # Their top-level POST is judged by its path: a sign-in's
+                # query names where it goes next (?next=/checkout/payment/).
                 await self._block(route, state, url=url, reason=READ_TIER_ORDER_REQUEST)
                 return
             if not _is_top_level(request):
@@ -698,6 +999,15 @@ class Guard:
                         reason=READ_TIER_FRAME_POST,
                     )
                     return
+                if request.method != "GET" and state.no_orders:
+                    await self._unasked_send(route, state, url, navigation=True)
+                    return
+                if state.no_orders:
+                    # The browser would follow its redirect unseen.
+                    await self._navigate(
+                        route, state, url, orders_open=orders_open, checkout_window=checkout_window, top=False
+                    )
+                    return
                 await route.continue_()
                 return
             if request.method != "GET" and not (write_allowed or state.human_driving):
@@ -722,6 +1032,9 @@ class Guard:
             if reason is not None:
                 await self._block(route, state, url=url, reason=reason)
                 return
+            if request.method != "GET" and state.no_orders and state.write_origin is None:
+                await self._unasked_send(route, state, url, navigation=True)
+                return
             if request.method != "GET":
                 if state.write_origin is None:
                     # An approved act, or the person's own submit during a
@@ -731,40 +1044,7 @@ class Guard:
                     return
                 await self._bound_post(route, state, url)
                 return
-            response = await route.fetch(max_redirects=0)
-            if response.status >= 400:
-                # A site's error page or bot wall, for the logs: the status
-                # and whether its CDN says it challenged the request.
-                logger.info(
-                    "browser_document_status",
-                    url=_without_query(url),
-                    status=response.status,
-                    challenged=bool(response.headers.get("cf-mitigated")),
-                )
-            location = response.headers.get("location")
-            if 300 <= response.status < 400 and location:
-                target = urljoin(url, location)
-                reason = await asyncio.to_thread(self.check_url, target)
-                if reason is None:
-                    reason = self._site_reason(state, target, exempt=checkout_window)
-                if reason is None:
-                    reason = await self._reputation_reason(state, target)
-                if reason is None and state.changing and _order_address(target):
-                    reason = ORDER_ADDRESS
-                if reason is None and state.read_click and _read_link(target):
-                    reason = READ_CLICK_ADDRESS
-                if reason is None and not orders_open and _order_step(target):
-                    reason = READ_TIER_ORDER_STEP
-                if reason is not None:
-                    await self._block(route, state, url=target, reason=reason, via=url)
-                    return
-                await route.fulfill(
-                    status=200,
-                    content_type="text/html; charset=utf-8",
-                    body=_client_redirect(target),
-                )
-                return
-            await route.fulfill(response=response)
+            await self._navigate(route, state, url, orders_open=orders_open, checkout_window=checkout_window, top=True)
         except Exception as exc:  # noqa: BLE001 - an unhandled route hangs the request forever
             logger.warning(
                 "browser_egress_handler_failed",
@@ -775,6 +1055,137 @@ class Guard:
                 await route.abort("failed")
             except Exception:  # noqa: BLE001 - already handled, or the page is gone
                 pass
+
+    async def _navigate(
+        self, route: "Route", state: EgressState, url: str, *, orders_open: bool, checkout_window: bool, top: bool
+    ) -> None:
+        """A GET navigation the guard admitted (a top-level page; a frame's
+        while a step runs with no card), fetched here with its redirect
+        held: a 3xx becomes a client hop, which comes back through here and
+        is judged like every navigation of its frame, once its target
+        passed ``check_url``, the owner's site rules, the link lookup (a
+        top-level page only) and the order checks. A plain answer is handed
+        to the browser as it is."""
+        response = await route.fetch(max_redirects=0)
+        if top and response.status >= 400:
+            # A site's error page or bot wall, for the logs: the status
+            # and whether its CDN says it challenged the request.
+            logger.info(
+                "browser_document_status",
+                url=_without_query(url),
+                status=response.status,
+                challenged=bool(response.headers.get("cf-mitigated")),
+            )
+        if top and response.status in _WALL_STATUSES and _chrome_may_load(state, orders_open, checkout_window, url):
+            # The fetch here is not Chrome on the wire, and a bot wall
+            # refuses it where Chrome gets the page (AMC's Cloudflare,
+            # Amazon's search). A read-tier page is loaded by Chrome itself
+            # through the egress proxy, which keeps every hop off private
+            # addresses; no order window, write window or unasked step is
+            # open, so no hop can carry anything.
+            logger.info("browser_wall_loaded_by_chrome", url=_without_query(url), status=response.status)
+            await route.continue_()
+            return
+        location = response.headers.get("location")
+        if not (300 <= response.status < 400 and location):
+            await route.fulfill(response=response)
+            return
+        target = urljoin(url, location)
+        reason = await asyncio.to_thread(self.check_url, target)
+        if reason is None:
+            reason = self._site_reason(state, target, exempt=checkout_window)
+        if reason is None and top:
+            reason = await self._reputation_reason(state, target)
+        if reason is None and state.no_orders and (
+            _order_step(target)
+            or (_order_address(target) and not CHECKOUT_ENTRY_RE.search(_path(target)))
+        ):
+            reason = UNASKED_ORDER
+        if reason is None and state.changing and _order_address(target):
+            reason = ORDER_ADDRESS
+        if reason is None and state.read_click and _read_link(target):
+            reason = READ_CLICK_ADDRESS
+        if reason is None and not orders_open and _order_step(target):
+            reason = READ_TIER_ORDER_STEP
+        if reason is not None:
+            await self._block(route, state, url=target, reason=reason, via=url)
+            return
+        await route.fulfill(status=200, content_type="text/html; charset=utf-8", body=_client_redirect(target))
+
+    async def _unasked_get(self, route: "Route", state: EgressState, url: str) -> None:
+        """A page's own GET (an image, a script, a GET fetch) while a step
+        runs with no card, fetched here hop by hop: the browser would follow
+        its redirect unseen (Playwright routes a request's first URL only).
+        Each hop is judged as its first address was (no order step, and no
+        address ``check_url`` refuses), and the last answer is handed to
+        the browser as the request's own."""
+        response = await route.fetch(max_redirects=0)
+        hop = url
+        for _ in range(_MAX_HOPS):
+            location = response.headers.get("location")
+            if not (300 <= response.status < 400 and location):
+                await route.fulfill(response=response)
+                return
+            hop = urljoin(hop, location)
+            reason = UNASKED_ORDER if _order_step(hop) else await asyncio.to_thread(self.check_url, hop)
+            if reason is not None:
+                await self._block(route, state, url=hop, reason=reason, via=url)
+                return
+            response = await route.fetch(url=hop, max_redirects=0)
+        await route.abort("failed")  # a redirect loop, as the browser would end it
+
+    async def _unasked_send(
+        self, route: "Route", state: EgressState, url: str, *, navigation: bool
+    ) -> None:
+        """What a step with no card may send (a cart, its own judged form),
+        fetched here since the browser would follow its redirect unseen
+        (Playwright routes a request's first URL only); its going out is
+        counted (``unasked_went``). A 307/308, the same request sent
+        again, may only go on to a cart of the same site, sent from here.
+        A redirect to an order address or an order step is stopped, except
+        that a cart's redirect to a checkout's entry page
+        (``CHECKOUT_ENTRY_RE``) is the next page. Any other redirect of a
+        navigation becomes a client hop, judged like every navigation; a
+        page request's goes on only to a cart or a checkout's entry page,
+        its GET made here, hop after hop. The last answer is handed to the
+        browser as it is, cookies included."""
+        response = await route.fetch(max_redirects=0)
+        state.unasked_went += 1
+        hop = url
+        for _ in range(_MAX_HOPS):
+            location = response.headers.get("location")
+            if not (300 <= response.status < 400 and location):
+                await route.fulfill(response=response)
+                return
+            target = urljoin(hop, location)
+            entry = bool(CART_PATH_RE.search(_path(hop)) and CHECKOUT_ENTRY_RE.search(_path(target)))
+            again = response.status in (307, 308)
+            reason: Optional[str] = None
+            if again and not (_origin(target) == _origin(hop) and _cart(target)):
+                reason = UNASKED_ORDER
+            elif _order_step(target) or _cart_order(target) or (_order_address(target) and not entry):
+                reason = UNASKED_ORDER
+            elif not (again or navigation or entry or _cart(target)):
+                reason = UNASKED_REQUEST
+            if reason is None and navigation and not again:
+                headers = response.headers
+                cookies = {"set-cookie": headers["set-cookie"]} if "set-cookie" in headers else {}
+                await route.fulfill(
+                    status=200, content_type="text/html; charset=utf-8", headers=cookies,
+                    body=_client_redirect(target),
+                )
+                return
+            if reason is None:  # the next hop is made from here
+                reason = await asyncio.to_thread(self.check_url, target)
+            if reason is not None:
+                await self._block(route, state, url=target, reason=reason, via=url)
+                return
+            if again:
+                response = await route.fetch(url=target, max_redirects=0)
+            else:
+                response = await route.fetch(url=target, method="GET", post_data=b"", max_redirects=0)
+            hop = target
+        await route.abort("failed")  # a redirect loop, as the browser would end it
 
     async def _bound_post(self, route: "Route", state: EgressState, url: str) -> None:
         """The checkout's order POST, to the bound origin. Fetched here so

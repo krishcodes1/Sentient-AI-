@@ -7,7 +7,9 @@ and the tests prove none of them is followed.
 
 Why it exists: the endpoint's bot check was reported as an empty search, and
 the model went on to guess shop addresses. The fallback only runs while
-"Control a browser" is on, and only reads.
+"Control a browser" is on, and only reads. It also runs when Bing's plain page
+answers only part of the query (rows for its first word alone); with the
+switch off those rows come back with a note instead.
 """
 
 from __future__ import annotations
@@ -21,13 +23,21 @@ from services.tools.browser import guard, handoff
 from services.tools.browser.actions import BrowserReadToolkit
 from services.tools.browser.session import BrowserSessionManager
 from services.tools.system import browser_installed
-from services.tools.web import SEARCH_BLOCKED, WebToolkit
+from services.tools.web import SEARCH_BLOCKED, SEARCH_OFF_TOPIC_NOTE, WebToolkit
 from tests.test_browser_read import TestPlatform
 from tests.test_purchases_wiring import _gate as gate_with
-from tests.test_web_tools import DBRAND, ENGINES, challenged, resolver_for
+from tests.test_web_tools import DBRAND, ENGINES, bing_answers, challenged, resolver_for
 
 QUERY = "dbrand grip iphone 16 pro max holo white"
 REDDIT = "https://www.reddit.com/r/dbrand/comments/abc/grip_holo_white/"
+# What Bing's plain page gives for QUERY when it searches its first word alone.
+DBRAND_HOME = [
+    {
+        "title": "dbrand | Official Site",
+        "url": "https://dbrand.com/",
+        "snippet": "Skins and cases for your devices.",
+    }
+]
 
 
 @pytest_asyncio.fixture
@@ -43,9 +53,15 @@ async def browser(fakesite, tmp_path):
         await sessions.close_all()
 
 
-def executor(fakesite, browser, *pages: str, capabilities=("web_browsing", "browser_control")):
+def executor(
+    fakesite,
+    browser,
+    *pages: str,
+    capabilities=("web_browsing", "browser_control"),
+    handler=challenged,
+):
     web = WebToolkit(
-        transport=httpx.MockTransport(challenged),
+        transport=httpx.MockTransport(handler),
         resolver=resolver_for(ENGINES),
         search_pages=tuple(fakesite.url(f"/search-results/{page}?{{query}}") for page in pages),
     )
@@ -120,6 +136,37 @@ async def test_no_browser_fallback_while_browser_control_is_off(fakesite, browse
 
     assert result["ok"] is False and result["blocked"] is True
     assert result["error"] == SEARCH_BLOCKED
+    # Nothing was launched and nothing was loaded.
+    _, sessions = browser
+    assert sessions.sessions == {}
+    assert fakesite.handled == []
+
+
+@pytest.mark.asyncio
+async def test_bing_rows_for_part_of_the_query_are_replaced_by_the_browsers(fakesite, browser):
+    ex = executor(fakesite, browser, "bing", handler=bing_answers(DBRAND_HOME))
+    result = await ex.execute("web.search", {"query": QUERY}, "u1", task_id="t1")
+
+    assert result["ok"] is True and result["source"] == "browser" and "note" not in result
+    assert [row["url"] for row in result["results"]] == [DBRAND, REDDIT]
+    assert fakesite.handled == [("GET", "/search-results/bing")]
+
+
+@pytest.mark.asyncio
+async def test_bing_rows_for_part_of_the_query_keep_a_note_while_browser_control_is_off(
+    fakesite, browser
+):
+    ex = executor(
+        fakesite,
+        browser,
+        "bing",
+        capabilities=("web_browsing",),
+        handler=bing_answers(DBRAND_HOME),
+    )
+    result = await ex.execute("web.search", {"query": QUERY}, "u1", task_id="t1")
+
+    assert result["ok"] is True and result["source"] == "bing"
+    assert result["results"] == DBRAND_HOME and result["note"] == SEARCH_OFF_TOPIC_NOTE
     # Nothing was launched and nothing was loaded.
     _, sessions = browser
     assert sessions.sessions == {}

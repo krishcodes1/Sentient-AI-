@@ -9,6 +9,7 @@
 import { useEffect, useId, useState, type ReactNode } from "react";
 import { ArrowRight, CheckCircle2, Loader2 } from "lucide-react";
 import ExternalAnchor from "@/components/ExternalAnchor";
+import { useProviderModels } from "@/hooks/useProviderModels";
 import { ErrorAlert, ResultLine } from "@/components/FormFeedback";
 import {
   errorText,
@@ -20,7 +21,12 @@ import {
   secondaryCls,
   secondaryStyle,
 } from "@/components/formStyles";
-import { clearStoredSecrets, getSetupProviders, saveProvider, testProvider } from "@/services/api";
+import {
+  clearStoredSecrets,
+  getSetupProviders,
+  saveProvider,
+  testProvider,
+} from "@/services/api";
 import type { ProviderChoice, SetupProvider, SetupProviders } from "@/types";
 
 // Picks this Crawler's AI provider: the setup wizard's provider step, and
@@ -143,6 +149,7 @@ export default function ProviderForm({
   }, [attempt]);
 
   const selected = data?.providers.find((p) => p.name === name);
+  const modelOptions = useProviderModels(selected?.name, selected?.models ?? []);
   // Ollama runs on the user's own machine and has no key at all.
   const takesKey = !!selected && !selected.key_from_env && selected.name !== "ollama";
   const keyRequired = takesKey && !selected?.key_stored;
@@ -366,7 +373,7 @@ export default function ProviderForm({
               spellCheck={false}
             />
             <datalist id={modelListId}>
-              {(selected?.models ?? []).map((m) => (
+              {modelOptions.map((m) => (
                 <option key={m} value={m} />
               ))}
             </datalist>

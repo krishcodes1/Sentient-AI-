@@ -13,7 +13,14 @@ import pytest
 from core.config import settings
 from services.agent.approvals import InMemoryApprovalStore
 from services.agent.providers import LLMResponse, ToolCall
-from services.agent.runtime import _CAP_REPLIES, GENERIC_CLOSING_LINE, AgentRuntime, PermissionEngine, Tool
+from services.agent.runtime import (
+    _CAP_REPLIES,
+    BROWSER_CLOSING_LINE,
+    GENERIC_CLOSING_LINE,
+    AgentRuntime,
+    PermissionEngine,
+    Tool,
+)
 from tests.conftest import use_provider
 from tests.test_agent_runtime_vision import RecordingAudit, RecordingGuard, RecordingProvider
 
@@ -112,11 +119,39 @@ def test_is_browser_tool_and_the_budget_table():
     # canvas.get_upcoming budget: tests/test_canvas_upcoming.py;
     # watch.list: tests/test_page_watch_tools.py
     assert {k: RESULT_CHAR_BUDGETS[k] for k in ("browser.", "desktop.observe", "desktop.act")} == {
-        "browser.": 8000,
+        "browser.": 30000,
         "desktop.observe": 18000,
         "desktop.act": 11000,
     }
-    assert result_char_budget("browser.read", 2000) == 8000 and result_char_budget("web.search", 2000) == 2000
+    assert result_char_budget("browser.read", 2000) == 30000 and result_char_budget("web.screenshot", 2000) == 2000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outline_chars", ["OUTLINE_CHARS", "FULL_OUTLINE_CHARS"])
+async def test_a_full_outline_reaches_the_model_whole(outline_chars):
+    """The budget is on the JSON the model is shown (quotes, commas, the url,
+    the summary), not on the outline's own characters: at 8000 for both, an
+    outline near its cap lost about fifteen lines of refs from the middle,
+    and snapshot(full=true) two thirds of the page."""
+    from services.tools.browser import _shared
+
+    cap = getattr(_shared, outline_chars)
+    lines, used = [], 0
+    while True:
+        line = f'- button "Seat {len(lines)}" [ref=e{len(lines)}] [cursor=pointer]'
+        if used + len(line) + 1 > cap:
+            break
+        lines.append(line)
+        used += len(line) + 1
+    page = outline_result(1)
+    page["outline"], page["refs"] = lines, len(lines)
+    executor = RecordingExecutor([page])
+    provider = RecordingProvider([call("browser.read", action="snapshot"), LLMResponse(content="done")])
+    runtime = runtime_with(provider, executor)
+    await runtime.chat(messages=[{"role": "user", "content": "go"}], tools=[BROWSER_TOOL], user_id="u1")
+    sent = provider.calls[1]["messages"][-1]["content"]
+    assert "chars truncated" not in sent
+    assert f"[ref=e{len(lines) // 2}]" in sent and f"[ref=e{len(lines) - 1}]" in sent
 
 
 @pytest.mark.asyncio
@@ -133,12 +168,15 @@ async def test_browser_results_keep_eight_thousand_chars_where_web_keeps_two():
     # alone cannot tell the budgets apart: the middle of the page must be
     # there too, and nothing may have been cut.
     assert "line 40" in sent and "chars truncated" not in sent
+    # A tool with no entry in the table keeps the 2000 default (web.search has
+    # its own entry now, sized to ten result rows).
+    plain_tool = Tool(name="web.screenshot", description="s", parameters={"type": "object", "properties": {}}, connector_type="web")
     web = RecordingExecutor([{"ok": True, "results": [f"line {i} " + "x" * 60 for i in range(80)]}])
-    provider = RecordingProvider([call("web.search", query="x"), LLMResponse(content="done")])
+    provider = RecordingProvider([call("web.screenshot", url="https://x.example"), LLMResponse(content="done")])
     runtime = runtime_with(provider, web)
-    await runtime.chat(messages=[{"role": "user", "content": "go"}], tools=[WEB_TOOL], user_id="u1")
+    await runtime.chat(messages=[{"role": "user", "content": "go"}], tools=[plain_tool], user_id="u1")
     sent = provider.calls[1]["messages"][-1]["content"]
-    assert "chars truncated" in sent and "line 40" not in sent  # web keeps the 2000 default
+    assert "chars truncated" in sent and "line 40" not in sent  # the 2000 default
 
 
 @pytest.mark.asyncio
@@ -190,6 +228,216 @@ async def test_non_browser_rounds_keep_the_generic_closing_line():
 
 
 @pytest.mark.asyncio
+async def test_a_refused_click_leaves_the_page_outline_in_context():
+    """A refusal carries no outline, and the page it was refused on has not
+    changed: the model needs that outline (and its refs) to make the same
+    click through browser.act. Before, the refusal retired the outline, so
+    the model was told "use browser.act with this ref" with no ref in sight."""
+    refused = {"ok": False, "error": "browser.read does not make this click.", "consequential": "x", "ref": "e1"}
+    executor = RecordingExecutor([outline_result(1), refused])
+    provider = RecordingProvider([
+        call("browser.read", action="open", url="http://site/grades"),
+        call("browser.read", action="click", ref="e1"),
+        LLMResponse(content="done"),
+    ])
+    runtime = runtime_with(provider, executor)
+    await runtime.chat(messages=[{"role": "user", "content": "go"}], tools=[BROWSER_TOOL], user_id="u1")
+    third_call = provider.calls[2]["messages"]
+    text = "\n".join(m["content"] if isinstance(m["content"], str) else m["content"][0]["text"] for m in third_call if m["role"] == "user")
+    assert "[ref=e1]" in text  # the outline the refused click was made in
+    assert "does not make this click" in text
+    assert text.rstrip().endswith(BROWSER_CLOSING_LINE)
+
+
+@pytest.mark.asyncio
+async def test_a_newer_outline_still_retires_one_kept_through_a_refusal():
+    refused = {"ok": False, "error": "browser.read does not make this click.", "consequential": "x", "ref": "e1"}
+    executor = RecordingExecutor([outline_result(1), refused, outline_result(3)])
+    provider = RecordingProvider([
+        call("browser.read", action="open", url="http://site/grades"),
+        call("browser.read", action="click", ref="e1"),
+        call("browser.read", action="snapshot"),
+        LLMResponse(content="done"),
+    ])
+    runtime = runtime_with(provider, executor)
+    await runtime.chat(messages=[{"role": "user", "content": "go"}], tools=[BROWSER_TOOL], user_id="u1")
+    fourth_call = provider.calls[3]["messages"]
+    text = "\n".join(m["content"] if isinstance(m["content"], str) else m["content"][0]["text"] for m in fourth_call if m["role"] == "user")
+    assert "[ref=e3]" in text and "[ref=e1]" not in text  # one full outline, the newest
+
+
+@pytest.mark.asyncio
+async def test_a_result_with_no_page_left_retires_the_outline_before_it():
+    """A page the owner's site rules blocked is blanked, and a result
+    withheld whole says nothing of the page: the refs of the outline before
+    it belong to no page, so it shrinks like any replaced outline."""
+    for gone in (
+        {"ok": False, "refused": True, "rule": "site_blocked", "error": "blocked", "mode": "account"},
+        {"redacted": True, "reason": "x"},
+    ):
+        executor = RecordingExecutor([outline_result(1), gone])
+        provider = RecordingProvider([
+            call("browser.read", action="open", url="http://site/grades"),
+            call("browser.read", action="click", ref="e1"),
+            LLMResponse(content="done"),
+        ])
+        runtime = runtime_with(provider, executor)
+        await runtime.chat(messages=[{"role": "user", "content": "go"}], tools=[BROWSER_TOOL], user_id="u1")
+        text = "\n".join(
+            m["content"] if isinstance(m["content"], str) else m["content"][0]["text"]
+            for m in provider.calls[2]["messages"] if m["role"] == "user"
+        )
+        assert "[ref=e1]" not in text and "[step 1]" in text
+
+
+@pytest.mark.asyncio
+async def test_the_approved_steps_outline_is_retired_by_the_next_page_and_its_summary_kept():
+    """The approved step's page stayed in full beside every newer page of
+    the resumed turn (two outlines, old refs still usable), and its summary
+    line was missing from the later task facts."""
+    from services.agent.runtime import ApprovedStep
+
+    provider = RecordingProvider([call("browser.read", action="snapshot"), LLMResponse(content="done")])
+    runtime = runtime_with(provider, RecordingExecutor([outline_result(5)]))
+    await runtime.chat(
+        messages=[{"role": "user", "content": "book it"}],
+        tools=[BROWSER_TOOL],
+        user_id="u1",
+        approved_step=ApprovedStep("browser.act", outline_result(4, did='Clicked "7:00 PM"')),
+    )
+    first = "\n".join(m["content"] for m in provider.calls[0]["messages"] if m["role"] == "user")
+    assert "[ref=e4]" in first
+    second = "\n".join(
+        m["content"] if isinstance(m["content"], str) else m["content"][0]["text"]
+        for m in provider.calls[1]["messages"] if m["role"] == "user"
+    )
+    assert "[ref=e5]" in second and "[ref=e4]" not in second
+    assert "[step 4]" in second and "[step 5]" in second
+
+
+def test_the_turn_resumed_after_an_approved_browser_step_is_told_to_go_on():
+    """Every browser.act ends its turn on a card. The turn resumed after the
+    tap starts from this message: told to "answer the user's request" it
+    stopped after one click; it is told to continue, as a browser round is."""
+    runtime = runtime_with(RecordingProvider(), RecordingExecutor())
+    acted = outline_result(4, did='Clicked "7:00 PM"', notes=["Paper Tiger, tonight"])
+    message = runtime.approved_call_message("browser.act", acted)
+    assert message.startswith("The owner approved 'browser.act' and it ran;")
+    assert message.rstrip().endswith(BROWSER_CLOSING_LINE)
+    assert "<task_facts>" in message and "Paper Tiger, tonight" in message and "[step 4]" in message
+    assert "[ref=e4]" in message  # the fresh outline, whole
+    # Any other tool keeps the plain closing line and gets no browser block.
+    other = runtime.approved_call_message("google_workspace.send_email", {"ok": True})
+    assert other.rstrip().endswith(GENERIC_CLOSING_LINE) and "<task_facts>" not in other
+
+
+def test_an_approved_step_that_was_refused_is_not_described_as_having_run():
+    runtime = runtime_with(RecordingProvider(), RecordingExecutor())
+    refused = {
+        "ok": False,
+        "refused": True,
+        "error": "The page changed since this was approved.",
+        "rule": "outline_changed",
+    }
+    message = runtime.approved_call_message("browser.act", refused)
+    # The fixed first words the tool rules read an envelope by.
+    assert message.startswith("The owner approved 'browser.act'")
+    assert "and it ran" not in message.split("\n")[0]
+    assert "did not run" in message.split("\n")[0]
+
+
+def test_an_approved_step_that_failed_after_it_began_is_not_described_as_never_run():
+    """A click that was made and then timed out, or a card that was typed
+    before the page failed, is not "did not run": told that, the model
+    repeated a step that had landed."""
+    runtime = runtime_with(RecordingProvider(), RecordingExecutor())
+    for result in (
+        {"ok": False, "error": "The page did not settle after the click."},
+        {"ok": False, "refused": True, "filled": True, "error": "The pay button was gone."},
+    ):
+        head = runtime.approved_call_message("browser.act", result).split("\n")[0]
+        assert head.startswith("The owner approved 'browser.act'")
+        assert "did not run" not in head and "ran but did not finish" in head
+
+
+def test_an_approved_checkout_is_never_closed_with_the_line_that_says_to_go_on():
+    """BROWSER_CLOSING_LINE says "call the next browser action": after a
+    payment that reads as an invitation to pay again."""
+    from services.agent.runtime import CHECKOUT_RESUME_CLOSING_LINE
+
+    runtime = runtime_with(RecordingProvider(), RecordingExecutor())
+    for result in (outline_result(5, did="Paid"), {"ok": False, "filled": True, "error": "x"}):
+        message = runtime.approved_call_message("browser.checkout", result)
+        assert BROWSER_CLOSING_LINE not in message
+        assert message.rstrip().endswith(CHECKOUT_RESUME_CLOSING_LINE)
+
+
+@pytest.mark.asyncio
+async def test_an_approved_step_that_lands_on_a_page_for_a_person_ends_the_turn_without_the_model():
+    """A tool round that meets a captcha ends the turn in the runtime's own
+    words. The approved step's result did not: the model was asked to go on
+    from a page only a person can clear, and wrote the reply itself."""
+    from services.agent.runtime import ApprovedStep
+
+    provider = RecordingProvider([LLMResponse(content="model words")])
+    runtime = runtime_with(provider, RecordingExecutor())
+    result = {"ok": False, "needs_human": {"kind": "captcha", "url": "https://shop.example/c"}}
+    response = await runtime.chat(
+        messages=[{"role": "user", "content": "book it"}],
+        tools=[BROWSER_TOOL],
+        user_id="u1",
+        approved_step=ApprovedStep("browser.act", result),
+    )
+    assert provider.calls == []
+    assert "take over in Crawler's browser window" in response.content
+    assert "prove you're a person" in response.content
+
+
+@pytest.mark.asyncio
+async def test_an_approved_steps_result_starts_the_resumed_turn_as_tool_output_not_as_the_persons_message():
+    """The turn resumed after an approval starts from the approved call's
+    result. It reaches the model in the tool-result envelope as the last user
+    turn, and the input scan reads the person's own message, never the result:
+    a page line that reads like an order used to refuse the whole resumed turn
+    with "I didn't act on that message...", blaming the person."""
+    from services.agent.runtime import GUARD_INPUT_REPLY, ApprovedStep
+
+    guard = RecordingGuard(unsafe_substring="EVIL-LINE")
+    provider = RecordingProvider([LLMResponse(content="Picked the 7:15 showing.")])
+    runtime = runtime_with(provider, RecordingExecutor(), guard=guard)
+    page = outline_result(3, did='Clicked "7:15 PM"')
+    page["outline"] = [*page["outline"], "- text: EVIL-LINE"]
+    response = await runtime.chat(
+        messages=[{"role": "user", "content": "book the 7:15 showing"}],
+        tools=[BROWSER_TOOL],
+        user_id="u1",
+        approved_step=ApprovedStep("browser.act", page),
+    )
+    assert response.content == "Picked the 7:15 showing." != GUARD_INPUT_REPLY
+    assert guard.scanned_inputs == ["book the 7:15 showing"]
+    last = provider.calls[0]["messages"][-1]
+    assert last["role"] == "user"
+    assert last["content"].startswith("The owner approved 'browser.act' and it ran;")
+    assert "[ref=e3]" in last["content"]
+    assert last["content"].rstrip().endswith(BROWSER_CLOSING_LINE)
+
+
+@pytest.mark.asyncio
+async def test_approve_action_redacts_a_flagged_line_of_the_result_like_any_tool_round():
+    guard = RecordingGuard(unsafe_substring="EVIL-LINE")
+    page = outline_result(3)
+    page["outline"] = ['- button "Seat A1" [ref=e1]', "- text: EVIL-LINE", '- button "Continue" [ref=e2]']
+    runtime = runtime_with(RecordingProvider(), RecordingExecutor([page]), guard=guard)
+    parked = await runtime._approvals.create(
+        user_id="u1", tool_name="browser.read", arguments={"action": "tabs"}, reason="r", conversation_id="c1"
+    )
+    ran = await runtime.approve_action(parked.action_id, "u1")
+    outline = ran["result"]["outline"]
+    assert outline[0] == '- button "Seat A1" [ref=e1]' and outline[2] == '- button "Continue" [ref=e2]'
+    assert outline[1].startswith("[line redacted: ") and "EVIL-LINE" not in str(ran["result"])
+
+
+@pytest.mark.asyncio
 async def test_image_blocks_survive_only_in_the_newest_follow_up():
     pixel = "data:image/jpeg;base64," + "Q" * 400
     executor = RecordingExecutor([outline_result(1, image=pixel), outline_result(2)])
@@ -233,7 +481,7 @@ async def test_a_cap_result_ends_the_turn_with_a_continue_question(cap):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["captcha", "mfa", "otp", "unusual_traffic", "requested"])
+@pytest.mark.parametrize("kind", ["captcha", "mfa", "otp", "unusual_traffic", "signin", "requested"])
 async def test_needs_human_ends_the_turn_and_keeps_the_picture_for_the_channel(kind):
     pixel = "data:image/jpeg;base64," + "Q" * 400
     needs = {"kind": kind, "detail": "Please solve the puzzle", "url": "http://site/captcha", "user_image": pixel}
@@ -249,9 +497,13 @@ async def test_needs_human_ends_the_turn_and_keeps_the_picture_for_the_channel(k
         "mfa": "the site wants you to confirm your sign-in",
         "otp": "the site is asking for a one-time code",
         "unusual_traffic": "the site wants a person to check in",
+        "signin": "the site wants you to sign in, once, in that window",
         "requested": "Please solve the puzzle",
     }[kind]
-    assert response.content == f"I need you to take over in the browser: {what} (http://site/captcha). Tell me when you're done."
+    assert response.content == (
+        "I need you to take over in Crawler's browser window on your computer: "
+        f"{what} (http://site/captcha). Tell me when you're done."
+    )
     assert response.tool_calls[0]["result"]["needs_human"]["user_image"] == pixel
 
 
@@ -477,14 +729,55 @@ async def test_runtime_passes_the_budget_on_browser_rounds_to_providers_that_tak
             self.calls.append({"messages": list(messages), "tools": tools, "thinking_budget": thinking_budget})
             return self._responses.pop(0) if self._responses else LLMResponse(content="done")
 
-    provider = ThinkingProvider([call("browser.read", action="tabs"), LLMResponse(content="done")])
-    runtime = runtime_with(provider, RecordingExecutor([outline_result(1)]))
-    await runtime.chat(messages=[{"role": "user", "content": "go"}], tools=[BROWSER_TOOL], user_id="u1")
-    assert [c["thinking_budget"] for c in provider.calls] == [0, 0]
+    provider = ThinkingProvider([
+        call("browser.read", action="tabs"),
+        call("web.search", query="x"),
+        LLMResponse(content="done"),
+    ])
+    runtime = runtime_with(provider, RecordingExecutor([outline_result(1), {"ok": True, "results": []}]))
+    await runtime.chat(messages=[{"role": "user", "content": "go"}], tools=[BROWSER_TOOL, WEB_TOOL], user_id="u1")
+    # Only the call that reads a browser step's result: the first call of a
+    # turn plans the task, and a round of other tools is not page reading.
+    # With the browser merely switched on, every call of every chat used to
+    # be sent with thinking off.
+    assert [c["thinking_budget"] for c in provider.calls] == [None, 0, None]
     provider = ThinkingProvider([LLMResponse(content="done")])
     runtime = runtime_with(provider, RecordingExecutor())
-    await runtime.chat(messages=[{"role": "user", "content": "go"}], tools=[WEB_TOOL], user_id="u1")
-    assert provider.calls[0]["thinking_budget"] is None  # no browser tool offered: unchanged
+    await runtime.chat(messages=[{"role": "user", "content": "go"}], tools=[BROWSER_TOOL, WEB_TOOL], user_id="u1")
+    assert provider.calls[0]["thinking_budget"] is None  # plain chat with the browser on: unchanged
+    # A turn resumed after an approved browser step starts by reading that
+    # step's result: a browser round from its first call.
+    from services.agent.runtime import ApprovedStep
+
+    provider = ThinkingProvider([LLMResponse(content="done")])
+    runtime = runtime_with(provider, RecordingExecutor())
+    await runtime.chat(
+        messages=[{"role": "user", "content": "go"}], tools=[BROWSER_TOOL, WEB_TOOL], user_id="u1",
+        approved_step=ApprovedStep("browser.act", outline_result(2)),
+    )
+    assert provider.calls[0]["thinking_budget"] == 0
+
+
+def test_a_result_is_never_given_more_than_a_third_of_the_turn_models_window():
+    """The browser's 30000-character budget is half of a 16k window, and
+    the context budget is only checked when a turn starts."""
+    from services.agent import turn_context
+    from services.agent.runtime import RESULT_CHAR_BUDGETS, result_char_budget
+
+    full = RESULT_CHAR_BUDGETS["browser."]
+    assert result_char_budget("browser.read", 8000) == full  # no turn bound: as listed
+
+    async def record(_usage, _model=None):
+        return None
+
+    for model, expected in (("gemini-3.5-flash-lite", full), ("codellama", int(16_000 * 3.5 / 3))):
+        token = turn_context.bind(
+            turn_context.TurnModel(provider="x", model=model, read_video_url=None, record_usage=record)
+        )
+        try:
+            assert result_char_budget("browser.read", 8000) == min(full, expected), model
+        finally:
+            turn_context.reset(token)
 
 
 # -- prompt ------------------------------------------------------------------------------
@@ -540,7 +833,7 @@ async def test_a_round_that_ends_the_turn_still_reports_its_spend():
     runtime = runtime_with(provider, executor, browser_spend=sink)
     use_provider(runtime, provider, pair=FLASH_LITE)
     response = await runtime.chat(messages=[{"role": "user", "content": "go"}], tools=[BROWSER_TOOL], user_id="u1", task_id="t9", llm_provider=FLASH_LITE[0], llm_model=FLASH_LITE[1])
-    assert response.content.startswith("I need you to take over in the browser")
+    assert response.content.startswith("I need you to take over in Crawler's browser window")
     assert seen == [("u1", "t9", pytest.approx(0.0003 + 0.00025))]
 
 
@@ -607,6 +900,96 @@ def test_account_mode_and_url_stripping():
     assert _account_mode([{"name": "browser.read", "result": {"mode": "public"}}]) is False
     assert _account_mode([{"name": "web.search", "result": {"mode": "account"}}]) is False
     assert strip_url_queries("see https://canvas.school.edu/courses/1/grades?student=42#top now") == "see https://canvas.school.edu/courses/1/grades now"
+
+
+def test_a_reply_keeps_the_query_of_a_link_one_of_the_turns_pages_showed():
+    """A turn that used the browser loses URL queries in its reply (they can
+    carry tokens and ids), which also broke every ticket and booking link
+    the assistant passed on. A link keeps its query when one of this turn's
+    pages showed that very link, without its credentials; an address the
+    model put together itself, or one no page showed, still loses it."""
+    from api.routes.agent import shown_links, strip_reply_urls
+
+    showtime = (
+        "https://tickets.fandango.com/transaction/ticketing/mobile/jump.aspx"
+        "?sdate=2026-11-12%2B19%3A45&tid=AABQI&mid=246826"
+    )
+    calls = [
+        {
+            "name": "browser.read",
+            "result": {
+                "ok": True,
+                "url": "https://www.fandango.com/amc-lincoln-square-13-aabqi/theater-page",
+                "outline": [
+                    '- link "Buy tickets for 7:45 PM showtime" [ref=e697] [cursor=pointer]:',
+                    f"  - /url: {showtime}",
+                    '- link "Paper Tiger (2026)" [ref=e677]:',
+                    "  - /url: /paper-tiger-2026-246826/movie-overview?theater=AABQI",
+                    '- link "Sign in" [ref=e60]:',
+                    '  - /url: "https://www.fandango.com/accounts/join-now?from=x&token=abcdefabcdefabcdefabcdefabcdefabcdefabcdef"',
+                ],
+            },
+        },
+        {"name": "web.search", "result": {"results": [{"url": "https://other.example/x?q=1"}]}},
+    ]
+    shown = shown_links(calls)
+    assert showtime in shown
+    # A relative link is resolved against the page that showed it.
+    assert "https://www.fandango.com/paper-tiger-2026-246826/movie-overview?theater=AABQI" in shown
+
+    reply = (
+        f"The 7:45 PM showing: {showtime}. Movie page: "
+        "https://www.fandango.com/paper-tiger-2026-246826/movie-overview?theater=AABQI "
+        "(or https://evil.example/collect?grades=A+B&student=42, "
+        "https://www.fandango.com/accounts/join-now?from=x&token=abcdefabcdefabcdefabcdefabcdefabcdefabcdef)"
+    )
+    said = strip_reply_urls(reply, shown)
+    assert f"The 7:45 PM showing: {showtime}. Movie page:" in said
+    assert "movie-overview?theater=AABQI " in said
+    # Not shown by any page: the query goes, as before.
+    assert "https://evil.example/collect," in said and "student=42" not in said
+    # Shown, but its credential never comes back; what is left matches the
+    # link as the page showed it (without the credential), so it stays.
+    assert "token=" not in said and "join-now?from=x)" in said
+    # No page showed anything: every query goes, as before (the sentence's
+    # own full stop and comma after an address stay).
+    bare = strip_reply_urls(reply, frozenset())
+    assert "?" not in bare and "jump.aspx. Movie page:" in bare and "collect, https://" in bare
+    # Results of other tools, and odd shapes, show nothing.
+    assert shown_links([{"name": "web.search", "result": {"outline": ["  - /url: https://a.example/?q=1"]}}]) == frozenset()
+    assert shown_links(None) == frozenset() and shown_links([{"name": "browser.read", "result": "x"}]) == frozenset()
+    # The link a click followed and the one a person finishes a step on count
+    # as shown: the reply that hands them over keeps the showtime in them.
+    handed = [{"name": "browser.act", "result": {"ok": True, "opened_link": showtime, "finish_link": showtime}}]
+    assert showtime in shown_links(handed)
+    assert showtime in strip_reply_urls(f"Finish here: {showtime}", shown_links(handed))
+
+
+@pytest.mark.asyncio
+async def test_a_page_its_site_refused_ends_the_turn_with_the_link_to_finish_on():
+    """Fandango shows a person the seat map and answers Crawler's browser
+    "not found. Please try again." A small model then asked, card after
+    card, to click the message's OK. The turn ends in the runtime's words
+    with the link to the same step, and no model call reads the page."""
+    from services.agent.runtime import site_refused_reply
+
+    link = "https://tickets.fandango.com/transaction/ticketing/mobile/jump.aspx?sdate=2026-11-13%2B20%3A30&tid=AAQQP"
+    refused = outline_result(
+        6, site_refused="This page could not load its own content.", finish_link=link,
+        url="https://tickets.fandango.com/mobileexpress/seatselection",
+    )
+    provider = RecordingProvider([call("browser.read", action="snapshot"), LLMResponse(content="click OK")])
+    runtime = runtime_with(provider, RecordingExecutor([refused]))
+    response = await runtime.chat(
+        messages=[{"role": "user", "content": "book Ghost Soldier at 8:30"}], tools=[BROWSER_TOOL], user_id="u1",
+    )
+    assert len(provider.calls) == 1
+    assert response.content == site_refused_reply(refused)
+    assert response.content.startswith("fandango.com won't show this step to Crawler's browser.")
+    assert response.content.rstrip().endswith(link)
+    assert chr(0x2014) not in response.content and "browser.read" not in response.content
+    # No link to give: still a plain sentence, never an address made up.
+    assert "https://" not in site_refused_reply({"site_refused": "x", "url": "about:blank"})
 
 
 def test_task_id_of_rows_is_the_newest_user_message():

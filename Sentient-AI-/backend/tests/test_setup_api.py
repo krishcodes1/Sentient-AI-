@@ -1337,3 +1337,39 @@ async def test_clearing_secrets_stops_the_poller(client, env, monkeypatch):
     assert resp.status_code == 204
     assert await env.installation.telegram_token() is None
     assert env.manager.is_running is False
+
+
+@pytest.mark.asyncio
+async def test_live_models_lists_chat_models_and_falls_back(monkeypatch):
+    """Model pickers list what the key can use, not a hardcoded few: chat
+    models only, newest first, and None (so the suggestions show) when the
+    provider cannot be asked."""
+    setup_routes._model_list_cache.clear()
+    gemini = {
+        "models": [
+            {"name": "models/gemini-3.1-pro-preview", "supportedGenerationMethods": ["generateContent"]},
+            {"name": "models/gemini-3.8-flash", "supportedGenerationMethods": ["generateContent"]},
+            {"name": "models/gemini-embedding-001", "supportedGenerationMethods": ["embedContent"]},
+            {"name": "models/imagen-5", "supportedGenerationMethods": ["generateContent"]},
+        ]
+    }
+    seen: list[dict] = []
+
+    async def fake_get(self, url, *args, **kwargs):
+        seen.append(kwargs.get("headers") or {})
+        return httpx.Response(200, json=gemini, request=httpx.Request("GET", str(url)))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    assert await setup_routes._live_models("gemini", "k1") == [
+        "gemini-3.8-flash",
+        "gemini-3.1-pro-preview",
+    ]
+    assert seen == [{"x-goog-api-key": "k1"}]
+    assert await setup_routes._live_models("gemini", "k1") is not None and len(seen) == 1  # cached
+    assert await setup_routes._live_models("openai", None) is None
+
+    async def failing_get(self, url, *args, **kwargs):
+        return httpx.Response(401, json={}, request=httpx.Request("GET", str(url)))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", failing_get)
+    assert await setup_routes._live_models("openai", "bad") is None

@@ -8,10 +8,20 @@ small (wrappers, off-viewport nodes and redundant name-from-content text
 go), safe (password / one-time-code / card-field values and anything the
 toolkit typed are redacted; cross-origin frames become one line) and
 navigable (``[ref=eN]`` survives untouched so ``aria-ref=`` resolves).
+Because the outline is the visible part and not the page, it also counts
+the lines that lie under the ones it returns (``Outline.below``), which
+the toolkit passes on so the model knows there is more to look at.
 Which fields hold a card is decided by ``checkout.markers``, the one
 classifier the checkout, the screenshot mask and browser.act share; a
 typed secret made of digits (a card number, a CVC) is redacted in every
 grouping a page can print it (``redact``).
+
+A link keeps its address, so the model can open a deep link it read (a
+showtime, a date and a theatre live in the query), less its fragment and
+the query parameters that may carry a credential: ``strip_url_secrets``,
+which other modules may use on addresses they pass on. The address of
+the page itself is cut further in ACCOUNT mode (``strip_url``: no query
+at all); the write tiers compare and keep that one.
 
 What Playwright 1.63 gives us, verified against the bundled renderer:
 ``[ref=eN]`` (``fKeN`` inside frames -- and on the *main* frame after the
@@ -34,7 +44,7 @@ import json
 import re
 from dataclasses import dataclass, field, replace
 from typing import Any, Mapping, Optional, Sequence
-from urllib.parse import quote, quote_plus, urlsplit, urlunsplit
+from urllib.parse import quote, quote_plus, unquote, urlsplit, urlunsplit
 
 import structlog
 
@@ -45,6 +55,9 @@ logger = structlog.get_logger(__name__)
 DEFAULT_LIMIT_CHARS = 8000
 FULL_LIMIT_CHARS = 24000
 DEFAULT_VIEWPORT = (1280, 800)
+# A screen height no page reaches: the selection with no bottom edge, which
+# ``filter_yaml`` counts the lines under the visible part with.
+_NO_BOTTOM_EDGE = 10**9
 REDACTED = "[redacted]"
 FIND_MAX_BLOCKS = 20
 FACTS_TIMEOUT_S = 3.0
@@ -62,11 +75,32 @@ _MIN_SECRET_CHARS = 3
 # shorter one (a CVC, an expiry as MMYY) only as a whole digit run, so
 # "987" inside an order id is not taken for the security code.
 _PAN_MIN_DIGITS = 12
-_DIGIT_GAP = r"[\s\-.\u00a0\u2007\u202f]*"
+# ("+" and "%20" too: how a space is written in a link's query.)
+_DIGIT_GAP = r"(?:[\s\-.+\u00a0\u2007\u202f]|%20)*"
 # What JavaScript's encodeURIComponent / encodeURI leave unescaped beyond
 # ASCII letters, digits and ``-_.`` (which ``quote`` never escapes).
 _JS_URI_COMPONENT_SAFE = "!~*'()"
 _JS_URI_SAFE = ";,/?:@&=+$!~*'()#"
+# Query parameters that carry a credential or an identity token, by name:
+# compared in lower case with "_" and "-" taken out, so access_token,
+# accessToken and access-token are one name. "code" and "state" are the
+# OAuth pair. A longer name that only holds one of these words (zipcode,
+# statement, author) is an ordinary parameter and is kept.
+_SECRET_PARAMS = frozenset(
+    "session sessionid sid auth authorization code state sig signature password passwd pwd "
+    "pass otp jwt secret samlrequest samlresponse ticket nonce".split()
+)
+# ...and every name that ends in one of these (token, id_token, csrf_token,
+# key, apikey, signing_key, client_secret, user[password], phpsessid).
+# "code" and "state" stay whole names only: zipcode and promo_code are kept.
+_SECRET_PARAM_ENDINGS = (
+    "token", "key", "secret", "password", "passwd", "sessid", "sessionid", "signature", "nonce", "verifier",
+)
+# A value that is one opaque token, whatever its parameter is called: 40
+# or more base64url / hex characters with nothing between them (padding
+# aside), or base64 JSON of any length ("eyJ...": a JWT, a state blob).
+# Words joined by "+", an address and a list of dates are not.
+_OPAQUE_VALUE_RE = re.compile(r"(?:[A-Za-z0-9_-]{40,}|eyJ[A-Za-z0-9_.-]+)(?:=|%3[Dd]){0,2}")
 
 # Roles the model can act on. They are never dropped as wrappers, never
 # treated as screen-reader-only, and never folded into a parent's name.
@@ -136,6 +170,10 @@ class Outline:
     refs: int
     chars: int
     truncated: bool
+    # How many lines of the page's outline lie under the ones in ``lines``:
+    # under the bottom edge of the screen, or cut by the character cap. The
+    # visible part is not the page, and the toolkit says so with this.
+    below: int = 0
 
 
 @dataclass(frozen=True)
@@ -432,6 +470,34 @@ def _dedupe_labels(children: list[_Node]) -> list[_Node]:
     return out
 
 
+# The longest address a link keeps with its query in ACCOUNT mode; a longer
+# one is cut to its path. A showtime deep link is well under it.
+_LINK_ADDRESS_CHARS = 300
+
+
+def _strip_link(token: str, account_mode: bool) -> str:
+    """A ``/url`` value as the snapshot prints it, stripped for the mode:
+    ACCOUNT keeps a link's address down to the parameters that may carry
+    a credential (``strip_url_secrets``), PUBLIC keeps it whole. Playwright
+    double-quotes a value YAML would misread (one that starts with ``#``
+    or ``?``, one that holds ``: ``), so it is unquoted first and quoted
+    again after: split with its quotes on, a link to ``#content`` came
+    out as a lone ``"``. A link no browser can open ("http://[") keeps
+    its line and loses its address, where it cost the page its outline."""
+    plain = _plain(token)
+    try:
+        stripped = strip_url_secrets(plain) if account_mode else strip_url(plain, False)
+    except ValueError:  # PUBLIC mode: strip_url passes urlsplit's refusal on
+        stripped = ""
+    if account_mode and len(stripped) > _LINK_ADDRESS_CHARS:
+        # A tracking redirect, not a deep link: its address alone would
+        # cost the outline several other lines of its character budget.
+        stripped = strip_url(plain, True)
+    if stripped == plain:
+        return token
+    return json.dumps(stripped, ensure_ascii=False) if plain != token or not stripped else stripped
+
+
 def _prune(
     nodes: list[_Node],
     *,
@@ -462,7 +528,7 @@ def _prune(
             continue
         name = _redact_text(node.name, needles)
         if node.role == "/url" and node.text is not None:
-            text: Optional[str] = strip_url(node.text, account_mode)
+            text: Optional[str] = _strip_link(node.text, account_mode)
         else:
             text = node.text
         secret_field = _is_secret_field(node, facts)
@@ -589,16 +655,32 @@ def filter_yaml(
     parsed = _parse(raw)
     needles = _secret_needles(parsed, secrets, facts)
     tree = _prune(parsed, account_mode=account_mode, needles=needles, facts=facts)
+    needle = query.lower() if query else None
     lines = _select(
         tree,
         depth=0,
         full=full,
-        query=query.lower() if query else None,
+        query=needle,
         height=facts.viewport[1],
         inherited=True,
     )
     kept, chars, truncated = _cap(lines, limit)
-    return Outline("", "", kept, _count_refs(kept), chars, truncated)
+    # What a look further down would add: the lines the cap cut and, for the
+    # visible part, the lines the same selection gains when the screen has
+    # no bottom edge (a second walk of the pruned tree, no second snapshot).
+    # A line above the screen is in neither: it is not under the outline.
+    below = len(lines) - len(kept)
+    if not full:
+        to_the_end = _select(
+            tree, depth=0, full=False, query=needle, height=_NO_BOTTOM_EDGE, inherited=True
+        )
+        below += len(to_the_end) - len(lines)
+    return Outline("", "", kept, _count_refs(kept), chars, truncated, below)
+
+
+# How large a row, list item or article around a match's own may be for
+# find to answer with it instead (lines).
+FIND_WIDE_LINES = 60
 
 
 def find_lines(
@@ -610,7 +692,8 @@ def find_lines(
     secrets: Sequence[str] = (),
     facts: PageFacts = UNKNOWN_FACTS,
 ) -> list[str]:
-    """Lines matching *text* with their nearest row/listitem/article.
+    """Lines matching *text* with their nearest row/listitem/article, or a
+    small one around that (``FIND_WIDE_LINES``).
 
     Searches the whole page (no viewport cut) after the same pruning and
     redaction as the outline, so ``find("password")`` is not a side door.
@@ -625,19 +708,26 @@ def find_lines(
     def walk(node: _Node, ancestors: list[_Node]) -> None:
         if needle in _render(node, 0, False).lower():
             root = node
+            block: list[str] = []
             if context:
                 for candidate in reversed(ancestors):
-                    if candidate.role in _CONTEXT_ROLES:
-                        root = candidate
+                    if candidate.role not in _CONTEXT_ROLES:
+                        continue
+                    lines = _select([candidate], depth=0, full=True, query=None, height=0, inherited=True)
+                    if root is node:
+                        root, block = candidate, lines  # the nearest, whatever its size
+                    elif len(lines) <= FIND_WIDE_LINES:
+                        # A small one around it too: a film's card names it,
+                        # and its showtimes sit beside the card in the same
+                        # list item.
+                        root, block = candidate, lines
+                    else:
                         break
+                if root is node:
+                    block = _select([root], depth=0, full=True, query=None, height=0, inherited=True)
             if id(root) not in seen:
                 seen.add(id(root))
-                if context:
-                    blocks.append(
-                        _select([root], depth=0, full=True, query=None, height=0, inherited=True)
-                    )
-                else:
-                    blocks.append([_render(node, 0, False).rstrip(":")])
+                blocks.append(block if context else [_render(node, 0, False).rstrip(":")])
         for child in node.children:
             walk(child, ancestors + [node])
 
@@ -650,10 +740,12 @@ def find_lines(
 
 
 def strip_url(url: str, account_mode: bool) -> str:
-    """ACCOUNT mode: query string and fragment removed (they carry tokens,
+    """The address of a page (the one on screen, a tab, a form's target).
+    ACCOUNT mode: query string and fragment removed (they carry tokens,
     search terms and student ids); PUBLIC mode: unchanged (flight deep
     links live in the query). Both modes drop ``user:password@`` userinfo:
-    it is a credential, never navigation state."""
+    it is a credential, never navigation state. A link in the outline is
+    not cut this far in ACCOUNT mode: see ``strip_url_secrets``."""
     parts = urlsplit(url)
     netloc = _host_port(parts.netloc)
     if not account_mode:
@@ -661,6 +753,63 @@ def strip_url(url: str, account_mode: bool) -> str:
             return url
         return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
     return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+
+
+def _opaque(value: str) -> bool:
+    """One opaque token (``_OPAQUE_VALUE_RE``), not a page's own slug: a
+    long value in lower case with "-" or "_" between its words
+    ("the-long-title-of-a-film-...") is an address part, and a random
+    token of that length all but always holds an upper-case letter or
+    has no separator at all."""
+    if not _OPAQUE_VALUE_RE.fullmatch(value):
+        return False
+    return value.startswith("eyJ") or not re.search(r"[-_]", value) or value != value.lower()
+
+
+def _secret_param(pair: str, depth: int = 0) -> bool:
+    """Whether one ``name=value`` of a query string may carry a credential:
+    its name says so (``_SECRET_PARAMS``), its value is one opaque token
+    (``_opaque``), or its value is an address that itself carries one (a
+    mail link wrapper, ``next=``, ``redirect_uri=``), looked into up to
+    three levels."""
+    name, _, value = pair.partition("=")
+    name = re.sub(r"[_\-\[\]]", "", unquote(name).lower())
+    if (
+        name in _SECRET_PARAMS
+        or name.endswith(_SECRET_PARAM_ENDINGS)
+        # The whole pair too: "/unsubscribe?<token>" has no name at all.
+        or _opaque(value)
+        or _opaque(pair)
+    ):
+        return True
+    inner = value
+    for _ in range(3):  # an address encoded more than once
+        decoded = unquote(inner)
+        if decoded == inner:
+            break
+        inner = decoded
+    return depth < 3 and any(
+        "=" in piece and _secret_param(piece, depth + 1) for piece in re.split(r"[?#&;]", inner)
+    )
+
+
+def strip_url_secrets(url: str) -> str:
+    """*url* as a link the model may read and open again: without
+    ``user:password@``, without its fragment, and without the query
+    parameters that may carry a credential (``_secret_param``). Every
+    other parameter stays, in its order, as the page wrote it: on a public
+    site the showtime, the date and the theatre live there. An address no
+    browser can open either ("http://[") comes back empty, never as an
+    error, so text that only quotes one (a reply) can go through this too."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return ""
+    # Parameters are split on "&" alone, as a browser splits them: a ";"
+    # is part of a value ("filters=a;b"), so a site that separates its
+    # parameters with ";" keeps them as one.
+    query = "&".join(pair for pair in parts.query.split("&") if not _secret_param(pair))
+    return urlunsplit((parts.scheme, _host_port(parts.netloc), parts.path, query, ""))
 
 
 def _host_port(netloc: str) -> str:

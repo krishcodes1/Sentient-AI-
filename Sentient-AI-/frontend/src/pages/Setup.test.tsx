@@ -19,6 +19,7 @@ vi.mock("@/services/api", () => ({
   getSetupStatus: vi.fn(),
   createOwner: vi.fn(),
   getSetupProviders: vi.fn(),
+  getProviderModels: vi.fn(() => new Promise(() => {})),
   testProvider: vi.fn(),
   saveProvider: vi.fn(),
   testTelegram: vi.fn(),

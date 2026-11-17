@@ -1,8 +1,10 @@
 """Tests for an Approve/Deny press on Telegram: the press is answered at once,
 the decision runs as the chat's tracked task off the poll loop, in order with
-the chat's other turns, and reports back in the chat; the turn resumed after an
-approval shows "typing…" and progress lines; and a /stop sent while the
-approved action or the resumed turn runs reaches it.
+the chat's other turns, and reports back in the chat; the card's buttons go
+when the decision starts, stay off a card that expired or was already
+answered (which says so) and come back after any other failure; the turn
+resumed after an approval shows "typing…" and progress lines; and a /stop
+sent while the approved action or the resumed turn runs reaches it.
 
 Why it exists: an approval runs the action and then a whole resumed agent
 turn, which can take a minute. Run inline, it held the poll loop that whole
@@ -27,6 +29,7 @@ no new message first, then waits a bounded time for a started call.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Optional
@@ -37,7 +40,7 @@ import structlog
 
 from services.agent import cancel as agent_cancel
 from services.agent.providers import LLMResponse, ToolCall
-from services.agent.runtime import USER_STOPPED_POLICY
+from services.agent.runtime import ACTION_EXPIRED_ERROR, ACTION_GONE_ERROR, USER_STOPPED_POLICY
 from services.notifications import progress
 from services.notifications import telegram as tg
 from tests.conftest import make_user, telegram_dm, use_provider
@@ -135,6 +138,7 @@ def _press(data: str, chat_id: Optional[int], message_id: int = 7) -> dict[str, 
             "chat": {"id": chat_id, "type": "private"},
             "message_id": message_id,
             "text": CARD_TEXT,
+            "reply_markup": CARD_KEYBOARD,
         }
     return callback
 
@@ -145,6 +149,16 @@ CARD_TEXT = "🔐 Send an email to prof@example.com"
 APPROVED_EDIT = re.compile(
     re.escape(CARD_TEXT) + r"\n\n✅ Approved at (1[0-2]|[1-9]):[0-5]\d [AP]M\."
 )
+# The buttons that card carries; Telegram sends them back with the press.
+CARD_KEYBOARD = {
+    "inline_keyboard": [
+        [
+            {"text": "✅ Approve", "callback_data": "apv:on-the-card"},
+            {"text": "❌ Deny", "callback_data": "dny:on-the-card"},
+        ],
+        [{"text": "📅 Allow Mail for 7 days", "callback_data": "apw:on-the-card"}],
+    ]
+}
 
 
 def _answers(api: FakeTelegramAPI) -> list[str]:
@@ -153,6 +167,12 @@ def _answers(api: FakeTelegramAPI) -> list[str]:
 
 def _edits(api: FakeTelegramAPI) -> list[str]:
     return [p["text"] for m, p in api.calls if m == "editMessageText"]
+
+
+def _keyboards(api: FakeTelegramAPI) -> list[dict[str, Any]]:
+    """Each change to a card's buttons alone (editMessageReplyMarkup): with
+    no ``reply_markup`` Telegram takes the buttons off and keeps the text."""
+    return [p for m, p in api.calls if m == "editMessageReplyMarkup"]
 
 
 async def _wait_for(predicate, timeout: float = 5.0) -> bool:
@@ -206,12 +226,18 @@ async def test_a_refused_decision_is_reported_in_the_chat(session_factory, fake_
     await service._handle_callback(_press("dny:act-2", 6161))
     await service.wait_for_chats()
     assert _answers(fake_api) == ["Denying…"]
-    # The press was already answered, so the reason arrives as a message,
-    # and the card keeps its buttons.
+    # The press was already answered, so the reason arrives as a message.
     assert [m["text"] for m in fake_api.sent_messages()] == [
         "⚠️ Action not found or already processed"
     ]
+    # The request may still be waiting: the card's text is left alone and
+    # its buttons, taken off when the decision started, come back as they
+    # were.
     assert _edits(fake_api) == []
+    assert _keyboards(fake_api) == [
+        {"chat_id": 6161, "message_id": 7},
+        {"chat_id": 6161, "message_id": 7, "reply_markup": CARD_KEYBOARD},
+    ]
     await service._client.aclose()
 
 
@@ -223,7 +249,11 @@ async def test_a_decision_that_fails_is_reported_in_the_chat(session_factory, fa
         raise RuntimeError("database went away")
 
     service = _service(session_factory, decide=decide)
-    await service._handle_callback(_press("apv:act-3", 6262))
+    press = _press("apv:act-3", 6262)
+    # A press that came without its card's buttons: the plain pair for the
+    # same request goes back on.
+    del press["message"]["reply_markup"]
+    await service._handle_callback(press)
     await service.wait_for_chats()
     assert _answers(fake_api) == ["Approving…"]
     assert [m["text"] for m in fake_api.sent_messages()] == [
@@ -231,6 +261,99 @@ async def test_a_decision_that_fails_is_reported_in_the_chat(session_factory, fa
         "Tap the button again, or answer in the web app."
     ]
     assert _edits(fake_api) == []
+    # "Tap the button again" holds: there is a button to tap.
+    assert _keyboards(fake_api)[-1] == {
+        "chat_id": 6262,
+        "message_id": 7,
+        "reply_markup": tg._approval_keyboard("act-3"),
+    }
+    await service._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_the_buttons_go_as_soon_as_the_decision_starts(session_factory, fake_api):
+    """An approval runs the action and then a whole resumed turn, which can
+    take a minute: a card that still shows Approve and Deny all that time
+    looks unanswered."""
+    await _link(session_factory, "tg-decision-buttons@example.com", 6565)
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def decide(user_id, action_id, approved, *, on_event=None):
+        started.set()
+        await release.wait()
+        return {"status": "approved", "summary": "Sent, and office hours are 3pm."}
+
+    service = _service(session_factory, decide=decide)
+    await service._handle_callback(_press("apv:act-7", 6565))
+    # The press is still answered first, and nothing else holds the poll loop.
+    assert [m for m, _ in fake_api.calls] == ["answerCallbackQuery"]
+    await asyncio.wait_for(started.wait(), 5)
+    # The buttons are gone while the decision runs; the card's text waits
+    # for the verdict.
+    assert _keyboards(fake_api) == [{"chat_id": 6565, "message_id": 7}]
+    assert _edits(fake_api) == []
+    release.set()
+    await service.wait_for_chats()
+    [edit] = [p for m, p in fake_api.calls if m == "editMessageText"]
+    assert APPROVED_EDIT.fullmatch(edit["text"]) and "reply_markup" not in edit
+    assert len(_keyboards(fake_api)) == 1  # never put back
+    await service._client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [ACTION_EXPIRED_ERROR, ACTION_GONE_ERROR])
+async def test_a_card_that_can_no_longer_be_answered_says_so_and_keeps_no_buttons(
+    session_factory, fake_api, error
+):
+    await _link(session_factory, "tg-decision-gone@example.com", 6666)
+
+    async def decide(user_id, action_id, approved, *, on_event=None):
+        return {"error": error}
+
+    service = _service(session_factory, decide=decide)
+    await service._handle_callback(_press("apv:act-8", 6666))
+    await service.wait_for_chats()
+    # The card says so under its own text, and its buttons stay off: a tap
+    # on them could only ever get this same answer.
+    [edit] = [p for m, p in fake_api.calls if m == "editMessageText"]
+    assert edit["text"] == f"{CARD_TEXT}\n\n⚠️ {error}" and "reply_markup" not in edit
+    assert _keyboards(fake_api) == [{"chat_id": 6666, "message_id": 7}]
+    # The chat hears it too, as before: the card may be far up the chat.
+    assert [m["text"] for m in fake_api.sent_messages()] == [f"⚠️ {error}"]
+    await service._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_second_press_on_one_card_keeps_the_first_ones_verdict(session_factory, fake_api):
+    """Two quick taps on one card. The second finds no buttons left to take
+    off, so its "already answered" goes to the chat only: written on the
+    card too, it would replace the first tap's "Approved" line."""
+    await _link(session_factory, "tg-decision-twice@example.com", 6767)
+    real = fake_api.handler
+
+    def telegram(request: httpx.Request) -> httpx.Response:
+        # How Telegram answers taking the buttons off a card that has none.
+        if request.url.path.endswith("/editMessageReplyMarkup") and _keyboards(fake_api):
+            fake_api.calls.append(("editMessageReplyMarkup", json.loads(request.content)))
+            refused = {"ok": False, "error_code": 400, "description": "message is not modified"}
+            return httpx.Response(400, json=refused)
+        return real(request)
+
+    fake_api.handler = telegram
+    outcomes = [{"status": "approved", "summary": "Sent."}, {"error": ACTION_GONE_ERROR}]
+
+    async def decide(user_id, action_id, approved, *, on_event=None):
+        return outcomes.pop(0)
+
+    service = _service(session_factory, decide=decide)
+    await service._handle_callback(_press("apv:act-9", 6767))
+    await service._handle_callback(_press("apv:act-9", 6767))
+    await service.wait_for_chats()
+    [edit] = _edits(fake_api)
+    assert APPROVED_EDIT.fullmatch(edit), edit
+    # Both presses tried to take the buttons off; neither put any back.
+    assert _keyboards(fake_api) == [{"chat_id": 6767, "message_id": 7}] * 2
+    assert [m["text"] for m in fake_api.sent_messages()] == ["Sent.", f"⚠️ {ACTION_GONE_ERROR}"]
     await service._client.aclose()
 
 
@@ -961,9 +1084,12 @@ async def test_a_call_that_ran_beside_a_card_is_named_for_the_resumed_turn(
 
     ran = "I already did this before asking you: set a reminder."
     texts = [m["text"] for m in fake_api.sent_messages()]
-    [reply] = [t for t in texts if "🔐 I need your OK first to send an email." in t]
-    assert reply.startswith("I need your OK before I send an email.")
+    [reply] = [t for t in texts if t.startswith("I need your OK before I send an email.")]
     assert ran in reply
+    # The reply asks once: its note only says how to see the card again,
+    # and never where the card is (it can arrive after the reply).
+    assert reply.count("I need your OK") == 1 and "just above" not in reply
+    assert "\n\nSend /pending to see the request again." in reply
     assert executor.calls == ["reminders.create", "google_workspace.send_email"]
     resumed = [m for m in provider.calls[1]["messages"] if m["role"] == "assistant"]
     assert any(ran in str(m["content"]) for m in resumed), resumed
@@ -1040,3 +1166,62 @@ async def test_the_resumed_turn_shows_typing_and_progress_lines(
     assert "disable_notification" not in sent[-1]
     [edit] = _edits(fake_api)
     assert APPROVED_EDIT.fullmatch(edit), edit
+
+
+@pytest.mark.asyncio
+async def test_a_decision_cut_off_by_stop_leaves_the_card_saying_what_is_true(session_factory, fake_api):
+    """/stop cancels the wait for a decision. The applier finishes a decision
+    it has started before the cancel lands, so the card must say what is
+    true: a request that still waits gets its buttons back (a later tap
+    works); one that was decided gets its verdict, and for an approval that
+    the stop came after, never live buttons on a step that already ran."""
+    from datetime import datetime, timedelta, timezone
+
+    from models.pending_action import PendingAction, PendingActionStatus
+
+    user = await _link(session_factory, "tg-decision-cancelled@example.com", 6161)
+
+    async def decide(user_id, action_id, approved, *, on_event=None):
+        raise asyncio.CancelledError()
+
+    async with session_factory() as session:
+        waiting = PendingAction(
+            user_id=user.id,
+            tool_name="google_workspace.send_email",
+            arguments={"to": "prof@example.com"},
+            reason="Send an email to prof@example.com",
+            status=PendingActionStatus.pending,
+            created_at=datetime.now(timezone.utc),
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+        )
+        session.add(waiting)
+        await session.commit()
+        waiting_id = str(waiting.id)
+
+    service = _service(session_factory, decide=decide)
+    try:
+        # 1. The cancel landed before the store decided: the request waits.
+        await service._handle_callback(_press("apv:" + waiting_id, 6161))
+        assert await _wait_for(lambda: len(_keyboards(fake_api)) >= 2)
+        taken, restored = _keyboards(fake_api)[:2]
+        assert "reply_markup" not in taken  # the buttons went when the decision started
+        assert restored["reply_markup"] == CARD_KEYBOARD and restored["message_id"] == 7
+        assert _edits(fake_api) == []  # no verdict: nothing was decided
+
+        # 2. The request was decided (and ran) before the cancel landed.
+        async with session_factory() as session:
+            stored = await session.get(PendingAction, waiting.id)
+            stored.status = PendingActionStatus.approved
+            await session.commit()
+        await service._handle_callback(_press("apv:" + waiting_id, 6161, message_id=8))
+        assert await _wait_for(lambda: bool(_edits(fake_api)))
+    finally:
+        await service.stop()
+    [edited] = _edits(fake_api)
+    assert re.search(
+        re.escape(CARD_TEXT)
+        + r"\n\n✅ Approved at \d{1,2}:\d{2} [AP]M\. Then you stopped me, so I did nothing after that\.$",
+        edited,
+    ), edited
+    # Its buttons stayed off: no keyboard was put back on message 8.
+    assert [k for k in _keyboards(fake_api) if k.get("message_id") == 8 and "reply_markup" in k] == []

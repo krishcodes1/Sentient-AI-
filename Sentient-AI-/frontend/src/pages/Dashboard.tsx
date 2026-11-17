@@ -57,6 +57,7 @@ import {
 } from "@/components/ApprovalDetails";
 import SecurityNotes from "@/components/SecurityNotes";
 import WeeklyAppButton, {
+  HourlySiteButton,
   WeeklyAllowedNote,
   type ApprovalDecision,
   type WeeklyGrant,
@@ -223,6 +224,11 @@ function ApprovalRow({
         disabled={pending || expired}
         onAllow={() => void decide(true, "week")}
       />
+      <HourlySiteButton
+        approval={approval}
+        disabled={pending || expired}
+        onAllow={() => void decide(true, "site")}
+      />
       <LowRiskGrantButton
         approval={approval}
         disabled={pending || expired}
@@ -332,6 +338,8 @@ export default function Dashboard() {
   const [decisionImages, setDecisionImages] = useState<TurnImage[]>([]);
   // The app the last decision allowed for a week (its weekly button).
   const [weeklyAllowed, setWeeklyAllowed] = useState<WeeklyGrant | null>(null);
+  // Whether that grant is a website's hour (the site button) rather than an app's week.
+  const [allowedIsSite, setAllowedIsSite] = useState(false);
   // The account the last decision allowed low-risk changes on (its low-risk button).
   const [lowRiskAllowed, setLowRiskAllowed] = useState<LowRiskGrant | null>(null);
   const [usage, setUsage] = useState<UsageSummary | null>(null);
@@ -411,7 +419,8 @@ export default function Dashboard() {
     const decided = await decideApproval(actionId, ...decision);
     setApprovals((prev) => prev.filter((a) => a.action_id !== actionId));
     setDecisionImages(decided.images ?? []);
-    setWeeklyAllowed(decided.weekly ?? null);
+    setWeeklyAllowed(decided.weekly ?? decided.site ?? null);
+    setAllowedIsSite(!decided.weekly && Boolean(decided.site));
     setLowRiskAllowed(decided.low_risk ?? null);
     // Refresh stats and the feed so the decided action shows up immediately.
     void load(true);
@@ -556,7 +565,7 @@ export default function Dashboard() {
         </div>
       )}
 
-      {weeklyAllowed && <WeeklyAllowedNote weekly={weeklyAllowed} />}
+      {weeklyAllowed && <WeeklyAllowedNote weekly={weeklyAllowed} site={allowedIsSite} />}
       {lowRiskAllowed && <LowRiskAllowedNote grant={lowRiskAllowed} />}
 
       {/* What the last approved action showed (a checkout's confirmation

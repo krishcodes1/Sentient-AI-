@@ -421,6 +421,36 @@ async def test_a_telegram_reply_after_a_stale_ref_names_no_block(session_factory
 
 
 @pytest.mark.asyncio
+async def test_a_telegram_reply_after_a_refused_step_says_that_steps_own_reason(session_factory):
+    # A step a rule refused reaches the chat with the rule's own sentence
+    # ("blocked_reasons", in the order of "blocked"), not with a general
+    # line about safety settings.
+    from api.routes.agent import build_chat_applier
+    from main import app
+    from services.notifications.telegram import _with_turn_notes
+    from tests.conftest import make_user
+
+    user, _ = await make_user(session_factory)
+    turn = Turn(mail_desktop())
+    use_provider(
+        turn.runtime,
+        Script(OBSERVE, call("t2", ACT, action="key", keys="ctrl+cmd+q"), LLMResponse(content=EXPLAINED)),
+    )
+    saved = getattr(app.state, "agent_runtime", None)
+    app.state.agent_runtime = turn.runtime
+    try:
+        outcome = await build_chat_applier(app, session_factory=session_factory)(
+            str(user.id), "Lock the screen."
+        )
+    finally:
+        app.state.agent_runtime = saved
+    assert outcome["blocked"] == [ACT]
+    [reason] = outcome["blocked_reasons"]
+    said = _with_turn_notes(outcome["content"], outcome)
+    assert reason and reason[:60] in said and "safety settings" not in said
+
+
+@pytest.mark.asyncio
 async def test_acting_before_any_outline_never_reaches_a_card():
     turn = Turn(mail_desktop())
     response = await turn.run(

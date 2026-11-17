@@ -8,7 +8,9 @@ labelled, paced parts that never interleave with another card's, with the
 question, the check code and the buttons on the last one. An oversized
 card, or one with a lost part, becomes a notice with no buttons. The reply
 notes, the expiry, the decision line and the grant line are plain words:
-never a tool id, never an em or en dash.
+never a tool id, never an em or en dash. A blocked step's note says the
+step's own reason when it has one, and a reply that already asks for the OK
+is not asked again.
 
 Why it exists: an approval card that cuts its details, or whose buttons sit
 under a message that does not say what they approve, lets the owner approve
@@ -733,6 +735,156 @@ def test_turn_notes_never_name_a_tool() -> None:
         {"pending_approvals": [None, 5, {"x": 1}], "blocked": "desktop.act"}, pending_hint=""
     )
     assert "desktop.act" not in odd and odd.count("\U0001f510") == 1
+
+
+# What today's note says about a step with no reason of its own.
+SKIPPED_ONE = "\n\n⛔ I skipped one step because your safety settings don't allow it: "
+
+
+def test_a_blocked_step_says_its_own_reason() -> None:
+    no_card = "No payment card is stored. Add one in Settings, under Payment card."
+    switched_off = "Control of this computer is turned off in Settings."
+    one = turn_notes({"blocked": ["browser.checkout"]}, pending_hint="x", reasons=[no_card])
+    assert one == f"\n\n⛔ I didn't pay for something on a website. {no_card}"
+    assert "safety settings" not in one
+    # One line per step, in the steps' order; a step refused twice for the
+    # same reason is said once.
+    several = turn_notes(
+        {"blocked": ["browser.checkout", "desktop.act", "browser.checkout"]},
+        pending_hint="x",
+        reasons=[no_card, switched_off, no_card],
+    )
+    assert several == (
+        f"\n\n⛔ I didn't pay for something on a website. {no_card}"
+        f"\n\n⛔ I didn't click or type in an app on your computer. {switched_off}"
+    )
+    # A step without a reason keeps the general sentence, after the others.
+    mixed = turn_notes(
+        {"blocked": ["desktop.act", "browser.act"]},
+        pending_hint="x",
+        reasons=[None, "That button pays for something."],
+    )
+    assert mixed == (
+        "\n\n⛔ I didn't fill in or click on a web page. That button pays for something."
+        f"{SKIPPED_ONE}click or type in an app on your computer."
+    )
+    # The reasons follow the blocked names' order, the guard's two pseudo
+    # names included: those still get no note, and no other step gets theirs.
+    guarded = turn_notes(
+        {"blocked": ["input", "browser.act"]},
+        pending_hint="x",
+        reasons=["Part of your message looked unsafe.", "That button pays for something."],
+    )
+    assert guarded == (
+        "\n\n⛔ I didn't fill in or click on a web page. That button pays for something."
+    )
+
+
+def test_a_blocked_reason_is_one_capped_line_and_never_breaks_the_note() -> None:
+    wordy = "so  many\nwords " * 90
+    long = turn_notes({"blocked": ["browser.act"]}, pending_hint="x", reasons=[wordy])
+    assert long.startswith("\n\n⛔ I didn't fill in or click on a web page. so many words so many")
+    reason = long.split(". ", 1)[1]
+    assert "\n" not in reason and "  " not in reason
+    assert len(reason) <= cards.BLOCKED_REASON_CHARS < len(wordy) and reason.endswith("…")
+    # One that fits is quoted whole, with no mark.
+    fits = "w" * cards.BLOCKED_REASON_CHARS
+    assert turn_notes({"blocked": ["browser.act"]}, pending_hint="x", reasons=[fits]).endswith(
+        f"a web page. {fits}"
+    )
+    # Reasons that are missing, short of the names, empty or not text fall
+    # back to today's sentence; the old call (no reasons) is unchanged.
+    plain = SKIPPED_ONE + "click or type in an app on your computer."
+    for reasons in (None, [], [""], ["  \n "], [7], "No card.", {"0": "No card."}):
+        got = turn_notes({"blocked": ["desktop.act"]}, pending_hint="x", reasons=reasons)
+        assert got == plain, reasons
+    assert turn_notes({"blocked": ["desktop.act"]}, pending_hint="x") == plain
+    # A tool is never named, with a reason or without.
+    for tool in [*known_tools(), "mcp.brave_search.web_search", "acme__1f2e.do_thing", "weird"]:
+        notes = turn_notes({"blocked": [tool]}, pending_hint="x", reasons=["It is off."])
+        assert tool not in notes and "_" not in notes and _no_dashes(notes), (tool, notes)
+        assert notes.startswith("\n\n⛔ I didn't ") and notes.endswith(". It is off.")
+
+
+def test_a_reason_written_for_the_model_is_never_quoted_to_the_person() -> None:
+    """A rule's refusal is worded for the model (it names the tool to use
+    next); the person gets the general sentence for that step instead, and a
+    long reason ends at a sentence, never mid-word."""
+    from services.agent.tool_registry import _not_wired
+    from services.tools.browser.checkout import markers
+
+    # Not quoted, and not blamed on the person's settings: the step is named.
+    named = "\n\n⛔ I didn't fill in or click on a web page."
+    for reason in (
+        markers.USE_CHECKOUT_MESSAGE,
+        markers.READ_CLICK_MESSAGE,
+        str(_not_wired("browser.act")["error"]),
+        "Call tools.find first.",
+        "Use browser.read with action open instead.",
+        "Use google_workspace__1a2b3c4d.send_email for that.",
+        "Call mcp.linear.create_issue instead.",
+        "Use Browser.Act to click.",
+        "Tool arguments must be a JSON object.",
+    ):
+        notes = turn_notes({"blocked": ["browser.act"]}, pending_hint="x", reasons=[reason])
+        assert notes == named, reason
+    # A site's name is not a tool's, even when its first label is a family's.
+    for sentence in (
+        "tickets.fandango.com is not the site you named.",
+        "githuub.com looks like github.com but is not that site, so I won't pay here.",
+        "canvas.nyit.edu is blocked in your Site rules.",
+        "The open page is on web.dev, not the site you asked for.",
+        "files.example.com asked for a sign-in.",
+    ):
+        site = turn_notes({"blocked": ["browser.checkout"]}, pending_hint="x", reasons=[sentence])
+        assert site.endswith(sentence), sentence
+    # Long: whole sentences that fit, no mid-word cut and no mark.
+    long = "The total is over your limit. " + "You can raise the limit in Settings, under Permissions. " * 6
+    said = turn_notes({"blocked": ["browser.checkout"]}, pending_hint="x", reasons=[long])
+    reason = said.split("a website. ", 1)[1]
+    assert len(reason) <= cards.BLOCKED_REASON_CHARS and reason.endswith("under Permissions.")
+    assert reason.startswith("The total is over your limit. You can raise")
+
+
+def test_a_reply_that_already_asks_gets_only_the_pending_hint() -> None:
+    from services.agent.runtime import pending_reply
+
+    email, install = "google_workspace.send_email", "system.install_capability"
+    asked = pending_reply([email])
+    # The runtime's own sentence is what the note recognises.
+    assert asked == "I need your OK before I send an email. Tap Approve or Deny on the request."
+    assert asked.startswith(cards.OWN_ASK_START)
+    one = turn_notes({"pending_approvals": [email]}, pending_hint="send /pending", reply=asked)
+    assert one == "\n\nSend /pending to see the request again."
+    both = turn_notes(
+        {"pending_approvals": [email, install]},
+        pending_hint='send "pending"',
+        reply=pending_reply([email, install]) + " I already did this before asking you: x.",
+    )
+    assert both == '\n\nSend "pending" to see the requests again.'
+    for notes in (one, both):
+        assert "just above" not in notes and "I need your OK" not in notes
+    # With no way to list the cards there is nothing left to add.
+    assert turn_notes({"pending_approvals": [email]}, pending_hint="", reply=asked) == ""
+    # A blocked step is still reported after it.
+    with_block = turn_notes(
+        {"pending_approvals": [email], "blocked": ["desktop.act"]},
+        pending_hint="send /pending",
+        reply=asked,
+    )
+    assert with_block == (
+        "\n\nSend /pending to see the request again."
+        f"{SKIPPED_ONE}click or type in an app on your computer."
+    )
+    # The model's own words say nothing about the request: today's note.
+    waiting = {"pending_approvals": [email]}
+    replies: list[Any] = ["Drafted it; approve the card to send.", "", None]
+    for reply in replies:
+        own = turn_notes(waiting, pending_hint="send /pending", reply=reply)
+        assert own == (
+            "\n\n\U0001f510 I need your OK first to send an email. The request is just above, "
+            "or send /pending to see it again."
+        )
 
 
 def test_low_risk_line_wording() -> None:

@@ -1,7 +1,9 @@
 """The markers every browser toolkit shares (checkout/markers.py): the
 card-field classifier as Python and as the page-side script built from
-the same patterns, the purchase-word list browser.act refuses on, and
-the log sanitiser that keeps a typed value out of an exception's text.
+the same patterns, the purchase rules browser.act and browser.read judge
+a click by (a plain link is navigation; words refuse an act only where
+money can move), and the log sanitiser that keeps a typed value out of
+an exception's text.
 Pure, except one headless Chromium check that the script and the Python
 rule agree on real elements."""
 
@@ -121,9 +123,14 @@ def _target(**over):
 @pytest.mark.parametrize(
     "target, pays",
     [
-        # The control's words, whatever else is true.
-        (_target(name="Place order", sends=False, buttonish=False), True),
+        # The control's words when money can move from the act: it sends a
+        # POST form, or the page shows an order total or a payment method
+        # on file. Words alone are left to the approval card.
+        (_target(name="Place order"), True),
         (_target(name="Gift note | Place order"), True),
+        (_target(name="Place order", sends=False, order_total=True), True),
+        (_target(name="Buy now", sends=False, buttonish=False, saved_payment=True), True),
+        (_target(name="Place order", sends=False), False),
         # A typed card in the form it sends.
         (_target(card_in_form=True, sends=False, buttonish=False), True),
         # A POST form to an order path, whatever the button says.
@@ -137,10 +144,15 @@ def _target(**over):
         # elsewhere is a read.
         (_target(name="Continue", sends=False, buttonish=False, action="", link=True, href="/place-order-now?t=1"), True),
         (_target(name="Your cart", sends=False, buttonish=False, action="", link=True, href="/cart"), False),
-        # A page (any frame of it) that holds a payment method next to a
-        # price: anything but a plain link is refused, in any language.
+        # A page (any frame of it) that holds a payment method in words
+        # next to a price: anything but a plain link is refused, in any
+        # language. A wallet button somewhere on a page refuses nothing
+        # (every shop shows one): only the wallet control itself is refused.
         (_target(name="Weiter", saved_payment=True, money=True), True),
-        (_target(name="Weiter", sends=False, buttonish=False, action="", wallet=True, money=True), True),
+        (_target(name="Weiter", sends=False, buttonish=False, action="", wallet=True, money=True), False),
+        (_target(name="Add to cart", action="/cart/add", wallet=True, money=True), False),
+        (_target(name="Buy with Google Pay", sends=False, action=""), True),
+        (_target(name="PayPal", sends=False, buttonish=False, action=""), True),
         (_target(name="Edit cart", sends=False, buttonish=False, action="", link=True, href="/cart",
                  plain_link=True, saved_payment=True, money=True), False),
         (_target(name="Edit cart", sends=False, buttonish=False, action="", link=True, href="/cart",
@@ -176,9 +188,118 @@ def _target(**over):
     ],
 )
 def test_pays_judges_the_control_that_sends_the_form_and_the_page(target, pays):
-    """The rule table behind ``use_checkout`` at run time: words, a typed
-    card, an order path, or a review page with a saved payment method."""
+    """The rule table behind ``use_checkout``: a typed card, an order
+    path, a bare price, the wallet control, a review page with a saved
+    payment method, or purchase words where money can move."""
     assert markers.pays(target) is pays, target
+
+
+# What the judge answers for a plain link: an http(s) <a href> to another
+# page, opened by GET, with no script or role of its own.
+PLAIN_LINK = {"link": True, "plain_link": True, "sends": False, "buttonish": False, "action": ""}
+# Everything a page and a form can show around a control.
+BUSY_PAGE = {
+    "order_total": True, "saved_payment": True, "wallet": True, "money": True,
+    "in_form": True, "card_in_form": True,
+}
+
+
+@pytest.mark.parametrize(
+    "name, href",
+    [
+        # A film poster whose anchor hides "Buy Tickets" for screen readers,
+        # and a showtime: both open the next page, neither pays.
+        ("Paper Tiger (2026) | Paper Tiger (2026) Buy Tickets", "/paper-tiger-2026-246826/movie-overview"),
+        ("Buy tickets for 7:15 PM showtime", "/transaction/ticketing/mobile/jump.aspx?tid=AAQQP"),
+        ("Subscribe and save $5.00", "/plans"),
+        ("PayPal", "/help/paying-with-paypal"),
+    ],
+)
+def test_a_plain_link_that_is_no_order_path_is_navigation_whatever_it_says(name, href):
+    """Following a link by GET moves no money, so neither tier refuses it
+    for its words: browser.read follows it, and browser.act's card is made
+    for it. The one exception is a link worded like the order itself on a
+    page that already shows a total or a payment method on file: a link a
+    script handles ("Place order" in a cart) looks plain too."""
+    link = _target(name=name, href=href, **PLAIN_LINK)
+    assert markers.pays(link) is False, link
+    assert markers.read_click_pays(link) is False, link
+    assert markers.read_click_allowed(link) is True, link
+    busy = _target(name=name, href=href, **PLAIN_LINK, **BUSY_PAGE)
+    worded = bool(markers.PURCHASE_RE.search(name))
+    assert markers.pays(busy) is worded, busy
+    assert markers.pay_rule(busy) == ("purchase_words" if worded else None), busy
+
+
+@pytest.mark.parametrize("href", ["/buy", "/pay", "/checkout/complete", "/buy?id=1", "/place-order-now?t=1"])
+def test_a_plain_link_aimed_at_an_order_path_still_pays(href):
+    """Opening an order path can be the order itself: the address is
+    judged before anything else about a link."""
+    link = _target(name="Tickets", href=href, **PLAIN_LINK)
+    assert markers.pays(link) is True
+    assert markers.read_click_pays(link) is True and markers.read_click_allowed(link) is False
+
+
+def test_purchase_words_alone_go_to_the_approval_card_but_never_to_a_read():
+    """A script button "Buy tickets" on a page with no order total and no
+    payment method on file opens the ticketing page. browser.act no longer
+    refuses it (its card shows the page and warns); browser.read, which
+    has no card, still leaves it alone."""
+    button = _target(name="Buy tickets", sends=False, action="", money=True)
+    assert markers.pays(button) is False
+    assert markers.read_click_pays(button) is True and markers.read_click_allowed(button) is False
+
+
+@pytest.mark.parametrize("fact", ["sends", "order_total", "saved_payment"])
+def test_purchase_words_refuse_an_act_when_money_can_move(fact):
+    """The same button in a POST form, or on a page that shows an order
+    total or a payment method on file, is the order button."""
+    button = _target(name="Buy tickets", sends=False, action="")
+    assert markers.pays(button) is False and markers.pays({**button, fact: True}) is True
+
+
+@pytest.mark.parametrize("name", ["Buy with Google Pay", "PayPal", "Apple Pay", "G Pay", "Check out with Shop Pay"])
+def test_a_wallet_control_is_refused_by_its_own_words(name):
+    assert markers.pays(_target(name=name, sends=False, action="")) is True
+    assert markers.change_pays({"name": f"Payment | {name}"}) is True
+
+
+def test_a_wallet_button_elsewhere_on_the_page_refuses_no_act_but_every_read():
+    """Most shops show an Apple Pay or PayPal button on every product
+    page. That no longer makes "Add to cart" and the size picker
+    unclickable through browser.act; a read still leaves the page's
+    buttons alone."""
+    shop = {"wallet": True, "money": True}
+    add = _target(name="Add to cart", action="/cart/add", **shop)
+    assert markers.pays(add) is False
+    assert markers.change_pays({"name": "Size | M", **shop}) is False
+    assert markers.read_click_pays(add) is True and markers.read_click_allowed(add) is False
+    # A payment method on file in words, next to a price, still refuses both.
+    assert markers.pays({**add, "saved_payment": True}) is True
+    assert markers.change_pays({"name": "Size | M", "saved_payment": True, "money": True}) is True
+
+
+@pytest.mark.parametrize(
+    "target, rule",
+    [
+        (None, "unjudged"),
+        ({"frame": True}, "unjudged"),
+        (_target(name="Tickets", href="/buy", **PLAIN_LINK), "order_path"),
+        (_target(name="Confirm", action="/place-order"), "order_path"),
+        (_target(card_in_form=True), "card_in_form"),
+        (_target(name="$0.99", sends=False, action=""), "priced_control"),
+        (_target(name="PayPal", sends=False, action=""), "wallet_control"),
+        (_target(name="Weiter", saved_payment=True, money=True), "saved_payment"),
+        (_target(name="Place order"), "purchase_words"),
+        (_target(name="Confirm", order_total=True, saved_payment=True), "order_review"),
+        (_target(name="Sign up", action="/post"), None),
+    ],
+)
+def test_pay_rule_names_the_rule_that_refuses(target, rule):
+    """browser.act logs the rule's name with a refusal (never the
+    control's words), so a refusal can be traced to the rule behind it."""
+    assert markers.pay_rule(target) == rule
+    assert markers.pays(target) is (rule is not None)
 
 
 @pytest.mark.parametrize(
@@ -234,6 +355,10 @@ def test_order_steps_are_the_addresses_that_order_when_opened(path, is_step):
         ("Card: Visa ...4242 (default)", True), ("Visa ....4242", True), ("Mastercard …4444", True),
         ("Charged to your default card.", True), ("Your primary payment method", True),
         ("Loading... 2024", False), ("Default shipping address", False),
+        # A card network and its last four right after "paying with" or
+        # "pay with" (Amazon's review page); a network alone pays nothing.
+        ("Paying with Visa 1234", True), ("Pay with Mastercard 5555", True),
+        ("Pay with Visa", False), ("Visa 1234 Main St", False),
     ],
 )
 def test_saved_payment_words(text, saved):
@@ -269,14 +394,17 @@ def test_total_labels_in_other_languages(text):
         ({"name": "Payment | Card on file"}, False),
         ({"name": "Payment | Card on file", "saved_payment": True, "money": True}, True),
         ({"name": "Country | Canada", "order_total": True}, False),
-        ({"name": "Gift wrap", "wallet": True, "money": True}, True),
+        ({"name": "Gift wrap", "wallet": True, "money": True}, False),
+        ({"name": "Payment | PayPal"}, True),
         (None, True),
     ],
 )
 def test_change_pays_judges_the_choice_and_the_page(target, pays):
-    """A check or a select: its own words, or a page that holds a payment
-    method next to a price. The form's button is not asked (a checkout's
-    Country select sits in the form whose button says "Place order")."""
+    """A check or a select: its own words (a purchase, or a wallet), or a
+    page that holds a payment method in words next to a price. The form's
+    button is not asked (a checkout's Country select sits in the form
+    whose button says "Place order"), and a wallet button elsewhere on the
+    page refuses no choice."""
     assert markers.change_pays(target) is pays, target
 
 
@@ -331,8 +459,8 @@ def test_a_control_that_is_little_more_than_a_price(name, priced):
 )
 def test_read_click_pays_leaves_every_click_that_may_order_to_browser_act(target, refused):
     """browser.read clicks with no approval card: it refuses whatever
-    browser.act would, and any button on a page that looks like a cart or
-    a review page."""
+    browser.act would, any control whose words are a purchase, and any
+    button on a page that looks like a cart or a review page."""
     assert markers.read_click_pays(target) is refused, target
 
 
@@ -347,10 +475,23 @@ def test_join_page_adds_every_frames_facts_and_fails_closed():
     assert markers.join_page("junk", [top]) == "junk"
 
 
-def test_the_refusal_names_the_switch_in_plain_words():
+def test_the_refusals_name_the_next_tool_and_hold_with_the_switch_on_or_off():
+    """Both are results the model reads. The old sentences named only the
+    owner's switch, so a refusal with every switch on was passed on as
+    "permissions are turned off". Each now says which tool to call next,
+    and treats the switch as off only when that tool is not offered."""
     assert markers.USE_CHECKOUT_MESSAGE == (
-        "Crawler only pays through its own checkout step, which needs 'Buy things for me' on "
-        "in Permissions."
+        "This step pays or places an order, so browser.act does not do it. On the payment page "
+        "call browser.checkout with the site's domain: the person approves the amount first. "
+        "Only if you have no browser.checkout tool is 'Buy things for me' off: then stop here "
+        "and tell the person the page is ready for them, and that they can turn it on in "
+        "Settings, under Permissions."
+    )
+    assert markers.READ_CLICK_MESSAGE == (
+        'browser.read does not make this click. Call browser.act with action "click" and the '
+        "same ref: the person approves it on a request that shows the page, then it runs. Only "
+        "if you have no browser.act tool is 'Fill in forms and click on sites' off: then tell "
+        "the person they can turn it on in Settings, under Permissions."
     )
 
 
@@ -410,6 +551,31 @@ async def test_the_script_and_the_python_rule_agree_on_a_live_form(page):
     assert await page.evaluate(markers.CLEAR_CARD_FIELDS_JS) == 0
     assert await page.evaluate(markers.FILLED_CARD_FIELDS_JS) == 0
     assert await page.input_value("#a") == "" and await page.input_value("#h") == "hunter2"
+
+
+@pytest.mark.asyncio
+async def test_the_judge_says_whether_a_click_sends_its_form_by_any_method(page):
+    """``sends`` is a POST form; ``submits`` is a form's own submit
+    control whatever the method (a search box's "Go" sends by GET). A
+    plain button or a field in the same form, a button outside any form
+    and a link send nothing by themselves. browser.act reads ``submits``
+    to tell an act that only clicks around from one that sends a form."""
+    await page.set_content(
+        "<form action='/search'><input id='q' name='q'><button id='go'>Go</button>"
+        "<button id='plain' type='button'>Filters</button></form>"
+        "<form method='post' action='/next'><button id='post'>Continue</button></form>"
+        "<button id='out' type='button'>Next</button><a id='link' href='https://shop.example/about'>About</a>"
+    )
+    judged = {}
+    for id_ in ("go", "plain", "q", "post", "out", "link"):
+        target = await page.locator(f"#{id_}").evaluate(markers.PURCHASE_TARGET_JS)
+        judged[id_] = (target["sends"], target["submits"])
+    assert judged == {
+        "go": (False, True), "plain": (False, False), "q": (False, False),
+        "post": (True, True), "out": (False, False), "link": (False, False),
+    }
+    # A submit through a field goes out by the form's default button.
+    assert (await page.locator("#q").evaluate(markers.SUBMIT_TARGET_JS))["submits"] is True
 
 
 @pytest.mark.parametrize(

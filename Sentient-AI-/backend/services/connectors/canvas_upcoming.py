@@ -2,9 +2,10 @@
 "what's due" rows that ``canvas.get_upcoming`` returns.
 
 Why it exists: Answering "what's due this week" took get_courses plus one
-get_assignments call per course, and the runtime cuts each of those results
-to about 2000 characters, so due items fell silently out of the middle of a
-long course. Two account-wide Canvas reads cover the same ground: the
+get_assignments call per course, and when this was written the runtime cut
+each of those results to about 2000 characters, so due items fell silently
+out of the middle of a long course (get_assignments is shaped and capped
+now, canvas_assignments.py). Two account-wide Canvas reads cover the same ground: the
 planner (everything with a date in a window, with the user's submission
 state) and the missing-submissions list. This module turns them into one
 bounded answer. Each row is a few short fields, the list is capped by rows

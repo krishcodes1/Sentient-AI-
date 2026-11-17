@@ -25,6 +25,9 @@ from typing import Any, Awaitable, Callable, Mapping, MutableMapping, Optional
 # (url=..., start_s=..., end_s=..., fps=..., instruction=..., prompt=...,
 # response_schema=..., max_output_tokens=...) -> the provider's response.
 VideoReader = Callable[..., Awaitable[Any]]
+# (query, max_results=...) -> {"sources": [{"site", "link", "text"}], "usage": {...}}:
+# the provider's own web search (GeminiProvider.search_web).
+WebSearcher = Callable[..., Awaitable[Any]]
 UsageRecorder = Callable[[Mapping[str, int]], None]
 
 
@@ -40,6 +43,9 @@ class TurnModel:
     read_video_url: Optional[VideoReader]
     record_usage: UsageRecorder
     usd_left: Optional[Callable[[], float]] = None
+    # The provider's own web search when it has one and the turn runs on
+    # Gemini (web.search asks it first); None otherwise.
+    search_web: Optional[WebSearcher] = None
 
 
 class UsageMeter:
@@ -166,15 +172,27 @@ def video_reader_of(provider: Any, provider_name: str) -> Optional[VideoReader]:
     return reader if callable(reader) else None
 
 
+def web_searcher_of(provider: Any, provider_name: str) -> Optional[WebSearcher]:
+    """The provider's ``search_web`` when the turn runs on Gemini and the
+    provider has one; None otherwise (every other provider, and a stand-in
+    without the method)."""
+    if (provider_name or "").strip().lower() != "gemini":
+        return None
+    searcher = getattr(provider, "search_web", None)
+    return searcher if callable(searcher) else None
+
+
 __all__ = [
     "TurnModel",
     "UsageMeter",
     "UsageRecorder",
     "VideoReader",
+    "WebSearcher",
     "bind",
     "bound",
     "current",
     "reset",
     "scope",
     "video_reader_of",
+    "web_searcher_of",
 ]

@@ -44,9 +44,11 @@ function RiskBadge({ risk }: { risk: CapabilityStatus["risk"] }) {
 }
 
 // What the owner should know before turning a switch on, shown under its
-// description: acting on sites goes step by step through approval cards.
+// description: which website steps Crawler takes on its own and which it
+// asks about first.
 const capabilityWarnings: Record<string, string> = {
-  browser_act: "Crawler will ask before every click or keystroke, with a picture of the page.",
+  browser_act:
+    "Crawler takes the ordinary steps of a website errand on its own and asks first before anything that pays, sends, posts, deletes, cancels, signs you up, agrees to terms or types your details.",
 };
 
 function effectiveColor(effective: CapabilityEffective): string {

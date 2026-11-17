@@ -274,6 +274,38 @@ async def test_a_parked_act_card_carries_its_picture_to_the_web():
     assert "image" not in str(pending.arguments) and IMAGE not in str(pending.arguments)
 
 
+@pytest.mark.asyncio
+async def test_a_bind_the_act_toolkit_refuses_is_filed_under_browser_rule_with_no_card():
+    """The contract the card-time checks rely on: when ``bind_async``
+    answers a refusal instead of card arguments, the runtime makes no
+    card, files the refusal under ``browser_rule`` with the toolkit's rule
+    name, and hands the model the refusal as the call's result."""
+    from services.agent.providers import LLMResponse
+    from services.agent.runtime import BROWSER_RULE_POLICY
+    from tests.test_purchases_wiring import U1, Turn, call
+
+    refusal = {"ok": False, "refused": True, "rule": "use_checkout", "error": markers.USE_CHECKOUT_MESSAGE}
+
+    class RefusingAct(RecordingAct):
+        async def bind_async(self, params, *, user_id, task_id):
+            return dict(refusal)
+
+    act = RefusingAct()
+    both = ("browser_act", "browser_control")
+    ex = ConnectorToolExecutor(session_factory=None, capability_gate=gate(*both), act_toolkit=act)
+    turn = Turn(ex, gate(*both))
+    response = await turn.run(
+        call("t1", ACT, action="click", ref="e1"),
+        LLMResponse(content="That step pays, so I'll use the checkout step."),
+        tools=build_tools([], enabled_capabilities=frozenset(both)),
+    )
+    assert response.pending_approvals == [] and await turn.store.list_pending(U1) == []
+    assert [(b.tool_name, b.policy) for b in response.blocked_actions] == [(ACT, BROWSER_RULE_POLICY)]
+    assert turn.of_type("blocked")[0]["rule"] == "use_checkout"
+    assert response.tool_calls[0]["result"] == refusal  # the model reads the toolkit's own sentence
+    assert act.calls == []  # nothing ran
+
+
 def _telegram(session_factory, image: Optional[str]):
     from services.notifications.telegram import TelegramService
 
@@ -362,11 +394,11 @@ def _decode(data_url: str) -> Image.Image:
 @pytest.mark.asyncio
 async def test_the_card_shows_the_page_with_the_target_outlined_and_secrets_masked(kits, fakesite_tls):
     _read, act_kit, _sessions, _memory, _spy = kits
-    await read(kits, "open", url=fakesite_tls.url("/login"))
+    await read(kits, "open", url=fakesite_tls.url("/signup"))
     page = await live_page(kits)
     await page.fill("input[name=password]", "hunter2hunter2")
     before = await read(kits, "snapshot")
-    call = {"action": "click", "ref": ref_of(before, '- button "Log in"')}
+    call = {"action": "click", "ref": ref_of(before, '- button "Create account"')}
     card = await act_kit.bind_async(call, user_id=USER, task_id="t1")
 
     image = act_kit.approval_image(card, user_id=USER)
@@ -391,16 +423,16 @@ async def test_the_card_shows_the_page_with_the_target_outlined_and_secrets_mask
 @pytest.mark.asyncio
 async def test_a_failed_screenshot_leaves_a_card_that_says_no_picture_was_taken(kits, fakesite_tls, monkeypatch):
     _read, act_kit, *_ = kits
-    before = await read(kits, "open", url=fakesite_tls.url("/login"))
+    before = await read(kits, "open", url=fakesite_tls.url("/signup"))
 
     async def broken(page, ref, *, mask_refs=()):
         raise RuntimeError("screenshot failed")
 
     monkeypatch.setattr(_shared, "jpeg", broken)
-    call = {"action": "click", "ref": ref_of(before, '- button "Log in"')}
+    call = {"action": "click", "ref": ref_of(before, '- button "Create account"')}
     card = await act_kit.bind_async(call, user_id=USER, task_id="t1")
     assert card[CARD_KEY]["picture"] == ""
-    assert act_kit.describe(card, user_id=USER).endswith(f'"Log in" on {fakesite_tls.base.split("://")[1]}. {NO_PICTURE_NOTE}')
+    assert act_kit.describe(card, user_id=USER).endswith(f'"Create account" on {fakesite_tls.base.split("://")[1]}. {NO_PICTURE_NOTE}')
     assert act_kit.approval_image(card, user_id=USER) is None
     assert await (await live_page(kits)).locator("[data-crawler-outline]").count() == 0
 
@@ -441,14 +473,19 @@ async def test_a_fill_on_a_page_with_a_total_and_a_card_on_file_warns(kits, fake
 @pytest.mark.asyncio
 async def test_a_review_page_in_a_language_the_lists_do_not_read_still_warns(kits, fakesite_tls, page_at):
     """Finnish: the total label is not one the patterns know, so the amount
-    is left out; the masked card still reads as a payment method on file."""
+    is left out; the masked card still reads as a payment method on file.
+    A fill is what gets a card on such a page: a click there is refused
+    when the card would be made (a card on file next to a price)."""
     sentence = await _card_sentence(
         kits, fakesite_tls, page_at,
         "<h1>Tarkista tilaus</h1><p>Maksutapa: Visa •••• 4242</p><p>Yhteensä 499,00 €</p>"
-        '<button type="button">Jatka</button>',
-        {"action": "click"}, '- button "Jatka"',
+        '<label>Lahjaviesti <input name="gift"></label><button type="button">Jatka</button>',
+        {"action": "fill", "text": "kiitos"}, '- textbox "Lahjaviesti"',
     )
     assert sentence.endswith(f". This page shows a saved payment method. {MAY_ORDER_NOTE}"), sentence
+    click = {"action": "click", "ref": ref_of(await read(kits, "snapshot"), '- button "Jatka"')}
+    answer = await kits[1].bind_async(click, user_id=USER, task_id="t1")
+    assert answer.get("rule") == "use_checkout" and CARD_KEY not in answer, answer
 
 
 @pytest.mark.asyncio
@@ -461,6 +498,32 @@ async def test_a_click_the_act_rules_allow_on_a_page_with_a_total_warns(kits, fa
         {"action": "click"}, '- button "Continue"',
     )
     assert sentence.endswith(f'"Continue" on {fakesite_tls.base.split("://")[1]}. This page shows $499.00. {MAY_ORDER_NOTE}')
+
+
+@pytest.mark.asyncio
+async def test_a_purchase_worded_script_button_gets_a_card_that_warns_and_then_runs(kits, fakesite_tls, page_at):
+    """ "Buy tickets" on a film's page: a script button that opens the
+    ticketing page. The page shows no order total and no payment method on
+    file, so money cannot move from this click and browser.act no longer
+    refuses it. Its words still match a purchase pattern, so the card says
+    so; the owner sees the page and decides."""
+    host = fakesite_tls.base.split("://")[1]
+    body = (
+        "<h1>Paper Tiger (2026)</h1><p>Tonight at Lincoln Square</p>"
+        "<button type=\"button\" onclick=\"location.href = '/flights'\">Buy tickets</button>"
+    )
+    before = await read(kits, "open", url=fakesite_tls.url(page_at("/r-buy-tickets", body, "Paper Tiger")))
+    call = {"action": "click", "ref": ref_of(before, '- button "Buy tickets"')}
+    assert kits[1].precheck(call, user_id=USER) is None
+    card = await kits[1].bind_async(call, user_id=USER, task_id="t1")
+    assert card.get("refused") is None and card[CARD_KEY]["picture"], card
+    # The button names no item, so the card names the one it sits with.
+    assert kits[1].describe(card, user_id=USER) == (
+        f'Click "Buy tickets" for "Paper Tiger (2026)" on {host}. {MAY_ORDER_NOTE}'
+    )
+    arguments = {k: v for k, v in card.items() if k != "action"}
+    result = await kits[1].execute("click", arguments, user_id=USER, task_id="t1", approved=True)
+    assert result["ok"] is True and result["url"].endswith("/flights"), result
 
 
 @pytest.mark.asyncio
@@ -563,8 +626,8 @@ async def test_a_card_whose_picture_is_no_longer_kept_says_so_and_does_not_run(k
     the owner could not have seen the page on it."""
     _read, act_kit, *_ = kits
     assert act_kit._picture_ttl == settings.APPROVAL_TTL_MINUTES * 60
-    before = await read(kits, "open", url=fakesite_tls.url("/login"))
-    call = {"action": "click", "ref": ref_of(before, '- button "Log in"')}
+    before = await read(kits, "open", url=fakesite_tls.url("/signup"))
+    call = {"action": "click", "ref": ref_of(before, '- button "Create account"')}
     card = await act_kit.bind_async(call, user_id=USER, task_id="t1")
     assert act_kit.approval_image(card, user_id=USER) is not None
     assert PICTURE_GONE_NOTE not in act_kit.describe(card, user_id=USER)

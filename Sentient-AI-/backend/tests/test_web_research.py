@@ -350,6 +350,10 @@ async def test_a_failed_page_is_one_failed_source_and_the_rest_still_come_back()
     by_host = {s["host"]: s for s in out["results"]}
     assert by_host["down.example.org"]["error"] == "Request failed: ConnectError"
     assert "503" in by_host["error.example.org"]["error"]
+    # A site that refuses the reader says what still works, as fetch_page
+    # does for the same answer; no other failure carries that hint.
+    assert by_host["error.example.org"]["hint"] == web_module.FETCH_REFUSED_HINT
+    assert [host for host, source in by_host.items() if "hint" in source] == ["error.example.org"]
     assert "not readable text" in by_host["image.example.org"]["error"]
     assert by_host["weird.example.org"]["error"] == "The page could not be read (LookupError)."
     for host in ("down.example.org", "error.example.org", "image.example.org", "weird.example.org"):

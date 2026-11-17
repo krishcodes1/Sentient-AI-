@@ -472,6 +472,9 @@ _EVENT_STATUS: dict[str, AuditStatus] = {
     "tool_denied": AuditStatus.blocked,
     "tool_expired": AuditStatus.blocked,
     "input_blocked": AuditStatus.blocked,
+    # The person's message read like an injection: the turn ran, asking
+    # before every consequential step (runtime: input_flagged).
+    "input_flagged": AuditStatus.approved,
     "output_blocked": AuditStatus.blocked,
     # The user's stop ended a turn before it finished (policy user_stopped).
     "turn_stopped": AuditStatus.blocked,

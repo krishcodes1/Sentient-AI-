@@ -276,3 +276,31 @@ def test_low_risk_actions_is_an_always_available_policy_switch_on_by_default():
     assert "- Make low-risk changes without asking: on" in on
     off = render_permissions_block(capabilities.report({"low_risk_actions": False}, ctx))
     assert f"- Make low-risk changes without asking: off. {cap.when_denied}" in off
+
+
+def test_ask_before_every_website_step_is_an_off_by_default_policy_switch_that_needs_acting():
+    """Off by default: a website errand asks once per outcome. It claims no
+    tools, needs "Fill in forms and click on sites", and what the model reads
+    while it is off says what runs unasked, in plain words with no dashes and
+    no tool id."""
+    from services.capabilities.base import ReportContext
+    from services.capabilities.browser_ask_every_step import KEY
+    from services.capabilities.prompt import render_permissions_block
+
+    cap = capabilities.get(KEY)
+    assert cap.label == "Ask before every website step"
+    assert cap.tools == () and cap.default_enabled is False and cap.risk == "low"
+    assert cap.requires == ("browser_act",) and cap.install is None and cap.probe is None
+    assert capabilities.default_switches()[KEY] is False
+    assert capabilities.settings_defaults(KEY) == {}
+    for text in (cap.description, cap.when_denied, capabilities.get("browser_act").description):
+        assert "—" not in text and "–" not in text and "browser." not in text, text
+    ctx = ReportContext(
+        in_container=False, platform="darwin", telegram_configured=False, browser_installed=True,
+        playwright_installed=True, browser_channel="chrome", host_platform="mac",
+    )
+    acting = {"browser_control": True, "browser_act": True}
+    off = render_permissions_block(capabilities.report(acting, ctx))
+    assert f"- Ask before every website step: off. {cap.when_denied}" in off
+    on = render_permissions_block(capabilities.report({**acting, KEY: True}, ctx))
+    assert "- Ask before every website step: on" in on

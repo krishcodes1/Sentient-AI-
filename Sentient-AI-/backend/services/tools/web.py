@@ -24,14 +24,28 @@ to be pointed at a hostile URL, so three constraints shape the module:
 - **Cost.** Every field that comes back is capped. The user pays per
   token for anything a tool returns, and a page is unbounded input.
 
+``search`` asks the turn's own model provider first when it has a web
+search of its own (Gemini with Google Search; ``_search_with_provider``):
+the pages that search cited, each with its own address, never the model's
+prose. Outside a turn, on any other provider, or when that search fails or
+cites nothing, the keyless search below answers as before.
+
 ``search`` never reports a bot check as an empty search. When the
 endpoint answers with anything but a results page (a status other than
 200, or DuckDuckGo's "anomaly" challenge) it asks Bing's plain results
 page next, over the same guarded client. When that has no result rows
-either, it runs the query in Crawler's own browser, when the executor
-hands it one ("Control a browser" is on): the browser.read session, read
-tier, behind the same egress guard, one page load per results page and
-no clicks. Otherwise it answers ``blocked`` with what to do instead.
+either, or rows that answer only part of the query (Bing's plain page
+answers a long query with the results for its first word alone;
+``_off_topic`` is the check), it runs the query in Crawler's own browser,
+when the executor hands it one ("Control a browser" is on): the
+browser.read session, read tier, behind the same egress guard, one page
+load per results page and no clicks. Rows that still answer only part of
+the query come back with a ``note`` that says so and what to do next;
+with no rows at all the answer is ``blocked`` with what to do instead.
+
+``fetch_page`` answers a site that refuses automated readers (HTTP 401,
+403, 429 or 503) with the status and a hint: use another source, or the
+browser. ``research`` keeps that hint on a source refused the same way.
 
 ``screenshot`` needs Playwright, which is deliberately *not* in
 requirements.txt: it pulls a browser download that most deployments do
@@ -43,7 +57,8 @@ raising. To enable it:
 ``research`` adds no egress of its own: it runs ``search`` (with its
 browser fallback and its ``blocked`` answer) and then ``fetch_page`` on
 each chosen result, so every page it reads passes the same guard, caps
-and text extraction as a single fetch.
+and text extraction as a single fetch. Rows the search notes as answering
+only part of the query are not read at all.
 
 Every action is read-only. There is no form submission, no login and no
 purchase path in this module, and the permission engine blocks every
@@ -57,12 +72,15 @@ import base64
 import inspect
 import re
 from contextvars import ContextVar
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Mapping, Optional
 from urllib.parse import urlencode, urlsplit
 
 import httpx
 import structlog
 
+from services.agent import turn_context
+from services.knowledge.text import STOPWORDS
+from services.security.egress import shown_to_model
 from services.tools.html_text import (
     clean_result_rows,
     extract_readable_text,
@@ -113,9 +131,27 @@ SEARCH_BLOCKED = (
     "The search engine asked for a bot check, so web search is unavailable right now."
 )
 SEARCH_BLOCKED_HINT = (
-    "Open the shop's own site and use its links, or ask the person for the link. "
-    "Don't guess addresses."
+    "Open the site you need and use its links or its own search, or ask the person for "
+    "the link. Don't guess addresses."
 )
+
+# What the model reads with rows that answer only part of its query
+# (_off_topic), and what web.research answers instead of reading such rows.
+# Both say what to do next. "The exact name first and in quotes" is the kind
+# of query Bing's plain page did answer on topic.
+_SEARCH_AGAIN = (
+    "Search again with fewer words, with the exact name first and in quotes, or open the "
+    "site you need and use its own search. Don't guess addresses."
+)
+SEARCH_OFF_TOPIC_NOTE = f"These results match only part of the query. {_SEARCH_AGAIN}"
+RESEARCH_OFF_TOPIC_NOTE = (
+    f"The search results matched only part of the query, so none was read. {_SEARCH_AGAIN}"
+)
+# Query words that say nothing about the topic, so a good answer need not
+# repeat them: the knowledge base's function words, when and where, and the
+# parts every address has.
+_QUERY_FILLERS = STOPWORDS | {"tonight", "today", "tomorrow", "near", "www", "com", "http", "https"}
+_QUERY_WORD = re.compile(r"[^\W_]{3,}")
 
 # What DuckDuckGo serves instead of results when it takes a request for a
 # bot: HTTP 202 and an "anomaly" page with a picture challenge ("Select
@@ -149,6 +185,7 @@ _BROWSER_RESULTS_JS = r"""
   });
   return {
     rows,
+    host: location.hostname,
     challenge: !!document.querySelector('[class*="anomaly-modal"], #challenge-form'),
     text: (document.body ? document.body.innerText : '').slice(0, 2000),
   };
@@ -166,6 +203,26 @@ _BROWSER_PAGE_TIMEOUT_S = 20.0
 # 403, and serves this one; a spoofed Chrome string buys nothing that a
 # truthful one does not, on any host tried.
 _USER_AGENT = "CrawlerAI/0.1 (+https://github.com/krishcodes1/Sentient-AI-)"
+
+# The provider's own search (Gemini's Google Search) names each page by a
+# redirect link on this host; the page's address is that link's Location.
+_PROVIDER_REDIRECT_HOST = "vertexaisearch.cloud.google.com"
+# The longest one such link may take to answer.
+_PROVIDER_LINK_TIMEOUT_S = 8.0
+# In a line the provider's search cited: a markdown link keeps its text
+# only; then any address the model wrote itself goes (it invents them: with
+# a scheme, starting www., or a host followed by a path), and citation and
+# markdown marks with it.
+_PROVIDER_MARKDOWN_LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+_PROVIDER_MARKUP = re.compile(
+    r"[a-z][a-z0-9+.-]*://\S+|\bwww\.\S+|\b(?:[a-z0-9-]+\.)+[a-z]{2,}/\S*|\[\d+\]|[*_`#]+",
+    re.IGNORECASE,
+)
+# "Title - what the page has": the first dash set off by spaces; a line
+# without one is split at its first colon ("Mission: Impossible - ..." is
+# split at the dash).
+_PROVIDER_DASH = re.compile(r"\s+[-\u2013\u2014]\s+")
+_PROVIDER_COLON = re.compile(r":\s+")
 
 _MAX_RESULTS = 10
 _DEFAULT_RESULTS = 5
@@ -186,6 +243,15 @@ MAX_PAGE_CHARS = 12000
 _MAX_BODY_BYTES = 2 * 1024 * 1024
 
 _READABLE_CONTENT_TYPES = ("text/html", "application/xhtml", "text/plain", "text/")
+
+# What a site answers a reader it takes for a bot: a sign-in wall, a refusal,
+# a rate limit, or a bot check served as "unavailable". Asking again gets the
+# same answer, so the error carries what still works.
+_REFUSED_STATUSES = frozenset({401, 403, 429, 503})
+FETCH_REFUSED_HINT = (
+    "This site refuses automated readers. Use another source, or open the page in the "
+    "browser if you can."
+)
 
 # web.research: one READ call that searches and reads the top results, so
 # a comparison costs one tool round instead of a search plus a fetch per
@@ -360,6 +426,24 @@ def _challenged(status_code: int, html: str, results: list[dict[str, Any]]) -> b
     return not results and _CHALLENGE_TEXT.search(html) is not None
 
 
+def _off_topic(query: str, rows: list[dict[str, Any]]) -> bool:
+    """True when *rows* answer only part of *query*: it has three or more
+    topic words (three letters or digits and up, fillers left out) and
+    fewer than half of them appear anywhere in the rows' titles, addresses
+    and snippets. Bing's plain page answers a long query with the results
+    for its first word alone, and those rows are organic and well formed,
+    so only their words tell. Fewer than three words say too little."""
+    words = set(_QUERY_WORD.findall(query.lower())) - _QUERY_FILLERS
+    if len(words) < 3:
+        return False
+    # A deliberate simplification: a substring count, with no stemming and
+    # no ranking. It leans towards "on topic"; a wrong "off topic" costs one
+    # browser search or a note that is still true. If it misfires, score
+    # each row on its own.
+    text = " ".join(f"{row['title']} {row['url']} {row['snippet']}" for row in rows).lower()
+    return 2 * sum(word in text for word in words) < len(words)
+
+
 class WebToolkit:
     """Executes the built-in ``web.*`` actions.
 
@@ -447,7 +531,7 @@ class WebToolkit:
         finally:
             _stop_check.reset(token)
 
-    def _client(self) -> httpx.AsyncClient:
+    def _client(self, *, follow_redirects: bool = True) -> httpx.AsyncClient:
         return build_guarded_client(
             timeout_s=self._timeout_s,
             headers={
@@ -456,6 +540,7 @@ class WebToolkit:
             },
             resolver=_no_youtube(self._resolver),
             transport=self._transport,
+            follow_redirects=follow_redirects,
         )
 
     # -- Actions -------------------------------------------------------------
@@ -469,12 +554,22 @@ class WebToolkit:
     ) -> dict[str, Any]:
         """Search the public web and return compact result rows.
 
+        In a turn whose model provider has a web search of its own, that
+        search answers first (``_search_with_provider``,
+        ``source: "google"``); the rest is the keyless search, which also
+        answers whenever the provider's has nothing.
+
         An answer that is not a results page (``_challenged``) is never
         reported as an empty search: the query goes to Bing's plain results
         page (``source: "bing"``), then to Crawler's own browser when
         *browser* is given (``source: "browser"``), and when neither has
         result rows it is reported as ``blocked`` with a hint that keeps the
-        model from guessing addresses."""
+        model from guessing addresses.
+
+        Bing's rows are not taken on trust either: when they answer only
+        part of the query (``_off_topic``) the browser is asked as if Bing
+        had none, and rows that still answer only part of it, from either,
+        come back with a ``note`` saying so and what to do next."""
         query = (query or "").strip()
         if not query:
             return _error("A non-empty 'query' is required.")
@@ -483,6 +578,10 @@ class WebToolkit:
             limit = max(1, min(int(max_results), _MAX_RESULTS))
         except (TypeError, ValueError):
             limit = _DEFAULT_RESULTS
+
+        cited = await self._search_with_provider(query, limit)
+        if cited is not None:
+            return cited
 
         url = f"{SEARCH_ENDPOINT}?{urlencode({'q': query})}"
         async with self._client() as client:
@@ -498,11 +597,101 @@ class WebToolkit:
 
         logger.warning("web_search_challenged", status_code=status)
         found = await self._search_bing(query, limit)
-        if found is None and browser is not None:
-            found = await self._search_in_browser(query, limit, browser)
-        if found is not None:
-            return found
-        return _error(SEARCH_BLOCKED, blocked=True, hint=SEARCH_BLOCKED_HINT, status_code=status)
+        if browser is not None and (found is None or _off_topic(query, found["results"])):
+            # Bing's rows are kept in case the browser has none.
+            found = await self._search_in_browser(query, limit, browser) or found
+        if found is None:
+            return _error(
+                SEARCH_BLOCKED, blocked=True, hint=SEARCH_BLOCKED_HINT, status_code=status
+            )
+        if _off_topic(query, found["results"]):
+            logger.warning("web_search_off_topic", source=found["source"])
+            found["note"] = SEARCH_OFF_TOPIC_NOTE
+        return found
+
+    async def _search_with_provider(self, query: str, limit: int) -> Optional[dict[str, Any]]:
+        """Run *query* on the web search the turn's own model provider has
+        (``turn_context.current().search_web``: Gemini's Google Search);
+        its rows, or None so the keyless search answers: outside a turn, on
+        a provider without one, in an unattended run with no budget left,
+        on any failure, and when no cited page has a usable address.
+
+        Only what the search cited comes back, never the model's prose: the
+        line each page was cited for (``_provider_row``) and the page's own
+        address (``_page_address``). What the call cost is recorded as the
+        turn's cost. The provider may also bill each search by itself, on
+        top of its tokens; that fee is the provider's and is not counted
+        here."""
+        turn = turn_context.current()
+        if turn is None or turn.search_web is None:
+            return None
+        if turn.usd_left is not None and turn.usd_left() <= 0:
+            return None
+        if shown_to_model(query) != query:
+            # The query holds something the provider is not shown: a key, or
+            # a contact detail the owner hides from the AI provider (the
+            # model wrote a placeholder; the real value was put back for
+            # the tool). The keyless search takes it, as it always did.
+            logger.info("web_search_provider_skipped", why="private_query")
+            return None
+        try:
+            answer = await turn.search_web(query, max_results=limit)
+        except Exception as exc:  # noqa: BLE001 - whatever failed, the keyless search still can
+            logger.warning("web_search_provider_failed", error_type=type(exc).__name__)
+            return None
+        if not isinstance(answer, Mapping):
+            return None
+        usage = answer.get("usage")
+        if isinstance(usage, Mapping) and usage:
+            turn.record_usage(usage)
+        cited = answer.get("sources")
+        sources = [s for s in cited if isinstance(s, Mapping)] if isinstance(cited, list) else []
+        if not sources:
+            return None
+        try:
+            async with self._client(follow_redirects=False) as client:
+                addresses = await asyncio.gather(
+                    *(self._page_address(client, source.get("link")) for source in sources)
+                )
+            rows = clean_result_rows(
+                [
+                    _provider_row(source, url)
+                    for source, url in zip(sources, addresses, strict=True)
+                    if url
+                ],
+                limit,
+                _SNIPPET_CHARS,
+            )
+        except Exception as exc:  # noqa: BLE001 - an address of an odd shape costs the search nothing
+            logger.warning("web_search_provider_rows_failed", error_type=type(exc).__name__)
+            return None
+        if not rows:
+            logger.warning("web_search_provider_no_rows", cited=len(sources))
+            return None
+        return {"ok": True, "query": query, "source": "google", "results": rows, "count": len(rows)}
+
+    async def _page_address(self, client: httpx.AsyncClient, link: Any) -> Optional[str]:
+        """The address of the page a provider's search link names, or None.
+        A link that is already a page (https, not on the provider's
+        redirect host) is that address and is not requested. A redirect
+        link is asked once through the guarded client, never followed: the
+        page's address is where it points, when that is an http(s) one."""
+        if not isinstance(link, str) or not link.startswith("https://"):
+            return None
+        try:
+            if urlsplit(link).hostname != _PROVIDER_REDIRECT_HOST:
+                return link
+            response = await asyncio.wait_for(client.get(link), _PROVIDER_LINK_TIMEOUT_S)
+            target = response.headers.get("location", "") if response.is_redirect else ""
+            if not target.startswith(("https://", "http://")):
+                return None
+            urlsplit(target)  # an address no parser reads is no row
+        except (EgressBlocked, httpx.HTTPError, httpx.InvalidURL, TimeoutError, ValueError) as exc:
+            # InvalidURL: httpx reads the Location even when it does not follow
+            # it. ValueError: a link or a Location that is no address at all.
+            logger.warning("web_search_provider_link_failed", error_type=type(exc).__name__)
+            return None
+        return target
 
     async def _search_bing(self, query: str, limit: int) -> Optional[dict[str, Any]]:
         """Run *query* on Bing's plain results page; its rows, or None when
@@ -529,9 +718,9 @@ class WebToolkit:
     ) -> Optional[dict[str, Any]]:
         """Run *query* on each of ``search_pages`` in Crawler's own browser
         until one shows result rows; None when the browser may not be used,
-        or every page was challenged, empty or did not load. Each page is
-        one GET load, bounded by _BROWSER_PAGE_TIMEOUT_S; the result links
-        are read off the page and unwrapped, never followed."""
+        or every page was challenged, empty, did not load or failed. Each
+        page is one GET load, bounded by _BROWSER_PAGE_TIMEOUT_S; the result
+        links are read off the page and unwrapped, never followed."""
         encoded = urlencode({"q": query})
         for template in self._search_pages:
             try:
@@ -542,9 +731,22 @@ class WebToolkit:
             except TimeoutError:
                 logger.warning("web_search_browser_timed_out")
                 continue
+            except Exception as exc:  # noqa: BLE001 - a browser that fails has no rows
+                # It is also asked after an answer Bing did give; raising here
+                # would turn that answer into an error.
+                logger.warning("web_search_browser_failed", error_type=type(exc).__name__)
+                continue
             if page.get("unavailable"):
                 return None
             if not page.get("ok"):
+                continue
+            # A results address can redirect somewhere else (a search
+            # engine's own shortcut syntax, an interstitial). Rows are only
+            # read off the engine's own page: another site could mark up its
+            # page to look like results.
+            landed = page.get("host")
+            if isinstance(landed, str) and landed and landed != urlsplit(template).hostname:
+                logger.warning("web_search_browser_left_engine")
                 continue
             rows = clean_result_rows(page.get("rows"), limit, _SNIPPET_CHARS)
             if rows:
@@ -577,10 +779,12 @@ class WebToolkit:
         async with self._client() as client:
             async with client.stream("GET", url) as response:
                 if response.status_code >= 400:
+                    refused = response.status_code in _REFUSED_STATUSES
                     return _error(
                         f"Fetch failed with HTTP {response.status_code}.",
                         status_code=response.status_code,
                         url=str(response.url),
+                        **({"hint": FETCH_REFUSED_HINT} if refused else {}),
                     )
                 content_type = (response.headers.get("content-type") or "").lower()
                 # top10:file_extraction: a PDF or Office document is read as
@@ -755,11 +959,14 @@ class WebToolkit:
 
         The search is ``search`` itself, *browser* fallback included, so a
         bot check is answered the same way (``blocked`` with its hint, which
-        is returned as the call's error) and never read as no sources.
+        is returned as the call's error) and never read as no sources. Rows
+        it notes as answering only part of the query are not read: the call
+        returns no sources and a note with what to do next.
 
         Never raises. A failed search is the call's error; a page that
         fails (HTTP error, not text, a blocked redirect, too slow) is one
-        source with ``ok: False`` and an error while the rest still come
+        source with ``ok: False`` and an error (and fetch_page's hint, when
+        the site refused the reader) while the rest still come
         back. A result whose host the egress policy refuses is skipped
         before any request and the next result takes its place.
 
@@ -788,6 +995,10 @@ class WebToolkit:
             return _error(f"Search failed: {type(exc).__name__}")
         if not found.get("ok"):
             return found
+        if found.get("note") == SEARCH_OFF_TOPIC_NOTE:
+            # The rows answer only part of the query: reading them would
+            # spend the call on pages about something else.
+            return {"ok": True, "query": query, "results": [], "note": RESEARCH_OFF_TOPIC_NOTE}
 
         # top10:file_extraction: document links are candidates only while
         # documents may be read in this call (at most two, WEB_RESEARCH).
@@ -902,6 +1113,10 @@ class WebToolkit:
 
         if not page.get("ok"):
             source["error"] = str(page.get("error") or "The page could not be read.")
+            if page.get("hint"):
+                # fetch_page's "this site refuses automated readers": without
+                # it a call whose sources all refused reads as a dead end.
+                source["hint"] = str(page["hint"])
             return source
         final_url = str(page.get("url") or url)
         source["url"] = final_url[:_RESEARCH_URL_CHARS]
@@ -1030,6 +1245,25 @@ class WebToolkit:
             raise WebToolError(f"Screenshot failed: {type(exc).__name__}") from exc
 
         return image, final_url, width, height
+
+
+def _provider_row(source: Mapping[str, Any], url: str) -> dict[str, str]:
+    """One search row from a page the provider's search cited: the cited
+    line up to its first dash (or, with no dash, its first colon) as the
+    title and the rest as the snippet; a line without either, or no line
+    at all, is the snippet under the site's name. Markdown, citation
+    marks, list numbers and any address in the line are dropped, so the
+    only address a row carries is *url*, the search's own."""
+    line = _PROVIDER_MARKDOWN_LINK.sub(r"\1", str(source.get("text") or ""))
+    line = " ".join(_PROVIDER_MARKUP.sub(" ", line).split())
+    line = re.sub(r"^(?:\d+[.)]|[-\u2022])\s+", "", line)
+    parts = _PROVIDER_DASH.split(line, maxsplit=1)
+    if len(parts) != 2:
+        parts = _PROVIDER_COLON.split(line, maxsplit=1)
+    site = " ".join(str(source.get("site") or "").split()) or _host_of(url)
+    if len(parts) == 2 and parts[0] and parts[1]:
+        return {"title": parts[0], "url": url, "snippet": parts[1]}
+    return {"title": site, "url": url, "snippet": line}
 
 
 def _bounded(value: Any, low: int, high: int, default: int) -> int:

@@ -37,6 +37,9 @@ async def test_a_purchase_card_on_a_real_host_carries_no_untrusted_content_warni
         runtime,
         open_call(f"https://{HOST}/checkout"),
         checkout_call(merchant=HOST, amount=23.4, note="one ticket"),
+        # The person named the shop: a site they never named gets its own
+        # note (test_a_purchase_card_says_so_when_the_person_never_named_the_site).
+        messages=[{"role": "user", "content": f"Buy one ticket on {HOST}."}],
     )
     assert response.blocked_actions == []
     [pending] = response.pending_approvals

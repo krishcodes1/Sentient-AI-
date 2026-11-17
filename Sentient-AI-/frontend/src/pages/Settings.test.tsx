@@ -24,6 +24,7 @@ vi.mock("@/services/api", () => {
   return {
     ApiError,
     changePassword: vi.fn(),
+    getProviderModels: vi.fn(() => new Promise(() => {})),
     createTelegramLink: vi.fn(),
     deleteAccount: vi.fn(),
     exportAccount: vi.fn(),

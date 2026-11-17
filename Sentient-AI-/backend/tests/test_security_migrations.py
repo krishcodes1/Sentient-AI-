@@ -25,6 +25,7 @@ from alembic.config import Config
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 
 BEFORE = "0024_media_transcripts"
+# The security chain's own end (later revisions, like the errands', follow it).
 HEAD = "0032_file_reputation"
 REVISIONS = (
     "0025_security_service_keys",
@@ -235,7 +236,7 @@ def _assert_security_schema(schema: dict[str, Any]) -> None:
 
 def test_upgrading_to_head_creates_every_table_index_foreign_key_and_added_column(tmp_path):
     db_path = tmp_path / "security.db"
-    command.upgrade(_config(db_path), "head")
+    command.upgrade(_config(db_path), HEAD)
     assert _versions(db_path) == [HEAD]
     _assert_security_schema(_schema(db_path))
 
@@ -258,7 +259,7 @@ def test_downgrading_to_0024_removes_exactly_the_security_schema_and_keeps_the_r
     finally:
         engine.dispose()
 
-    command.upgrade(config, "head")
+    command.upgrade(config, HEAD)
     command.downgrade(config, BEFORE)
     after = _schema(db_path)
     assert _versions(db_path) == [BEFORE]
@@ -274,7 +275,7 @@ def test_downgrading_to_0024_removes_exactly_the_security_schema_and_keeps_the_r
         engine.dispose()
     assert 2 in ids
 
-    command.upgrade(config, "head")
+    command.upgrade(config, HEAD)
     assert _versions(db_path) == [HEAD]
     _assert_security_schema(_schema(db_path))
 
@@ -282,12 +283,12 @@ def test_downgrading_to_0024_removes_exactly_the_security_schema_and_keeps_the_r
 def test_each_revision_downgrades_to_its_parent_and_upgrades_again(tmp_path):
     db_path = tmp_path / "steps.db"
     config = _config(db_path)
-    command.upgrade(config, "head")
+    command.upgrade(config, HEAD)
     for revision, parent in zip(reversed(REVISIONS), reversed((BEFORE, *REVISIONS[:-1])), strict=True):
         assert _versions(db_path) == [revision]
         command.downgrade(config, parent)
     assert _versions(db_path) == [BEFORE]
-    command.upgrade(config, "head")
+    command.upgrade(config, HEAD)
     _assert_security_schema(_schema(db_path))
 
 
@@ -305,7 +306,7 @@ def test_an_adopted_database_built_from_the_models_upgrades_without_creating_any
         engine.dispose()
     config = _config(db_path)
     command.stamp(config, BEFORE)
-    command.upgrade(config, "head")
+    command.upgrade(config, HEAD)
     assert _versions(db_path) == [HEAD]
     _assert_security_schema(_schema(db_path))
 

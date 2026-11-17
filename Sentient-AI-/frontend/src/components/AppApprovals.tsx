@@ -1,7 +1,7 @@
 /**
  * AppApprovals: Settings ▸ Permissions ▸ "Apps allowed for a week" — each app Crawler may act in
- * without asking, where it was allowed (this browser, another browser or Telegram) and until when,
- * each with Revoke.
+ * without asking, and each website it may click around on for an hour, where it was allowed (this
+ * browser, another browser or Telegram) and until when, each with Revoke.
  *
  * Why it exists: "Allow Calendar for 7 days" on an approval card lets desktop.act run in that app
  * with no card for a week, for requests from the browser or Telegram chat that allowed it (spec
@@ -18,6 +18,11 @@ import { ApiError, listAppApprovals, revokeAppApproval } from "@/services/api";
 import type { AppApproval } from "@/types";
 
 const rowStyle = { background: "var(--claw-surface)", border: "1px solid var(--claw-border)" };
+
+/** What a row allows, as its name: the app, or "Clicks on <site>" for a website. */
+function allowedName(row: AppApproval): string {
+  return row.kind === "site" ? `Clicks on ${row.app}` : row.app;
+}
 
 /** Where the requests it covers come from. Only a web row allowed here is "this browser". */
 function allowedFrom(row: AppApproval): string {
@@ -59,7 +64,7 @@ export default function AppApprovals() {
     } catch (err) {
       setRevokeError({
         id: target.id,
-        text: errorText(err, `${target.app} could not be revoked. Try again.`),
+        text: errorText(err, `${allowedName(target)} could not be revoked. Try again.`),
       });
       // 404: the server holds nothing live under this id any more (the week ran out, or it was
       // revoked from Telegram). Read the list again rather than assume: a row that is truly gone
@@ -82,7 +87,8 @@ export default function AppApprovals() {
       <p className="text-xs mb-3" style={{ color: "var(--text-muted)" }}>
         Crawler scrolls and clicks around in these apps without asking, only for requests from the
         browser or Telegram chat that allowed each one; typing, and buttons that change or send
-        something, still ask. Revoke one to get approval cards for it again.
+        something, still ask. A website allowed from a card ("Clicks on …") is listed here too, for
+        one hour. Revoke one to get approval cards for it again.
       </p>
 
       {loadError ? (
@@ -107,7 +113,8 @@ export default function AppApprovals() {
       ) : rows.length === 0 ? (
         <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
           No apps are allowed for a week. When Crawler asks to act in an app like Calendar, you can
-          allow it for 7 days from the approval card.
+          allow it for 7 days from the approval card. A request to click on a website can allow
+          clicks on that site for 1 hour.
         </p>
       ) : (
         <ul className="space-y-2">
@@ -116,7 +123,7 @@ export default function AppApprovals() {
               <div className="flex items-center justify-between gap-3 flex-wrap">
                 <div className="min-w-0">
                   <p className="text-sm font-semibold break-words" style={{ color: "var(--text-primary)" }}>
-                    {row.app}
+                    {allowedName(row)}
                   </p>
                   <p className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>
                     From {allowedFrom(row)} · until {formatAllowedUntil(row.expires_at)}
@@ -128,7 +135,7 @@ export default function AppApprovals() {
                   type="button"
                   onClick={() => void revoke(row)}
                   disabled={revokingId !== null}
-                  aria-label={`Revoke ${row.app} (${allowedFrom(row)})`}
+                  aria-label={`Revoke ${allowedName(row)} (${allowedFrom(row)})`}
                   className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-[10px] text-xs font-semibold disabled:opacity-50"
                   style={{
                     minHeight: 36,

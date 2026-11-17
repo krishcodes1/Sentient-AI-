@@ -148,7 +148,8 @@ describe("CapabilityList acting on sites", () => {
     reason: "Needs 'Control a browser' on in Permissions.",
     tools: ["browser.act"],
   };
-  const WARNING = "Crawler will ask before every click or keystroke, with a picture of the page.";
+  const WARNING =
+    "Crawler takes the ordinary steps of a website errand on its own and asks first before anything that pays, sends, posts, deletes, cancels, signs you up, agrees to terms or types your details.";
 
   it("shows the switch with its one-line description, its plain warning and why it is blocked", () => {
     render(

@@ -292,9 +292,14 @@ def test_the_shopping_playbook_says_search_do_not_guess_and_404_means_a_wrong_ad
         "If the person pasted a link, open exactly that link.",
         "never guess a shop's addresses: web.search for the shop, product and variant",
         "open the shop's home page and use its search or menus",
-        "A 404 or \"page not found\" means the address was guessed wrong, not that the product is gone",
-        "pick the variant (color, size, model) with browser.act, add it to the cart",
+        "A 404 means the address was guessed wrong: search instead.",
         "Pay only with browser.checkout, and only when it is offered",
+        # The owner, after a card asked to "Click Add to cart" over a page of
+        # four products: the point is to be told the best few, pick one, and
+        # have the rest done.
+        "tell the person the best 2 or 3 in a short list (name, price, rating, one reason each)",
+        "say which you recommend, and ask which to buy",
+        "do the rest without asking in chat",
     ):
         assert fragment in block, fragment
     # Short: it rides on every browser request.
@@ -309,8 +314,40 @@ async def test_the_shopping_playbook_is_sent_only_with_a_browser_tool(tools, sen
     await runtime.chat(messages=[{"role": "user", "content": "hi"}], tools=tools, user_id=U1)
     system = provider.calls[0]["messages"][0]["content"]
     assert ("<shopping>" in system) is sent
+    # The browser-task playbook rides on the same terms: an install without
+    # the browser keeps its prompt unchanged.
+    assert ("<browser_tasks>" in system) is sent
     if sent:
         assert system.index("</hard_limits>") < system.index("<shopping>") < system.index("<today>")
+        assert system.index("</hard_limits>") < system.index("<browser_tasks>") < system.index("<shopping>")
+
+
+def test_the_browser_task_playbook_says_look_further_act_through_the_card_and_keep_going():
+    """Each line answers a way the 2026-11-12 ticket booking went wrong."""
+    from services.agent.runtime import BROWSER_TASKS_SYSTEM_PROMPT
+
+    block = " ".join(BROWSER_TASKS_SYSTEM_PROMPT.split())
+    for fragment in (
+        "An outline is the visible part of a page.",
+        "find(text), scroll, or snapshot with full=true",
+        "go through browser.act",
+        "When browser.read will not make a click, make the same click with browser.act.",
+        "Keep going step by step until the task is done.",
+        "say exactly where things stand and what they need to do next",
+        "use another site that offers the same thing",
+        # The live run on the small model: it read the top of the page and
+        # went for the site's search box, answered a cookie banner first,
+        # and never asked which showing.
+        "Look for what they named with find(text) first",
+        "Leave cookie and sign-up banners alone unless they cover the page",
+        "take a guest path",
+        "ask once, in one sentence, then go on",
+        "give the person the link to the page where they can finish",
+    ):
+        assert fragment in block, fragment
+    assert chr(0x2014) not in block and chr(0x2013) not in block
+    # Short: it rides on every browser request.
+    assert len(BROWSER_TASKS_SYSTEM_PROMPT) < 1400
 
 
 # ── 4. a browser step that never finishes ─────────────────────────────────────

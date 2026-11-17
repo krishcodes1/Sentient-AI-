@@ -428,6 +428,44 @@ async def test_web_lists_and_revokes_approvals_and_marks_this_browser(
 
 
 @pytest.mark.asyncio
+async def test_web_lists_a_site_approval_as_a_site_and_audits_its_revoke_under_the_browser(
+    client, session_factory, backend_ready
+):
+    """Site approvals (browser.act on one website for an hour) share the list
+    with app approvals, so the owner sees and ends both in one place; each
+    row says which kind it is, and a revoke is audited under the tool it took
+    the permission from."""
+    from sqlalchemy import select
+
+    from models.audit import AuditLog
+    from services.agent.app_approvals import SITE_TOOL
+    from tests.conftest import make_user
+
+    user, token = await make_user(session_factory, "wk-web-site@example.com")
+    store = DbAppApprovalStore(session_factory)
+    await store.allow(user_id=str(user.id), app="Calendar", channel=Channel.telegram(1))
+    site = await store.allow(
+        user_id=str(user.id), app="tickets.fandango.com", channel=Channel.web(DEVICE), tool=SITE_TOOL
+    )
+    headers = {**auth_headers(token), "X-Crawler-Device": DEVICE}
+    async with wired(session_factory, RecordingProvider([]), calendar_desktop()):
+        listed = (await client.get("/api/agent/app-approvals", headers=headers)).json()
+        assert {(a["app"], a["kind"], a["this_device"]) for a in listed} == {
+            ("Calendar", "app", False),
+            ("tickets.fandango.com", "site", True),
+        }
+        assert (
+            await client.delete(f"/api/agent/app-approvals/{site.id}", headers=headers)
+        ).status_code == 204
+    async with session_factory() as session:
+        rows = (await session.execute(select(AuditLog).where(AuditLog.user_id == user.id))).scalars().all()
+    revoked = [r for r in rows if (r.reasoning_chain or {}).get("event") == "app_approval_revoked"]
+    assert len(revoked) == 1
+    assert (revoked[0].connector_name, revoked[0].action) == ("browser", "act")
+    assert revoked[0].reasoning_chain["app"] == "tickets.fandango.com"
+
+
+@pytest.mark.asyncio
 async def test_web_allow_for_7_days_then_this_browser_acts_without_a_card(
     client, session_factory, backend_ready
 ):

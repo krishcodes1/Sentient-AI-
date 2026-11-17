@@ -12,7 +12,8 @@ pushed.
 
 Connects to: the Telegram Bot API (httpx long polling and sends), the
 User table (links), the chat and decision appliers from
-api/routes/agent.py, the approval store, services/usage (cost line and
+api/routes/agent.py, the approval store, the runtime's two sentences for
+a card that can no longer be answered, services/usage (cost line and
 /usage), the progress lines in services/notifications/progress.py and the
 stop requests in services/agent/cancel.py.
 Used by: TelegramManager, which starts and stops it; main.py wires its
@@ -43,6 +44,13 @@ Design notes:
   second person can never act through someone else's chat.
 - Only the linked chat can decide an approval, and the decision callback
   re-checks ownership server-side (the store scopes by user_id).
+- A press is answered at once and its decision runs off the poll loop. The
+  card's buttons go as soon as that decision starts and its verdict follows
+  as a line on the card; a card that expired or was already answered says
+  so and keeps no buttons, and after any other failure they come back.
+- A card is only ever answered by its buttons. A bare "yes" or "no" typed
+  while one waits starts no turn: it gets one line saying so and the
+  waiting cards again.
 - Each chat's in-flight work (agent turns and approval decisions) runs as
   tracked tasks, so /stop can cancel exactly that chat's work.
 - The bot token is a server-wide secret from the environment; it is never
@@ -64,7 +72,7 @@ import time
 import uuid as uuid_module
 import weakref
 from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable, Coroutine, Optional
+from typing import Any, Awaitable, Callable, Coroutine, Mapping, Optional
 
 import httpx
 import structlog
@@ -72,7 +80,14 @@ from sqlalchemy import select, update
 
 from services.action_text import GENERIC_SENTENCE, approval_sentence
 from services.agent import cancel as agent_cancel
-from services.agent.app_approvals import REMEMBER_WEEK, Channel, weekly_app_for
+from services.agent.app_approvals import (
+    REMEMBER_SITE,
+    REMEMBER_WEEK,
+    SITE_TOOL,
+    Channel,
+    site_offer,
+    weekly_app_for,
+)
 from services.agent.permission_grants import REMEMBER_LOW_RISK
 from services.agent.shared_content import fence_forwarded
 from services.notifications import cards, telegram_format
@@ -99,6 +114,9 @@ _CB_DENY = "dny:"
 # "Allow <app> for 7 days": approve the card and allow its app for a week
 # for this chat (services.agent.app_approvals).
 _CB_APPROVE_WEEK = "apw:"
+# "Allow clicks on <site> for 1 hour": approve a browser.act card and allow
+# clicks that only move around its website for an hour, for this chat.
+_CB_APPROVE_SITE = "aps:"
 # /apps: revoke one weekly app approval (the "Turn off for <app>" button).
 _CB_REVOKE_APP = "rva:"
 # "Allow small changes on <account> for 7 days": approve the card and allow
@@ -152,7 +170,7 @@ HELP_LINES: list[str] = [
     "/stop: stop what I'm working on right now",
     "/new: start a new conversation",
     "/pending: show again everything that's waiting for your OK",
-    "/apps: apps I can use without asking for 7 days, with a button to undo each",
+    "/apps: apps and websites I can use without asking, with a button to undo each",
     "/usage: what I've used today and over the last 30 days, and about what it cost",
     # top10:secret_pii_redaction
 
@@ -161,6 +179,7 @@ HELP_LINES: list[str] = [
 
     # top10:scheduler_briefing
     "/schedules: your scheduled tasks, with buttons to run, pause or resume each",
+    "/errands: errands I'm doing for you in the background, with a button to cancel each",
     "/briefing: send your daily briefing now",
     "/timezone: see or change your time zone, for example /timezone America/Chicago",
 
@@ -423,13 +442,17 @@ def _purchase_caption(card: dict[str, Any], expires_at: Any) -> str:
 
 
 def _approval_keyboard(
-    action_id: str, weekly_app: Optional[str] = None, low_risk_account: Optional[str] = None
+    action_id: str,
+    weekly_app: Optional[str] = None,
+    low_risk_account: Optional[str] = None,
+    hourly_site: Optional[str] = None,
 ) -> dict[str, Any]:
     """Approve and Deny, plus "Allow <app> for 7 days" on its own row when
     the card may be allowed for a week (a desktop.act in an app on the
-    weekly list), or "Allow small changes on <account> for 7 days" when the
-    card offers a low-risk grant (never both: the week is desktop.act's
-    only)."""
+    weekly list), "Allow clicks on <site> for 1 hour" when it may be
+    allowed for its website (a browser.act), or "Allow small changes on
+    <account> for 7 days" when the card offers a low-risk grant (never two
+    of them: each belongs to another kind of card)."""
     rows: list[list[dict[str, str]]] = [
         [
             {"text": "✅ Approve", "callback_data": _CB_APPROVE + action_id},
@@ -442,6 +465,15 @@ def _approval_keyboard(
                 {
                     "text": f"📅 Allow {weekly_app} for 7 days",
                     "callback_data": _CB_APPROVE_WEEK + action_id,
+                }
+            ]
+        )
+    elif hourly_site:
+        rows.append(
+            [
+                {
+                    "text": f"🖱 Allow clicks on {_button_site(hourly_site)} for 1 hour",
+                    "callback_data": _CB_APPROVE_SITE + action_id,
                 }
             ]
         )
@@ -458,6 +490,26 @@ def _approval_keyboard(
             ]
         )
     return {"inline_keyboard": rows}
+
+
+# Longest site name on the site button: a longer host keeps its end, the
+# part that says whose site it is ("…ckets.example.com").
+_SITE_BUTTON_CHARS = 32
+
+
+def _button_site(site: str) -> str:
+    return site if len(site) <= _SITE_BUTTON_CHARS else "…" + site[-(_SITE_BUTTON_CHARS - 1):]
+
+
+def _site_line(site: str) -> str:
+    """What a card that offers the hour says about it: what it lets Crawler
+    do without asking, what still asks, and how to undo it."""
+    return (
+        f"Or allow clicks on {site} for 1 hour: I can then click, pick options and tick "
+        "boxes on that site without asking, for requests from this chat. I'll still ask "
+        "before I type, send a form, or press anything that changes, cancels, sends, "
+        "agrees to or pays for something. Send /apps to see or undo this."
+    )
 
 
 def _button_account(account: str) -> str:
@@ -515,6 +567,20 @@ def _until(when: Any) -> str:
     if day == str(when):
         return "for the next 7 days"
     return f"until {day}"
+
+
+def _until_time(when: Any) -> str:
+    """How long a one-hour permission lasts, for the line a decided card
+    gets: "until 6:40 PM", in this computer's time zone, or "for the next
+    hour" when the end cannot be read (never a raw timestamp or "None")."""
+    try:
+        moment = when if isinstance(when, datetime) else datetime.fromisoformat(str(when))
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        local = moment.astimezone()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return "for the next hour"
+    return f"until {local.hour % 12 or 12}:{local:%M} {'AM' if local.hour < 12 else 'PM'}"
 
 
 def _chunks(text: str, size: int = _MESSAGE_CHUNK) -> list[str]:
@@ -655,16 +721,40 @@ _PENDING_HINT = "send /pending"
 def _with_turn_notes(reply: str, outcome: dict[str, Any]) -> str:
     """*reply* with what the turn left for the person to do, in plain words
     and never by tool name (cards.turn_notes): the requests waiting on
-    their OK (each card is already in the chat) and the steps their safety
-    settings did not allow. A message turn and the turn resumed after an
-    approval report both the same way, so their replies read the same."""
-    return reply + cards.turn_notes(outcome, pending_hint=_PENDING_HINT)
+    their OK and the steps that were not allowed, each with its own reason
+    when the outcome gives one (``blocked_reasons``, in the order of
+    ``blocked``). A message turn and the turn resumed after an approval
+    report both the same way, so their replies read the same."""
+    return reply + _turn_notes(outcome, reply)
 
 
-def _turn_notes(outcome: dict[str, Any]) -> str:
-    """Just the notes _with_turn_notes adds. App text: _send_reply sends it
-    as written after the reply, never as Markdown."""
-    return _with_turn_notes("", outcome)
+def _turn_notes(outcome: dict[str, Any], reply: str = "") -> str:
+    """Just the notes _with_turn_notes adds to *reply*: a reply that
+    already asks for the OK is not asked again. Only the runtime's own
+    sentence for the requests that wait counts as that ask
+    (``runtime.pending_reply``): text the model wrote to begin the same way
+    keeps the note, the one line built from the request and not from the
+    model's words. App text: _send_reply sends it as written after the
+    reply, never as Markdown."""
+    return cards.turn_notes(
+        outcome,
+        pending_hint=_PENDING_HINT,
+        reasons=outcome.get("blocked_reasons"),
+        reply=reply if _is_own_ask(reply, outcome.get("pending_approvals")) else "",
+    )
+
+
+def _is_own_ask(reply: str, pending: Any) -> bool:
+    """Whether *reply* starts with the runtime's own ask for *pending*."""
+    if not reply or not isinstance(pending, (list, tuple)) or not pending:
+        return False
+    # Imported here: this module does not otherwise load the runtime.
+    from services.agent.runtime import pending_reply
+
+    try:
+        return reply.lstrip().startswith(pending_reply(pending))
+    except Exception:
+        return False
 
 
 # The answer to a button pressed from a chat that is not linked.
@@ -686,6 +776,18 @@ _DECISION_FAILED = (
 )
 # The reply to /new (Slack's words for "new").
 _FRESH_START_TEXT = "Fresh start. Your next message starts a new conversation."
+
+# A message that is nothing but a yes or a no (any case, with or without
+# closing punctuation). While an approval card waits it reads as an answer
+# to the card, which typed words can't give: only its buttons say which
+# request is meant. Anything longer is a message like any other.
+# A fixed list of English words: a yes in other words or another language
+# still starts a turn, as before. Add words here when that shows.
+_BARE_ANSWER_RE = re.compile(
+    r"(?:yes|ok|okay|approve|go\s+ahead|do\s+it|no|deny|cancel)[\s.,!?…]*", re.IGNORECASE
+)
+# What such a message gets instead of a turn, followed by the cards again.
+_TAP_THE_CARD_TEXT = "Tap Approve or Deny on the request so I know which step you mean."
 
 # Errors the appliers in api/routes/agent.py return in developer words,
 # each as the chat says it. Every other error they return is already a
@@ -783,6 +885,14 @@ class TelegramService:
         # Chats that asked for /new; the next message starts a fresh
         # conversation instead of continuing the running one.
         self._fresh_chats: set[int] = set()
+        # The requests each chat's own replies left waiting on the owner's
+        # OK, by their ids. Only while one of them still waits does a bare
+        # "yes" or "no" read as an answer to a card (_point_at_cards); a
+        # card that waits from somewhere else (a scheduled task's, a mail
+        # alert's, one from the web app) never takes a plain answer away
+        # from the model. In memory: after a restart a bare word is a
+        # message again, as it always was.
+        self._asked_chats: dict[int, set[str]] = {}
         # One turn at a time per chat (messages from a person are ordered),
         # while different chats — and the poll loop itself — keep moving.
         self._chat_locks: dict[int, asyncio.Lock] = {}
@@ -806,7 +916,7 @@ class TelegramService:
         # and the non-approval buttons by callback_data prefix ("rva:").
         # /start (before the link check) and /help (any other "/" word) are
         # answered by _handle_message itself, and the approval buttons
-        # (apv: dny: apw:) by _handle_callback.
+        # (apv: dny: apw: aps: apl:) by _handle_callback.
         self._commands: dict[str, CommandHandler] = {}
         self._callback_routes: dict[str, CallbackRoute] = {}
         self._register_builtin_commands()
@@ -867,6 +977,10 @@ class TelegramService:
         from services.scheduler import commands as schedule_commands
 
         schedule_commands.register_telegram(self)
+        # /errands (services/automation/errand_commands.py).
+        from services.automation import errand_commands
+
+        errand_commands.register_telegram(self)
 
         # top10:tutor_mode
         # /tutor on|off|status (services/tutor), applied by the tutor applier
@@ -913,6 +1027,9 @@ class TelegramService:
         from services.scheduler import commands as schedule_commands
 
         schedule_commands.register_telegram_buttons(self)
+        from services.automation import errand_commands
+
+        errand_commands.register_telegram_buttons(self)
 
         # top10:tutor_mode
 
@@ -1268,16 +1385,21 @@ class TelegramService:
             # A desktop.act in an app on the weekly list also offers "Allow
             # <app> for 7 days" (services.agent.app_approvals).
             weekly_app = weekly_app_for(action.tool_name, action.arguments)
+            # A browser.act card may offer "Allow clicks on <site> for 1
+            # hour" (the same module; never on a card that warns of an order).
+            hourly_site = site_offer(action.tool_name, action.arguments)
             # A LOW action's card may offer "Allow small changes on <account>"
             # (services.agent.permission_grants).
             low_risk_account = cards.low_risk_account(action)
             # Security wave: a card that carries a call check's warning
-            # offers neither (A18); its notes follow the risk note, and a
-            # card without notes is today's text byte for byte.
+            # offers none of them (A18); its notes follow the risk note, and
+            # a card without notes is today's text byte for byte.
             if not cards.offers_standing_consent(action):
-                weekly_app, low_risk_account = None, None
+                weekly_app, low_risk_account, hourly_site = None, None, None
             note_lines = cards.security_note_lines(cards.security_notes_of(action))
-            keyboard = _approval_keyboard(action.action_id, weekly_app, low_risk_account)
+            keyboard = _approval_keyboard(
+                action.action_id, weekly_app, low_risk_account, hourly_site
+            )
             purchase = _purchase_card(action)
             # Any risk note, on one line like the sentence: a value quoted in
             # the note can't pass for a line of the card.
@@ -1326,6 +1448,8 @@ class TelegramService:
             footer: list[str] = []
             if weekly_app:
                 footer = ["", _weekly_line(weekly_app)]
+            elif hourly_site:
+                footer = ["", _site_line(hourly_site)]
             elif low_risk_account:
                 footer = ["", _low_risk_line(action, low_risk_account)]
             if action.tool_name == _ACT_TOOL:
@@ -1585,7 +1709,39 @@ class TelegramService:
         elif command.startswith("/"):
             await self._handle_help(chat_id)
         else:
+            # A bare "yes" or "no" while a card waits starts no turn.
+            if _BARE_ANSWER_RE.fullmatch(text) and await self._point_at_cards(chat_id, user_id):
+                return
             await self._handle_chat(chat_id, user_id, text)
+
+    async def _point_at_cards(self, chat_id: int, user_id: str) -> bool:
+        """Answer a bare "yes" or "no" (``_BARE_ANSWER_RE``) while a request
+        this chat's own replies asked about still waits: one plain line,
+        then the cards again as /pending sends them. True when it answered;
+        False when no request of this chat's waits (or the cards cannot be
+        read), and the message is then a turn like any other.
+
+        Run as a turn, the word could not answer the card: the model has
+        no way to approve one, so it asked for the same step again (a
+        second card), and the new message started a new task."""
+        from services.agent.approvals import DbApprovalStore
+
+        asked = self._asked_chats.get(chat_id)
+        if not asked:
+            return False
+        try:
+            waiting = await DbApprovalStore(self._session_factory).list_pending(user_id)
+        except Exception as exc:
+            logger.warning("telegram_bare_answer_lookup_failed", error_type=type(exc).__name__)
+            return False
+        # Requests answered elsewhere, or that ran out of time, are forgotten.
+        asked &= {str(action.action_id) for action in waiting}
+        if not asked:
+            self._asked_chats.pop(chat_id, None)
+            return False
+        await self._api("sendMessage", chat_id=chat_id, text=_TAP_THE_CARD_TEXT)
+        await self._handle_pending(chat_id, user_id)
+        return True
 
     async def _intercepted(self, chat_id: int, user_id: str, message: dict[str, Any]) -> bool:
         """Whether an interceptor took this linked chat's message (security
@@ -1682,8 +1838,9 @@ class TelegramService:
 
     async def _handle_apps(self, chat_id: int, user_id: str) -> None:
         """List the apps Crawler may use without asking (weekly app
-        approvals), each with a "Turn off for <app>" button, whichever chat
-        or browser allowed them: the owner sees every one from here."""
+        approvals) and the websites it may click around on (for an hour),
+        each with a "Turn off for <app>" button, whichever chat or browser
+        allowed them: the owner sees every one from here."""
         from services.agent.app_approvals import DbAppApprovalStore
 
         try:
@@ -1703,15 +1860,22 @@ class TelegramService:
                 text=(
                     "You haven't let me use any app without asking. When I ask to do "
                     "something in an app like Calendar, the request has an "
-                    "\u201cAllow Calendar for 7 days\u201d button."
+                    "\u201cAllow Calendar for 7 days\u201d button. A request to click on a "
+                    "website has one that allows clicks on that site for 1 hour."
                 ),
             )
             return
         here = Channel.telegram(chat_id)
-        lines = [
-            "I can scroll and click around in these apps without asking you, until the date shown:",
-            "",
-        ]
+        # Apps are allowed for days, websites for an hour: the header says
+        # what the list holds.
+        sites = sum(1 for approval in approvals if approval.tool == SITE_TOOL)
+        if sites == len(approvals):
+            header = "I can click around on these websites without asking you, until the time shown:"
+        elif sites:
+            header = "I can use these apps and websites without asking you, until the time shown:"
+        else:
+            header = "I can scroll and click around in these apps without asking you, until the date shown:"
+        lines = [header, ""]
         buttons: list[list[dict[str, str]]] = []
         for approval in approvals:
             if approval.holds_for(here):
@@ -1720,11 +1884,20 @@ class TelegramService:
                 where = "the web app"
             else:
                 where = "another Telegram chat"
-            lines.append(f"\u2022 {approval.app}, allowed from {where} until {_day(approval.expires_at)}")
+            if approval.tool == SITE_TOOL:
+                # A website, for an hour: its end is a time of day.
+                lines.append(
+                    f"\u2022 Clicks on {approval.app}, allowed from {where} "
+                    f"{_until_time(approval.expires_at)}"
+                )
+            else:
+                lines.append(
+                    f"\u2022 {approval.app}, allowed from {where} until {_day(approval.expires_at)}"
+                )
             buttons.append(
                 [
                     {
-                        "text": f"Turn off for {approval.app}",
+                        "text": f"Turn off for {_button_site(approval.app)}",
                         "callback_data": _CB_REVOKE_APP + approval.id,
                     }
                 ]
@@ -1773,29 +1946,35 @@ class TelegramService:
         if revoked is None:
             await answer("That one has already ended.")
             return
-        await answer(f"{revoked.app} turned off.")
+        # A website's approval covered clicks on it; an app's, acts in it.
+        site = revoked.tool == SITE_TOOL
+        await answer(f"Clicks on {revoked.app} turned off." if site else f"{revoked.app} turned off.")
         await self._audit_app_revoke(user_id, revoked)
+        what = "clicking on" if site else "doing anything in"
         await self._api(
             "sendMessage",
             chat_id=chat_id,
-            text=f"Done. I'll ask you first again before doing anything in {revoked.app}.",
+            text=f"Done. I'll ask you first again before {what} {revoked.app}.",
         )
 
     async def _audit_app_revoke(self, user_id: str, revoked: Any) -> None:
-        """The ``app_approval_revoked`` row for a revoke from this chat.
-        Best effort: revoking only takes a permission away."""
+        """The ``app_approval_revoked`` row for a revoke from this chat,
+        filed under the tool the approval covered (the desktop for an app,
+        the browser for a website), as the web's revoke is. Best effort:
+        revoking only takes a permission away."""
         from models.audit import AuditStatus
         from services.audit import append_audit_log
 
+        connector, _, action = str(revoked.tool).partition(".")
         try:
             async with self._session_factory() as session:
                 await append_audit_log(
                     session,
                     user_id=user_id,
-                    connector_name="desktop",
-                    action="act",
+                    connector_name=connector,
+                    action=action,
                     endpoint="telegram:/apps",
-                    scope_used="desktop",
+                    scope_used=connector,
                     status=AuditStatus.approved,
                     reasoning_chain={
                         "event": "app_approval_revoked",
@@ -1818,8 +1997,19 @@ class TelegramService:
             summary = await usage_summary(session, uuid_module.UUID(user_id))
         await self._api("sendMessage", chat_id=chat_id, text=format_usage_text(summary))
 
+    def _note_asked(self, chat_id: int, outcome: Mapping[str, Any]) -> None:
+        """Remember the requests the reply about to go to *chat_id* leaves
+        waiting on the owner's OK, by their ids (``_asked_chats``). A reply
+        that parks none forgets nothing: an older request of this chat may
+        still wait, and ``_point_at_cards`` drops the ones that no longer
+        do."""
+        ids = outcome.get("pending_ids")
+        if isinstance(ids, (list, tuple)) and ids:
+            self._asked_chats.setdefault(chat_id, set()).update(str(i) for i in ids if i)
+
     async def _handle_new(self, chat_id: int) -> None:
         self._fresh_chats.add(chat_id)
+        self._asked_chats.pop(chat_id, None)
         await self._api(
             "sendMessage",
             chat_id=chat_id,
@@ -1963,7 +2153,8 @@ class TelegramService:
             )
             return
         reply = (outcome.get("content") or "").strip()
-        notes = _turn_notes(outcome)
+        self._note_asked(chat_id, outcome)
+        notes = _turn_notes(outcome, reply)
         if not reply and not notes:
             reply = _NO_REPLY_TEXT
         # Photos first, so the text (which ends with the usage line)
@@ -2244,7 +2435,8 @@ class TelegramService:
             )
             return
         reply = (outcome.get("content") or "").strip()
-        notes = _turn_notes(outcome)
+        self._note_asked(chat_id, outcome)
+        notes = _turn_notes(outcome, reply)
         for image in outcome.get("images") or []:
             await self._send_photo(chat_id, image.get("data_url", ""), image.get("caption", ""))
         await self._send_reply(
@@ -2419,7 +2611,13 @@ class TelegramService:
                 )
 
         prefix, target = data[:_CB_PREFIX_LEN], data[_CB_PREFIX_LEN:]
-        if prefix not in (_CB_APPROVE, _CB_DENY, _CB_APPROVE_WEEK, _CB_APPROVE_LOW_RISK):
+        if prefix not in (
+            _CB_APPROVE,
+            _CB_DENY,
+            _CB_APPROVE_WEEK,
+            _CB_APPROVE_SITE,
+            _CB_APPROVE_LOW_RISK,
+        ):
             # Every other button is a route; each one checks the chat itself.
             route = self._callback_routes.get(prefix)
             if route is None:
@@ -2430,12 +2628,14 @@ class TelegramService:
             return
         approved = prefix != _CB_DENY
         # "Allow <app> for 7 days" approves the card and remembers the app;
-        # "Allow small changes on <account>" approves it and allows the account.
-        remember = (
-            REMEMBER_WEEK
-            if prefix == _CB_APPROVE_WEEK
-            else REMEMBER_LOW_RISK if prefix == _CB_APPROVE_LOW_RISK else None
-        )
+        # "Allow clicks on <site> for 1 hour" approves it and remembers the
+        # site; "Allow small changes on <account>" approves it and allows
+        # the account.
+        remember = {
+            _CB_APPROVE_WEEK: REMEMBER_WEEK,
+            _CB_APPROVE_SITE: REMEMBER_SITE,
+            _CB_APPROVE_LOW_RISK: REMEMBER_LOW_RISK,
+        }.get(prefix)
         action_id = target
         logger.info(
             "telegram_callback_received",
@@ -2508,11 +2708,29 @@ class TelegramService:
         "typing…" and progress lines, as a message turn does. The press was
         already answered, so a failure goes to the chat as a message.
 
+        The card's buttons go before the decision runs (it can take a
+        minute, and a card that still shows them looks unanswered); the
+        verdict follows as a line on the card. A card that can no longer be
+        answered (it expired, or was answered already) says so itself and
+        stays without buttons. After any other failure the buttons come
+        back, since the request may still be waiting. A second press on a
+        card whose buttons an earlier press already took changes nothing on
+        the card: the first press writes its line.
+
         The decision carries this chat (``channel``): the resumed turn's acts
         in an app allowed for a week from here need no card, and with
         ``remember="week"`` (the "Allow for 7 days" button) the card's app is
         allowed from this chat."""
         assert self.decide is not None
+        # No reply_markup: Telegram takes the buttons off and leaves the
+        # card's text as it is. It refuses when the card has none left,
+        # which is how a second press on one card is told from the first:
+        # that press then leaves the card alone.
+        took_buttons = (
+            message_id is not None
+            and await self._api("editMessageReplyMarkup", chat_id=chat_id, message_id=message_id)
+            is not None
+        )
         typing: Optional[asyncio.Task[None]] = None
         progress: Optional[TurnProgress] = None
         listen: dict[str, Any] = {}
@@ -2529,6 +2747,17 @@ class TelegramService:
                 listen["on_event"] = progress.on_event
         try:
             outcome = await self.decide(user_id, action_id, approved, **listen)
+        except asyncio.CancelledError:
+            # The chat's /stop cancelled the wait. The applier finishes a
+            # decision it has started (the action and its record) before
+            # the cancel lands, so the card says what is true: the request
+            # still waits (its buttons go back), or it was decided (the
+            # verdict, and that the stop came after).
+            if took_buttons:
+                await self._after_stopped_decision(
+                    chat_id, user_id, action_id, approved, message, message_id
+                )
+            raise
         except Exception as exc:
             # A decision failure must reach the person who pressed the
             # button; silently swallowing it looks like a dead button. The
@@ -2552,11 +2781,29 @@ class TelegramService:
             # The applier's error is a sentence written for the owner (the
             # request expired, it was already answered, a re-check refused
             # it); a developer message is put in plain words first.
-            await self._api(
-                "sendMessage",
-                chat_id=chat_id,
-                text=f"⚠️ {_plain_error(outcome['error'])}"[:_MESSAGE_CHUNK],
-            )
+            failed = f"⚠️ {_plain_error(outcome['error'])}"[:_MESSAGE_CHUNK]
+            # Imported here: this module does not otherwise load the runtime.
+            from services.agent.runtime import ACTION_EXPIRED_ERROR, ACTION_GONE_ERROR
+
+            if took_buttons and outcome["error"] in (ACTION_EXPIRED_ERROR, ACTION_GONE_ERROR):
+                # No tap can answer this card any more: it says so itself
+                # and its buttons stay off.
+                await self._freeze_card(chat_id, message, message_id, failed)
+            elif took_buttons:
+                # The request may still be waiting, so its buttons go back
+                # on as they were (the plain pair when the press came
+                # without them): "tap the button again" has to work.
+                # A refusal that closed the card (a failed re-check) gets
+                # its buttons back too; the next tap is then told it was
+                # already answered and they go for good. Telling the two
+                # apart needs the applier to say if the card still waits.
+                await self._api(
+                    "editMessageReplyMarkup",
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    reply_markup=message.get("reply_markup") or _approval_keyboard(action_id),
+                )
+            await self._api("sendMessage", chat_id=chat_id, text=failed)
             return
 
         # "✅ Approved at 5:25 PM." or "❌ Denied at 5:25 PM. I didn't do it."
@@ -2573,6 +2820,18 @@ class TelegramService:
             if isinstance(app, str) and app.strip()
             else ""
         )
+        # "Allow clicks on <site> for 1 hour": until what time, and how to
+        # undo it; one that could not be made leaves the card approved once.
+        site_raw = outcome.get("site")
+        site: dict[str, Any] = site_raw if isinstance(site_raw, dict) else {}
+        host = site.get("app")
+        if isinstance(host, str) and host.strip():
+            allowed = (
+                f" I can click around on {' '.join(host.split())} without asking "
+                f"{_until_time(site.get('expires_at'))}. Send /apps to undo that."
+            )
+        elif approved and remember == REMEMBER_SITE:
+            allowed = " I couldn't turn on the hour without asking, so I'll still ask next time."
         # "Allow small changes on <account>": until when, and how to undo
         # it ("I won't ask about small changes on Gmail until Fri Oct 16.
         # Send /grants to undo that."); a grant that could not be made (the
@@ -2588,25 +2847,10 @@ class TelegramService:
             )
         elif approved and remember == REMEMBER_LOW_RISK:
             allowed = " I couldn't turn on the 7 days without asking, so I'll still ask next time."
-        # Freeze the card: replace the buttons with the decision so it
-        # can't be pressed twice from the chat history. A photo card (a
-        # purchase) has a caption, not text, and is edited as one.
-        if message_id is not None and message.get("photo"):
-            original = message.get("caption") or "🛒 Purchase"
-            await self._api(
-                "editMessageCaption",
-                chat_id=chat_id,
-                message_id=message_id,
-                caption=f"{original}\n\n{verdict}{allowed}"[:1024],
-            )
-        elif message_id is not None:
-            original = message.get("text") or "🔐 Request"
-            await self._api(
-                "editMessageText",
-                chat_id=chat_id,
-                message_id=message_id,
-                text=f"{original}\n\n{verdict}{allowed}",
-            )
+        await self._freeze_card(chat_id, message, message_id, f"{verdict}{allowed}")
+        # The resumed turn may have parked the next request; a denial or a
+        # finished task leaves none.
+        self._note_asked(chat_id, outcome)
         summary = outcome.get("summary")
         if summary:
             # The resumed turn's reply, in full and with its own usage line,
@@ -2616,14 +2860,101 @@ class TelegramService:
                 await self._send_photo(
                     chat_id, image.get("data_url", ""), image.get("caption", "")
                 )
-            await self._send_reply(chat_id, str(summary), outcome, _turn_notes(outcome))
+            await self._send_reply(
+                chat_id, str(summary), outcome, _turn_notes(outcome, str(summary))
+            )
+
+    async def _after_stopped_decision(
+        self,
+        chat_id: int,
+        user_id: str,
+        action_id: str,
+        approved: bool,
+        message: dict[str, Any],
+        message_id: Any,
+    ) -> None:
+        """What a card shows when /stop cut its decision off. Still waiting
+        (or its state cannot be read): the buttons go back on, so a later
+        tap works. Decided: the verdict, and for an approval that the stop
+        came after it, so nothing more was done. Best effort: the stop
+        itself must go on whatever this meets."""
+        from sqlalchemy import select
+
+        from models.pending_action import PendingAction, PendingActionStatus
+
+        try:
+            async with self._session_factory() as session:
+                status = (
+                    await session.execute(
+                        select(PendingAction.status).where(PendingAction.id == uuid_module.UUID(str(action_id)))
+                    )
+                ).scalar_one_or_none()
+            # A card this install has no row for was not decided either.
+            still_waits = status is None or status == PendingActionStatus.pending
+        except Exception as exc:
+            logger.warning("telegram_stopped_decision_lookup_failed", error_type=type(exc).__name__)
+            still_waits = True
+        try:
+            if still_waits:
+                await self._api(
+                    "editMessageReplyMarkup",
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    reply_markup=message.get("reply_markup") or _approval_keyboard(action_id),
+                )
+                return
+            verdict = cards.decision_line(approved, at=cards.decided_at_text())
+            after = " Then you stopped me, so I did nothing after that." if approved else ""
+            await self._freeze_card(chat_id, message, message_id, f"{verdict}{after}")
+        except Exception as exc:
+            logger.warning("telegram_stopped_decision_card_failed", error_type=type(exc).__name__)
+
+    async def _freeze_card(
+        self, chat_id: int, message: dict[str, Any], message_id: Any, line: str
+    ) -> None:
+        """Freeze a card: add *line* under its own text (the decision, or
+        why it can no longer be answered). The edit carries no buttons, so
+        the card can't be pressed again from the chat history. A photo card
+        (a purchase, a page) has a caption, not text, and is edited as one."""
+        if message_id is None:
+            return
+        if message.get("photo"):
+            original = message.get("caption") or "🛒 Purchase"
+            caption = f"{original}\n\n{line}"
+            if cards.utf16_len(caption) > _CAPTION_UNITS:
+                # A caption holds 1,024 units. The offer under the question
+                # ("Or allow ...") is moot once the card is decided, so it
+                # gives way to the verdict.
+                caption = re.sub(r"\n\nOr allow [^\n]*\Z", "", original) + f"\n\n{line}"
+            await self._api(
+                "editMessageCaption",
+                chat_id=chat_id,
+                message_id=message_id,
+                caption=caption[:1024],
+            )
+        else:
+            original = message.get("text") or "🔐 Request"
+            await self._api(
+                "editMessageText",
+                chat_id=chat_id,
+                message_id=message_id,
+                text=f"{original}\n\n{line}",
+            )
+
+
+# Card pushes still on their way. The event loop holds a running task only
+# weakly, so a push nobody keeps can be garbage-collected while it waits on
+# the chat app: the card is stored and then never reaches the chat. Each
+# push is parked here until it ends (as runtime._spawn_detached does).
+_CARD_PUSHES: set[asyncio.Task[None]] = set()
 
 
 class NotifyingApprovalStore:
     """ApprovalStore decorator: forwards every call to the wrapped store and
     pushes a Telegram notification after a pending action is created. The
     notification is fire-and-forget — the approval flow itself never waits
-    on (or fails because of) Telegram."""
+    on (or fails because of) Telegram. Its task is kept until it ends
+    (``_CARD_PUSHES``), so a slow push is never dropped half-way."""
 
     def __init__(
         self, inner: Any, notify: Callable[[Any], Coroutine[Any, Any, None]]
@@ -2634,9 +2965,12 @@ class NotifyingApprovalStore:
     async def create(self, **kwargs: Any) -> Any:
         stored = await self._inner.create(**kwargs)
         try:
-            asyncio.get_running_loop().create_task(self._notify(stored))
+            push = asyncio.get_running_loop().create_task(self._notify(stored))
         except RuntimeError:  # no running loop (sync test context)
             pass
+        else:
+            _CARD_PUSHES.add(push)
+            push.add_done_callback(_CARD_PUSHES.discard)
         return stored
 
     async def list_pending(self, user_id: str) -> Any:

@@ -267,6 +267,20 @@ def redact_for_model(text: str) -> str:
     return redact_text(text, MODEL_FLOOR).text
 
 
+def shown_to_model(text: str) -> str:
+    """*text* as the provider of the turn in progress may see it: through
+    the turn's ``ModelEgress`` when one is bound (the floor, and
+    placeholders for contact details when the owner hides them), else the
+    floor alone. For code inside a turn that sends text to the provider
+    outside the runtime's own model call (web.search's provider search): a
+    caller compares the answer with *text* and keeps away from the provider
+    when they differ. Nothing is counted as newly hidden by asking."""
+    egress = current_egress.get()
+    if egress is None:
+        return redact_for_model(text)
+    return egress._text(text, False)
+
+
 def redact_for_embedding(text: str, *, cloud: bool, hide_personal: bool) -> str:
     """*text* as it may go to an embedding endpoint: the floor always, and
     contact details as [email], [phone], [address] or [birth date] (never
@@ -287,4 +301,5 @@ __all__ = [
     "is_local_provider",
     "redact_for_embedding",
     "redact_for_model",
+    "shown_to_model",
 ]

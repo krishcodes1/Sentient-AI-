@@ -598,7 +598,7 @@ export async function getPendingApprovals(): Promise<PendingApproval[]> {
 export async function decideApproval(
   actionId: string,
   approved: boolean,
-  remember?: "week" | "low_risk"
+  remember?: "week" | "low_risk" | "site"
 ): Promise<ApprovalDecisionResponse> {
   return request<ApprovalDecisionResponse>(`/agent/approvals/${actionId}`, {
     method: "POST",
@@ -1041,6 +1041,14 @@ export async function createOwner(data: RegisterData): Promise<AuthResponse> {
 
 export async function getSetupProviders(): Promise<SetupProviders> {
   return request<SetupProviders>("/setup/providers");
+}
+
+/** Every chat model this Crawler's key for *provider* can use (asked of the
+ * provider), or the suggested few when it could not be asked. */
+export async function getProviderModels(
+  provider: string,
+): Promise<{ models: string[]; live: boolean }> {
+  return request(`/setup/models/${encodeURIComponent(provider)}`);
 }
 
 /** Sends one tiny prompt with the given key; nothing is stored. */
