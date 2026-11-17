@@ -20,7 +20,6 @@ httpx with the in-memory SQLite fixture; no network, no key.
 
 from __future__ import annotations
 
-import json
 import uuid
 from typing import Any
 
@@ -31,16 +30,13 @@ from api.routes import security_mcp
 from api.routes.agent import UserRateLimiter
 from models.audit import AuditLog
 from models.mcp_tool_pin import McpToolPin
-from services.mcp.client import MCPClient, MCPToolInfo
+from services.mcp.client import MCPToolInfo
 from services.mcp.integration import (
-    MCPConnectorLoader,
-    MCPToolCatalog,
-    mcp_name_bindings,
     seen_tools_for,
 )
 from services.mcp.pin_store import McpPinService, PinServer
 from tests.conftest import auth_headers, make_user
-from tests.test_mcp import FakeTransport, _make_mcp_connector
+from tests.test_mcp import _make_mcp_connector
 from tests.test_mcp_client import clean_bindings as clean_bindings  # noqa: F401 - fixture
 
 LABEL = "notes_server"

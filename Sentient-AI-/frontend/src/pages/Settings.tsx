@@ -884,7 +884,7 @@ export default function Settings() {
                     onClick={() => void handleTgTokenSave()}
                     disabled={!tgToken.trim() || tgTokenBusy !== null}
                     className="px-4 py-2 rounded-[10px] text-sm font-semibold disabled:opacity-50"
-                    style={{ background: "var(--accent-primary)", color: "#0a0a0b" }}
+                    style={{ background: "var(--accent-primary)", color: "var(--text-on-accent)" }}
                   >
                     {tgTokenBusy === "save" ? (
                       <Loader2 className="w-4 h-4 animate-spin inline-block mr-1.5" />
@@ -965,7 +965,7 @@ export default function Settings() {
                 onClick={() => void handleTgConnect()}
                 disabled={tgBusy}
                 className="flex items-center gap-2 px-4 py-2 rounded-[10px] text-sm font-semibold disabled:opacity-50"
-                style={{ background: "var(--accent-primary)", color: "#0a0a0b" }}
+                style={{ background: "var(--accent-primary)", color: "var(--text-on-accent)" }}
               >
                 {tgBusy ? (
                   <Loader2 className="w-4 h-4 animate-spin" />
