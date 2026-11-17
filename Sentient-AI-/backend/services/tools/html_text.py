@@ -1,6 +1,8 @@
 """Parses fetched HTML into readable page text and DuckDuckGo and Bing result
 pages into result lists, using only the stdlib html.parser, and cleans the
-result rows a browser read off a results page (web.search's fallback).
+result rows a browser read off a results page (web.search's fallback). Rows
+from all three are cut to size in one place, which also drops Bing's stand-in
+for a missing description.
 
 Why it exists: The web toolkit needs both readers to run on hostile markup
 without adding a scraping dependency to the agent's process, and malformed
@@ -84,6 +86,24 @@ _WHITESPACE = re.compile(r"[^\S\n]+")
 _BLANK_LINES = re.compile(r"\n{3,}")
 
 
+# Elements with no end tag: never opened, so never counted as open.
+_VOID_TAGS = frozenset("area base br col embed hr img input link meta param source track wbr".split())
+# An inline style that takes an element off the page a person reads.
+_HIDDEN_STYLE = re.compile(
+    r"display\s*:\s*none|visibility\s*:\s*hidden|(?:font-size|opacity)\s*:\s*0(?![.\d])", re.IGNORECASE
+)
+
+
+def _hidden(attrs: list[tuple[str, Optional[str]]]) -> bool:
+    """Whether a start tag hides its element from a reader: the ``hidden``
+    attribute, or an inline style that does. Text a person cannot see is
+    where a page puts words meant for an assistant alone."""
+    return any(
+        name == "hidden" or (name == "style" and value and _HIDDEN_STYLE.search(value))
+        for name, value in attrs
+    )
+
+
 class _ReadableTextParser(HTMLParser):
     """Collects the text a reader would see, plus the document title."""
 
@@ -93,8 +113,14 @@ class _ReadableTextParser(HTMLParser):
         self._parts: list[str] = []
         self._skip_depth = 0
         self._in_title = False
+        # The tags open inside a hidden element, the element's own first.
+        self._hidden_open: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
+        if self._hidden_open or _hidden(attrs):
+            if tag not in _VOID_TAGS:
+                self._hidden_open.append(tag)
+            return
         if tag in _SKIPPED_TAGS:
             self._skip_depth += 1
             return
@@ -104,6 +130,12 @@ class _ReadableTextParser(HTMLParser):
             self._parts.append("\n")
 
     def handle_endtag(self, tag: str) -> None:
+        if self._hidden_open:
+            # Closes back to its own start tag; a stray close tag closes nothing.
+            if tag in self._hidden_open:
+                while self._hidden_open.pop() != tag:
+                    pass
+            return
         if tag in _SKIPPED_TAGS:
             # Clamped at zero: a stray close tag for a container that was
             # never opened must not unskip the rest of the document.
@@ -118,7 +150,7 @@ class _ReadableTextParser(HTMLParser):
         if self._in_title:
             self.title += data
             return
-        if self._skip_depth:
+        if self._skip_depth or self._hidden_open:
             return
         self._parts.append(data)
 
@@ -382,6 +414,13 @@ def _unwrap_redirect(href: str) -> Optional[str]:
     return href
 
 
+# How Bing's stand-in for a missing description starts ("... but the site
+# won't allow us."), printed where a site keeps its crawler out. It says
+# nothing about the result, and read by the model it passes for the search
+# tool reporting a block, so such a row keeps an empty snippet.
+_NO_DESCRIPTION = "We would like to show you a description here"
+
+
 def _bounded(rows: Iterable[dict[str, str]], limit: int, snippet_chars: int) -> list[dict[str, Any]]:
     """At most *limit* rows, one per URL, each field cut to size."""
     results: list[dict[str, Any]] = []
@@ -390,11 +429,12 @@ def _bounded(rows: Iterable[dict[str, str]], limit: int, snippet_chars: int) -> 
         if result["url"] in seen:
             continue
         seen.add(result["url"])
+        snippet = "" if result["snippet"].startswith(_NO_DESCRIPTION) else result["snippet"]
         results.append(
             {
                 "title": result["title"][:140],
                 "url": result["url"][:500],
-                "snippet": result["snippet"][:snippet_chars],
+                "snippet": snippet[:snippet_chars],
             }
         )
         if len(results) >= limit:

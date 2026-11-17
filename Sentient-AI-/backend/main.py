@@ -143,6 +143,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # top10:scheduler_briefing
     await app.state.schedules.start()
+    # Errand runs; nothing runs while errand_runs is off.
+    await app.state.errands.start()
+    # Errands from calendar notes; nothing is read while calendar_errands is off.
+    await app.state.calendar_errands.start()
 
     # top10:tutor_mode
 
@@ -191,6 +195,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # top10:tutor_mode
 
     # top10:scheduler_briefing
+    await app.state.calendar_errands.stop()
+    await app.state.errands.stop()
     await app.state.schedules.stop()
 
     # top10:file_extraction
@@ -777,6 +783,57 @@ async def wire_services(
             service=app.state.schedules,
             session_factory=session_factory,
         )
+    )
+
+    # Errand runs: background errands in Crawler's browser that end in one
+    # purchase card. The errand runner is the unattended runner's twin with
+    # the errand budgets; the checkout keeps a parked card's page open for as
+    # long as the card waits; a card nobody should approve any more is closed
+    # through the runtime (audited). The sweeper re-reads errand_runs before
+    # every pass.
+    from services.automation import errands
+    from services.capabilities.errand_runs import KEY as ERRAND_RUNS
+
+    async def _errand_settings() -> dict[str, Any]:
+        return await installation.capability_settings(ERRAND_RUNS)
+
+    async def _deny_errand_card(action_id: str, user_id: str) -> Any:
+        return await app.state.agent_runtime.deny_action(action_id, user_id)
+
+    app.state.errands = errands.ErrandService(
+        session_factory,
+        runner=app.state.unattended_runner.errand_runner(_errand_settings),
+        send=app.state.owner_send,
+        enabled_keys=installation.enabled_keys,
+        settings=_errand_settings,
+        hold=browser_toolkits.checkout.hold,
+        deny=_deny_errand_card,
+    )
+    errands.configure(app.state.errands)
+
+    # Errands from the owner's calendar notes: a daily read of the Mac's
+    # Calendar app (and Google Calendar when connected, through the
+    # briefing's gated and audited read) that plans errands through the
+    # errand service. Nothing is read while calendar_errands is off.
+    from services.capabilities.calendar_errands import KEY as CALENDAR_ERRANDS
+    from services.errands.finder import CalendarErrandFinder
+    from services.notifications.sweeper import capability_gate as _gate
+
+    async def _calendar_errand_settings() -> dict[str, Any]:
+        return await installation.capability_settings(CALENDAR_ERRANDS)
+
+    app.state.calendar_errands = CalendarErrandFinder(
+        session_factory,
+        errands=app.state.errands,
+        runtime=lambda: getattr(app.state, "agent_runtime", None),
+        reader=BriefingReader(
+            permissions=RuntimePermissionAdapter(capability_gate=installation.capability_statuses),
+            executor=tool_executor,
+            audit=RuntimeAuditLogger(session_factory=session_factory),
+        ),
+        send=app.state.owner_send,
+        enabled=_gate(installation, CALENDAR_ERRANDS),
+        settings=_calendar_errand_settings,
     )
 
     # top10:tutor_mode

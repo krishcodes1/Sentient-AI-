@@ -275,6 +275,9 @@ export interface PendingApproval {
    *  offering "Allow Calendar for 7 days" beside Approve / Deny. Null or
    *  absent: the card has no weekly option. */
   weekly_app?: string | null;
+  /** The website a browser.act card can be allowed on for an hour ("tickets.example.com"),
+   *  offering "Allow clicks on tickets.example.com for 1 hour". Null or absent: no offer. */
+  hourly_site?: string | null;
   /** The account a card for a low-risk change can be allowed on for 7 days ("School Gmail"),
    *  offering "Allow low-risk changes on School Gmail for 7 days". Null or absent: no offer. */
   low_risk_account?: string | null;
@@ -343,6 +346,9 @@ export interface ApprovalDecisionResponse {
   /** The app the weekly button allowed, and until when. Null when the act
    *  was approved once only (no `remember`, or no usable device header). */
   weekly?: { app: string; expires_at: string } | null;
+  /** The website the site button allowed clicks on (as `app`), and until when. Null when the
+   *  act was approved once only. */
+  site?: { app: string; expires_at: string } | null;
   /** The account the low-risk button allowed, and until when. Null when the card was approved
    *  once only (no `remember`, or the action no longer graded low-risk). */
   low_risk?: { account: string; expires_at: string } | null;
@@ -356,6 +362,8 @@ export interface ApprovalDecisionResponse {
 export interface AppApproval {
   id: string;
   app: string;
+  /** "app": an app on this computer, for a week. "site": clicks on a website, for an hour. */
+  kind?: "app" | "site";
   channel: "telegram" | "web";
   this_device: boolean;
   granted_at: string;

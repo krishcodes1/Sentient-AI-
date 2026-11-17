@@ -10,6 +10,14 @@ listed: acting on the computer or in a browser, installing software, saving
 memories, watches, schedules and triggers (no self-replication), the tool
 finder, skills, the tutor and third-party MCP tools, and an upload of a file
 to VirusTotal. Every DELETE, EXECUTE and FINANCIAL action is out too.
+
+The one exception is an errand run (``classify_tool(..., errand=True)``):
+it may read pages in Crawler's browser (browser.read: the runtime's fence
+refuses its clicks and opens only links the errand rule allows, see
+services/agent/unattended.py), take website steps (browser.act, a "step":
+only the runtime's errand path runs one, with no card) and propose the
+purchase (browser.checkout, its one card). A scheduled task or a trigger
+still never gets a browser tool.
 """
 
 from __future__ import annotations
@@ -53,7 +61,14 @@ FIND_TOOL = "tools.find"
 # "<type>__<8 hex>.<action>": a tool of one of two accounts of a type.
 _SLUGGED = re.compile(r"([a-z0-9_]+?)__([0-9a-f]{8})(\..+)")
 
-ToolKind = Literal["read", "write"]
+ToolKind = Literal["read", "write", "step"]
+
+# What an errand run may do in Crawler's browser, by canonical name.
+ERRAND_TOOLS: dict[str, ToolKind] = {
+    "browser.read": "read",
+    "browser.act": "step",
+    "browser.checkout": "write",
+}
 
 
 def canonical_name(name: str) -> str:
@@ -68,13 +83,16 @@ def _slug_of(name: str) -> Optional[str]:
     return match.group(2) if match else None
 
 
-def classify_tool(name: Any) -> Optional[ToolKind]:
+def classify_tool(name: Any, *, errand: bool = False) -> Optional[ToolKind]:
     """'read' or 'write' for a tool an unattended run may be given, else
     None: unknown names, the families and tools above, and every DELETE,
-    EXECUTE and FINANCIAL action."""
+    EXECUTE and FINANCIAL action. With *errand*, the browser tools of
+    ``ERRAND_TOOLS`` too ('step' for a website step)."""
     if not isinstance(name, str) or "." not in name:
         return None
     canonical = canonical_name(name.strip())
+    if errand and canonical in ERRAND_TOOLS:
+        return ERRAND_TOOLS[canonical]
     if canonical in NEVER_TOOLS or canonical.split(".", 1)[0] in NEVER_TYPES:
         return None
     # Deferred: the registry imports the runtime, which imports the fence's
@@ -96,8 +114,9 @@ def build_fence(tools: Sequence[Any], run: UnattendedRun) -> tuple[list[Any], li
     """The tools one run is offered, and the listed ones that are missing.
 
     Keeps a tool only when its canonical name is one of the run's reads
-    (plus ``ALWAYS_READS``) classified as a read, or one of its writes
-    classified as a write; ``tools.find`` never. With ``run.connector_id``
+    (plus ``ALWAYS_READS``) classified as a read (or, in an errand run, a
+    step), or one of its writes classified as a write; ``tools.find``
+    never. With ``run.connector_id``
     set, a tool of one of several accounts of a type (a slugged name) is
     kept only for that connector's row; a type with one account has
     unslugged names, and that one account is the connector's. ``missing``
@@ -115,8 +134,8 @@ def build_fence(tools: Sequence[Any], run: UnattendedRun) -> tuple[list[Any], li
         canonical = canonical_name(name)
         if canonical == FIND_TOOL:
             continue
-        kind = classify_tool(canonical)
-        if kind == "read" and canonical not in reads:
+        kind = classify_tool(canonical, errand=run.errand)
+        if kind in ("read", "step") and canonical not in reads:
             continue
         if kind == "write" and canonical not in run.writes:
             continue

@@ -2,7 +2,39 @@
 (purchases spec §6): the origin and scheme, the order total, the item
 lines, the card fields, the order button and where it would send the
 form, plus a digest of the page outline that ties the approval card to
-this page.
+this page (the page memory's structure digest, the one browser.act's
+card is tied to). A page with no card fields may pay with what the shop
+keeps on file (Amazon's "Place your order" page): then the facts say
+whether the page names a saved payment method, the one card it names in
+a strict shape within one line of text ("Visa ending in 4242" or
+"Paying with Visa 4242" read as "Visa ····4242"; no other page text is
+kept), and its order button, which must be the only button in the page
+itself (the page script says which frame is the main one, never a ref's
+prefix) whose words place the order, with no other control that may
+place one: no button or link in any frame named like one ("Pay $23.40",
+"Buy now", "Complete payment", a "Place your order" link; never "Change
+payment method", "Pay with a gift card" or an "Order details" link), and
+no other submit button of a POST form in the page that sends it
+somewhere else, whatever it says ("Continue"). Those are counted, never
+pressed; the same button repeated in one form, to one target, counts
+once, and every control named like one is read, however many buttons
+come first. The method and the card are read only from text painted on
+screen, outside links, buttons and form controls' labels, near the order
+total or the order button, and never from words that say there is none
+(before it, or right after it: "Card on file: none", "has expired") or
+offer to keep one, so a sign-in link, a promo line, "no saved cards" or
+"Keep this card on file" does not make a page pay on file. Text whose
+look Crawler cannot judge (a colour not in rgb(), a background image, a
+filter, a blend mode, an inset shadow, a mask, a transform, scale or
+rotate that does more than move it) does not count either, and every box around it fades its ink by
+its opacity before the contrast is judged. The limit: anything painted
+over the text that hit testing does not see (an overlay that lets clicks
+through, a sibling's box, the element's own ``::before`` or ``::after``,
+an outline, a text decoration) is not seen, and only the person's look
+at the screenshot on the card catches it. A card number or code field
+Crawler does not fill, in the page or any frame, or more fields than
+Crawler reads (``stray_card_fields``), means the page may ask for a
+card, and it is refused instead.
 
 Why the toolkit reads these itself: the amount on the card and the fields
 the vault fills into must come from the page as it is, not from the
@@ -21,13 +53,13 @@ than guessed at, and the caps are checked against the largest. The
 order button is taken from the card fields' own ``<form>`` (never one
 attached from outside through ``form=``), and its effective target
 (``formaction`` or the form's ``action``) must be an https POST to the
-page's own origin, or to the payment frame's, before a card is filled.
+page's own origin, or to the payment frame's, before a card is filled
+or the order button is pressed.
 """
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -41,6 +73,7 @@ from services.tools.browser import snapshot as snap
 from services.tools.browser.checkout import markers
 from services.tools.browser.checkout.amounts import Money, fmt_usd, parse_money, usd
 from services.tools.browser.checkout.merchant import merchant_refusal
+from services.tools.browser.pagememory import outline_digest
 
 logger = structlog.get_logger(__name__)
 
@@ -58,8 +91,14 @@ FACTS_TIMEOUT_S = 8.0
 REF_TIMEOUT_MS = 3_000
 MAX_ITEMS = 10
 MAX_TOTALS_SEEN = 10
+# How many fields and buttons are asked about. A page with more fields
+# than this and no card fields is never paid with the card on file (the
+# rest could ask for a card); every button or link named like one that
+# may place an order is asked about on top of the first ``_MAX_BUTTONS``,
+# up to ``_MAX_ORDER_BUTTONS``, and more of them than that is ambiguous.
 _MAX_FIELDS = 40
 _MAX_BUTTONS = 40
+_MAX_ORDER_BUTTONS = 10
 _ITEM_CHARS = 120
 _TOTAL_CHARS = 160
 
@@ -68,9 +107,14 @@ _TOTAL_CHARS = 160
 # "before" something). Held by ``markers`` so browser.act asks the same
 # question of a page.
 _TOTAL_LABEL_RE = markers.TOTAL_LABEL_RE
-# Rows that are a total line, not an item.
+# Rows that are a total line or an order summary row (Amazon's "Items:",
+# "Shipping & handling:", "Estimated tax"), not an item. The summary words
+# count only at the start of the row: an item row that ends in "FREE
+# Shipping" is still an item.
 _ITEM_EXCLUDE_RE = re.compile(
-    r"sub\s*-?\s*total|\btotal\b|amount\s+due|you\s+pay|to\s+pay|balance\s+due",
+    r"sub\s*-?\s*total|\btotal\b|amount\s+due|you\s+pay|to\s+pay|balance\s+due"
+    r"|^\s*(?:items?\s*(?:\(\d+\)\s*)?:|shipping|handling|(?:estimated\s+)?tax\b"
+    r"|promotion|discount)",
     re.IGNORECASE,
 )
 _PAY_BUTTON_RE = re.compile(
@@ -80,6 +124,97 @@ _PAY_BUTTON_RE = re.compile(
     r"|order now|book now|check ?out)\b",
     re.IGNORECASE,
 )
+# On a page with no card fields, the words of a button that places the
+# order. Narrower than ``_PAY_BUTTON_RE`` because it counts buttons: a
+# "Change payment method" or "Checkout" button must not make a second one.
+_ORDER_BUTTON_RE = re.compile(
+    r"\b(?:place (?:your |the |my )?order|complete (?:my |your |the )?(?:order|purchase)"
+    r"|confirm (?:and pay|(?:your |the |my )?(?:order|purchase))|submit (?:your |the )?order"
+    r"|(?:buy|pay|order) now)\b",
+    re.IGNORECASE,
+)
+# On a page with no card fields, the words of a link or button that might
+# place an order without being named like an order button: only the verb,
+# optionally "now" and an amount ("Pay $23.40", "Buy", "Checkout"; never
+# "Order summary" or "Pay in 4 interest-free payments"). A button in pay
+# words (``_PAY_BUTTON_RE``: "Complete payment", "Confirm & pay") is one
+# too, unless it changes, adds or picks a way to pay (``_PAY_CHOICE_RE``).
+# Such a control is never pressed, only counted, so the one order button
+# is not an upsell's while the real one is named in other words or is a
+# link; the real one in plain words in a POST form is counted by its
+# form's target instead (``_order_button``).
+_RIVAL_RE = re.compile(
+    r"^\s*(?:pay|buy|purchase|order|check\s?out)(?:\s+now)?(?:\s+(?:US)?\$?[\d.,]+)?\s*$",
+    re.IGNORECASE,
+)
+_PAY_CHOICE_RE = re.compile(
+    r"^\s*(?:change|edit|add|use|select|manage|update|remove|pay\s+(?:with|using)\s+an?)\b",
+    re.IGNORECASE,
+)
+_NETWORK = r"visa|mastercard|american\s+express|amex|discover|jcb|diners(?:\s+club)?|unionpay"
+_PAYING_WITH = rf"\b(?:paying|pay)\s+with\s+({_NETWORK})\s+(\d{{4}})(?!\d)"
+_ENDING_IN = rf"\b({_NETWORK})\s*(?:ending\s+in|[·•]{{2,}})\s*(\d{{4}})(?!\d)"
+# The one card a page says it will charge, in a strict shape: a card
+# network, then "ending in" or a dotted mask, then exactly four digits;
+# or, only right after "paying with" or "pay with", a network then four
+# digits that end the phrase ("Paying with Visa 1234", never "Pay with
+# Visa 2026 rewards"). Read within one text node, so a street number on
+# the next line never joins it. Only the network (spelled as below) and
+# the digits reach the approval card, so no other page text can.
+_SAVED_CARD_RE = re.compile(
+    _PAYING_WITH + r"(?=\s*(?:$|[.,;:·|)]))|" + _ENDING_IN, re.IGNORECASE
+)
+# What makes a page a card-on-file page: a card in the strict shape (here
+# "paying with" a network and any four digits), a card the page says it
+# keeps ("the card on file"), or a card by its last four ("card ending in
+# 5555"). Never a bare "saved card" or "default payment": a heading over
+# "none saved" says that too. Narrower than ``markers.SAVED_PAYMENT_RE``,
+# which browser.act may over-read (it only refuses more): here a match
+# lets the order button be pressed, so a bare "ending in 2026" (a sale) or
+# a mask with no card named never counts.
+_SAVED_METHOD_RE = re.compile(
+    _PAYING_WITH + "|" + _ENDING_IN
+    + r"|\b(?:card|payment(?:\s+method)?)\s+(?:on\s+file|saved|stored)\b"
+    + r"|\bcard\s*(?:ending\s+in|[·•*]{2,}|\.{2,}|…)\s*\d{4}(?!\d)",
+    re.IGNORECASE,
+)
+# What, right before a ``_SAVED_METHOD_RE`` match, says the method is
+# missing or not this order's ("You have no saved cards", "No payment
+# method on file", "Keep this card on file"): a negation or an offer to
+# keep the card, then at most two words.
+_NOT_SAVED_RE = re.compile(
+    r"\b(?:no|not|never|none|without|don['’]?t|doesn['’]?t|add|keep|save|remember)\b"
+    r"(?:\s+\S+){0,2}\s*$",
+    re.IGNORECASE,
+)
+# What, in the ``_NONE_AFTER_CHARS`` right after such a match, says there
+# is none or it cannot pay ("Card on file: none", "Payment method on file:
+# N/A", "Your card on file has expired").
+_NONE_AFTER_RE = re.compile(
+    r"^\s*[:(\-\u2013\u2014]?\s*\(?\s*(?:none|no|n/?a|0|not|(?:has|is)\s+expired|expired|was\s+removed)\b",
+    re.IGNORECASE,
+)
+_NONE_AFTER_CHARS = 30
+# How near (CSS pixels, the gap between the two boxes) a saved method must
+# sit to the order total or the order button to count: the next block or
+# the next column, not a footer or a side panel.
+# ponytail: one fixed reach; tune it if a real review page lays out wider.
+_SAVED_REACH_PX = 300
+# The least contrast (WCAG ratio: 1 is the same colour, 21 black on white)
+# between a text's ink and the background colours behind it for the text
+# to count as legible: #eee on white (1.16) is not, #ddd (1.36) is.
+# ponytail: judged against ancestors' background colours only; text over a
+# picture does not count, and anything painted over it that hit testing
+# does not see (a click-through overlay, a sibling's box, its own ::before
+# or ::after, an outline, a text decoration) is not seen either: the
+# screenshot on the card is the check.
+_LEGIBLE_CONTRAST = 1.25
+_NETWORKS: dict[str, str] = {
+    "visa": "Visa", "mastercard": "Mastercard", "american express": "American Express",
+    "amex": "American Express", "discover": "Discover", "jcb": "JCB", "diners": "Diners Club",
+    "diners club": "Diners Club", "unionpay": "UnionPay",
+}
+_MAX_SAVED_CARDS = 5
 # The card-field hints live in ``markers`` (shared with the outline, the
 # screenshot mask and browser.act); ``field_kind`` applies them here.
 _FIELD_ROLES = frozenset({"textbox", "spinbutton", "combobox"})
@@ -87,17 +222,63 @@ _FIELD_ROLES = frozenset({"textbox", "spinbutton", "combobox"})
 _SNAPSHOT_LINE_RE = re.compile(
     r"^\s*-\s*'?(?P<role>[a-z][a-z-]*)(?:\s+(?P<name>\"(?:[^\"\\]|\\.)*\"))?.*?\[ref=(?P<ref>(?:f\d+)?e\d+)\]"
 )
-_ACTIVE_MARKER = " [active]"
 
+# Where a submit control would send its form: its own ``formaction`` or
+# else the form's ``action`` (read as attributes, so a field named
+# "action" cannot stand in for it), resolved against the document, and
+# the method the same way. Shared by the page script and ``_BUTTON_JS``,
+# so the order button's target and every other one are read alike.
+_TARGET_JS = r"""(el, form) => {
+  const raw = el.hasAttribute('formaction') ? el.getAttribute('formaction') : form.getAttribute('action');
+  let action = 'invalid:';
+  try { action = new URL(raw || '', document.baseURI).href; } catch (e) {}
+  return [action, (el.getAttribute('formmethod') || form.getAttribute('method') || 'get').toLowerCase()];
+}"""
 # One evaluate on the main frame: the page origin, every short text
 # block that mentions money and is on screen (total candidates, each with
-# its distance to the card form or the order button) and every leaf row
-# that mentions money (item lines). Text is collapsed to one line.
+# its distance to the card form or the order button), every leaf row
+# that mentions money (item lines), whether the page names a payment
+# method on file, the short matches of the strict card shape (never the
+# text around them), each within one text node, and where every enabled
+# submit button of a POST form in the page would send it (``posts``, read
+# as ``_BUTTON_JS`` reads the order button's). Text is collapsed to one
+# line. The saved method and the card are read only from words the owner
+# sees as this order's: text painted on screen, not in a link, a button
+# or a form control's label, in a block within ``_SAVED_REACH_PX`` of an
+# order total or an order button, and not said to be missing ("no saved
+# cards", "Card on file: none", "has expired") or offered to keep ("Keep
+# this card on file"). A text node is painted when one of its own boxes,
+# not shrunk under 0.6 of its font size, has its centre in the viewport
+# on its own element (not pushed away by text-indent, clipped or
+# covered), no ancestor has a transform that does more than move it or is
+# drawn over by a background image, a filter, a blend mode or an inset
+# shadow, and its ink, faded by every ancestor's opacity, and the colours
+# behind it read as rgb() and differ enough. The limit: anything painted
+# over the text that hit testing does not see (a click-through overlay, a
+# sibling's box, its own ::before or ::after, an outline, a text
+# decoration) is not seen, and the screenshot on the card is the check.
+# Each card is kept once before the cap, so repeats cannot crowd out a
+# second card. Reading never scrolls: the page is read, and photographed
+# for the card, as the model left it.
 _PAGE_JS = r"""
 () => {
+  const target = __TARGET__;
   const MONEY = __MONEY__;
   const classify = __FIELD_KIND__;
   const PAY = __PAY_RE__;
+  const ORDER = __ORDER_RE__;
+  const TOTAL = __TOTAL__;
+  const SAVED = __SAVED__;
+  const SAVED_ALL = __SAVED_ALL__;
+  const NOT_SAVED = __NOT_SAVED__;
+  const NONE_AFTER = __NONE_AFTER__;
+  const CARD_ON_FILE = __CARD_ON_FILE__;
+  const REACH = __REACH__;
+  const LEGIBLE = __LEGIBLE__;
+  // Links, buttons and form controls' labels: their words are a choice
+  // the page offers ("Use a saved card", "Keep this card on file"), not
+  // what pays this order.
+  const CONTROLS = 'a, button, [role=button], [role=link], label';
   const vw = window.innerWidth, vh = window.innerHeight;
   const visible = el => {
     const cs = getComputedStyle(el);
@@ -130,15 +311,18 @@ _PAGE_JS = r"""
       if (PAY.test(words(el))) { anchor = el; break; }
     }
   }
-  const ar = anchor ? anchor.getBoundingClientRect() : null;
-  const distance = el => {
-    if (!ar) return 0;
+  // The gap between a box and an element, in CSS pixels (0 when they touch).
+  const gap = (ar, el) => {
     const r = el.getBoundingClientRect();
     const dy = Math.max(0, ar.top - r.bottom, r.top - ar.bottom);
     const dx = Math.max(0, ar.left - r.right, r.left - ar.right);
     return Math.round(Math.hypot(dx, dy));
   };
+  const ar = anchor ? anchor.getBoundingClientRect() : null;
+  const distance = el => (ar ? gap(ar, el) : 0);
   const totals = [];
+  // Where this order is placed: its total lines on screen and its order buttons.
+  const places = [];
   const blocks = document.querySelectorAll(
     'p, div, span, td, th, li, dt, dd, strong, b, em, h1, h2, h3, h4, h5, h6, label, tr, output, summary, section, output');
   for (const el of blocks) {
@@ -146,6 +330,106 @@ _PAGE_JS = r"""
     const text = clean(el.innerText);
     if (!text || text.length > 160 || !MONEY.test(text) || !onScreen(el)) continue;
     totals.push({ text, distance: distance(el) });
+    if (TOTAL.test(text)) places.push(el.getBoundingClientRect());
+  }
+  for (const el of document.querySelectorAll('button, input[type=submit], input[type=image], [role=button]')) {
+    if (!el.disabled && visible(el) && ORDER.test(words(el))) places.push(el.getBoundingClientRect());
+  }
+  // [r, g, b, alpha] of a computed rgb()/rgba() colour; null for any
+  // other notation (oklch(), lab()), which cannot be judged.
+  const rgba = s => {
+    const n = /^rgba?\(/.test(s || '') ? s.match(/[\d.]+/g) : null;
+    return n && n.length >= 3 ? [+n[0], +n[1], +n[2], n.length > 3 ? +n[3] : 1] : null;
+  };
+  // What shows behind an element: its own and its ancestors' background
+  // colours laid over white; null when one cannot be read.
+  const backdrop = el => {
+    const layers = [];
+    for (let a = el; a; a = a.parentElement) {
+      const c = rgba(getComputedStyle(a).backgroundColor);
+      if (!c) return null;
+      if (c[3] > 0) { layers.push(c); if (c[3] >= 1) break; }
+    }
+    let base = [255, 255, 255];
+    for (const c of layers.reverse()) base = base.map((v, i) => v + (c[i] - v) * c[3]);
+    return base;
+  };
+  const luminance = c => 0.05 + c.slice(0, 3).map(v => {
+    v /= 255;
+    return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+  }).reduce((sum, v, i) => sum + v * [0.2126, 0.7152, 0.0722][i], 0);
+  // A transform that only moves a box (a centring translate, an
+  // animation's resting state) draws its text as laid out.
+  const MOVED = /^(?:none|matrix\(1, 0, 0, 1, [^,]+, [^,]+\))$/;
+  // Is this text node painted where the owner can read it? Text that
+  // cannot be judged does not count: no ancestor may have a transform
+  // that does more than move it, a background image, a filter, a blend
+  // mode or an inset shadow; its ink, faded by the opacity of every box
+  // around it, and the colours behind it must read as rgb() and differ
+  // enough; and one of its boxes, at least 0.6 of its font size tall, must
+  // be on its own element at its centre, in the viewport.
+  const painted = n => {
+    const p = n.parentElement;
+    if (!p || !n.data.trim() || p.closest(CONTROLS) || !visible(p)) return false;
+    let alpha = 1;
+    for (let a = p; a; a = a.parentElement) {
+      const s = getComputedStyle(a);
+      alpha *= +s.opacity;
+      if (!MOVED.test(s.transform) || s.backgroundImage !== 'none' || s.filter !== 'none'
+        || s.mixBlendMode !== 'normal' || /inset/.test(s.boxShadow)
+        || !['none', '', undefined].includes(s.scale) || !['none', '', undefined].includes(s.rotate)
+        || ![s.maskImage, s.webkitMaskImage].every(m => !m || m === 'none')) return false;
+    }
+    const cs = getComputedStyle(p);
+    const ink = rgba(cs.webkitTextFillColor || cs.color);
+    const back = backdrop(p);
+    if (!ink || !back) return false;
+    const seen = back.map((v, i) => v + (ink[i] - v) * ink[3] * alpha);
+    const [hi, lo] = [luminance(seen), luminance(back)].sort((x, y) => y - x);
+    if (hi / lo < LEGIBLE) return false;
+    const least = Math.max(1, 0.6 * parseFloat(cs.fontSize) || 0);
+    const range = document.createRange();
+    range.selectNodeContents(n);
+    for (const r of range.getClientRects()) {
+      const cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+      if (r.width < 1 || r.height < least || cx < 0 || cy < 0 || cx >= vw || cy >= vh) continue;
+      const hit = document.elementFromPoint(cx, cy);
+      if (hit && (hit === p || p.contains(hit))) return true;
+    }
+    return false;
+  };
+  // The text nodes of a block the owner can read, each collapsed to one
+  // line: its painted text, outside controls.
+  const shown = el => {
+    const parts = [];
+    const walk = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    for (let n = walk.nextNode(); n; n = walk.nextNode()) if (painted(n)) parts.push(clean(n.data));
+    return parts;
+  };
+  // Words that name a saved method, not ones that say it is missing,
+  // before it ("no saved cards") or right after it ("Card on file: none").
+  const names = text => [...text.matchAll(SAVED_ALL)].some(m => {
+    const end = m.index + m[0].length;
+    return !NOT_SAVED.test(text.slice(Math.max(0, m.index - 40), m.index))
+      && !NONE_AFTER.test(text.slice(end, end + __NONE_AFTER_CHARS__));
+  });
+  let saved = false;
+  const cards = [], kept = new Set();
+  for (const el of blocks) {
+    const raw = clean(el.innerText);
+    if (!raw || raw.length > 160 || !SAVED.test(raw) || el.closest(CONTROLS)) continue;
+    if (!places.some(r => gap(r, el) <= REACH)) continue;
+    const parts = shown(el);
+    if (!names(parts.join(' '))) continue;
+    saved = true;
+    // The strict card within one text node, so no digits join it from
+    // the next line.
+    for (const part of parts) for (const m of part.matchAll(CARD_ON_FILE)) {
+      const key = m[0].replace(/\s+/g, ' ').toLowerCase();
+      if (kept.has(key) || cards.length >= __MAX_CARDS__) continue;
+      kept.add(key);
+      cards.push(m[0].slice(0, 60));
+    }
   }
   const rows = [...document.querySelectorAll('[class*="item" i], li, tr')].filter(el => {
     const t = clean(el.innerText);
@@ -154,18 +438,47 @@ _PAGE_JS = r"""
   const leaves = rows.filter(el => !rows.some(other => other !== el && el.contains(other)));
   const items = [];
   for (const el of leaves) { items.push(clean(el.innerText)); if (items.length >= 40) break; }
+  // Every enabled submit button of a POST form in the page, by where it
+  // sends the form (``el.form``, so one attached through form= counts by
+  // the form it submits) and what it says, named as ``_BUTTON_JS`` names
+  // one: an upsell posting to the order's own address is another button.
+  const posts = new Set();
+  for (const el of document.querySelectorAll('button, input')) {
+    if (!el.form || el.disabled || !['submit', 'image'].includes(el.type) || !visible(el)) continue;
+    const [action, method] = target(el, el.form);
+    const name = [el.getAttribute('aria-label'), el.innerText, el.value, el.getAttribute('title')]
+      .map(s => (s || '').replace(/\s+/g, ' ').trim()).find(s => s) || '';
+    if (method === 'post') posts.add(JSON.stringify([action, name.slice(0, 80).toLowerCase()]));
+  }
   let origin = '';
   try { origin = self.origin || location.origin || ''; } catch (e) {}
-  return { origin, totals, items };
+  return { origin, totals, items, saved, cards, posts: [...posts].map(p => JSON.parse(p)) };
 }
-""".replace("__FIELD_KIND__", markers.FIELD_KIND_FN).replace(
+""".replace("__TARGET__", _TARGET_JS).replace("__FIELD_KIND__", markers.FIELD_KIND_FN).replace(
     "__PAY_RE__", f"new RegExp({json.dumps(_PAY_BUTTON_RE.pattern)}, 'i')"
-).replace("__MONEY__", f"new RegExp({json.dumps(markers.MONEY_PATTERN)}, 'i')")
+).replace("__ORDER_RE__", f"new RegExp({json.dumps(_ORDER_BUTTON_RE.pattern)}, 'i')").replace(
+    "__TOTAL__", f"new RegExp({json.dumps(markers.TOTAL_LABEL_RE.pattern)}, 'i')"
+).replace("__MONEY__", f"new RegExp({json.dumps(markers.MONEY_PATTERN)}, 'i')").replace(
+    "__SAVED_ALL__", f"new RegExp({json.dumps(_SAVED_METHOD_RE.pattern)}, 'gi')"
+).replace(
+    "__SAVED__", f"new RegExp({json.dumps(_SAVED_METHOD_RE.pattern)}, 'i')"
+).replace(
+    "__NOT_SAVED__", f"new RegExp({json.dumps(_NOT_SAVED_RE.pattern)}, 'i')"
+).replace(
+    "__NONE_AFTER__", f"new RegExp({json.dumps(_NONE_AFTER_RE.pattern)}, 'i')"
+).replace("__NONE_AFTER_CHARS__", str(_NONE_AFTER_CHARS)).replace(
+    "__CARD_ON_FILE__", f"new RegExp({json.dumps(_SAVED_CARD_RE.pattern)}, 'gi')"
+).replace("__MAX_CARDS__", str(_MAX_SAVED_CARDS)).replace(
+    "__REACH__", str(_SAVED_REACH_PX)
+).replace("__LEGIBLE__", str(_LEGIBLE_CONTRAST))
 # Per field ref: what the element is, its autocomplete token, every hint
-# a site uses to name a card field, and which ``<form>`` of its document
-# encloses it (-1 for none). ``self.origin`` is the frame's security
-# origin (a srcdoc frame inherits its parent's; location.origin says
-# "null" there).
+# a site uses to name a card field, which ``<form>`` of its document
+# encloses it (-1 for none), and whether it is in the page itself rather
+# than a frame (``main``). ``self.origin`` is the frame's security origin
+# (a srcdoc frame inherits its parent's; location.origin says "null"
+# there). ``main`` is asked of the page because a ref's ``fN`` prefix
+# cannot say it: the main frame's refs carry one too once the tab has
+# navigated; ``window`` and ``window.top`` are ones a page cannot redefine.
 _FIELD_JS = r"""
 el => {
   const a = n => (el.getAttribute(n) || '');
@@ -182,17 +495,18 @@ el => {
       .join(' ').replace(/\s+/g, ' ').toLowerCase().slice(0, 300),
     origin,
     form: own ? [...document.forms].indexOf(own) : -1,
+    main: window === window.top,
   };
 }
 """
 # Per button ref: is it a submit control, which form encloses it (and
-# whether ``form=`` attaches it to a different one), what it says, and
-# where a click would send the form: the button's own ``formaction`` or
-# else the form's ``action`` (read as attributes, so a field named
-# "action" cannot stand in for it), resolved against the document, and
-# the method the same way.
+# whether ``form=`` attaches it to a different one), what it says, where
+# a click would send the enclosing form and by which method
+# (``_TARGET_JS``), and whether it is in the page itself (``main``, as
+# for a field).
 _BUTTON_JS = r"""
 el => {
+  const target = __TARGET__;
   const tag = el.tagName.toLowerCase();
   const type = (el.getAttribute('type') || '').toLowerCase();
   const own = el.closest('form');
@@ -201,12 +515,7 @@ el => {
     || (tag === 'input' && (type === 'submit' || type === 'image'));
   const name = [el.getAttribute('aria-label'), el.innerText, el.value, el.getAttribute('title')]
     .map(s => (s || '').replace(/\s+/g, ' ').trim()).find(s => s) || '';
-  let action = '', method = '';
-  if (own) {
-    const raw = el.hasAttribute('formaction') ? el.getAttribute('formaction') : own.getAttribute('action');
-    try { action = new URL(raw || '', document.baseURI).href; } catch (e) { action = 'invalid:'; }
-    method = (el.getAttribute('formmethod') || own.getAttribute('method') || 'get').toLowerCase();
-  }
+  const [action, method] = own ? target(el, own) : ['', ''];
   return {
     submit,
     name: name.slice(0, 80),
@@ -215,9 +524,10 @@ el => {
     reattached: !!(attached && attached !== own),
     action,
     method,
+    main: window === window.top,
   };
 }
-"""
+""".replace("__TARGET__", _TARGET_JS)
 
 
 @dataclass(frozen=True)
@@ -277,6 +587,22 @@ class CheckoutFacts:
     # one nearest the card form); more than one is refused.
     totals: tuple[Money, ...] = ()
     submit_target: Optional[SubmitTarget] = None
+    # The page names a payment method on file (``_SAVED_METHOD_RE``, in
+    # words the owner sees near the order total or button), and the one
+    # card it names in the strict shape ("Visa ····4242", "" when none or
+    # several). With no card fields, ``order_buttons`` counts the distinct
+    # order buttons, or every control that may place an order when there
+    # is more than one (``_order_button``); ``submit_ref`` is set only when
+    # there is exactly one.
+    saved_payment: bool = False
+    saved_card: str = ""
+    order_buttons: int = 0
+    # No card fields Crawler fills, yet the page may ask for a card, so it
+    # is never paid with the card on file: a card number or security code
+    # field in the page itself ("page", a saved card asking for its code)
+    # or in a frame, trusted or not ("frame"), or more fields than
+    # ``_MAX_FIELDS`` so the rest went unread ("unchecked"). "" for none.
+    stray_card_fields: str = ""
 
 
 @dataclass(frozen=True)
@@ -284,22 +610,6 @@ class _Ref:
     role: str
     name: str
     ref: str
-
-
-def outline_digest(lines: Sequence[str]) -> str:
-    """sha1 of the page's interactive structure: the outline lines that
-    carry a ref, minus their inline value and the focus marker. Text-only
-    lines are left out so a ticking cart timer or a focus change does not
-    void an approval; a changed total or item is caught by the explicit
-    comparisons the toolkit makes."""
-    kept: list[str] = []
-    for line in lines:
-        if "[ref=" not in line:
-            continue
-        line = line.replace(_ACTIVE_MARKER, "")
-        head, sep, _value = line.partition("]: ")
-        kept.append(head + ("]" if sep else ""))
-    return hashlib.sha1("\n".join(kept).encode("utf-8")).hexdigest()
 
 
 def _plain_name(token: Optional[str]) -> str:
@@ -331,10 +641,11 @@ async def _evaluate(page: Any, ref: str, script: str) -> Optional[dict[str, Any]
 
 
 async def _ask_page(
-    page: Any, refs: Sequence[_Ref]
+    page: Any, fields: Sequence[_Ref], buttons: Sequence[_Ref]
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
-    fields = [r for r in refs if r.role in _FIELD_ROLES][:_MAX_FIELDS]
-    buttons = [r for r in refs if r.role == "button"][:_MAX_BUTTONS]
+    """The page script's answer, and each field's and button's (a link is
+    asked like a button). A button keeps its snapshot name as ``label``
+    beside the name the page gives it, and its snapshot ``role``."""
     page_data, field_data, button_data = await asyncio.gather(
         page.evaluate(_PAGE_JS),
         asyncio.gather(*(_evaluate(page, r.ref, _FIELD_JS) for r in fields)),
@@ -346,7 +657,12 @@ async def _ask_page(
         if data is not None
     ]
     found_buttons = [
-        {**data, "ref": r.ref, "name": data.get("name") or r.name}
+        {
+            **data, "ref": r.ref, "name": data.get("name") or r.name, "label": r.name, "role": r.role,
+            # The name as the page script reads it, for ``posts`` (an
+            # aria-labelledby button reads "" there, "Place your order" here).
+            "own_name": data.get("name") or "",
+        }
         for r, data in zip(buttons, button_data, strict=True)
         if data is not None
     ]
@@ -444,8 +760,12 @@ def _card_fields(fields: Sequence[dict[str, Any]], page_origin: str) -> Optional
 
 
 def _frame_of(ref: str) -> str:
-    """The frame prefix of an aria ref: ``""`` for the main frame, ``f1``
-    for the first child frame, so two refs in the same frame share it."""
+    """The frame address an aria ref carries (``f2`` of ``f2e8``; ``""``
+    for the tab's first main frame). Playwright resolves a ref in the frame
+    this names, so two refs of one snapshot share it exactly when they sit
+    in the same frame. It never says which frame is the page itself: once
+    the tab has navigated, the main frame's refs carry one too. That is
+    asked of the page (``main``)."""
     return ref.partition("e")[0]
 
 
@@ -456,13 +776,15 @@ def _submit_button(
     own ``<form>`` element counts (one attached from elsewhere through
     ``form=`` never does, whatever it says): named like one first, else
     that form's last submit control. When the card fields are in no form
-    (a script submits them), a button named like one anywhere, itself in
-    no form or in its own, is taken instead."""
+    (a script submits them), a button named like one, itself in no form or
+    in its own, in the page itself or in the card number's frame, is taken
+    instead (never one in another frame). A link is never the order button."""
     if card is None:
         return None
     usable = [
         b for b in buttons
         if not b.get("disabled") and not b.get("reattached") and isinstance(b.get("form"), int)
+        and b.get("role") != "link"
     ]
     frame = _frame_of(card.number_ref)
     if card.form >= 0:
@@ -473,9 +795,102 @@ def _submit_button(
         submits = [b for b in in_form if b.get("submit")]
         return submits[-1] if submits else None
     for button in usable:
-        if _PAY_BUTTON_RE.search(str(button.get("name") or "")):
+        here = button.get("main") is True or _frame_of(str(button["ref"])) == frame
+        if here and _PAY_BUTTON_RE.search(str(button.get("name") or "")):
             return button
     return None
+
+
+def _rival(role: str, *names: str) -> bool:
+    """Do these words (the page's or the snapshot's name for a control
+    with this *role*) read as a control that may place an order
+    (``_ORDER_BUTTON_RE`` or ``_RIVAL_RE``, or for a button pay words
+    that do not pick a way to pay)?"""
+    return any(
+        _ORDER_BUTTON_RE.search(n) or _RIVAL_RE.match(n)
+        or (role != "link" and _PAY_BUTTON_RE.search(n) and not _PAY_CHOICE_RE.match(n))
+        for n in names
+    )
+
+
+def _order_button(
+    buttons: Sequence[dict[str, Any]], named: int = 0, posts: Sequence[tuple[str, str]] = ()
+) -> tuple[Optional[dict[str, Any]], int]:
+    """On a page with no card fields: the one button in the page itself
+    (``main``, never a frame) whose words, as the page or the snapshot
+    names it, place the order, and how many distinct ones there are. Every
+    button or link in any frame whose words may place an order (``_rival``:
+    "Pay $23.40", "Complete payment", a "Place your order" link) is counted
+    too, and so is every other target in *posts* (where each submit button
+    of a POST form in the page sends it, whatever it says): those are never
+    pressed, and two or more of them is ambiguous, so none is picked and
+    that many are counted. Submit buttons of the same form with the same
+    words and target are one (a shop repeats its order button at the foot
+    of the form); a disabled button and one attached to another form
+    through ``form=`` are not candidates. *named* is how many controls the
+    snapshot names like a rival: more than ``_MAX_ORDER_BUTTONS`` were not
+    all asked about, so none is picked and that many are counted."""
+    if named > _MAX_ORDER_BUTTONS:
+        return None, named
+    rivals: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for button in buttons:
+        name = str(button.get("name") or "")
+        label = str(button.get("label") or "")
+        if button.get("disabled") or button.get("reattached"):
+            continue
+        if not _rival(str(button.get("role") or ""), name, label):
+            continue
+        ref, form = str(button["ref"]), button.get("form")
+        key: tuple[Any, ...] = (ref,)
+        if isinstance(form, int) and form >= 0 and button.get("submit"):
+            key = (_frame_of(ref), form, button.get("action"), button.get("method"), name.lower())
+        rivals.setdefault(key, button)
+    if len(rivals) > 1:
+        return None, len(rivals)
+    picks = [
+        b for b in rivals.values()
+        if b.get("main") is True and b.get("role") != "link"
+        and (_ORDER_BUTTON_RE.search(str(b.get("name") or ""))
+             or _ORDER_BUTTON_RE.search(str(b.get("label") or "")))
+    ]
+    if not picks:
+        return None, 0
+    pick = picks[0]
+    own = None
+    if pick.get("method") == "post":
+        own_words = pick.get("own_name", pick.get("name"))
+        own = (str(pick.get("action") or ""), str(own_words or "")[:80].lower())
+    others = {post for post in posts if post != own}
+    if others:
+        return None, 1 + len(others)
+    return pick, 1
+
+
+def _stray(fields: Sequence[dict[str, Any]], cut: bool) -> str:
+    """On a page with no card fields Crawler fills: where a card number or
+    security code field sits anyway ("page" or "frame", by the page's own
+    ``main``), else "unchecked" when *cut* left fields unread, else ""."""
+    asks = [field for field in fields if _field_kind(field) in ("number", "cvc")]
+    if any(field.get("main") is True for field in asks):
+        return "page"
+    if asks:
+        return "frame"
+    return "unchecked" if cut else ""
+
+
+def _saved_card(found: Any) -> str:
+    """``"Visa ····4242"`` when the page's strict matches (``_SAVED_CARD_RE``)
+    name exactly one card, else ``""``: with two, which one pays is not said."""
+    labels: set[str] = set()
+    for text in found if isinstance(found, list) else []:
+        match = _SAVED_CARD_RE.search(text) if isinstance(text, str) else None
+        if match is None:
+            continue
+        name, digits = match.group(1) or match.group(3), match.group(2) or match.group(4)
+        network = _NETWORKS.get(" ".join(name.lower().split()))
+        if network is not None:
+            labels.add(f"{network} ····{digits}")
+    return labels.pop() if len(labels) == 1 else ""
 
 
 def _submit_target(button: Optional[dict[str, Any]]) -> Optional[SubmitTarget]:
@@ -490,9 +905,13 @@ def _submit_target(button: Optional[dict[str, Any]]) -> Optional[SubmitTarget]:
 
 async def collect_checkout_facts(page: Any) -> CheckoutFacts:
     """Read the page. Takes a fresh snapshot (which retires every earlier
-    ref) and asks the page about its fields and buttons; a page that will
-    not answer in time reports no total, no card fields and no button, so
-    the toolkit refuses rather than guesses."""
+    ref) and asks the page about its first ``_MAX_FIELDS`` fields, its
+    first ``_MAX_BUTTONS`` buttons and every button or link the snapshot
+    names like one that may place an order (``_rival``, up to
+    ``_MAX_ORDER_BUTTONS``), and the page script reads where every submit
+    button of a POST form in the page sends it; a page that will not
+    answer in time reports no total, no card fields and no button, so the
+    toolkit refuses rather than guesses."""
     url = str(page.url)
     parts = urlsplit(url)
     scheme = parts.scheme.lower()
@@ -501,10 +920,16 @@ async def collect_checkout_facts(page: Any) -> CheckoutFacts:
     title = str(await page.title())[:200]
     raw = await snap.snapshot_raw(page)
     outline = snap.filter_yaml(raw, full=True, account_mode=True, limit_chars=snap.FULL_LIMIT_CHARS)
-    digest = outline_digest(outline.lines)
+    digest = outline_digest(outline.lines, states=True)
+    refs = _snapshot_refs(raw)
+    all_fields = [r for r in refs if r.role in _FIELD_ROLES]
+    all_buttons = [r for r in refs if r.role == "button"]
+    named = [r for r in refs if r.role in ("button", "link") and _rival(r.role, r.name)]
+    asked = all_buttons[:_MAX_BUTTONS]
+    asked += [r for r in named[:_MAX_ORDER_BUTTONS] if r not in asked]
     try:
         page_data, fields, buttons = await asyncio.wait_for(
-            _ask_page(page, _snapshot_refs(raw)), FACTS_TIMEOUT_S
+            _ask_page(page, all_fields[:_MAX_FIELDS], asked), FACTS_TIMEOUT_S
         )
     except Exception as exc:  # noqa: BLE001 - unknown facts fail closed
         logger.warning("checkout_facts_failed", error_type=type(exc).__name__, host=host)
@@ -512,7 +937,16 @@ async def collect_checkout_facts(page: Any) -> CheckoutFacts:
     origin = str(page_data.get("origin") or "") or python_origin
     total, totals_seen, totals = _pick_total(page_data.get("totals"))
     card_fields = _card_fields(fields, origin)
-    button = _submit_button(buttons, card_fields)
+    button, order_buttons = _submit_button(buttons, card_fields), 0
+    stray = ""
+    if card_fields is None:
+        found = page_data.get("posts")
+        posts = [
+            (str(p[0]), str(p[1])) for p in (found if isinstance(found, list) else [])
+            if isinstance(p, list) and len(p) == 2
+        ]
+        button, order_buttons = _order_button(buttons, len(named), posts)
+        stray = _stray(fields, len(all_fields) > _MAX_FIELDS)
     return CheckoutFacts(
         url=snap.strip_url(url, True),
         origin=origin,
@@ -527,6 +961,10 @@ async def collect_checkout_facts(page: Any) -> CheckoutFacts:
         outline_digest=digest,
         totals=totals,
         submit_target=_submit_target(button),
+        saved_payment=page_data.get("saved") is True,
+        saved_card=_saved_card(page_data.get("cards")),
+        order_buttons=order_buttons,
+        stray_card_fields=stray,
     )
 
 
@@ -537,11 +975,13 @@ def _list_amounts(totals: Sequence[Money]) -> str:
 
 def _submit_target_refusal(facts: CheckoutFacts) -> Optional[str]:
     """Why the order button may not be clicked: its form would send the
-    card somewhere other than this site (or the payment frame it sits
-    in) over https by POST. A button in no form has no target to check."""
+    card (or, paying with the card on file, the order) somewhere other
+    than this site (or the payment frame it sits in) over https by POST.
+    A button in no form has no target to check."""
     target = facts.submit_target
     if target is None or not target.action:
         return None
+    what = "the card" if facts.card_fields is not None else "the order"
     parts = urlsplit(target.action)
     origin = f"{parts.scheme.lower()}://{parts.netloc.rpartition('@')[2].lower()}"
     allowed = {facts.origin}
@@ -549,16 +989,77 @@ def _submit_target_refusal(facts: CheckoutFacts) -> Optional[str]:
         allowed.add(facts.card_fields.frame_origin)
     if parts.scheme.lower() != "https" or origin not in allowed:
         return (
-            f"The order button on this page would send the card to {snap.host_path(target.action)} "
+            f"The order button on this page would send {what} to {snap.host_path(target.action)} "
             f"over {parts.scheme or 'no scheme'}, not to {facts.host} over https, so Crawler will "
             "not pay here."
         )
     if target.method != "post":
         return (
-            f"The order form on {facts.host} would send the card in the page address "
+            f"The order form on {facts.host} would send {what} in the page address "
             f"({target.method or 'no'} method instead of POST), so Crawler will not pay here."
         )
     return None
+
+
+# Why a page with no card fields Crawler fills may still ask for a card,
+# by ``CheckoutFacts.stray_card_fields``.
+_STRAY_REFUSALS = {
+    "page": (
+        "This page asks for a card number or security code that Crawler cannot fill here, so "
+        "Crawler will not pay here."
+    ),
+    "frame": (
+        "The card fields on this page are in a part of the page Crawler cannot fill, so "
+        "Crawler will not pay here."
+    ),
+    "unchecked": (
+        "This page has more fields than Crawler checks, so Crawler cannot tell whether it asks "
+        "for a card and will not pay here."
+    ),
+}
+
+
+def _payment_step_refusal(facts: CheckoutFacts) -> Optional[str]:
+    """Why this page is not a payment step Crawler can finish: it may ask
+    for a card Crawler cannot fill (never paid with the card on file
+    instead), an order button with no saved method on screen (scrolled
+    away, so the person is told to bring it back beside the total, since
+    reading never scrolls), no card fields and no payment method saved at
+    the site, a saved method with no single order button, or card fields
+    with no order button."""
+    if facts.card_fields is None and facts.stray_card_fields:
+        return _STRAY_REFUSALS[facts.stray_card_fields]
+    if facts.card_fields is None and not facts.saved_payment and facts.order_buttons:
+        return (
+            "This page has an order button but no payment method saved at the site on screen "
+            "beside the order total. If the page shows one elsewhere, scroll so the payment "
+            "method and the order total show together and try again; if not, open the payment "
+            "step with the card fields."
+        )
+    if facts.card_fields is None and not facts.saved_payment:
+        return (
+            "Could not find the card number and security code fields, or a payment method "
+            "saved at the site, on this page. Open the payment step of the checkout (the page "
+            "with the card fields, or the review page that shows the saved card and the order "
+            "button) and try again."
+        )
+    if facts.submit_ref is not None:
+        return None
+    if facts.card_fields is not None:
+        return (
+            "Could not find the order button on this page. Open the payment step of the "
+            "checkout and try again."
+        )
+    if facts.order_buttons > 1:
+        return (
+            "This page shows a payment method saved at the site and more than one order button, "
+            "so Crawler cannot tell which one places the order. Open the final review step and "
+            "try again."
+        )
+    return (
+        "This page shows a payment method saved at the site but no button that places the "
+        "order. Open the final review step, where the order is placed, and try again."
+    )
 
 
 def classify_facts(
@@ -575,10 +1076,11 @@ def classify_facts(
     order the spec lists them, so the owner is told the most basic problem
     first (a plain http page before a missing total)."""
     if facts.scheme != "https":
+        act = "enter a card" if facts.card_fields is not None else "pay"
         return (
             "insecure_page",
             f"This page is not served over HTTPS ({facts.scheme or 'no scheme'}://{facts.host}), "
-            "so Crawler will not enter a card here.",
+            f"so Crawler will not {act} here.",
         )
     reason = merchant_refusal(facts.host, expected_merchant)
     if reason is not None:
@@ -587,8 +1089,8 @@ def classify_facts(
         return (
             "no_total",
             "Could not find the order total on this page, so Crawler cannot say what it would "
-            "pay. Open the final checkout step (the page with the card fields and the total) "
-            "and try again.",
+            "pay. Open the final checkout step (the page that shows the total next to the card "
+            "fields or the saved card) and try again.",
         )
     totals = facts.totals or (facts.total,)
     if len(set(totals)) > 1:
@@ -604,13 +1106,9 @@ def classify_facts(
             f"The total on this page is in {facts.total.currency}, and Crawler only pays in US "
             "dollars for now.",
         )
-    if facts.card_fields is None or facts.submit_ref is None:
-        missing = "the card number and security code fields" if facts.card_fields is None else "the order button"
-        return (
-            "no_card_fields",
-            f"Could not find {missing} on this page. Open the payment step of the checkout and "
-            "try again.",
-        )
+    reason = _payment_step_refusal(facts)
+    if reason is not None:
+        return "no_card_fields", reason
     reason = _submit_target_refusal(facts)
     if reason is not None:
         return "submit_target", reason

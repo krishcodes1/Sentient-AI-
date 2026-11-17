@@ -1,5 +1,5 @@
 """Tests for offering tools at scale (connectors spec 4.5): the bounded, stable
-selection of offered tools (core, loaded, starters, the rest; cap 24), the
+selection of offered tools (core, loaded, starters, the rest; cap 64), the
 tools.find built-in the runtime answers from the turn's full tool list, the
 conversation's persisted loaded list, and the result budgets for long
 connector reads.
@@ -80,11 +80,21 @@ def _names(tools: list[dict]) -> list[str]:
 
 CORE = ["web.search", "web.fetch_page", "reminders.now", "tools.find"]
 
+# The numbered tools in these fixtures were laid out against a cap of 24
+# (18 free slots after the core tools and two starters). The cap is larger
+# now, so the difference is filled by padding tools that come first in build
+# order: the numbered tools then meet the trim exactly where they did. Their
+# names carry no digits or "widget", so no tools.find query below finds one.
+_PADDING = [
+    f"acme.pad_{chr(97 + i // 26)}{chr(97 + i % 26)}" for i in range(MAX_OFFERED_TOOLS - 24)
+]
+
 
 def _big_set(rest: int = 30) -> list[dict]:
-    """Core tools, two starters and *rest* plain connector tools, in a
-    build order that interleaves them."""
+    """Core tools, two starters, the padding and *rest* plain connector
+    tools, in a build order that interleaves them."""
     tools = [_tool("web.search"), _tool("web.fetch_page")]
+    tools += [_tool(name) for name in _PADDING]
     tools += [_tool(f"acme.op_{i:02d}") for i in range(rest)]
     tools += [
         _tool("reminders.now"),
@@ -164,8 +174,8 @@ def _runtime(provider, *, permissions=None, executor=None, audit=None) -> AgentR
 
 
 def _runtime_tools(rest: int = 30) -> list[Tool]:
-    """Runtime Tool objects: the core built-ins, two starters, *rest*
-    connector tools with distinct descriptions."""
+    """Runtime Tool objects: the core built-ins, one starter, the padding and
+    *rest* connector tools with distinct descriptions."""
     tools = [
         Tool("web.search", "Search the public web", {}, "web"),
         Tool("web.fetch_page", "Fetch a public web page", {}, "web"),
@@ -173,6 +183,7 @@ def _runtime_tools(rest: int = 30) -> list[Tool]:
         Tool("tools.find", "Find tools", {}, "tools"),
         Tool("acme.list_things", "List things", {}, "acme", starter=True),
     ]
+    tools += [Tool(name, "Padding", {}, "acme") for name in _PADDING]
     tools += [
         Tool(f"acme.widget_{i:02d}", f"Operate acme widget number {i}", {}, "acme")
         for i in range(rest)
@@ -770,15 +781,16 @@ def _conversation_updates(statements: list[str]) -> list[str]:
 
 @pytest.fixture
 def wide_tool_set(monkeypatch):
-    """The real route tool list plus 30 synthetic acme tools, so the offered
-    array is over its cap and loading visibly changes it."""
+    """The real route tool list plus the padding and 30 synthetic acme tools,
+    so the offered array is over its cap and loading visibly changes it."""
     from api.routes import agent as agent_routes
 
     real = agent_routes._build_tools_and_memory
 
     async def wider(*args, **kwargs):
         built = await real(*args, **kwargs)
-        extra = [
+        extra = [Tool(name, "Padding", {}, "acme") for name in _PADDING]
+        extra += [
             Tool(f"acme.widget_{i:02d}", f"Operate acme widget number {i}", {}, "acme")
             for i in range(30)
         ]

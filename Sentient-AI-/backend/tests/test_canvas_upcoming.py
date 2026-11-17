@@ -1043,11 +1043,12 @@ def test_the_budget_applies_to_this_tool_only():
     assert result_char_budget("canvas.get_upcoming", 2000) == 16000
     # A second Canvas account's spelling of the same tool keeps its budget.
     assert result_char_budget("canvas__1f2e3d4c.get_upcoming", 2000) == 16000
-    assert result_char_budget("canvas.get_assignments", 2000) == 2000
-    assert result_char_budget("canvas__1f2e3d4c.get_assignments", 2000) == 2000
+    # The assignment list has its own entry (tests/connectors/test_canvas_assignments.py).
+    assert result_char_budget("canvas.get_assignments", 2000) == 16000
+    assert result_char_budget("canvas__1f2e3d4c.get_assignments", 2000) == 16000
     assert result_char_budget("canvas.get_courses", 2000) == 2000
     assert result_char_budget("mcp.notes__x.get_upcoming", 2000) == 2000
-    assert result_char_budget("web.search", 2000) == 2000
+    assert result_char_budget("web.screenshot", 2000) == 2000
 
 
 def test_a_telegram_progress_line_names_it():

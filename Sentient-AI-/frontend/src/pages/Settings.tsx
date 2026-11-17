@@ -25,6 +25,7 @@ import CapabilityList, { CapabilityListError } from "@/components/CapabilityList
 import PaymentCardSettings from "@/components/PaymentCardSettings";
 import TutorLocks from "@/components/TutorLocks";
 import ServerSettings from "@/components/ServerSettings";
+import { useProviderModels } from "@/hooks/useProviderModels";
 import type { CapabilityStatus, User } from "@/types";
 import {
   ApiError,
@@ -204,6 +205,7 @@ export default function Settings() {
   // provider/model the owner set up, now and after any later change.
   const [llmProvider, setLlmProvider] = useState<string | null>(null);
   const [llmModel, setLlmModel] = useState("");
+  const modelOptions = useProviderModels(llmProvider, llmProvider ? (LLM_MODELS[llmProvider] ?? []) : []);
 
   // Per-section saving + feedback
   const [savingProfile, setSavingProfile] = useState(false);
@@ -884,7 +886,7 @@ export default function Settings() {
                     onClick={() => void handleTgTokenSave()}
                     disabled={!tgToken.trim() || tgTokenBusy !== null}
                     className="px-4 py-2 rounded-[10px] text-sm font-semibold disabled:opacity-50"
-                    style={{ background: "var(--accent-primary)", color: "#0a0a0b" }}
+                    style={{ background: "var(--accent-primary)", color: "var(--text-on-accent)" }}
                   >
                     {tgTokenBusy === "save" ? (
                       <Loader2 className="w-4 h-4 animate-spin inline-block mr-1.5" />
@@ -965,7 +967,7 @@ export default function Settings() {
                 onClick={() => void handleTgConnect()}
                 disabled={tgBusy}
                 className="flex items-center gap-2 px-4 py-2 rounded-[10px] text-sm font-semibold disabled:opacity-50"
-                style={{ background: "var(--accent-primary)", color: "#0a0a0b" }}
+                style={{ background: "var(--accent-primary)", color: "var(--text-on-accent)" }}
               >
                 {tgBusy ? (
                   <Loader2 className="w-4 h-4 animate-spin" />
@@ -1055,31 +1057,23 @@ export default function Settings() {
               <label htmlFor={ids.model} className={labelCls}>
                 Model
               </label>
-              <select
+              <input
                 id={ids.model}
+                type="text"
+                list={`${ids.model}-list`}
                 aria-describedby={ids.modelHelp}
                 value={llmModel}
                 onChange={(e) => setLlmModel(e.target.value)}
                 className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
                 style={inputStyle}
-              >
-                {(() => {
-                  // The hardcoded list is a convenience, not a contract: the
-                  // account's current model (set server-side or by an older
-                  // build) must stay selectable even when it isn't listed,
-                  // and an unknown provider must not crash the page.
-                  const known = LLM_MODELS[llmProvider] ?? [];
-                  const options =
-                    llmModel && !known.includes(llmModel)
-                      ? [llmModel, ...known]
-                      : known;
-                  return options.map((m) => (
-                    <option key={m} value={m}>
-                      {m}
-                    </option>
-                  ));
-                })()}
-              </select>
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <datalist id={`${ids.model}-list`}>
+                {modelOptions.map((m) => (
+                  <option key={m} value={m} />
+                ))}
+              </datalist>
               <p id={ids.modelHelp} className="text-xs mt-1.5" style={{ color: "var(--text-muted)" }}>
                 Takes effect on your next message. This Crawler must have an
                 API key for this provider (added during setup or in{" "}

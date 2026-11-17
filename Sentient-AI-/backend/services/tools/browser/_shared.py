@@ -14,8 +14,16 @@ no difference. The handoff window lives here too (``hand_over`` /
 ``take_back``): whichever toolkit hands the page to the person opens it,
 and whichever acts next shuts it, so a sign-in or a one-time code the
 person types during a checkout's handoff passes the guard the same way
-it does after a read's. Nothing here logs page text, typed text or a URL's query
+it does after a read's. For as long, the session is parked
+(``BrowserSession.pending``), so the idle reaper leaves the window to
+the person. Nothing here logs page text, typed text or a URL's query
 string: those are the person's data and log lines are persistent.
+
+An observation is the part of the page on screen. The outline counts the
+lines that lie under it (``Outline.below``), and ``observe`` passes the
+count on as ``below`` with one fixed hint when there are any (BELOW_HINT;
+BELOW_HINT_FULL after a whole-page snapshot that was cut at its cap), so
+the model does not take the visible part for the whole page.
 
 Security wave (S4, S7): ``attach_egress_hooks`` binds a toolkit's
 ``guard.EgressHooks`` to the context it guards, for the session's user, and
@@ -31,14 +39,17 @@ import base64
 import hashlib
 import json
 import re
+import weakref
 from typing import Any, Optional, Protocol, Sequence
+from urllib.parse import urlsplit
 
 import structlog
 
+from services.tools.browser import guard as guard_module
 from services.tools.browser import snapshot as snap
 from services.tools.browser.checkout import markers
 from services.tools.browser.guard import EgressHooks, PageNotice
-from services.tools.browser.handoff import Challenge
+from services.tools.browser.handoff import NOTE_KINDS, Challenge
 from services.tools.browser.pagememory import PageMemory
 from services.tools.browser.session import BrowserSession
 
@@ -72,6 +83,12 @@ JPEG_QUALITY = 70
 UNAVAILABLE_TEXT = (
     "Crawler could not read its Site rules just now, so it did not describe this page."
 )
+# What an observation adds when part of the page lies under the outline it
+# returns: how much, and the three actions that reach it.
+BELOW_HINT = "{count} more {lines} below: use find(text), scroll(down) or snapshot(full=true)"
+# The same after snapshot(full=true), whose outline was cut at its cap:
+# asking for the whole page again would return the same part.
+BELOW_HINT_FULL = "{count} more {lines} below: use find(text) or scroll(down)"
 # Fields whose pixels never leave the machine, even in a screenshot the
 # person asked for: the checkout's classifier marks them (``mask_locators``)
 # and this selector finds the marks and the plain attribute cases.
@@ -299,6 +316,15 @@ async def jpeg(page: Any, ref: Optional[str], *, mask_refs: Sequence[str] = ()) 
     return "data:image/jpeg;base64," + base64.b64encode(raw).decode("ascii")
 
 
+# What an observation of a bot wall says in place of handing the page over.
+TRAFFIC_WALL_NOTE = (
+    "This site is checking for automated browsers and stopped Crawler's. It is the site's own "
+    "block, not a Crawler permission. Do not retry here: get the same thing from another site "
+    "or with web.search, and tell the person this one blocked Crawler. Only if the task needs "
+    "this very site, hand the page over with browser.read handoff so the person can clear it."
+)
+
+
 async def settle(page: Any) -> None:
     """Give a click that navigates a moment to land; one that does not
     returns at once because the state is already reached."""
@@ -354,7 +380,12 @@ def hand_over(guard: Any, session: BrowserSession, page: Any, *, checkout: bool 
     order, where the bank's check returns to the shop's payment address
     (``EgressState.checkout_handoff``), on *page* only, never another
     tab (``EgressState.handoff_page``). A guard without state (not
-    installed yet, a test double) has no window to open."""
+    installed yet, a test double) has no window to open.
+
+    The session is parked for as long (``BrowserSession.pending``), so
+    the idle reaper does not close the window while the person is typing
+    in it (it used to, fifteen minutes after the agent's last call)."""
+    session.pending = "handoff"
     state = guard.egress_state(session.context)
     if state is not None:
         state.human_driving = True
@@ -367,7 +398,9 @@ async def take_back(guard: Any, session: BrowserSession) -> None:
     """The agent is acting again, so the person is no longer driving:
     shut the handoff window before anything touches the page, then let
     the navigation their last click started land, so the first look
-    after "done" sees the signed-in page and not the form."""
+    after "done" sees the signed-in page and not the form. The session
+    is no longer parked either (``hand_over``)."""
+    session.pending = None
     state = guard.egress_state(session.context)
     if state is None or not getattr(state, "human_driving", False):
         return
@@ -438,11 +471,21 @@ async def page_facts(page: Any) -> list[Any]:
     away shows nothing, and so does one that never answered because it has
     no document (URL "": a frame whose parent wrote into it has one, and
     answers). browser.act and browser.read's click join these into what
-    they judge (``markers.join_page``)."""
+    they judge (``markers.join_page``). A closed shadow tree counts as all
+    of them shown only on the page's own site: in a frame of another site
+    (an ad) only what it shows in words counts."""
+    from services.security.lookalike import registrable_domain
+
+    def site(url: str) -> str:
+        parts = urlsplit(url)
+        return registrable_domain(parts.hostname or "") if parts.scheme in ("http", "https") else ""
+
+    top = site(page.main_frame.url)
 
     async def ask(frame: Any) -> Any:
+        other = frame is not page.main_frame and site(frame.url) not in ("", top)
         try:
-            return await frame_evaluate(frame, markers.PAGE_FACTS_JS)
+            return await frame_evaluate(frame, markers.PAGE_FACTS_READABLE_JS if other else markers.PAGE_FACTS_JS)
         except Exception as exc:  # noqa: BLE001 - unknown facts fail closed
             if frame.is_detached() or (isinstance(exc, asyncio.TimeoutError) and not frame.url):
                 return dict.fromkeys(markers.PAGE_FACT_KEYS, False)
@@ -467,7 +510,9 @@ async def observe(
     """The fresh page as the model sees it, or ``needs_human`` when the
     page is a challenge (checked first, so a CAPTCHA wall is never
     described as if it were content; with *guard*, the page is the
-    person's from that moment: ``hand_over``). With *memory*, the page
+    person's from that moment: ``hand_over``). A traffic wall, a sign-in
+    form on a page not named for signing in and a guest path are described,
+    each with its fixed note. With *memory*, the page
     is remembered as the one the user's next browser.act may be bound to.
     The owner's site rules (security S7) are asked first: a Blocked page is
     blanked and refused without being described or remembered, and an
@@ -486,9 +531,28 @@ async def observe(
             "error": notice.text,
             "mode": session.mode,
         }
-    challenge = await handoff.detect_challenge(page)
-    if challenge is not None:
+    # The handoff module also answers with the notes a page is read with
+    # (``handoff.detect``); a detector without them only hands over.
+    detect = getattr(handoff, "detect", handoff.detect_challenge)
+    challenge = await detect(page)
+    # A wall against automated browsers ("unusual traffic") is the site
+    # turning the browser away, like a 403: the page is described with a
+    # note that says to go another way. Handed to the person, it ended the
+    # task on a search engine the model had only tried in passing. The
+    # model can still hand the page over (browser.read handoff) when the
+    # task needs that very site. A sign-in form on a page not named for
+    # signing in (a bank's home page, a forum's header, a checkout), and a
+    # sign-in step with a guest path, are read the same way, with their
+    # note (``signin_note``): the model hands over when the task needs the
+    # account.
+    traffic_wall = challenge is not None and challenge.kind == "unusual_traffic"
+    note = challenge is not None and challenge.kind in NOTE_KINDS
+    if challenge is not None and not traffic_wall and not note:
         return await needs_human(session, page, challenge.kind, challenge.detail, guard=guard)
+    if traffic_wall:
+        extra = {**(extra or {}), "blocked": True, "error_page": TRAFFIC_WALL_NOTE}
+    elif challenge is not None and note:
+        extra = {**(extra or {}), "signin_note": challenge.detail}
     account = session.mode == "account"
     out = await snap.outline(
         page,
@@ -523,6 +587,75 @@ async def observe(
         "mode": session.mode,
         **(extra or {}),
     }
+    # The outline is the part of the page on screen. How many lines lie
+    # under it is the outline's to count (``Outline.below``); passed on
+    # with one fixed hint, so the model does not take the visible part for
+    # the whole page. An outline that carries no count adds nothing.
+    below = getattr(out, "below", None)
+    if isinstance(below, int):
+        result["below"] = below
+        if below > 0:
+            result["hint"] = (BELOW_HINT_FULL if full else BELOW_HINT).format(
+                count=below, lines="line is" if below == 1 else "lines are"
+            )
     if notice is not None and notice.kind == "always_ask":
         result["site_notice"] = notice.text
+    refused = _site_refused(session, page, result["outline"])
+    if refused is not None:
+        result["site_refused"] = SITE_REFUSED_NOTE.format(status=refused)
+        result["finish_link"] = finish_link(session, page)
     return result
+
+
+# What a page says when its own site would not give it its data: the page
+# loaded, asked its site for what it shows (a seat map, a cart), was
+# refused, and put up an error message. Ticket sites do this to automated
+# browsers at the seat map: Fandango answers "not found. Please try again."
+# to Crawler's browser and shows the same showtime's seats to a person's.
+SITE_REFUSED_NOTE = (
+    "This page could not load its own content: its site refused the page's request (HTTP "
+    "{status}) and the page shows an error message. Sites do this to automated browsers at "
+    "steps like seat maps and carts, and clicking the message or looking again will not fix "
+    "it. Do not retry. Tell the person what you found and give them finish_link, the exact "
+    "link to finish on their own phone or computer."
+)
+_DIALOG_LINE = re.compile(r"^\s*- (?:alertdialog|alert|dialog)\b")
+# page -> (host/path the tab landed on, the link that brought it there):
+# what a person opens to get to the same step on their own device.
+_ENTRY_LINKS: "weakref.WeakKeyDictionary[Any, tuple[str, str]]" = weakref.WeakKeyDictionary()
+
+
+def note_entry_link(page: Any, href: str) -> None:
+    """Remember that the tab *page* got where it is now by following
+    *href* (a link the agent clicked, redirects and all)."""
+    if isinstance(href, str) and href.startswith(("https://", "http://")):
+        _ENTRY_LINKS[page] = (guard_module.page_place(page.url), href)
+
+
+def finish_link(session: BrowserSession, page: Any) -> str:
+    """The link a person opens to reach the step *page* shows: the link the
+    agent followed to get here when there is one (a showtime's, which
+    carries the showtime), else the page's own address; without
+    credentials in ACCOUNT mode, as every link the model reads."""
+    entry = _ENTRY_LINKS.get(page)
+    link = entry[1] if entry and entry[0] == guard_module.page_place(page.url) else page.url
+    if session.mode != "account":
+        return link
+    try:
+        return snap.strip_url_secrets(link)
+    except ValueError:
+        return ""
+
+
+def _site_refused(session: BrowserSession, page: Any, outline: Sequence[str]) -> Optional[int]:
+    """The status with which this page's own site refused the page's data,
+    when the page also shows an error dialog; else None. Both are needed:
+    a page whose one side request fails still works, and a dialog alone is
+    a cookie banner as often as an error."""
+    if not any(_DIALOG_LINE.match(line) for line in outline):
+        return None
+    try:
+        statuses = guard_module.data_refusals(session.context, page)
+    except Exception:  # noqa: BLE001 - a test double's context; nothing recorded
+        return None
+    return statuses[-1] if statuses else None

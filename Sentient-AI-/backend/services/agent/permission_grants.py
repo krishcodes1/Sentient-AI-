@@ -727,23 +727,32 @@ def connection_of(tool_name: str) -> str:
     return tool_name.partition(".")[0] if isinstance(tool_name, str) else ""
 
 
-def _flagged(result: Any) -> bool:
+_REDACTED_LINE = "[line redacted: "
+
+
+def _flagged(result: Any, depth: int = 0) -> bool:
     """Whether a recorded tool result carries PromptGuard's redaction
     (runtime._scan_and_redact_result): the whole result, or one item of a
     list in it, replaced by a ``{"redacted": True, "reason": ...}`` marker,
-    or a line of an outline replaced by ``[line redacted: ...]``."""
+    or a line of an outline or of a text value replaced by
+    ``[line redacted: ...]``, at any depth the runtime redacts at."""
     if not isinstance(result, Mapping):
         return False
     if result.get("redacted") is True and "reason" in result:
         return True
     for value in result.values():
-        if not isinstance(value, list):
-            continue
-        for item in value:
-            if isinstance(item, Mapping) and item.get("redacted") is True and "reason" in item:
+        if isinstance(value, str):
+            if _REDACTED_LINE in value:
                 return True
-            if isinstance(item, str) and item.startswith("[line redacted: "):
+        elif isinstance(value, Mapping):
+            if depth < 6 and _flagged(value, depth + 1):
                 return True
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, Mapping) and item.get("redacted") is True and "reason" in item:
+                    return True
+                if isinstance(item, str) and item.startswith(_REDACTED_LINE):
+                    return True
     return False
 
 
@@ -804,6 +813,14 @@ class StandingConsent:
                 self.suspended = True
                 logger.info("standing_consent_suspended", user_id=self.user_id)
         self._scanned = len(results)
+
+    def saw(self, result: Any) -> None:
+        """Count a result the turn starts from (the approved call's, in a turn
+        resumed after an approval) for the tripwire, as ``_watch`` does for
+        the results the turn records."""
+        if not self.suspended and _flagged(result):
+            self.suspended = True
+            logger.info("standing_consent_suspended", user_id=self.user_id)
 
     async def _switch_is_on(self) -> bool:
         if self._switch_on is None:

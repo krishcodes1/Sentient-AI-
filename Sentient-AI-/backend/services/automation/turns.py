@@ -4,12 +4,15 @@ conversation and message, the fenced tools, ``runtime.chat`` with the
 
 Why it exists: api/routes/agent.build_unattended_runner wires this with the
 chat pipeline's own pieces (``_build_tools_and_memory``, ``_usage_columns``)
-and hangs it on ``app.state.unattended_runner``; the schedule sweeper (and
-wave 2's trigger sweeper) call it through the ``UnattendedRunner`` protocol.
-A run gets no memory block, a fresh history (only its own message), no chat
-channel (so no weekly app approval), no MCP tools, at most two runs per
-process at once, and the owner's /stop ends it at a step boundary like any
-turn (``runtime.chat`` runs under ``agent_cancel.watching``).
+and hangs it on ``app.state.unattended_runner``; the schedule and trigger
+sweepers call it through the ``UnattendedRunner`` protocol, and the errand
+sweeper calls its twin from ``errand_runner`` (the errand budgets, its own
+ledger sums, one run at a time). A run gets no memory block, a fresh history
+(only its own message), no chat channel (so no weekly app approval), no MCP
+tools, at most two runs per process at once, and the owner's /stop ends it
+at a step boundary like any turn (``runtime.chat`` runs under
+``agent_cancel.watching``). The outcome names the cards a run parked and the
+browser result that ended it, if one did (``stopped_on``).
 """
 
 from __future__ import annotations
@@ -23,7 +26,7 @@ import structlog
 from sqlalchemy import select
 
 from services.agent import cancel as agent_cancel
-from services.agent.unattended import UNATTENDED_TASK_PREFIX, UnattendedRun
+from services.agent.unattended import ERRAND_ORIGIN_PREFIX, UNATTENDED_TASK_PREFIX, UnattendedRun
 from services.automation.conversations import add_message, ensure_conversation
 from services.automation.fence import ALWAYS_READS, build_fence
 from services.automation.ledger import AutomationLedger
@@ -32,7 +35,6 @@ from services.automation.runner import BudgetState, UnattendedOutcome, Unattende
 logger = structlog.get_logger(__name__)
 
 MAX_CONCURRENT_RUNS = 2
-CARD_TTL_MINUTES = 180
 # What a run's reply says when there is no answer to show. It becomes the
 # body of the chat message and the web conversation's reply, so it is the
 # owner's words, never a provider's error. _STOPPED_REPLY is the same text
@@ -55,7 +57,33 @@ def run_message(label: str, when_local: str, prompt: str, origin: str = "") -> s
     trigger's run says it fired (its items follow as untrusted data)."""
     if origin.startswith("trigger:"):
         return f'Trigger "{label}" fired at {when_local}:\n\n{prompt}'
+    if origin.startswith(ERRAND_ORIGIN_PREFIX):
+        return f'Errand "{label}", started {when_local}:\n\n{prompt}'
     return f'Scheduled task "{label}", run for {when_local}:\n\n{prompt}'
+
+
+# The keys of a browser result that ended a run which the outcome keeps
+# (``UnattendedOutcome.stopped_on``): what happened and where, never page text.
+_STOP_KEYS = ("cap", "site_refused", "finish_link", "url")
+_NEEDS_KEYS = ("kind", "url")
+
+
+def stopped_on(tool_calls: Any) -> Optional[dict[str, Any]]:
+    """The browser result that ended a run (a page that needs the owner, a
+    site that turned the browser away, a browser cap; the same results
+    runtime.turn_ending_reply ends a turn on), cut to its facts, or None."""
+    for record in reversed(tool_calls if isinstance(tool_calls, list) else []):
+        if not isinstance(record, dict) or not str(record.get("name", "")).startswith("browser."):
+            continue
+        result = record.get("result")
+        if not isinstance(result, dict):
+            continue
+        needs = result.get("needs_human")
+        if isinstance(needs, dict):
+            return {"needs_human": {k: needs[k] for k in _NEEDS_KEYS if isinstance(needs.get(k), str)}}
+        if result.get("cap") or result.get("site_refused"):
+            return {k: result[k] for k in _STOP_KEYS if k in result}
+    return None
 
 
 class UnattendedTurnRunner:
@@ -86,6 +114,21 @@ class UnattendedTurnRunner:
         self._ledger = ledger or AutomationLedger(session_factory, clock=clock)
         self._slots = asyncio.Semaphore(max_concurrent)
         self._clock = clock
+
+    def errand_runner(self, settings: SettingsSource) -> "UnattendedTurnRunner":
+        """This runner's twin for errand runs: the same turn pipeline, with
+        *settings* answering the errand budgets (errand_runs), a ledger that
+        sums only errand runs, and one run at a time."""
+        return UnattendedTurnRunner(
+            runtime=self._runtime,
+            session_factory=self._session_factory,
+            build_context=self._build_context,
+            usage_columns=self._usage_columns,
+            settings=settings,
+            ledger=AutomationLedger(self._session_factory, clock=self._clock, errands=True),
+            max_concurrent=1,
+            clock=self._clock,
+        )
 
     async def _caps(self) -> tuple[float, float, int]:
         """(per-run USD, per-day USD, runs per day) from the owner's
@@ -162,7 +205,7 @@ class UnattendedTurnRunner:
                 trusted_text=req.prompt,
                 max_usd=max_usd,
                 max_rounds=req.max_rounds,
-                card_ttl_minutes=CARD_TTL_MINUTES,
+                card_ttl_minutes=req.card_ttl_minutes,
                 seed_results=tuple(req.seed_results),
             )
             fenced, missing = build_fence(list(ctx.tools), run)
@@ -215,10 +258,12 @@ class UnattendedTurnRunner:
             status, reply = "failed", _FAILED_REPLY
 
         cards = 0
+        card_ids: tuple[str, ...] = ()
         blocked: tuple[str, ...] = ()
         if response is not None:
             reply = response.content
             cards = len(response.pending_approvals)
+            card_ids = tuple(p.action_id for p in response.pending_approvals)
             blocked = tuple(
                 dict.fromkeys(
                     b.tool_name
@@ -252,6 +297,8 @@ class UnattendedTurnRunner:
             model=used_model,
             blocked=blocked,
             budget_usd=max_usd,
+            card_ids=card_ids,
+            stopped_on=stopped_on(response.tool_calls) if response is not None else None,
         )
 
     async def _store(

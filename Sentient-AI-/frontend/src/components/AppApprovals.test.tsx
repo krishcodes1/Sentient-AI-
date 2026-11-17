@@ -54,7 +54,7 @@ const ELSEWHERE = allowed({ id: "w2", app: "Notes", this_device: false });
 const TELEGRAM = allowed({ id: "w3", app: "Reminders", channel: "telegram", this_device: false });
 
 const EMPTY =
-  "No apps are allowed for a week. When Crawler asks to act in an app like Calendar, you can allow it for 7 days from the approval card.";
+  "No apps are allowed for a week. When Crawler asks to act in an app like Calendar, you can allow it for 7 days from the approval card. A request to click on a website can allow clicks on that site for 1 hour.";
 
 describe("AppApprovals", () => {
   it("lists each app with where it was allowed and until when", async () => {
@@ -74,6 +74,18 @@ describe("AppApprovals", () => {
     expect(screen.getByRole("button", { name: "Revoke Calendar (this browser)" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Revoke Notes (another browser)" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Revoke Reminders (Telegram)" })).toBeEnabled();
+  });
+
+  it("names a website allowed for an hour as clicks on that site", async () => {
+    const site = allowed({ id: "s1", app: "tickets.example.com", kind: "site", channel: "telegram", this_device: false });
+    vi.mocked(listAppApprovals).mockResolvedValue([HERE, site]);
+    render(<AppApprovals />);
+
+    expect(await screen.findByText("Clicks on tickets.example.com")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Revoke Clicks on tickets.example.com (Telegram)" }),
+    ).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Revoke Calendar (this browser)" })).toBeEnabled();
   });
 
   it("says how to allow one when none are allowed", async () => {

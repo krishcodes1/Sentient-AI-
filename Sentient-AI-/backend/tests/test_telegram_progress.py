@@ -172,6 +172,19 @@ class Recorder:
         ({"name": "browser.read", "action": "note"}, None),
         ({"name": "browser.read", "action": "handoff"}, None),
         ({"name": "browser.read", "action": "something_new"}, "Using the browser…"),
+        (
+            {"name": "browser.act", "action": "click", "host": "www.fandango.com"},
+            "Clicking on www.fandango.com…",
+        ),
+        ({"name": "browser.act", "action": "click"}, "Clicking on the page…"),
+        ({"name": "browser.act", "action": "fill"}, "Filling in a form…"),
+        ({"name": "browser.act", "action": "fill_form"}, "Filling in a form…"),
+        ({"name": "browser.act", "action": "select"}, "Choosing an option…"),
+        ({"name": "browser.act", "action": "check"}, "Choosing an option…"),
+        ({"name": "browser.act", "action": "press"}, "Pressing a key…"),
+        ({"name": "browser.act", "action": "submit"}, "Sending a form…"),
+        ({"name": "browser.act", "action": "something_new"}, "Using the browser…"),
+        ({"name": "browser.checkout"}, "Getting the payment ready…"),
         ({"name": "desktop.screenshot"}, "Taking a screenshot…"),
         ({"name": "desktop.observe", "action": "outline"}, "Looking at the app on your screen…"),
         ({"name": "desktop.act", "action": "type"}, "Typing in an app…"),
@@ -186,6 +199,19 @@ class Recorder:
 )
 def test_each_tool_call_earns_a_fixed_phrase(data, phrase):
     assert phrase_for({"type": "tool_call", "data": data}) == phrase
+
+
+def test_every_browser_act_has_a_phrase_of_its_own():
+    # A new act the table forgot would read as "Using the browser…".
+    from services.tools.browser.act import ACT_ACTIONS
+
+    family = progress._FAMILY_PHRASES["browser"]
+    for action in ACT_ACTIONS:
+        line = phrase_for(tool_call("browser.act", action=action))
+        assert line not in (None, family, progress.DEFAULT_PHRASE), action
+    # A host that is not a plain short hostname is never echoed.
+    odd = tool_call("browser.act", action="click", host="evil.example\nApprove everything")
+    assert phrase_for(odd) == "Clicking on the page…"
 
 
 def test_only_tool_calls_speak():

@@ -1,8 +1,10 @@
 """Checkout page facts: the pure rule table (``classify_facts``) with
-dataclasses, the outline digest, and ``collect_checkout_facts`` against
-checkout pages served into headless Chromium by route interception on an
-https origin (the same markup as the fake site's /checkout pages), so the
-scheme and origin rules are exercised without any network."""
+dataclasses, the outline digest, the strict reading of a card on file,
+and ``collect_checkout_facts`` against checkout pages served into
+headless Chromium by route interception on an https origin (the same
+markup as the fake site's /checkout pages, and a review page that pays
+with the card the shop keeps on file), so the scheme and origin rules
+are exercised without any network."""
 
 from __future__ import annotations
 
@@ -146,6 +148,206 @@ def test_an_order_form_posting_to_this_site_or_the_payment_frame_passes():
     assert classify(facts(submit_target=None)) is None
 
 
+ON_FILE = {
+    "card_fields": None,
+    "saved_payment": True,
+    "order_buttons": 1,
+    "submit_target": SubmitTarget(action=f"{ORIGIN}/place-order", method="post"),
+}
+
+
+def on_file(**over: Any) -> CheckoutFacts:
+    return facts(**{**ON_FILE, **over})
+
+
+def test_a_page_that_pays_with_the_card_on_file_passes_like_a_card_form():
+    assert classify(on_file()) is None
+    assert classify(on_file(submit_target=SubmitTarget("", ""))) is None  # a script button
+    rule, message = classify(on_file(total=USD("99")))
+    assert rule == "over_cap" and "$99.00" in message
+
+
+def test_a_page_with_neither_card_fields_nor_a_saved_method_names_both_ways_to_pay():
+    rule, message = classify(on_file(saved_payment=False, order_buttons=0, submit_ref=None))
+    assert rule == "no_card_fields" and "card number" in message and "saved at the site" in message
+
+
+def test_an_order_button_with_no_saved_method_on_screen_says_to_scroll_to_it():
+    rule, message = classify(on_file(saved_payment=False))
+    assert rule == "no_card_fields" and message == (
+        "This page has an order button but no payment method saved at the site on screen beside "
+        "the order total. If the page shows one elsewhere, scroll so the payment method and the "
+        "order total show together and try again; if not, open the payment step with the card "
+        "fields."
+    )
+
+
+@pytest.mark.parametrize("saved", [True, False])
+@pytest.mark.parametrize(
+    "where, message",
+    [
+        (
+            "frame",
+            "The card fields on this page are in a part of the page Crawler cannot fill, so "
+            "Crawler will not pay here.",
+        ),
+        (
+            "page",
+            "This page asks for a card number or security code that Crawler cannot fill here, so "
+            "Crawler will not pay here.",
+        ),
+        (
+            "unchecked",
+            "This page has more fields than Crawler checks, so Crawler cannot tell whether it asks "
+            "for a card and will not pay here.",
+        ),
+    ],
+)
+def test_card_fields_crawler_cannot_fill_never_let_the_page_pay_with_the_card_on_file(
+    saved, where, message
+):
+    """A card number or code field Crawler does not fill (in a frame it
+    does not trust, or in the page without its pair), or more fields than
+    it reads, means the page may ask for a card: the saved method next to
+    it does not make it a card-on-file page."""
+    found = on_file(saved_payment=saved, stray_card_fields=where)
+    assert classify(found) == ("no_card_fields", message)
+
+
+def test_order_summary_rows_are_not_items():
+    rows = [
+        "Chain wax lube $20.00", "Items: $20.00", "Items (2): $40.00", "Shipping & handling: $3.40",
+        "Estimated tax to be collected: $1.20", "Tax $1.00", "Promotion applied: -$2.00",
+        "Discount -$1.00", "Total before tax: $23.40", "Order total: $23.40",
+        "Chain wax lube — $23.40 · FREE Shipping",
+    ]
+    assert factsmod._pick_items(rows) == (
+        "Chain wax lube $20.00", "Chain wax lube — $23.40 · FREE Shipping",
+    )
+
+
+def control(
+    ref: str, name: str, *, role: str = "button", main: bool = True, form: int = -1,
+    action: str = f"{ORIGIN}/place-order",
+) -> dict[str, Any]:
+    """A button or link as the page script describes it; one in a form is
+    a POST submit to *action* (the shop's /place-order)."""
+    in_form = form >= 0
+    return {
+        "ref": ref, "name": name, "label": name, "role": role, "main": main, "form": form,
+        "submit": in_form and role == "button", "action": action if in_form else "",
+        "method": "post" if in_form else "", "disabled": False, "reattached": False,
+    }
+
+
+def test_every_control_that_could_place_the_order_counts_against_the_one_order_button():
+    """Only a button in the page itself in the order words is pressed, but
+    any button or link in any frame whose words could place an order is a
+    rival: two rivals is ambiguous. A control that changes, adds or picks a
+    way to pay, an "Order summary" toggle and links that only start with
+    the verb ("Order details", "Pay in 4 interest-free payments") are no
+    rivals."""
+    place = control("e1", "Place your order", form=0)
+    bystanders = [
+        control("e2", "Change payment method"), control("e3", "Payment options", role="link"),
+        control("e4", "Order summary"), control("e5", "Order details", role="link"),
+        control("e6", "Pay in 4 interest-free payments", role="link"),
+        control("e7", "Pay with a gift card"), control("e8", "Edit payment"),
+        control("e9", "Use this payment method"), control("e10", "Remove"),
+    ]
+    assert factsmod._order_button([place, *bystanders], posts=[post(place)]) == (place, 1)
+    rivals = [
+        control("e11", "Buy now", form=1), control("e12", "Pay $23.40", form=2),
+        control("e13", "Purchase"), control("e14", "Place your order", role="link"),
+        control("e15", "Checkout", role="link"), control("e16", "Pay $23.40", role="link"),
+        control("e17", "Order now"), control("e18", "Buy"), control("e19", "Complete payment"),
+        control("e20", "Confirm & pay"), control("e21", "Submit payment"),
+        control("f1e22", "Buy now", main=False), control("f1e23", "Place your order", main=False),
+    ]
+    for rival in rivals:
+        assert factsmod._order_button([place, rival]) == (None, 2), rival["name"]
+    # A link and a frame's button are counted, never pressed.
+    assert factsmod._order_button([control("e14", "Place your order", role="link")]) == (None, 0)
+    assert factsmod._order_button([control("f1e23", "Place your order", main=False, form=0)]) == (
+        None, 0,
+    )
+
+
+def post(button: dict[str, Any]) -> tuple[str, str]:
+    """A submit button as the page script lists it among ``posts``."""
+    return (button["action"], button["name"].lower())
+
+
+def test_any_other_post_forms_submit_button_makes_the_one_order_button_ambiguous():
+    """The real order button may say only "Continue": any other submit
+    button of a POST form in the page is a rival whatever it says, so an
+    upsell's "Buy now" is never the button the card pays with, even one
+    that posts to the order's own address (a hidden sku, or a second button
+    of the same form). The order button repeated is no rival."""
+    real = f"{ORIGIN}/place-order"
+    upsell = control("e1", "Buy now", form=0, action=f"{ORIGIN}/buy-upsell")
+    assert factsmod._order_button([upsell], posts=[post(upsell), (real, "continue")]) == (None, 2)
+    same_target = control("e4", "Buy now", form=0)
+    assert factsmod._order_button([same_target], posts=[post(same_target), (real, "continue")]) == (None, 2)
+    place = control("e2", "Place your order", form=0)
+    assert factsmod._order_button([place], posts=[post(place)]) == (place, 1)
+    assert factsmod._order_button([place], posts=[post(place), (f"{ORIGIN}/sign-out", "sign out")]) == (None, 2)
+    # A script order button has no form: every POST form's button is another.
+    script = control("e3", "Place your order")
+    assert factsmod._order_button([script], posts=[]) == (script, 1)
+    assert factsmod._order_button([script], posts=[(real, "place your order")]) == (None, 2)
+
+
+@pytest.mark.parametrize(
+    "count, words", [(0, "no button that places the order"), (2, "more than one order button")]
+)
+def test_a_saved_method_needs_exactly_one_order_button(count, words):
+    rule, message = classify(on_file(submit_ref=None, order_buttons=count))
+    assert rule == "no_card_fields" and words in message
+
+
+def test_an_order_button_on_file_that_would_send_the_order_elsewhere_is_refused():
+    away = SubmitTarget("https://collector.example.test/steal", "post")
+    rule, message = classify(on_file(submit_target=away))
+    assert rule == "submit_target" and "send the order" in message and "card" not in message
+    rule, _ = classify(on_file(submit_target=SubmitTarget(f"{ORIGIN}/place-order", "get")))
+    assert rule == "submit_target"
+
+
+@pytest.mark.parametrize(
+    "shown, label",
+    [
+        (["Paying with Visa ending in 4242"], "Visa ····4242"),
+        (["MasterCard ending in 5555"], "Mastercard ····5555"),
+        (["Amex ····1005"], "American Express ····1005"),
+        (["American  Express •••• 1005"], "American Express ····1005"),
+        (["Diners Club ending in 3237"], "Diners Club ····3237"),
+        (["Visa ending in 4242"] * 2, "Visa ····4242"),  # the same card twice
+        (["Visa ending in 4242", "Mastercard ending in 5555"], ""),  # which one pays is not said
+        (["Visa ending 4242"], ""),  # not the strict shape
+        (["Visa ending in 42424"], ""),  # five digits are no last four
+        (["Gift card ending in 4242"], ""),  # no card network named
+        (["Visa ending in 4242 <script>"], "Visa ····4242"),  # nothing after the digits is kept
+        ("Visa ending in 4242", ""),  # not the page's answer shape
+        # A network then its last four, only right after "paying with" or
+        # "pay with" (Amazon's "Paying with Visa 1234").
+        (["Paying with Visa 1234"], "Visa ····1234"),
+        (["Paying with Visa 1234."], "Visa ····1234"),
+        (["Pay with Mastercard 5555"], "Mastercard ····5555"),
+        # The four digits end the phrase: a street number or a year after
+        # the network is not the card's.
+        (["Paying with Visa 1234 Main St"], ""),
+        (["Pay with Visa 2026 rewards: 3% back"], ""),
+        (["Paying with Visa 1234", "Visa ending in 1234"], "Visa ····1234"),
+        (["Visa 1234"], ""),
+        (["Paying with Visa 12345"], ""),
+        (["Paying with gift card 1234"], ""),
+    ],
+)
+def test_the_card_on_file_is_named_only_in_the_strict_shape(shown, label):
+    assert factsmod._saved_card(shown) == label
+
+
 def test_over_daily_cap_adds_what_was_spent():
     rule, message = classify(facts(), spent_today=Decimal("30"))
     assert rule == "over_daily_cap" and "$53.40" in message and "$30.00" in message and "$50.00" in message
@@ -156,17 +358,25 @@ def test_over_daily_cap_adds_what_was_spent():
 # ── outline digest ─────────────────────────────────────────────────────────
 
 
-def test_outline_digest_ignores_text_values_and_focus_but_not_structure():
+def test_outline_digest_ignores_text_values_focus_and_state_but_not_structure():
+    """The digest the purchase card is tied to is the page memory's, the
+    one browser.act's card uses: a ticking timer, a moved focus or a
+    ticked box is the same page (a changed total is caught by the
+    toolkit's own comparison)."""
     lines = [
         '- heading "Checkout" [level=1] [ref=e2]',
         "- text: Cart expires in 9:59",
         '- listitem [ref=e4]: Concert ticket — $19.00',
         '- textbox "Card number" [active] [ref=e12]',
+        '- checkbox "Gift wrap" [checked] [ref=e15]',
         '- button "Place order" [ref=e17]',
     ]
     digest = outline_digest(lines)
     assert len(digest) == 40
-    ticking = [line.replace("9:59", "9:58").replace("$19.00", "$18.00").replace(" [active]", "") for line in lines]
+    ticking = [
+        line.replace("9:59", "9:58").replace("$19.00", "$18.00").replace(" [active]", "").replace(" [checked]", "")
+        for line in lines
+    ]
     assert outline_digest(ticking) == digest
     assert outline_digest(lines[:-1]) != digest
     assert outline_digest([*lines, '- link "Remove" [ref=e18]']) != digest
@@ -261,7 +471,54 @@ PAGES: dict[str, str] = {
             '<button type="submit" formaction="https://collector.example.test/steal">Place order</button>',
         ),
     ),
+    # A final review page that pays with the card the shop keeps on file:
+    # no card field, the saved card next to the total, one order button
+    # (Amazon's shape, which repeats it at the foot of the same form).
+    "/review": html(
+        "Review your order",
+        "<h1>Review your order</h1><p>Paying with Visa ending in 4242</p>" + ITEMS
+        + '<p>Order total: $23.40</p><form method="post" action="/place-order">'
+        '<button type="submit">Place your order</button>'
+        '<button type="button">Apply gift card</button><p>Order total: $23.40</p>'
+        '<button type="submit">Place your order</button></form>',
+    ),
 }
+ORDER_TAIL = (
+    '<p>Order total: $23.40</p><form method="post" action="/place-order">'
+    '<button type="submit">Place your order</button></form>'
+)
+
+
+def review(paying: str, *, gap: str = "") -> str:
+    """A review page with *paying* as its payment line, *gap* between it
+    and the items, the order total and the one order button."""
+    return html("Review your order", f"<h1>Review your order</h1><p>{paying}</p>{gap}{ITEMS}{ORDER_TAIL}")
+
+
+PAGES.update({
+    "/review-paying-plain": review("Paying with Visa 1234"),
+    "/review-pay-with": review("Pay with Mastercard 5555"),
+    # Card text the owner cannot read as the way this order is paid.
+    "/review-sign-in-link": review("<a href='/login'>Sign in to use a saved card</a>"),
+    "/review-promo": review("Free shipping offer ending in 2026"),
+    "/review-card-in-button": review("<button type='button'>Visa ending in 4242</button>"),
+    "/review-offscreen-card": review(
+        '<span style="position:absolute;left:-10000px">Paying with Visa ending in 4242</span>'
+    ),
+    "/review-transparent-card": review('<span style="opacity:0">Paying with Visa ending in 4242</span>'),
+    "/review-far-card": review("Paying with Visa ending in 4242", gap='<div style="height:420px"></div>'),
+    # Words that say there is no saved card.
+    "/review-no-saved-cards": review("You have no saved cards."),
+    "/review-no-card-on-file": review("No payment method on file. Add a card to continue."),
+    "/review-none-saved": review("You don't have any saved cards yet."),
+    # One card repeated five times, then a second one.
+    "/review-repeats": review("Visa ending in 4242. " * 5 + "Backup: Mastercard ending in 5555."),
+    # A saved card, and a card number field the page asks to fill again.
+    "/review-number-only": review(
+        "Paying with Visa ending in 4242",
+        gap='<label>Re-enter card number <input name="cc-number" autocomplete="cc-number"></label>',
+    ),
+})
 FRAME_PAGES: dict[str, str] = {
     "https://evil.example.test/card": html("Card", '<input autocomplete="cc-number" name="n">'),
     "https://pay.example.test/card": html(
@@ -373,6 +630,105 @@ async def test_hidden_totals_are_not_read_and_http_is_reported(page):
         found, expected_merchant="shop.example.test", model_amount=None,
         per_purchase_cap=Decimal("25"), per_day_cap=Decimal("50"), spent_today=Decimal("0"),
     )[0] == "insecure_page"
+
+
+@pytest.mark.asyncio
+async def test_facts_of_a_review_page_that_pays_with_the_card_on_file(page):
+    """No card fields: the saved card is read in the strict shape, and the
+    same "Place your order" twice in one form to one target is one order
+    button, bound to that form's target."""
+    await serve(page)
+    await page.goto(f"{ORIGIN}/review", wait_until="domcontentloaded")
+    found = await collect_checkout_facts(page)
+    assert found.card_fields is None and found.saved_payment is True
+    assert found.saved_card == "Visa ····4242" and found.order_buttons == 1
+    assert found.total == Money(Decimal("23.40"), "USD") and len(found.items) == 2
+    assert found.submit_target == SubmitTarget(action=f"{ORIGIN}/place-order", method="post")
+    assert await page.locator(f"aria-ref={found.submit_ref}").inner_text() == "Place your order"
+    assert classify_facts(
+        found, expected_merchant="shop.example.test", model_amount=None,
+        per_purchase_cap=Decimal("25"), per_day_cap=Decimal("50"), spent_today=Decimal("0"),
+    ) is None
+    # A card form shows no saved method, and its order button is the form's.
+    await page.goto(f"{ORIGIN}/checkout", wait_until="domcontentloaded")
+    found = await collect_checkout_facts(page)
+    assert found.card_fields is not None and found.saved_payment is False
+    assert found.order_buttons == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path, card", [("/review-paying-plain", "Visa ····1234"), ("/review-pay-with", "Mastercard ····5555")]
+)
+async def test_paying_with_a_card_network_and_its_last_four_is_a_saved_card(page, path, card):
+    await serve(page)
+    await page.goto(f"{ORIGIN}{path}", wait_until="domcontentloaded")
+    found = await collect_checkout_facts(page)
+    assert found.card_fields is None and found.saved_payment is True
+    assert found.saved_card == card and found.order_buttons == 1
+    assert classify(found) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/review-sign-in-link", "/review-promo", "/review-card-in-button", "/review-offscreen-card",
+        "/review-transparent-card", "/review-far-card", "/review-no-saved-cards",
+        "/review-no-card-on-file", "/review-none-saved",
+    ],
+)
+async def test_card_words_the_owner_cannot_read_as_what_pays_this_order_are_no_saved_method(page, path):
+    """A link or a button, a promo line, text off screen or transparent,
+    a card named far from the order total and the order button, and words
+    that say there is no saved card: none makes the page a card-on-file
+    page, and none puts digits on the card."""
+    await serve(page)
+    await page.goto(f"{ORIGIN}{path}", wait_until="domcontentloaded")
+    found = await collect_checkout_facts(page)
+    assert found.total == USD("23.40") and found.order_buttons == 1
+    assert found.saved_payment is False and found.saved_card == ""
+    rule, message = classify(found)
+    assert rule == "no_card_fields" and "saved at the site" in message
+
+
+@pytest.mark.asyncio
+async def test_one_card_repeated_does_not_hide_a_second_card(page):
+    await serve(page)
+    await page.goto(f"{ORIGIN}/review-repeats", wait_until="domcontentloaded")
+    found = await collect_checkout_facts(page)
+    assert found.saved_payment is True and found.saved_card == ""
+
+
+@pytest.mark.asyncio
+async def test_a_card_field_crawler_cannot_fill_is_reported_in_any_frame(page):
+    await serve(page)
+    await page.goto(f"{ORIGIN}/checkout-framed", wait_until="domcontentloaded")
+    await page.frames[1].wait_for_selector("input")
+    found = await collect_checkout_facts(page)
+    assert found.card_fields is None and found.stray_card_fields == "frame"
+    await page.goto(f"{ORIGIN}/review-number-only", wait_until="domcontentloaded")
+    found = await collect_checkout_facts(page)
+    assert found.card_fields is None and found.saved_payment is True and found.stray_card_fields == "page"
+    rule, message = classify(found)
+    assert rule == "no_card_fields" and "cannot fill" in message
+    for path in ("/review", "/checkout"):
+        await page.goto(f"{ORIGIN}{path}", wait_until="domcontentloaded")
+        assert (await collect_checkout_facts(page)).stray_card_fields == "", path
+
+
+@pytest.mark.asyncio
+async def test_the_order_button_is_found_after_the_tab_has_loaded_other_pages(page):
+    """After a navigation the main frame's refs carry a frame prefix too
+    (``f2e8``): the page itself says which frame is the main one."""
+    await serve(page)
+    for path in ("/checkout", "/review", "/checkout-framed", "/review"):
+        await page.goto(f"{ORIGIN}{path}", wait_until="domcontentloaded")
+    found = await collect_checkout_facts(page)
+    assert found.submit_ref is not None and found.submit_ref.startswith("f"), found.submit_ref
+    assert found.order_buttons == 1 and found.saved_payment is True and found.stray_card_fields == ""
+    assert await page.locator(f"aria-ref={found.submit_ref}").inner_text() == "Place your order"
+    assert classify(found) is None
 
 
 @pytest.mark.asyncio

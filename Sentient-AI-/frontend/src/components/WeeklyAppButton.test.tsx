@@ -11,7 +11,7 @@
 
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import WeeklyAppButton, { WeeklyAllowedNote } from "@/components/WeeklyAppButton";
+import WeeklyAppButton, { HourlySiteButton, WeeklyAllowedNote } from "@/components/WeeklyAppButton";
 import { formatAllowedUntil } from "@/components/appApprovalFormat";
 import type { PendingApproval } from "@/types";
 
@@ -91,5 +91,47 @@ describe("formatAllowedUntil", () => {
 
   it("hands back a value that is not a date as it was, never Invalid Date", () => {
     expect(formatAllowedUntil("next week")).toBe("next week");
+  });
+});
+
+// A browser.act card as the backend parks it, with the page it was made from under `_page`.
+const SITE_CARD: PendingApproval = {
+  action_id: "b3",
+  tool_name: "browser.act",
+  reason: 'Click "Seat F7" on tickets.example.com',
+  arguments: { action: "click", ref: "e7", _page: { origin: "https://tickets.example.com" } },
+  expires_at: "2099-01-01T00:00:00Z",
+  hourly_site: "tickets.example.com",
+};
+const ALLOW_SITE = "Allow clicks on tickets.example.com for 1 hour";
+
+describe("HourlySiteButton", () => {
+  it.each([undefined, null, "", "   "])("renders nothing when hourly_site is %j", (hourly_site) => {
+    const { container } = render(
+      <HourlySiteButton approval={{ ...SITE_CARD, hourly_site }} disabled={false} onAllow={() => {}} />,
+    );
+
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("offers the card's site for an hour and says what still asks", () => {
+    render(<HourlySiteButton approval={SITE_CARD} disabled={false} onAllow={() => {}} />);
+
+    const button = screen.getByRole("button", { name: ALLOW_SITE });
+    expect(button).toBeEnabled();
+    expect(button).toHaveAccessibleDescription(
+      /^For the next hour I'll click, pick options and tick boxes on tickets\.example\.com without asking, for requests from this browser\. I'll still ask before typing, sending a form, or pressing anything that changes, cancels, sends, agrees to or pays for something\./,
+    );
+  });
+
+  it("reports a press, and none while the card is busy or expired", () => {
+    const onAllow = vi.fn();
+    const { rerender } = render(<HourlySiteButton approval={SITE_CARD} disabled={false} onAllow={onAllow} />);
+
+    fireEvent.click(screen.getByRole("button", { name: ALLOW_SITE }));
+    expect(onAllow).toHaveBeenCalledTimes(1);
+
+    rerender(<HourlySiteButton approval={SITE_CARD} disabled onAllow={onAllow} />);
+    expect(screen.getByRole("button", { name: ALLOW_SITE })).toBeDisabled();
   });
 });

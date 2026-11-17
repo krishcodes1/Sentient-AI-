@@ -57,15 +57,41 @@ def _install_offer(install: str, size_hint: Any) -> str:
     )
 
 
+def _usd(amount: Any) -> str:
+    """A dollar amount as a person writes it: $25, $60.50."""
+    value = float(amount)
+    return f"${value:,.0f}" if value == int(value) else f"${value:,.2f}"
+
+
+def _limits(status: CapabilityStatus) -> str:
+    """What follows "on" for a capability whose settings bound what it may do:
+    the owner's spending limits for buying. They are enforced at the last step
+    of a purchase, after every other approval, so the model is told them here
+    and can say "that's over your limit" when it first sees a price. Empty for
+    every other capability, and when the status carries no settings."""
+    if status.key != "purchases":
+        return ""
+    try:
+        per_purchase = _usd(status.settings["per_purchase_cap_usd"])
+        per_day = _usd(status.settings["per_day_cap_usd"])
+    except (KeyError, TypeError, ValueError):
+        return ""
+    return (
+        f". Limits: up to {per_purchase} per purchase and {per_day} per day "
+        "(the owner changes them in Settings, under Permissions)."
+    )
+
+
 def render_permissions_block(statuses: Iterable[CapabilityStatus]) -> str:
-    """Render one line per capability: on, off (with what to tell the user)
-    or blocked (with why, and how to fix it when there is a fix)."""
+    """Render one line per capability: on (with its limits, when it has
+    them), off (with what to tell the user) or blocked (with why, and how to
+    fix it when there is a fix)."""
     statuses = list(statuses)
     installs_on = any(s.key == _INSTALLS_KEY and s.effective == "on" for s in statuses)
     lines: list[str] = []
     for s in statuses:
         if s.effective == "on":
-            lines.append(f"- {s.label}: on")
+            lines.append(f"- {s.label}: on{_limits(s)}")
         elif s.effective == "off":
             lines.append(f"- {s.label}: off. {s.when_denied}")
         else:

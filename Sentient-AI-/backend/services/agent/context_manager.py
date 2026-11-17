@@ -331,9 +331,28 @@ CORE_TOOL_NAMES = frozenset(
 _core_tool_names: set[str] = set(CORE_TOOL_NAMES)
 
 # How many tools one request offers, and how many names a conversation keeps
-# loaded through tools.find (spec 4.5).
-MAX_OFFERED_TOOLS = 24
+# loaded through tools.find (spec 4.5). The cap was 24 when the built-ins
+# were web, reminders and the browser; with every switch on they are over
+# fifty, and at 24 the trim dropped tools the prompt and the tools' own
+# refusals name (browser.act, desktop.screenshot), so the assistant said a
+# permission was off while it was on. 40 holds every lead, starter and
+# companion of an install with every switch on (36, measured); what is left
+# over that is still reached through tools.find. It was 64 for a while: the
+# 28 second tools that filled the array cost about 9k tokens on every model
+# call and gave a small model more to choose wrongly from.
+MAX_OFFERED_TOOLS = 40
 MAX_LOADED_TOOLS = 24
+# A model with a small window keeps the old bound: 40 schemas are about
+# 8k tokens, half of a 16k window.
+SMALL_WINDOW_OFFERED_TOOLS = 24
+_SMALL_WINDOW_TOKENS = 64_000
+
+
+def offered_tool_cap(model: Optional[str] = None) -> int:
+    """How many tools a request to *model* offers (None: the full cap)."""
+    if model and get_context_window(model) < _SMALL_WINDOW_TOKENS:
+        return SMALL_WINDOW_OFFERED_TOOLS
+    return MAX_OFFERED_TOOLS
 
 
 def register_core_tools(*names: str) -> None:
@@ -385,14 +404,27 @@ UNDO_COMPANIONS: dict[str, tuple[str, ...]] = {
 
 }
 
+# The next rungs of a tool whose own answers send the model to them:
+# browser.read refuses a click that types, submits or signs up and names
+# browser.act, and browser.act refuses one that pays and names
+# browser.checkout. Offered without them, the model is told to use a tool it
+# cannot see and tells the person the permission is off. Chosen with their
+# first rung exactly as an undo is with its create; a rung whose switch is
+# off was never built, so it is simply absent.
+LADDER_COMPANIONS: dict[str, tuple[str, ...]] = {
+    "browser.read": ("browser.act", "browser.checkout"),
+}
+
 
 def _companion_names(tool: dict[str, Any]) -> list[str]:
-    """The names *tool*'s ``UNDO_COMPANIONS`` have in its own namespace."""
+    """The names *tool*'s ``UNDO_COMPANIONS`` and ``LADDER_COMPANIONS`` have
+    in its own namespace."""
     namespace, _, action = tool.get("name", "").rpartition(".")
     connector = (tool.get("connector_type") or namespace.partition("__")[0]).lower()
+    key = f"{connector}.{action}"
     return [
-        f"{namespace}.{key.rpartition('.')[2]}"
-        for key in UNDO_COMPANIONS.get(f"{connector}.{action}", ())
+        f"{namespace}.{companion.rpartition('.')[2]}"
+        for companion in (*UNDO_COMPANIONS.get(key, ()), *LADDER_COMPANIONS.get(key, ()))
     ]
 
 
@@ -430,7 +462,8 @@ def select_offered_tools(
     (``starter`` true); then the rest. Leads, starters and the rest prefer
     the active connectors, then keep build order. A loaded name
     missing from ``tools`` (connector removed, scope revoked) is skipped.
-    A tool with ``UNDO_COMPANIONS`` brings them along at its own priority
+    A tool with ``UNDO_COMPANIONS`` or ``LADDER_COMPANIONS`` brings them
+    along at its own priority
     and is never chosen without them: a core or loaded tool's companions
     take the free slots before it does, and a starter or one of the rest is
     taken only when it fits together with them. The chosen tools keep their
@@ -787,7 +820,10 @@ class ContextManager:
         # Step 3: Pick the tool array. Deliberately independent of the
         # messages above — see select_offered_tools.
         optimized_tools = select_offered_tools(
-            tools, active_connectors or [], loaded=loaded
+            tools,
+            active_connectors or [],
+            max_tools=offered_tool_cap(model or self.model),
+            loaded=loaded,
         )
 
         # Step 4: Check budget and trim if needed

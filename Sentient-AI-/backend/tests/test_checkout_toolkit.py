@@ -2,9 +2,10 @@
 fakes, then the whole flow (begin -> card -> run -> confirmation) in
 headless Chromium against checkout pages served into the session by
 route interception on an https origin (the fake site's /checkout markup,
-spec §9), a fake vault holding a test card and the real purchase ledger
-on the test database. Never a real site, never a real card, never a
-headed window."""
+spec §9, and review pages that pay with the card the shop keeps on
+file), a fake vault holding a test card and the real purchase ledger on
+the test database. Never a real site, never a real card, never a headed
+window."""
 
 from __future__ import annotations
 
@@ -27,7 +28,7 @@ from models.audit import AuditLog, AuditStatus
 from services.tools.browser import handoff
 from services.tools.browser.act import BrowserActToolkit
 from services.tools.browser.actions import BrowserReadToolkit
-from services.tools.browser.checkout import CHECKOUT_RULES, NOTICE
+from services.tools.browser.checkout import CHECKOUT_RULES, NOTICE, markers
 from services.tools.browser.pagememory import PageMemory
 from services.tools.browser.checkout.ledger import PurchaseLedger
 from services.tools.browser.checkout.toolkit import CARD_KEY, BrowserCheckoutToolkit
@@ -197,7 +198,7 @@ async def test_precheck_passes_good_arguments_and_drops_nulls():
 
 
 @pytest.mark.asyncio
-async def test_precheck_rules_cancelled_vault_and_card():
+async def test_precheck_refuses_a_stopped_task_and_leaves_the_vault_and_the_card_to_the_page():
     params = {"merchant": "shop.example.test"}
     stopped = fake_kit(cancel_flag=lambda uid: uid == "u1")
     assert (await stopped.precheck(params, user_id="u1"))["rule"] == "cancelled"
@@ -208,25 +209,15 @@ async def test_precheck_rules_cancelled_vault_and_card():
 
     assert (fake_kit(cancel_flag=broken).precheck_sync(params, user_id="u1"))["rule"] == "cancelled"
 
-    closed = fake_kit(vault=FakeVault(available=(False, "Not available in this environment (container).")))
-    result = await closed.precheck(params, user_id="u1")
-    assert result["rule"] == "vault_unavailable" and "container" in result["error"]
-    assert closed.precheck_sync(params, user_id="u1")["rule"] == "vault_unavailable"
-    # The key store's reason is already the sentence the owner reads in
-    # Settings (the Keychain one, the container one): the refusal is that
-    # sentence alone, not "not available: ...not available..." twice over.
+    # Whether the vault and a stored card are needed depends on the page
+    # (card fields, or a card the site keeps on file), which precheck
+    # cannot see: vault_unavailable and no_card are begin's, on a page with
+    # card fields.
     keychain = "Crawler could not open this Mac's Keychain. Unlock the Mac and try again."
-    locked = fake_kit(vault=FakeVault(available=(False, keychain)))
-    result = await locked.precheck(params, user_id="u1")
-    assert result["rule"] == "vault_unavailable" and result["error"] == keychain
-    assert locked.precheck_sync(params, user_id="u1")["error"] == keychain
-    silent = fake_kit(vault=FakeVault(available=(False, "")))
-    assert (await silent.precheck(params, user_id="u1"))["error"] == "The card vault is not available."
-
-    empty = fake_kit(vault=FakeVault(card=False))
-    result = await empty.precheck(params, user_id="u1")
-    assert result["rule"] == "no_card" and "Settings → Payment card" in result["error"]
-    assert empty.precheck_sync(params, user_id="u1") is None  # needs the database: async only
+    for vault in (FakeVault(available=(False, keychain)), FakeVault(card=False)):
+        kit = fake_kit(vault=vault)
+        assert await kit.precheck(params, user_id="u1") is None
+        assert kit.precheck_sync(params, user_id="u1") is None
 
     class BrokenSettings:
         async def purchase_caps(self):
@@ -295,7 +286,45 @@ def checkout(total: str, *, action: str = "/pay", form: bool = True) -> str:
     )
 
 
+PLACE = '<button type="submit">Place your order</button>'
+ORDER_FORM = f'<form method="post" action="/place-order">{PLACE}</form>'
+# A button outside any form whose script sends the order (no target to bind).
+ORDER_SCRIPT = (
+    '<button type="button" onclick="placeOrder()">Place your order</button>'
+    "<script>function placeOrder(){const f=document.createElement('form');f.method='post';"
+    "f.action='/place-order';document.body.appendChild(f);f.submit();}</script>"
+)
+VISA_ON_FILE = "Paying with Visa ending in 4242"
+
+
+def review(total: str = "$23.40", *, paying: str = VISA_ON_FILE, order: str = ORDER_FORM) -> str:
+    """A final review page that pays with the card the shop keeps on file
+    (Amazon's "Place your order" page): no card field, the saved method
+    next to the order total, one order button."""
+    return html(
+        "Review your order",
+        f'<h1>Review your order</h1><p id="paying">{paying}</p>'
+        f'<ul class="items"><li>Chain wax lube — {total}</li></ul>'
+        f'<p id="total">Order total: {total}</p>{order}',
+    )
+
+
 PAGES: dict[str, str] = {
+    "/review": review(),
+    "/review-plain": review(paying="Paying with the card on file."),
+    "/review-two-cards": review(paying=f"{VISA_ON_FILE}. Backup: Mastercard ending in 5555."),
+    "/review-big": review("$99.00"),
+    "/review-script": review(order=ORDER_SCRIPT),
+    # The same button at the top and the foot of one form (Amazon's page).
+    "/review-twice": review(
+        order=ORDER_FORM.replace("</form>", f"<p>Order total: $23.40</p>{PLACE}</form>")
+    ),
+    "/review-two": review(order=ORDER_FORM + ORDER_FORM.replace("/place-order", "/place-order-gift")),
+    "/review-none": review(
+        order='<form method="post" action="/next"><button type="submit">Continue</button></form>'
+    ),
+    # The fake merchant declines what posts to /pay without a valid number.
+    "/review-declined": review(order=ORDER_FORM.replace("/place-order", "/pay")),
     "/checkout": checkout("$23.40"),
     "/checkout-eur": checkout("€23,40"),
     "/checkout-no-total": checkout(""),
@@ -450,6 +479,8 @@ async def shop(session_factory, tmp_path):
                 page = PAGES["/order-confirmed"] if luhn_ok(number) else PAGES["/pay-declined"]
             elif path == "/pay-3ds":
                 page = PAGES["/otp"]
+            elif path == "/place-order":  # the merchant charges the card it keeps on file
+                page = PAGES["/order-confirmed"]
             else:
                 page = html("Thanks", "<h1>Thanks</h1>")
             await route.fulfill(status=200, content_type="text/html; charset=utf-8", body=page)
@@ -790,6 +821,73 @@ async def test_a_second_factor_after_submit_is_handed_to_the_person(shop):
     # The card went out: it counts against the daily cap until the person says otherwise.
     assert await s.ledger.spent_last_24h(s.user_id) == Decimal("23.40")
     assert_no_card_data(*(row_text(r) for r in rows))
+
+
+@pytest.mark.asyncio
+async def test_a_sign_in_after_the_order_is_handed_over_without_opening_the_order_addresses(shop):
+    """The checkout's own handoff opens the order addresses to the page,
+    for the bank's 3-D Secure return. A sign-in is no part of paying, so it
+    is handed over as any other page is: the person's submit passes, and
+    no order address opens to the page's scripts."""
+    s = shop
+    original = PAGES["/order-confirmed"]
+    PAGES["/order-confirmed"] = html("Sign in", (
+        '<h1>Sign in</h1><form method="post" action="/login"><label>Email <input type="email" '
+        'name="email"></label><label>Password <input type="password" name="pw"></label>'
+        "<button>Sign in</button></form>"
+    ))
+    try:
+        result = await run(s, await begin(s))
+    finally:
+        PAGES["/order-confirmed"] = original
+    assert result["ok"] is False and result["filled"] is True
+    assert result["needs_human"]["kind"] == "signin"
+    assert s.guard.state.human_driving is True and s.guard.state.checkout_handoff is False
+
+
+@pytest.mark.asyncio
+async def test_a_checkout_with_an_optional_login_above_its_card_form_goes_on_as_a_guest(shop, monkeypatch):
+    """A Magento style checkout: "Sign in or continue as guest" in plain
+    words, a login box with the email filled, then the card form. The
+    login box made browser.checkout refuse the page (needs_human), so a
+    scheduled order stalled on a handoff nobody was there to take."""
+    s = shop
+    login = (
+        "<form class='form-login' method='post' action='/customer/login'><label>Email Address <input "
+        "type='email' name='username' value='me@example.com'></label><span>You already have an account "
+        "with us. Sign in or continue as guest.</span><label>Password <input type='password' "
+        "name='password'></label><button type='submit'>Login</button></form>"
+    )
+    monkeypatch.setitem(
+        PAGES, "/checkout-optional-account", checkout("$23.40").replace("<h1>Checkout</h1>", f"<h1>Checkout</h1>{login}")
+    )
+    arguments = await begin(s, "/checkout-optional-account")
+    assert CARD_KEY in arguments, arguments
+    result = await run(s, arguments)
+    assert result["ok"] is True, result
+    assert [path for path, _body in s.posted] == ["/pay"] and s.guard.state.human_driving is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("frame_path", ["/pay/login", "/account/signin"])
+async def test_a_checkout_with_an_optional_wallet_login_frame_goes_on_to_pay(shop, monkeypatch, frame_path):
+    """An express wallet's login box in a frame at a sign-in address (an
+    email box and Continue) above the card form: the frame was read as the
+    page's sign-in step and browser.checkout refused the page."""
+    s = shop
+    monkeypatch.setitem(PAGES, frame_path, html(
+        "Wallet", "<form method='post' action='/wallet/session'><label>Email <input type='email' "
+        "name='email'></label><button>Continue</button></form>",
+    ))
+    frame = f"<p>Express checkout</p><iframe src='{frame_path}' style='width:400px;height:160px'></iframe>"
+    monkeypatch.setitem(
+        PAGES, "/checkout-wallet", checkout("$23.40").replace("<h1>Checkout</h1>", f"<h1>Checkout</h1>{frame}")
+    )
+    arguments = await begin(s, "/checkout-wallet")
+    assert CARD_KEY in arguments, arguments
+    result = await run(s, arguments)
+    assert result["ok"] is True, result
+    assert [path for path, _body in s.posted] == ["/pay"] and s.guard.state.human_driving is False
 
 
 @pytest.mark.asyncio
@@ -1200,7 +1298,9 @@ async def test_a_stopped_checkout_cannot_be_finished_through_browser_act(shop):
     """After a validation stop, the model's natural next steps are a ZIP
     fill and a click on "Place order" through browser.act. The card is
     no longer in the form, and the click is refused as the checkout's
-    job, whatever the purchases switch says."""
+    job, whatever the purchases switch says: by the live page when its
+    card would be made (the button sends the order form), and again
+    should an approved click ever run."""
     s = shop
     result = await run(s, await begin(s, "/checkout-zip"))
     assert result.get("filled") is True and s.posted == [], (result, s.posted)
@@ -1214,9 +1314,13 @@ async def test_a_stopped_checkout_cannot_be_finished_through_browser_act(shop):
     assert done["ok"] is True
     outline = await read.execute("snapshot", {}, user_id=s.user_id, task_id="t1")
     click = {"action": "click", "ref": ref_of(outline, '- button "Place order"')}
-    refusal = act.precheck(click, user_id=s.user_id)
-    assert refusal is not None and refusal["rule"] == "use_checkout"
-    assert refusal["error"] == "Crawler only pays through its own checkout step, which needs 'Buy things for me' on in Permissions."
+    assert act.precheck(click, user_id=s.user_id) is None  # a click is judged on the live page
+    refusal = await act.bind_async(click, user_id=s.user_id, task_id="t1")
+    assert refusal == {
+        "ok": False, "refused": True, "rule": "use_checkout", "error": markers.USE_CHECKOUT_MESSAGE,
+        "reason": markers.USE_CHECKOUT_REASON,  # what the person reads: no tool is named in it
+    }
+    assert "call browser.checkout" in refusal["error"]
     # And at run time, should a card somehow have been made.
     card = act.bind(click, user_id=s.user_id)
     result = await act.execute("click", {k: v for k, v in card.items() if k != "action"}, user_id=s.user_id, task_id="t1", approved=True)
@@ -1240,3 +1344,718 @@ async def test_a_cancel_between_the_fill_and_the_submit_clears_the_card(shop):
     for field in ("cc-number", "cc-csc", "cc-exp"):
         assert await s.page.locator(f"input[name={field}]").input_value() == "", field
     assert TEST_NUMBER in s.session.typed_secrets and TEST_CVC in s.session.typed_secrets
+
+
+# ── a final page that pays with the card the shop keeps on file ──────────
+
+
+class ClosedVault(FakeVault):
+    """A vault that fails the test the moment anything asks it for a card:
+    paying with what the shop keeps on file never needs one."""
+
+    async def get_card_view(self, user_id):
+        raise AssertionError("the checkout asked the vault for a card")
+
+    async def open_card(self, user_id, *, purpose):
+        raise AssertionError("the checkout opened the vault")
+
+
+ON_FILE_LINE = f"Pay $23.40 to {HOST} (1 item) with Visa ····4242 on file at {HOST}"
+ANY_CARD_ON_FILE = f"Pay $23.40 to {HOST} (1 item) with the card on file at {HOST}"
+KEYCHAIN = "Crawler could not open this Mac's Keychain. Unlock the Mac and try again."
+# A shop's card frame on a host Crawler does not trust to carry the card.
+FOREIGN_CARD_FRAME = (
+    '<iframe src="https://checkout.pci.shopifyinc.com/card-frame" width="400" height="80"></iframe>'
+)
+SEEN_CARD = "Paying with your card ending in 5555"
+AMAZON_INPUT = '<input type="submit" name="placeYourOrder1" value="Place your order">'
+AMAZON_ARIA = (
+    '<span class="a-button"><input class="a-button-input" type="submit" name="placeYourOrder1" '
+    'aria-labelledby="{id}"><span id="{id}" class="a-button-text" aria-hidden="true">'
+    "Place your order</span></span>"
+)
+
+
+def amazon(top: str = AMAZON_INPUT, bottom: str = AMAZON_INPUT, *, tall: bool = False) -> str:
+    """Amazon's review page: two columns in one POST form holding the order
+    button twice, "Paying with Visa 1234" in the left column, the order
+    summary (Items, Shipping & handling, Order total) on the right. *tall*
+    puts a long gap before the item and fixes the summary box on screen."""
+    gap = '<div style="height:1400px"></div>' if tall else ""
+    box = "position:fixed;top:10px;right:20px;" if tall else ""
+    return html(
+        "Place Your Order - Amazon Checkout",
+        '<form method="post" action="/place-order"><div style="display:flex;gap:40px;width:1240px">'
+        '<div style="width:860px"><h1>Review your order</h1>'
+        "<div><h3>Delivering to Krish</h3><span>1 Main St, Springfield</span> <a href='/addr'>Change</a></div>"
+        '<div class="pmts"><span>Paying with Visa 1234</span> <a href="/pay-method">Change</a></div>'
+        f'{gap}<div class="items"><div class="item">Chain wax lube <span>$20.00</span></div></div>'
+        f"<div>{bottom}</div></div>"
+        f'<div style="width:300px;{box}"><div>{top}</div>'
+        "<h3>Order Summary</h3><table><tr><td>Items:</td><td>$20.00</td></tr>"
+        "<tr><td>Shipping &amp; handling:</td><td>$3.40</td></tr>"
+        "<tr><td><b>Order total:</b></td><td><b>$23.40</b></td></tr></table>"
+        "</div></div></form>",
+    )
+
+
+PAGES.update({
+    "/card-frame": html(
+        "Card", '<input autocomplete="cc-number" name="number"><input autocomplete="cc-csc" name="cvc">'
+    ),
+    # The review's probes: a sign-in link to a saved card beside card
+    # fields in that frame, and a promo line in the saved card's shape.
+    "/review-sign-in-frame": html(
+        "Checkout",
+        "<h1>Payment</h1>" + ITEMS + "<p><a href='/login'>Sign in to use a saved card</a></p>"
+        + FOREIGN_CARD_FRAME + "<p>Total: $23.40</p>"
+        '<form method="post" action="/no-card-entered"><button type="submit">Pay now</button></form>',
+    ),
+    "/review-promo": html(
+        "Checkout",
+        "<h1>Payment</h1>" + ITEMS + "<p>Free shipping offer ending in 2026</p><p>Total: $23.40</p>"
+        '<form method="post" action="/no-card-entered"><button type="submit">Pay now</button></form>',
+    ),
+    "/review-foreign-frame": review(paying=VISA_ON_FILE + FOREIGN_CARD_FRAME),
+    # The card the owner sees is ····5555; another one hides on the page.
+    "/review-hidden-card": review(
+        paying="Paying with your card ending in 5555"
+        '<span style="position:absolute;left:-10000px">Visa ending in 4242</span>'
+    ),
+    "/review-transparent-card": review(
+        paying='Paying with your card ending in 5555 <span style="opacity:0">Visa ending in 4242</span>'
+    ),
+    "/review-tiny-cards": review(
+        paying="<span style='font-size:0'>Visa ending in 4242</span>" * 5
+        + "Paying with Mastercard ending in 5555"
+    ),
+    # Amazon's shape: a network and the last four after "Paying with".
+    "/review-paying-plain": review(paying="Paying with Visa 1234"),
+    "/review-pay-with": review(paying="Pay with Mastercard 5555"),
+    # The card the owner sees is "ending in 5555"; a Visa hides beside it
+    # under a clear wrapper, in clear ink, white on white, indented away.
+    "/review-card-in-clear-box": review(
+        paying=f'{SEEN_CARD}<span style="opacity:0"><span>Visa ending in 4242</span></span>'
+    ),
+    "/review-card-in-clear-ink": review(
+        paying=f'{SEEN_CARD} <span style="color:transparent">Visa ending in 4242</span>'
+    ),
+    "/review-card-white-on-white": review(
+        paying=f'{SEEN_CARD} <span style="color:#fff">Visa ending in 4242</span>'
+    ),
+    "/review-card-indented-away": review(
+        paying=f'{SEEN_CARD} <span style="display:inline-block;width:200px;overflow:hidden;'
+        'text-indent:-9999px;white-space:nowrap">Visa ending in 4242</span>'
+    ),
+    # No card on file at all: only clear words say there is one, or the
+    # page says there is none.
+    "/review-only-clear-words-say-on-file": html(
+        "Checkout",
+        "<h1>Payment</h1>" + ITEMS + '<p style="color:transparent">Paying with the card on file</p>'
+        "<p>Total: $23.40</p>" + ORDER_FORM,
+    ),
+    "/review-says-no-saved-cards": html(
+        "Checkout",
+        "<h1>Payment</h1>" + ITEMS + "<p>You have no saved cards.</p><p>Total: $23.40</p>" + ORDER_FORM,
+    ),
+    # Past the first forty fields, a card frame Crawler does not fill.
+    "/review-forty-fields-then-a-card-frame": review(
+        order=ORDER_FORM
+        + "".join(f'<input name="note{i}" aria-label="Note {i}" size="4">' for i in range(41))
+        + FOREIGN_CARD_FRAME,
+    ),
+    # Thirty-nine buttons, an upsell "Buy now" as the fortieth, then the
+    # real order form.
+    "/review-upsell-among-forty-buttons": review(
+        order="".join(f'<button type="button">Change {i}</button>' for i in range(39))
+        + '<form method="post" action="/buy-upsell"><button type="submit">Buy now</button></form>'
+        + ORDER_FORM,
+    ),
+    # A saved card that asks for its security code again, in the page itself.
+    "/review-saved-card-asks-for-its-code": review(
+        paying=f'{VISA_ON_FILE} <label>Security code <input autocomplete="cc-csc" name="cvv"></label>'
+    ),
+    "/amazon": amazon(),
+    "/amazon-aria": amazon(AMAZON_ARIA.format(id="top"), AMAZON_ARIA.format(id="bottom")),
+    # Long enough to scroll: the payment line at the top, the summary box
+    # (total and order button) fixed at the top right.
+    "/amazon-tall": amazon(tall=True),
+    # Digits after the card network that are not the card's: a street
+    # number on the next line, a year in a promotion.
+    "/review-address-digits": review(
+        paying="<span>Paying with Visa</span><br><span>1234 Main St, Springfield</span>"
+    ),
+    "/review-promo-digits": review(paying="Pay with Visa 2026 rewards: 3% back"),
+    # A box only moved by a transform (a centring translate) reads as laid out.
+    "/review-card-in-a-moved-box": review(
+        paying=f'<span style="display:inline-block;transform:translate(4px, 2px)">{VISA_ON_FILE}</span>'
+    ),
+})
+# The real order control says "Pay $23.40" or is a link, so only an
+# upsell's "Buy now" is named like an order button.
+UPSELL = (
+    '<div>You may also like: Chain cleaner $9.99 '
+    '<form method="post" action="/buy-upsell"><button type="submit">Buy now</button></form></div>'
+)
+PAGES["/review-pay-button-beside-an-upsell"] = review(
+    order='<form method="post" action="/place-order"><button type="submit">Pay $23.40</button></form>'
+    + UPSELL
+)
+PAGES["/review-order-link-beside-an-upsell"] = review(
+    order='<a href="#" onclick="placeOrder();return false">Place your order</a>'
+    + ORDER_SCRIPT.split("</button>", 1)[1]
+    + UPSELL
+)
+# The real order button in ordinary words, in its own POST form, beside
+# the upsell; and the real "Place your order" in a frame of the page.
+REAL_ORDER_WORDS = (
+    "Submit payment", "Confirm payment", "Complete payment", "Confirm &amp; pay",
+    "Complete checkout", "Continue", "Make payment",
+)
+UPSELL_SHAPES = [f"/review-{i}-beside-an-upsell" for i in range(len(REAL_ORDER_WORDS))]
+for _path, _words in zip(UPSELL_SHAPES, REAL_ORDER_WORDS, strict=True):
+    PAGES[_path] = review(
+        order=f'<form method="post" action="/place-order"><button type="submit">{_words}</button></form>'
+        + UPSELL
+    )
+UPSELL_SHAPES.append("/review-framed-order-beside-an-upsell")
+PAGES["/review-framed-order-beside-an-upsell"] = review(
+    order='<iframe width="400" height="80" srcdoc="'
+    + ORDER_FORM.replace('"', "&quot;").replace("/place-order", f"{ORIGIN}/place-order")
+    + '"></iframe>' + UPSELL
+)
+# The upsell posts to the order's own address: a second button of the
+# order's form, or another form told apart by a hidden field.
+UPSELL_SHAPES.append("/review-upsell-in-the-orders-form")
+PAGES["/review-upsell-in-the-orders-form"] = review(order=(
+    '<form method="post" action="/place-order"><p>Add chain cleaner $9.99</p>'
+    '<button type="submit" name="op" value="upsell">Buy now</button> '
+    '<button type="submit" name="op" value="place">Continue</button></form>'
+))
+UPSELL_SHAPES.append("/review-upsell-to-the-orders-address")
+PAGES["/review-upsell-to-the-orders-address"] = review(order=(
+    '<form method="post" action="/place-order"><input type="hidden" name="sku" value="cleaner">'
+    "Chain cleaner $9.99 <button>Buy now</button></form>"
+    '<form method="post" action="/place-order"><input type="hidden" name="sku" value="cart">'
+    "<button>Continue</button></form>"
+))
+# Ordinary controls beside the one order button: a toggle, financing and
+# order details links, a gift card button.
+NOT_ORDER_CONTROLS = {
+    "/review-order-summary-toggle": '<button type="button">Order summary</button>',
+    "/review-pay-in-four-link": '<a href="#">Pay in 4 interest-free payments</a>',
+    "/review-gift-card-button": '<button type="button">Pay with a gift card</button>',
+    "/review-order-details-link": '<a href="#">Order details</a>',
+}
+for _path, _control in NOT_ORDER_CONTROLS.items():
+    PAGES[_path] = review(order=_control + ORDER_FORM)
+# Ways to paint text the owner cannot read: the strict card beside the
+# one the owner sees, or the only words that say a card is on file.
+HIDDEN = {
+    "filter": lambda text: f'<span style="filter:opacity(0)">{text}</span>',
+    "oklch-white": lambda text: f'<span style="color:oklch(1 0 0)">{text}</span>',
+    "fill-oklch-clear": lambda text: (
+        f'<span style="-webkit-text-fill-color:oklch(0 0 0 / 0)">{text}</span>'
+    ),
+    "on-a-gradient": lambda text: (
+        f'<span style="color:#000;background-image:linear-gradient(#000,#000)">{text}</span>'
+    ),
+    "under-an-inset-shadow": lambda text: (
+        f'<span style="color:#000;box-shadow:inset 0 0 0 200px #000">{text}</span>'
+    ),
+    "one-pixel-font": lambda text: f'<span style="font-size:1px">{text}</span>',
+    "scaled-down": lambda text: (
+        f'<span style="display:inline-block;transform:scale(0.06)">{text}</span>'
+    ),
+    "screen-blended": lambda text: f'<span style="mix-blend-mode:screen;color:#000">{text}</span>',
+    "nested-opacity": lambda text: (
+        f'<span style="opacity:.3"><span style="opacity:.3"><span style="opacity:.3">{text}'
+        "</span></span></span>"
+    ),
+    "faded-grey": lambda text: f'<span style="opacity:0.1;color:#888">{text}</span>',
+    "squeezed-flat": lambda text: (
+        f'<span style="display:inline-block;transform:scaleX(0.01)">{text}</span>'
+    ),
+    "turned-edge-on": lambda text: (
+        f'<span style="display:inline-block;transform:rotateY(89.5deg)">{text}</span>'
+    ),
+    # The standalone properties leave ``transform`` at none.
+    "scale-property": lambda text: f'<span style="display:inline-block;scale:0.01 1">{text}</span>',
+    "rotate-property": lambda text: f'<span style="display:inline-block;rotate:y 89.5deg">{text}</span>',
+    "masked": lambda text: (
+        f'<span style="mask-image:linear-gradient(transparent,transparent);'
+        f'-webkit-mask-image:linear-gradient(transparent,transparent)">{text}</span>'
+    ),
+}
+for _how, _hide in HIDDEN.items():
+    PAGES[f"/review-card-hidden-{_how}"] = review(paying=f"{SEEN_CARD} {_hide('Visa ending in 4242')}")
+    PAGES[f"/review-on-file-hidden-{_how}"] = html(
+        "Checkout",
+        "<h1>Payment</h1>" + ITEMS + f"<p>{_hide('Paying with the card on file')}</p>"
+        "<p>Total: $23.40</p>" + ORDER_FORM,
+    )
+# Ordinary words that are no saved card: none saved, none or an expired
+# one on file, an offer to keep the new card, a saved card that cannot be
+# chosen.
+NOT_A_SAVED_CARD = {
+    "/review-saved-cards-heading-then-none": "<h3>Saved cards</h3><p>You have no saved cards.</p>",
+    "/review-saved-cards-none": "<p>Saved cards: none</p>",
+    "/review-saved-methods-zero": "<p>Saved payment methods (0)</p>",
+    "/review-card-on-file-none": "<p>Card on file: none</p>",
+    "/review-method-on-file-none": "<p>Payment method on file: None. Add one at the next step.</p>",
+    "/review-card-on-file-expired": "<p>Your card on file has expired.</p>",
+    "/review-card-on-file-dash-none": "<p>Card on file \u2013 none</p>",
+    "/review-card-on-file-paren-none": "<p>Card on file: (none)</p>",
+    "/review-card-on-file-no": "<p>Card on file: No</p>",
+    "/review-card-on-file-is-expired": "<p>Your card on file is expired.</p>",
+    "/review-keep-this-card-on-file": (
+        '<label><input type="checkbox"> Keep this card on file for next time</label>'
+    ),
+    "/review-a-saved-card-that-cannot-be-chosen": (
+        '<label><input type="radio" name="m" disabled> Use a saved card</label>'
+        '<label><input type="radio" name="m" checked> Use a new card</label>'
+    ),
+}
+for _path, _words in NOT_A_SAVED_CARD.items():
+    PAGES[_path] = html(
+        "Checkout", "<h1>Payment</h1>" + ITEMS + _words + "<p>Total: $23.40</p>" + ORDER_FORM
+    )
+REACHED = {
+    "/review": ("/place-order", ON_FILE_LINE),
+    "/review-paying-plain": ("/place-order", ON_FILE_LINE.replace("····4242", "····1234")),
+    "/review-script": ("/place-order", ON_FILE_LINE),
+    "/amazon": ("/place-order", ON_FILE_LINE.replace("····4242", "····1234")),
+    "/checkout": ("/pay", f"Pay $23.40 to {HOST} (2 items) with Visa ····4242"),
+}
+PAGES["/cart"] = html(
+    "Your cart", "<h1>Cart</h1>" + "".join(f'<p><a href="{path}">Go to {path}</a></p>' for path in REACHED)
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "vault", [ClosedVault(), FakeVault(card=False)], ids=["vault-never-asked", "no-card-stored"]
+)
+async def test_a_card_on_file_is_paid_with_one_press_of_the_bound_order_button(shop, vault):
+    s = shop
+    s.toolkit._vault = vault
+    arguments = await begin(s, "/review", amount=23.4)
+    card = arguments[CARD_KEY]
+    assert card["card_label"] == f"Visa ····4242 on file at {HOST}"
+    assert card["submit_to"] == f"{ORIGIN}/place-order" and card["amount_usd"] == "23.40"
+    assert s.toolkit.describe(arguments, user_id=s.user_id) == ON_FILE_LINE
+    image = s.toolkit.approval_image(arguments, user_id=s.user_id)
+    assert image is not None and image.startswith("data:image/jpeg;base64,")
+    assert s.posted == []
+    result = await run(s, arguments)
+    assert result["ok"] is True, result
+    assert result["merchant"] == HOST and result["amount"] == "23.40"
+    assert "Order number 8841" in result["confirmation_text_summary"]
+    # One press, one POST, to the bound target, inside a window bound to it.
+    assert s.posted == [("/place-order", {})] and s.windows == [(True, ORIGIN)]
+    assert s.guard.state.write_allowed is False and s.guard.state.write_origin is None
+    # Nothing was typed and the vault was never opened.
+    assert s.session.typed_secrets == [] and vault.opened == []
+    rows = await audit_rows(s)
+    assert [r.action for r in rows] == [
+        "purchase_requested", "purchase_approved", "purchase_completed",
+    ]
+    assert {r.request_data["checkout_id"] for r in rows} == {card["checkout_id"]}
+    assert_no_card_data(*(row_text(r) for r in rows))
+    assert await s.ledger.spent_last_24h(s.user_id) == Decimal("23.40")
+    # The approval is used up: no second press.
+    assert (await run(s, arguments))["rule"] == "unbound_approval" and len(s.posted) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/review-plain", "/review-two-cards"])
+async def test_the_card_names_a_saved_card_only_when_the_page_names_exactly_one(shop, path):
+    s = shop
+    arguments = await begin(s, path)
+    assert s.toolkit.describe(arguments, user_id=s.user_id) == (
+        f"Pay $23.40 to {HOST} (1 item) with the card on file at {HOST}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_shops_one_order_button_repeated_in_its_form_is_pressed_once(shop):
+    s = shop
+    arguments = await begin(s, "/review-twice")
+    assert CARD_KEY in arguments, arguments
+    assert (await run(s, arguments))["ok"] is True
+    assert s.posted == [("/place-order", {})]
+
+
+@pytest.mark.asyncio
+async def test_a_script_order_button_is_bound_to_the_page_origin(shop):
+    """No form, so no target to bind: the write window is bound to the
+    page's own origin, which is the only place the guard then lets a POST go."""
+    s = shop
+    arguments = await begin(s, "/review-script")
+    assert arguments[CARD_KEY]["submit_to"] == ""
+    result = await run(s, arguments)
+    assert result["ok"] is True, result
+    assert s.posted == [("/place-order", {})] and s.windows == [(True, ORIGIN)]
+
+
+@pytest.mark.asyncio
+async def test_a_card_on_file_the_site_declines_is_filed_as_declined(shop):
+    s = shop
+    s.toolkit._vault = ClosedVault()
+    result = await run(s, await begin(s, "/review-declined"))
+    assert result["ok"] is False and result["filled"] is True
+    assert "did not accept" in result["error"] and [p for p, _b in s.posted] == ["/pay"]
+    last = (await audit_rows(s))[-1]
+    assert last.action == "purchase_refused" and last.reasoning_chain["reason"] == "declined"
+    assert await s.ledger.spent_last_24h(s.user_id) == Decimal("0")
+
+
+@pytest.mark.asyncio
+async def test_a_page_with_card_fields_and_no_stored_card_is_refused_no_card(shop):
+    s = shop
+    s.toolkit._vault = FakeVault(card=False)
+    result = await begin(s, "/checkout")
+    assert result["rule"] == "no_card" and "Settings → Payment card" in result["error"]
+    assert "card number" in result["error"]
+    assert s.posted == [] and s.toolkit._pending == {}
+
+
+@pytest.mark.asyncio
+async def test_a_page_with_neither_card_fields_nor_a_saved_card_names_both_ways_to_pay(shop):
+    s = shop
+    result = await begin(s, "/checkout-no-card")
+    assert result["rule"] == "no_card_fields" and "saved at the site" in result["error"], result
+    assert s.posted == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path, origin, rule, words",
+    [
+        ("/review-big", ORIGIN, "over_cap", "$99.00"),
+        ("/review", "http://shop.example.test", "insecure_page", "http://shop.example.test"),
+        ("/review-two", ORIGIN, "no_card_fields", "more than one order button"),
+        ("/review-none", ORIGIN, "no_card_fields", "no button that places the order"),
+    ],
+)
+async def test_a_card_on_file_page_keeps_every_page_rule(shop, path, origin, rule, words):
+    s = shop
+    s.toolkit._vault = ClosedVault()
+    await open_page(s, path, origin=origin)
+    result = await s.toolkit.begin({"merchant": HOST}, user_id=s.user_id, task_id="t1")
+    assert result["rule"] == rule and words in result["error"], result
+    assert s.posted == [] and s.toolkit._pending == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "change",
+    [
+        "document.getElementById('paying').textContent = 'Paying with Mastercard ending in 5555'",
+        "document.getElementById('total').textContent = 'Order total: $24.40'",
+    ],
+    ids=["another-saved-card", "another-total"],
+)
+async def test_a_card_on_file_page_that_changed_after_the_card_presses_nothing(shop, change):
+    s = shop
+    arguments = await begin(s, "/review")
+    await s.page.evaluate(change)
+    result = await run(s, arguments)
+    assert result["rule"] == "screen_changed" and s.posted == [], result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/review", "/review-script"])
+async def test_browser_act_still_refuses_the_order_button_a_card_on_file_pays_through(shop, path):
+    s = shop
+    await open_page(s, path)
+    read, act = kits(s)
+    outline = await read.execute("snapshot", {}, user_id=s.user_id, task_id="t1")
+    click = {"action": "click", "ref": ref_of(outline, '- button "Place your order"')}
+    refusal = await act.bind_async(click, user_id=s.user_id, task_id="t1")
+    assert refusal["rule"] == "use_checkout", refusal
+    card = {k: v for k, v in act.bind(click, user_id=s.user_id).items() if k != "action"}
+    result = await act.execute("click", card, user_id=s.user_id, task_id="t1", approved=True)
+    assert result["rule"] == "use_checkout" and s.posted == []
+
+
+async def begin_framed(s, path: str) -> dict[str, Any]:
+    """``begin`` once the page's card frame has loaded its fields."""
+    await open_page(s, path)
+    await s.page.frames[1].wait_for_selector("input")
+    return await s.toolkit.begin({"merchant": HOST}, user_id=s.user_id, task_id="t1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/review-sign-in-frame", "/review-foreign-frame"])
+async def test_card_fields_crawler_cannot_fill_are_never_paid_with_the_card_on_file(shop, path):
+    """Card fields in a frame Crawler does not trust mean the page asks for
+    a card: a sign-in link to a saved card, or even a saved card shown
+    beside them, never makes it a card-on-file page."""
+    s = shop
+    s.toolkit._vault = ClosedVault()
+    result = await begin_framed(s, path)
+    assert result["rule"] == "no_card_fields" and "cannot fill" in result["error"], result
+    assert s.posted == [] and s.toolkit._pending == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/review-promo", "/review-only-clear-words-say-on-file", "/review-says-no-saved-cards",
+        *(f"/review-on-file-hidden-{how}" for how in HIDDEN), *NOT_A_SAVED_CARD,
+    ],
+)
+async def test_a_page_that_only_seems_to_have_a_card_on_file_pays_nothing(shop, path):
+    """A promo line in the shape of a saved card, words the owner cannot
+    see however they are hidden, words that say there is no saved card
+    (before it or right after it: "Card on file: none", "has expired"),
+    and a form control's label (keep this card, a saved card it cannot
+    choose): none makes the page pay with a card on file, and the refusal
+    is filed with no method."""
+    s = shop
+    s.toolkit._vault = ClosedVault()
+    result = await begin(s, path)
+    assert result["rule"] == "no_card_fields" and "saved at the site" in result["error"], result
+    assert s.posted == [] and s.toolkit._pending == {}
+    last = (await audit_rows(s))[-1]
+    assert last.action == "purchase_refused" and last.request_data.get("method") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path, line",
+    [
+        ("/review-hidden-card", ANY_CARD_ON_FILE),
+        ("/review-transparent-card", ANY_CARD_ON_FILE),
+        ("/review-tiny-cards", ANY_CARD_ON_FILE.replace("the card", "Mastercard ····5555")),
+        ("/review-card-in-clear-box", ANY_CARD_ON_FILE),
+        ("/review-card-in-clear-ink", ANY_CARD_ON_FILE),
+        ("/review-card-white-on-white", ANY_CARD_ON_FILE),
+        ("/review-card-indented-away", ANY_CARD_ON_FILE),
+        *((f"/review-card-hidden-{how}", ANY_CARD_ON_FILE) for how in HIDDEN),
+        # Digits the page shows after the network but not as the card's.
+        ("/review-address-digits", ANY_CARD_ON_FILE),
+        ("/review-promo-digits", ANY_CARD_ON_FILE),
+        ("/review-card-in-a-moved-box", ON_FILE_LINE),
+    ],
+)
+async def test_the_card_names_only_card_text_the_owner_can_see(shop, path, line):
+    s = shop
+    arguments = await begin(s, path)
+    assert s.toolkit.describe(arguments, user_id=s.user_id) == line
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path, label", [("/review-paying-plain", "Visa ····1234"), ("/review-pay-with", "Mastercard ····5555")]
+)
+async def test_paying_with_a_card_network_and_its_last_four_is_paid_with_the_card_on_file(shop, path, label):
+    s = shop
+    s.toolkit._vault = ClosedVault()
+    arguments = await begin(s, path)
+    assert s.toolkit.describe(arguments, user_id=s.user_id) == ON_FILE_LINE.replace("Visa ····4242", label)
+    assert (await run(s, arguments))["ok"] is True
+    assert s.posted == [("/place-order", {})]
+
+
+@pytest.mark.asyncio
+async def test_a_locked_vault_stops_a_card_page_but_not_a_card_on_file(shop):
+    """A card on file never needs the vault, so a locked Keychain does not
+    stop it; a page with card fields is refused in the vault's own words."""
+    s = shop
+    s.toolkit._vault = ClosedVault(available=(False, KEYCHAIN))
+    arguments = await begin(s, "/review")
+    assert s.toolkit.describe(arguments, user_id=s.user_id) == ON_FILE_LINE
+    assert (await run(s, arguments))["ok"] is True and s.posted == [("/place-order", {})]
+    result = await begin(s, "/checkout")
+    assert result["rule"] == "vault_unavailable" and result["error"] == KEYCHAIN, result
+    s.toolkit._vault = FakeVault(available=(False, ""))
+    assert (await begin(s, "/checkout"))["error"] == "The card vault is not available."
+    assert len(s.posted) == 1 and s.toolkit._pending == {}
+
+
+@pytest.mark.asyncio
+async def test_a_card_store_that_cannot_be_read_says_so(shop):
+    class UnreadableVault(FakeVault):
+        async def get_card_view(self, user_id):
+            raise RuntimeError("database is locked")
+
+    s = shop
+    s.toolkit._vault = UnreadableVault()
+    result = await begin(s, "/checkout")
+    assert result == {
+        "ok": False, "refused": True, "rule": "check_failed",
+        "error": "Could not read the stored card, so nothing was done.",
+    }
+    assert s.toolkit._pending == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path, method", [("/checkout-no-card", None), ("/review-big", "on_file"), ("/checkout-big", "card")]
+)
+async def test_a_refusal_is_filed_under_the_way_the_page_would_pay(shop, path, method):
+    """A page that can be paid neither way is filed with no method."""
+    s = shop
+    assert (await begin(s, path))["refused"] is True
+    rows = await audit_rows(s)
+    assert rows[-1].action == "purchase_refused" and rows[-1].request_data.get("method") == method
+
+
+# ── payment pages as a real task reaches them ──────────────────────────────
+
+
+async def arrive(s, path: str, way: str) -> None:
+    """Load *path* the way a task does: never as the tab's first page."""
+    if way == "after-another-page":
+        await open_page(s, "/grades")
+        await open_page(s, path)
+        return
+    await open_page(s, "/cart")
+    await s.page.click(f'a[href="{path}"]')
+    await s.page.wait_for_url(f"{ORIGIN}{path}")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("way", ["after-another-page", "through-a-cart-link"])
+@pytest.mark.parametrize("path", list(REACHED))
+async def test_a_payment_page_reached_from_another_page_is_paid_with_one_press(shop, path, way):
+    """Once the tab has loaded an earlier page, the main frame's refs carry
+    a frame prefix too: the page still pays, with a card on file or with
+    the vault's card, through the one order button the card was made for."""
+    s = shop
+    target, line = REACHED[path]
+    if path != "/checkout":
+        s.toolkit._vault = ClosedVault()
+    await arrive(s, path, way)
+    arguments = await s.toolkit.begin({"merchant": HOST}, user_id=s.user_id, task_id="t1")
+    assert CARD_KEY in arguments, arguments
+    assert s.toolkit.describe(arguments, user_id=s.user_id) == line
+    result = await run(s, arguments)
+    assert result["ok"] is True, result
+    assert [p for p, _body in s.posted] == [target]
+
+
+@pytest.mark.asyncio
+async def test_amazons_order_button_named_by_another_element_pays_once(shop):
+    s = shop
+    s.toolkit._vault = ClosedVault()
+    arguments = await begin(s, "/amazon-aria")
+    assert s.toolkit.describe(arguments, user_id=s.user_id) == REACHED["/amazon"][1]
+    assert (await run(s, arguments))["ok"] is True
+    assert [p for p, _body in s.posted] == ["/place-order"]
+
+
+@pytest.mark.asyncio
+async def test_an_upsell_among_forty_buttons_is_never_the_button_that_pays(shop):
+    """Every button named like an order button is read, however many other
+    buttons come first: two of them is ambiguous, so no card is made and
+    nothing posts to the upsell."""
+    s = shop
+    s.toolkit._vault = ClosedVault()
+    result = await begin(s, "/review-upsell-among-forty-buttons")
+    assert result["rule"] == "no_card_fields", result
+    assert "more than one order button" in result["error"]
+    assert s.posted == [] and s.toolkit._pending == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path", ["/review-pay-button-beside-an-upsell", "/review-order-link-beside-an-upsell", *UPSELL_SHAPES]
+)
+async def test_an_upsell_beside_an_order_control_in_other_words_is_never_pressed(shop, path):
+    """The real order control says "Pay $23.40", "Continue" or other plain
+    words, is a link, or sits in a frame, so only the upsell's "Buy now" is
+    named like an order button: every control that could place an order is
+    counted (any other POST form's submit button, whatever it says), two is
+    ambiguous, and nothing posts."""
+    s = shop
+    s.toolkit._vault = ClosedVault()
+    await s.page.goto(f"{ORIGIN}{path}", wait_until="load")
+    result = await s.toolkit.begin({"merchant": HOST}, user_id=s.user_id, task_id="t1")
+    assert result["rule"] == "no_card_fields", result
+    assert "more than one order button" in result["error"]
+    assert s.posted == [] and s.toolkit._pending == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", list(NOT_ORDER_CONTROLS))
+async def test_a_toggle_a_link_or_a_gift_card_button_beside_the_order_button_still_pays_once(shop, path):
+    """An "Order summary" toggle, a "Pay in 4 interest-free payments" link,
+    a "Pay with a gift card" button and an "Order details" link place no
+    order, so the one order button is still the one the card is made for
+    and the one pressed."""
+    s = shop
+    s.toolkit._vault = ClosedVault()
+    arguments = await begin(s, path)
+    assert s.toolkit.describe(arguments, user_id=s.user_id) == ON_FILE_LINE, arguments
+    assert arguments[CARD_KEY]["submit_to"] == f"{ORIGIN}/place-order"
+    assert (await run(s, arguments))["ok"] is True
+    assert s.posted == [("/place-order", {})]
+
+
+@pytest.mark.asyncio
+async def test_more_order_buttons_than_crawler_reads_are_refused_as_ambiguous(shop, monkeypatch):
+    from services.tools.browser.checkout import facts as factsmod
+
+    monkeypatch.setattr(factsmod, "_MAX_ORDER_BUTTONS", 1)
+    s = shop
+    result = await begin(s, "/review-twice")
+    assert result["rule"] == "no_card_fields", result
+    assert "more than one order button" in result["error"]
+    assert s.posted == []
+
+
+@pytest.mark.asyncio
+async def test_a_card_frame_past_the_fields_crawler_reads_is_never_paid_with_the_card_on_file(shop):
+    s = shop
+    s.toolkit._vault = ClosedVault()
+    result = await begin_framed(s, "/review-forty-fields-then-a-card-frame")
+    assert result["rule"] == "no_card_fields", result
+    assert result["error"] == (
+        "This page has more fields than Crawler checks, so Crawler cannot tell whether it asks "
+        "for a card and will not pay here."
+    )
+    assert s.posted == [] and s.toolkit._pending == {}
+
+
+@pytest.mark.asyncio
+async def test_a_saved_card_that_asks_for_its_security_code_is_refused_in_plain_words(shop):
+    s = shop
+    s.toolkit._vault = ClosedVault()
+    result = await begin(s, "/review-saved-card-asks-for-its-code")
+    assert result["rule"] == "no_card_fields", result
+    assert result["error"] == (
+        "This page asks for a card number or security code that Crawler cannot fill here, so "
+        "Crawler will not pay here."
+    )
+    assert s.posted == []
+
+
+@pytest.mark.asyncio
+async def test_a_page_scrolled_past_its_payment_line_is_told_to_scroll_back(shop):
+    """Reading the page never scrolls it: what the owner approves is the
+    page as the model left it. Scrolled down to the items, the payment line
+    is off screen, so the refusal says to show it beside the total."""
+    s = shop
+    s.toolkit._vault = ClosedVault()
+    assert CARD_KEY in await begin(s, "/amazon-tall")
+    await s.page.evaluate("window.scrollTo(0, 900)")
+    result = await s.toolkit.begin({"merchant": HOST}, user_id=s.user_id, task_id="t1")
+    assert result["rule"] == "no_card_fields", result
+    assert "scroll so the payment method and the order total show together" in result["error"]
+    assert s.posted == []
+
+
+def test_the_rules_are_listed_in_the_order_the_checkout_checks_them():
+    begin_rules = (
+        "needs_human", "insecure_page", "merchant_mismatch", "no_total", "ambiguous_total",
+        "currency", "no_card_fields", "submit_target", "over_cap", "over_daily_cap",
+        "vault_unavailable", "no_card",
+    )
+    assert CHECKOUT_RULES == (
+        "invalid_arguments", "cancelled", "check_failed", *begin_rules,
+        "unbound_approval", "screen_changed",
+    )

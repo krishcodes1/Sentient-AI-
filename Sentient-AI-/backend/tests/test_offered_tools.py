@@ -21,8 +21,11 @@ from core.config import settings
 from services.agent.approvals import InMemoryApprovalStore
 from services.agent.context_manager import (
     CORE_TOOL_NAMES,
+    LADDER_COMPANIONS,
     MAX_OFFERED_TOOLS,
+    SMALL_WINDOW_OFFERED_TOOLS,
     UNDO_COMPANIONS,
+    offered_tool_cap,
     select_offered_tools,
 )
 from services.agent.runtime import AgentRuntime, PermissionEngine, Tool
@@ -120,25 +123,28 @@ async def test_the_assistant_tools_survive_a_trim(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("connector_types", "switches"),
+    ("connector_types", "switches", "trims"),
     [
-        (("canvas", "google_workspace"), _DEFAULT_SWITCHES | {"scheduled_tasks"}),
-        (("canvas", "google_workspace"), _DEFAULT_SWITCHES | {"scheduled_tasks", "study", "event_triggers"}),
-        ((), _EVERY_CAPABILITY),
-        (("canvas",), _DEFAULT_SWITCHES | {"scheduled_tasks", "study", "event_triggers", "page_watch"}),
-        (("github",), _EVERY_CAPABILITY - {"page_watch"}),
+        (("canvas", "google_workspace"), _DEFAULT_SWITCHES | {"scheduled_tasks"}, True),
+        (("canvas", "google_workspace"), _DEFAULT_SWITCHES | {"scheduled_tasks", "study", "event_triggers"}, True),
+        # A trim again at 40: the leads, starters and their companions fit
+        # (about 36 with every switch on); second tools go to tools.find.
+        ((), _EVERY_CAPABILITY, True),
+        (("canvas",), _DEFAULT_SWITCHES | {"scheduled_tasks", "study", "event_triggers", "page_watch"}, True),
+        (("github",), _EVERY_CAPABILITY - {"page_watch"}, True),
     ],
     ids=["student-scheduled", "student-study-triggers", "no-connectors-all-on", "canvas-opt-ins", "github-most-on"],
 )
 async def test_every_skill_and_account_keeps_its_entry_point_through_a_trim(
-    connector_types: tuple[str, ...], switches: frozenset[str]
+    connector_types: tuple[str, ...], switches: frozenset[str], trims: bool
 ):
     """An opt-in switch must not push out a default-on skill's entry point
     (knowledge.search, video.transcript) or another opt-in's: a trim drops
     second tools (schedule.briefing, study.review, extra reads) first."""
     tools = build_tools(_connected(connector_types, write_scopes=True), enabled_capabilities=switches)
-    assert len(tools) > MAX_OFFERED_TOOLS  # precondition: this is a trim
+    assert (len(tools) > MAX_OFFERED_TOOLS) is trims  # precondition: which cases are a trim
     offered = await _offered_in_a_turn(tools)
+    assert len(offered) == min(len(tools), MAX_OFFERED_TOOLS)
     leads = [t.name for t in tools if t.lead]
     for name in leads:
         assert name in offered, name
@@ -149,6 +155,23 @@ async def test_every_skill_and_account_keeps_its_entry_point_through_a_trim(
         assert any(n.startswith(f"{connector_type}.") for n in leads), connector_type
     if "scheduled_tasks" in switches:
         assert {"knowledge.search", "video.transcript", "schedule.create"} <= offered
+
+
+@pytest.mark.asyncio
+async def test_a_fully_switched_on_install_is_offered_the_tools_its_own_words_name():
+    """Canvas connected and every switch on (the install of 2026-11-12). Its
+    turn was offered browser.read without browser.act, the tool browser.read's
+    refusal and the <shopping> block name, so "book me a movie ticket" ended
+    in "the permissions are turned off" with the switch on; "send me a
+    screenshot of my screen" had no desktop.screenshot to call."""
+    tools = build_tools(_connected(("canvas",), write_scopes=True), enabled_capabilities=_EVERY_CAPABILITY)
+    offered = await _offered_in_a_turn(tools)
+    assert {"browser.read", "browser.act", "browser.checkout"} <= offered
+    assert "desktop.screenshot" in offered
+    # Every entry point and everyday tool the owner switched on or connected.
+    for tool in tools:
+        if tool.lead or tool.starter:
+            assert tool.name in offered, tool.name
 
 
 def test_every_lead_is_a_real_starter():
@@ -201,6 +224,43 @@ def test_the_undo_companions_name_real_tools_of_their_own_family():
         for name in (create, *companions):
             assert resolve_tool(name) is not None, name
             assert name.partition(".")[0] == create.partition(".")[0], name
+
+
+def test_the_ladder_companions_name_real_tools_of_their_own_family():
+    for first, rungs in LADDER_COMPANIONS.items():
+        for name in (first, *rungs):
+            assert resolve_tool(name) is not None, name
+            assert name.partition(".")[0] == first.partition(".")[0], name
+
+
+def test_browser_read_is_chosen_together_with_the_tools_its_refusals_name():
+    """browser.read answers a click it will not make with "use browser.act",
+    and browser.act one that pays with the checkout step: a trim never
+    offers the first rung without the ones the owner switched on."""
+    tools = [
+        *_core(),
+        {**_tool("browser.read", starter=True), "lead": True},
+        *[_tool(f"alpha.t{i}", starter=True) for i in range(8)],
+        _tool("browser.act"),
+        _tool("browser.checkout"),
+    ]
+    offered = _names(select_offered_tools(tools, ["alpha"], max_tools=len(_core()) + 4))
+    assert {"browser.read", "browser.act", "browser.checkout"} <= offered
+    assert len(offered) == 4  # the ladder, then one alpha starter
+    # With "Fill in forms and click" or "Buy things" off, that rung was never
+    # built, and the rest of the ladder is offered without it.
+    without_checkout = [t for t in tools if t["name"] != "browser.checkout"]
+    offered = _names(select_offered_tools(without_checkout, ["alpha"], max_tools=len(_core()) + 4))
+    assert {"browser.read", "browser.act"} <= offered and "browser.checkout" not in offered
+
+
+def test_a_small_window_model_keeps_the_smaller_tool_array():
+    assert offered_tool_cap("gemini-3.5-flash-lite") == MAX_OFFERED_TOOLS
+    assert offered_tool_cap("claude-sonnet-5") == MAX_OFFERED_TOOLS
+    assert offered_tool_cap(None) == MAX_OFFERED_TOOLS
+    # 40 schemas are about 8k tokens: half of a 16k window.
+    assert offered_tool_cap("codellama") == SMALL_WINDOW_OFFERED_TOOLS < MAX_OFFERED_TOOLS
+    assert offered_tool_cap("mistral") == SMALL_WINDOW_OFFERED_TOOLS
 
 
 # ---------------------------------------------------------------------------

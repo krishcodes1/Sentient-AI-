@@ -186,13 +186,15 @@ class PurchaseLedger:
         action_id: Optional[str] = None,
         reason: Optional[str] = None,
         checkout_id: Optional[str] = None,
+        method: Optional[str] = None,
     ) -> None:
         """Append one purchase row. Only the facts of the purchase go in:
         the host, the amount as ``"23.40"``, the currency, the number of
         item lines, the task and the checkout (the random id its approval
         card carries, which pairs an approval with its outcome);
         ``reason`` names a rule or a failure in the toolkit's words, never
-        page text."""
+        page text; ``method`` is what paid ("card" from the vault, or
+        "on_file", the card the shop keeps)."""
         if event not in PURCHASE_EVENTS:
             raise ValueError(f"unknown purchase event {event!r}")
         request_data: dict[str, Any] = {
@@ -206,6 +208,8 @@ class PurchaseLedger:
             request_data["action_id"] = str(action_id)[:120]
         if checkout_id:
             request_data["checkout_id"] = str(checkout_id)[:120]
+        if method:
+            request_data["method"] = str(method)[:16]
         reasoning: dict[str, Any] = {"event": event}
         if reason:
             reasoning["reason"] = str(reason)[:_REASON_CHARS]

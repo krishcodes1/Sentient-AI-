@@ -10,6 +10,11 @@ Canvas LMS connector for Crawler AI.
 Implements OAuth 2.0 + PKCE authentication and provides read/write
 access to courses, assignments, grades, calendar, and submissions
 via the Canvas REST API.
+
+Assignments, submissions and calendar events come back as compact rows
+shaped in ``canvas_assignments`` (as ``canvas_upcoming`` and
+``canvas_activity`` shape theirs), never as Canvas's raw objects: those
+carry signed tokens and launch data, and are many times the result budget.
 """
 
 from __future__ import annotations
@@ -25,7 +30,7 @@ import structlog
 
 from services.agent.permissions import ActionCategory
 
-from . import canvas_grades
+from . import canvas_assignments, canvas_grades
 from .base import (
     AuthenticationError,
     BaseConnector,
@@ -85,11 +90,31 @@ ACTIONS: tuple[ToolSpec, ...] = (
         required_scope="courses.read",
         starter=True,
     ),
+    # Rows shaped in canvas_assignments, never Canvas's raw objects. The
+    # description is long, so it comes only with assignment_id.
     ToolSpec(
         "get_assignments",
-        "List assignments for a Canvas course.",
+        "List a Canvas course's assignments as compact rows (id, name, due_at in "
+        "UTC, points, submission types, link, locked, and the user's own "
+        "submitted/missing/late state; scores are in canvas.get_submissions): work "
+        "still due first, then work with no due date, then past work, latest "
+        "first. Pass assignment_id to read one assignment with its description as "
+        "plain text (up to 8000 characters).",
         ActionCategory.READ,
-        _schema(course_id={"type": "string", "description": "Numeric Canvas course id from canvas.get_courses (not the course code)", "required": True}),
+        _schema(
+            course_id={
+                "type": "string",
+                "description": "Numeric Canvas course id from canvas.get_courses "
+                "(not the course code)",
+                "required": True,
+            },
+            assignment_id={
+                "type": "string",
+                "description": "Omit for the course's list. Pass an id from the list "
+                "(the number that ends an assignment's link) for that one assignment "
+                "with its full description",
+            },
+        ),
         required_scope="assignments.read",
         starter=True,
     ),
@@ -672,12 +697,35 @@ class CanvasConnector(BaseConnector):
             result = [c for _, c in sorted(ended, key=lambda x: x[0], reverse=True)[:10]]
         return result
 
-    async def get_assignments(self, course_id: int | str) -> list[dict[str, Any]]:
-        """Fetch assignments for a given course."""
-        return await self._api_get(
-            f"/courses/{path_segment(course_id)}/assignments",
-            params={"per_page": 100, "order_by": "due_at"},
+    async def get_assignments(
+        self, course_id: int | str, assignment_id: Any = None
+    ) -> dict[str, Any]:
+        """A course's assignments as compact rows or, with *assignment_id*,
+        that one assignment with its description as plain text.
+
+        Canvas's assignment objects are never passed on. Each carries
+        secure_params (a signed token that repeats the description), which
+        the runtime's prompt guard read as an encoded instruction, so every
+        result was replaced; a course's raw list is also many times the
+        result budget. ``include[]=submission`` adds the user's own
+        submission, which becomes the submitted/missing/late flags. A
+        malformed *assignment_id* is refused before any request; a blank
+        one means the list. Shaping and the caps live in
+        ``canvas_assignments``.
+        """
+        course = path_segment(course_id)
+        if assignment_id is None or (isinstance(assignment_id, str) and not assignment_id.strip()):
+            raw = await self._api_get(
+                f"/courses/{course}/assignments",
+                params={"per_page": 100, "order_by": "due_at", "include[]": "submission"},
+            )
+            return canvas_assignments.rows(raw, base_url=self._base_url)
+        wanted = self._numeric_id(assignment_id, "assignment_id")
+        raw = await self._api_get(
+            f"/courses/{course}/assignments/{path_segment(wanted)}",
+            params={"include[]": "submission"},
         )
+        return canvas_assignments.detail(raw, base_url=self._base_url)
 
     async def get_grades(self, course_id: int | str) -> list[dict[str, Any]]:
         """Fetch the current user's enrollments (which contain grades) for a course."""
@@ -724,11 +772,14 @@ class CanvasConnector(BaseConnector):
         except canvas_grades.GradeInputError as exc:
             raise ConnectorError(str(exc)) from exc
 
-    async def get_calendar_events(self) -> list[dict[str, Any]]:
-        """Fetch upcoming calendar events."""
-        return await self._api_get(
+    async def get_calendar_events(self) -> dict[str, Any]:
+        """Calendar events as compact rows (``canvas_assignments``): the raw
+        objects carry HTML and, for an assignment's event, the whole
+        assignment with its secure_params."""
+        raw = await self._api_get(
             "/calendar_events", params={"type": "event", "per_page": 50}
         )
+        return canvas_assignments.calendar_events(raw, base_url=self._base_url)
 
     async def get_upcoming(self, days: Any = None) -> dict[str, Any]:
         """Everything due in the next *days* days across the user's active
@@ -814,13 +865,16 @@ class CanvasConnector(BaseConnector):
 
     async def get_submissions(
         self, course_id: int | str, assignment_id: int | str
-    ) -> list[dict[str, Any]]:
-        """Fetch submissions for a specific assignment."""
-        return await self._api_get(
+    ) -> dict[str, Any]:
+        """An assignment's submissions as compact rows (``canvas_assignments``):
+        the raw objects carry the submitted text and file links with a
+        download token in them."""
+        raw = await self._api_get(
             f"/courses/{path_segment(course_id)}/assignments/"
             f"{path_segment(assignment_id)}/submissions",
             params={"per_page": 100},
         )
+        return canvas_assignments.submissions(raw)
 
     async def submit_assignment(
         self,

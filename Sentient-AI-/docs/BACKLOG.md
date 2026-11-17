@@ -333,6 +333,60 @@ Deferred by the owner: Block sender (F9) and the red-team regression harness, S8
   e.g. `CHECK_FAILED_NOTE`), and a few Security page labels still use a dash (the Site rules
   legend, the Service keys placeholder).
 
+### Assistant dead ends (2026-11-12): follow-ups
+
+Fixed on `fix/assistant-dead-ends` (see SECURITY.md: one-hour site approvals,
+turn steering, approved step, flagged tool output). Left open:
+
+- The injection scanner's word patterns trade false alarms for misses in
+  every precision round (four rounds on 2026-11-12/13: each round that
+  caught more attack wordings flagged dozens of ordinary sentences, and two
+  introduced super-linear patterns, now guarded by a timing sweep). The
+  owner's own message no longer depends on it. The next step is a different
+  approach for tool results, not more patterns: a small classifier, or
+  scanning only what is aimed at the assistant (imperatives addressed to
+  "you" about its own rules) with a fixed vocabulary.
+- Specs that now describe the old behaviour and need a pass:
+  `docs/superpowers/specs/2026-09-25-purchases-design.md` lines 60 to 79 and
+  408 (click refusal wording, `bind_async` live rules and `_page.quiet`,
+  purchase words only with a POST form or a total on the page, wallet rule,
+  `stopped_request`), `docs/superpowers/specs/2026-09-24-browser-control-design.md`
+  lines 51 and 93 (parked sessions close after 2 hours, new tabs adopted,
+  `blocked` on 401/403/429/451/503), `docs/superpowers/plans/2026-09-24-browser-control-contracts.md`
+  lines 53 to 85 (result shapes: `below`, `hint`, `opened_link`,
+  `empty_page`, `new_tab`, `reloaded`), `docs/testing/headless-mac-full-test.md`
+  line 613 (old refusal sentence).
+- A model id no table knows on a local provider still gets the full tool
+  array (40); treat it as a small window when the provider is local.
+- A script button outside any form can send a request during a one-hour
+  site approval. Closing it needs a mark on site-approval runs and a guard
+  mode that keeps the write window shut for them.
+- Seat maps: on Fandango's seat page the seats have no names in the
+  outline and the map is drawn again every few seconds, so a seat click
+  approved at a person's speed can go stale, and the card can only say
+  "an unnamed control" next to its picture. The prompt tells the model to
+  hand the page over (`browser.read` handoff) for a pick the outline cannot
+  show; a named-seat reader for common seat maps would let it ask "which
+  seat?" and click it.
+- A small model still sometimes picks a showtime itself instead of asking
+  (the card names the showtime, so the owner can deny it). A runtime check
+  for "the person named no time and the click names one" would close it.
+- Walled sites: Chrome loads a walled page itself only on a fixed list
+  (`guard._CHROME_LOADS_WALLS`), since its redirects are then judged by the
+  egress proxy for their address only. Intercepting Chrome's own document
+  redirects at the response stage (CDP Fetch, alongside Playwright's
+  routes) would judge every hop and let any walled site load.
+- Card on file: an order button that sends by script with plain words
+  ("Continue" as a `type=button`) or sits in a shadow root is not counted
+  against the one order button, so an upsell's "Buy now" beside it could
+  be the bound button (the card's screenshot is the only check).
+- Sign-in and guest words are still English word lists (titles, guest
+  links); other languages fall back to the model handing the page over.
+- Telegram approval buttons are still pressable while the phone is locked
+  (Telegram's own behaviour); no fix found.
+- `blocked_reasons` on the web chip does not go through `cards._reason_line`
+  yet, so a model-facing refusal text can show there.
+
 ## Track G — Native install (coordinate with Krish; the installer already exists for Docker)
 | ID | Item | Where | Done when | Size |
 |---|---|---|---|---|

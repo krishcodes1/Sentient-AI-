@@ -1,8 +1,10 @@
 """Tests for the Telegram approval channel: link-code linking is single-use and
 expires, only a linked chat's decisions are authorized, an approval card shows
-the call without the screen a desktop.act card stores, and the notifying
-approval-store decorator, message splitting, and poller-conflict backoff all
-behave correctly.
+the call without the screen a desktop.act card stores, a bare "yes" or "no"
+while a card waits points at the card instead of starting a turn, a blocked
+step reaches the chat with its own reason, and the notifying approval-store
+decorator (which keeps each card push until it ends), message splitting, and
+poller-conflict backoff all behave correctly.
 
 Why it exists: Guards the identity boundary between a Telegram chat and the
 account it can approve actions for; the Bot API is faked at the transport level
@@ -332,6 +334,39 @@ async def test_notifying_store_forwards_and_notifies(session_factory, fake_api):
 
 
 @pytest.mark.asyncio
+async def test_a_card_push_still_waiting_survives_garbage_collection():
+    """The event loop holds a running task only weakly. A card push nobody
+    else keeps can be collected while it waits on Telegram, and the card,
+    already stored, then never reaches the chat."""
+    import gc
+
+    from services.agent.approvals import InMemoryApprovalStore
+    from services.notifications import telegram as tg
+
+    started = asyncio.Event()
+
+    async def notify(stored):
+        started.set()
+        # Waits on something only this push holds, as a slow send does.
+        await asyncio.get_running_loop().create_future()
+
+    store = tg.NotifyingApprovalStore(InMemoryApprovalStore(), notify=notify)
+    before = asyncio.all_tasks()
+    await store.create(
+        user_id="u1", tool_name="canvas.submit_assignment", arguments={}, reason="test"
+    )
+    await started.wait()
+    gc.collect()
+    pushes = asyncio.all_tasks() - before
+    assert len(pushes) == 1, "the card push was collected before it finished"
+    for push in pushes:
+        push.cancel()
+    await asyncio.gather(*pushes, return_exceptions=True)
+    # Kept only until it ends: a finished push is not held on to.
+    assert not pushes & tg._CARD_PUSHES
+
+
+@pytest.mark.asyncio
 async def test_status_and_link_routes(client, session_factory, fake_api):
     """Route surface: unconfigured status is honest; linking requires the
     service; unlink always works."""
@@ -465,6 +500,131 @@ async def _link(session_factory, email: str, chat_id: int):
     return user
 
 
+def test_only_the_runtimes_own_ask_shortens_the_note():
+    """The note after a reply names the waiting request from the tool, not
+    from the model's words. It is shortened only when the reply is the
+    runtime's own sentence for exactly those requests: text the model wrote
+    to begin the same way keeps the full note."""
+    from services.agent.runtime import pending_reply
+    from services.notifications.telegram import _turn_notes
+
+    outcome = {"pending_approvals": ["google_workspace.send_email"]}
+    own = pending_reply(outcome["pending_approvals"])
+    assert own.startswith("I need your OK before I")
+    assert _turn_notes(outcome, own) == "\n\nSend /pending to see the request again."
+    assert _turn_notes(outcome, own + "\n\nI also checked your calendar.").startswith("\n\nSend /pending")
+    written = "I need your OK before I show you the seating chart. Tap Approve on the request."
+    assert "I need your OK first to send an email" in _turn_notes(outcome, written)
+    # Nothing waits: no note at all, whatever the reply says.
+    assert _turn_notes({}, own) == ""
+
+
+# What a bare "yes" or "no" gets while an approval card waits.
+TAP_THE_CARD = "Tap Approve or Deny on the request so I know which step you mean."
+
+
+@pytest.mark.asyncio
+async def test_a_bare_yes_or_no_while_a_card_waits_points_at_the_card(session_factory, fake_api):
+    """A typed "yes" cannot answer a card. Run as a turn, it made the model
+    ask for the same step again (a second card) and started a new task; it
+    now gets one plain line and the waiting cards again, and no turn. Only
+    when this chat's last reply asked for the OK: a card that waits from
+    somewhere else never takes a plain answer away from the model."""
+    from models.pending_action import PendingAction, PendingActionStatus
+
+    user = await _link(session_factory, "tg-bare-word@example.com", 515)
+    turns: list[str] = []
+
+    card_ids: list[str] = []
+
+    async def chat(user_id, text, *, new_conversation=False):
+        turns.append(text)
+        if text == "submit it":
+            # The turn that parked the card names it by its id.
+            return {"content": "", "pending_approvals": ["canvas.submit_assignment"], "pending_ids": list(card_ids)}
+        return {"content": "On it."}
+
+    service = _make_service(session_factory)
+    service.chat = chat
+
+    # With nothing waiting, "yes" is a message like any other.
+    await service._handle_message(telegram_dm(515, "yes"))
+    await service.wait_for_chats()
+    assert turns == ["yes"]
+
+    async with session_factory() as session:
+        row = PendingAction(
+            user_id=user.id,
+            tool_name="canvas.submit_assignment",
+            arguments={"course": "CSCI-456"},
+            reason="Submitting on your behalf",
+            status=PendingActionStatus.pending,
+            created_at=datetime.now(timezone.utc),
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+        )
+        session.add(row)
+        await session.commit()
+        card_ids.append(str(row.id))
+
+    # A card waits, but this chat was not asked about it (a scheduled task's
+    # card, one from the web app): "yes" answers whatever the assistant last
+    # said, as a turn.
+    await service._handle_message(telegram_dm(515, "yes"))
+    await service.wait_for_chats()
+    assert turns == ["yes", "yes"]
+    assert not [m for m in fake_api.sent_messages() if m["text"] == TAP_THE_CARD]
+
+    # The turn that asks for the OK: from here a bare word is about the card.
+    await service._handle_message(telegram_dm(515, "submit it"))
+    await service.wait_for_chats()
+    assert turns == ["yes", "yes", "submit it"]
+
+    for word in ("yes", "OK", "Okay!", "approve", "Go ahead.", "do  it", "No", "deny", "cancel?"):
+        before = len(fake_api.sent_messages())
+        await service._handle_message(telegram_dm(515, word))
+        await service.wait_for_chats()
+        line, card = fake_api.sent_messages()[before:]
+        assert line["text"] == TAP_THE_CARD and "reply_markup" not in line, word
+        # The card again, as /pending sends it, with live buttons.
+        assert card["text"].startswith("🔐 Submitting on your behalf"), word
+        buttons = card["reply_markup"]["inline_keyboard"][0]
+        assert [b["callback_data"][:4] for b in buttons] == ["apv:", "dny:"]
+    assert turns == ["yes", "yes", "submit it"]  # none of them started a turn
+
+    # Anything longer is a normal message, as it always was.
+    longer = ["yes please, and cc my advisor", "ok so what's next", "no idea", "yes no"]
+    for text in longer:
+        await service._handle_message(telegram_dm(515, text))
+    await service.wait_for_chats()
+    assert turns == ["yes", "yes", "submit it", *longer]
+
+    # The card this chat asked about still waits, so a bare word is still
+    # about it, whatever was said in between.
+    before = len(fake_api.sent_messages())
+    await service._handle_message(telegram_dm(515, "ok"))
+    await service.wait_for_chats()
+    assert fake_api.sent_messages()[before]["text"] == TAP_THE_CARD and turns[-1] == "yes no"
+
+    # Once it is answered (here: from the web app), a bare word is a message
+    # again, though nothing in this chat said so.
+    async with session_factory() as session:
+        stored = await session.get(PendingAction, row.id)
+        stored.status = PendingActionStatus.approved
+        await session.commit()
+    await service._handle_message(telegram_dm(515, "ok"))
+    await service.wait_for_chats()
+    assert turns[-1] == "ok"
+
+    # A forwarded "yes" is someone else's word: it still reaches the turn
+    # fenced, never this shortcut.
+    forwarded = {**telegram_dm(515, "yes"), "forward_origin": {"type": "hidden_user"}}
+    await service._handle_message(forwarded)
+    await service.wait_for_chats()
+    assert turns[-1] != "yes" and "yes" in turns[-1]
+    assert sum(m["text"] == TAP_THE_CARD for m in fake_api.sent_messages()) == 10
+    await service._client.aclose()
+
+
 @pytest.mark.asyncio
 async def test_plain_text_from_linked_chat_runs_a_turn_and_replies(
     session_factory, fake_api
@@ -578,6 +738,41 @@ async def test_chat_error_and_pending_are_surfaced(session_factory, fake_api):
     last = fake_api.sent_messages()[-1]["text"]
     assert "I drafted the email." in last and "I need your OK first to send an email." in last
     assert "google_workspace" not in last
+    await service._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_blocked_step_reaches_the_chat_with_its_own_reason(session_factory, fake_api):
+    """The reply used to blame "your safety settings" for every blocked
+    step. With the step's reason on the outcome (same order as "blocked"),
+    a message turn and the turn resumed after an approval both say it."""
+    await _link(session_factory, "tg-blocked-reason@example.com", 616)
+    no_card = "No payment card is stored. Add one in Settings, under Payment card."
+    blocked = {"blocked": ["browser.checkout"], "blocked_reasons": [no_card]}
+
+    async def chat(user_id, text, *, new_conversation=False):
+        return {"content": "I got as far as the checkout page.", **blocked}
+
+    async def decide(user_id, action_id, approved):
+        return {"status": "approved", "summary": "I filled in the form.", **blocked}
+
+    service = _make_service(session_factory, decide=decide)
+    service.chat = chat
+    note = f"\n\n⛔ I didn't pay for something on a website. {no_card}"
+    await service._handle_message(telegram_dm(616, "buy the tickets"))
+    await service.wait_for_chats()
+    assert fake_api.sent_messages()[-1]["text"] == "I got as far as the checkout page." + note
+    await service._handle_callback(
+        {
+            "id": "cb-reason",
+            "from": {"id": 616, "is_bot": False},
+            "data": "apv:action-reason",
+            "message": {"chat": {"id": 616, "type": "private"}, "message_id": 3, "text": "req"},
+        }
+    )
+    await service.wait_for_chats()
+    assert fake_api.sent_messages()[-1]["text"] == "I filled in the form." + note
+    assert not any("safety settings" in m["text"] for m in fake_api.sent_messages())
     await service._client.aclose()
 
 

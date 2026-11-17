@@ -25,6 +25,7 @@ from services.tools.browser.snapshot import (
     host_path,
     redact,
     strip_url,
+    strip_url_secrets,
     summarize,
 )
 
@@ -70,10 +71,10 @@ def test_canvas_keeps_screenreader_only_status_in_account_mode():
     assert "      - 'cell \"- Score: not yet graded\" [ref=e37]'" in out.lines
 
 
-def test_canvas_strips_query_and_fragment_from_same_origin_paths():
+def test_canvas_link_keeps_its_query_and_loses_its_fragment():
     out = filter_yaml(fixture("canvas_grades"), account_mode=True, facts=KNOWN)
-    assert "    - /url: /courses/123/grades" in out.lines
-    assert "?sort=due" not in text_of(out) and "#content" not in text_of(out)
+    assert "    - /url: /courses/123/grades?sort=due" in out.lines
+    assert "#content" not in text_of(out)
 
 
 def test_canvas_drops_wrappers_boxes_and_duplicate_labels():
@@ -177,6 +178,56 @@ def test_default_cap_is_8000_and_full_lifts_it_to_24000_at_most():
     assert viewport.truncated and viewport.chars <= DEFAULT_LIMIT_CHARS
     assert full.truncated and DEFAULT_LIMIT_CHARS < full.chars <= FULL_LIMIT_CHARS
     assert huge.chars == full.chars and small.chars <= 500
+
+
+# -- what lies below the outline -------------------------------------------
+
+# A film's page scrolled a little: one link above the screen, a heading and
+# a link on it, the showtimes and a footer link under the bottom edge.
+BELOW_RAW = """- link "Skip to content" [ref=e5] [box=0,-200,100,20]
+- heading "Paper Tiger" [level=1] [ref=e1] [box=0,10,300,40]
+- link "Trailer" [ref=e2] [box=0,60,100,20]
+- list "Showtimes" [ref=e3] [box=0,900,500,400]:
+  - link "7:15 PM" [ref=e4] [box=0,900,100,20]
+  - text: sold out
+- link "Privacy" [ref=e6] [box=0,5000,100,20]"""
+
+
+def test_the_outline_counts_the_lines_that_lie_under_the_visible_part():
+    """The model took the visible part of a page for the whole of it: the
+    outline says how much more there is, so the toolkit can pass it on."""
+    out = filter_yaml(BELOW_RAW, account_mode=True, facts=KNOWN)
+    full = filter_yaml(BELOW_RAW, account_mode=True, full=True, facts=KNOWN)
+    assert out.lines == ['- heading "Paper Tiger" [level=1] [ref=e1]', '- link "Trailer" [ref=e2]']
+    # The list, its two lines and the footer link. The link above the screen
+    # is not under it: a look further down would not bring it back.
+    assert out.below == 4 == len(full.lines) - len(out.lines) - 1
+    # The whole page has nothing below it.
+    assert full.below == 0 and not full.truncated
+
+
+def test_a_line_the_query_brought_up_is_no_longer_counted_as_below():
+    picked = filter_yaml(BELOW_RAW, account_mode=True, query="privacy", facts=KNOWN)
+    assert '- link "Privacy" [ref=e6]' in picked.lines and picked.below == 3
+
+
+def test_lines_the_cap_cut_are_below_what_was_returned_too():
+    full = filter_yaml(BELOW_RAW, account_mode=True, full=True, facts=KNOWN)
+    capped = filter_yaml(BELOW_RAW, account_mode=True, full=True, limit_chars=120, facts=KNOWN)
+    assert capped.truncated and capped.below == len(full.lines) - len(capped.lines) > 0
+    # The visible part, cut by the cap: what the cap cut and what is under the screen.
+    seen = filter_yaml(BELOW_RAW, account_mode=True, limit_chars=50, facts=KNOWN)
+    assert seen.lines == ['- heading "Paper Tiger" [level=1] [ref=e1]'] and seen.below == 5
+
+
+def test_the_count_matches_what_the_whole_page_adds_on_a_saved_page():
+    viewport = filter_yaml(fixture("canvas_grades"), account_mode=True, facts=KNOWN)
+    full = filter_yaml(fixture("canvas_grades"), account_mode=True, full=True, facts=KNOWN)
+    assert viewport.below == len(full.lines) - len(viewport.lines) > 0 and full.below == 0
+
+
+def test_an_outline_built_without_a_count_has_nothing_below():
+    assert Outline("https://a.example/", "A", [], 0, 0, False).below == 0
 
 
 # -- hidden injection ---------------------------------------------------------
@@ -443,6 +494,38 @@ def test_find_returns_the_row_around_each_match():
     assert len(lines) == 16 and len([line for line in lines if line.startswith("- row")]) == 2
 
 
+def test_find_answers_with_the_small_list_item_around_a_films_card():
+    """On the theatre page the film's name sits in an article and its
+    showtimes beside it in the same list item: find("Paper Tiger") came
+    back with the card alone, and the model never saw a time. A list item
+    too large to be "around" the match is not used."""
+    raw = "\n".join([
+        "- list:",
+        "  - listitem:",
+        "    - article:",
+        '      - link "Paper Tiger (2026)" [ref=e1]',
+        "    - list:",
+        '      - link "7:15 PM" [ref=e2]',
+        '      - link "9:40 PM" [ref=e3]',
+        "  - listitem:",
+        "    - article:",
+        '      - link "Other Film" [ref=e4]',
+    ])
+    from services.tools.browser import snapshot as snap
+
+    found = "\n".join(snap.find_lines(raw, "paper tiger"))
+    assert "7:15 PM" in found and "9:40 PM" in found and "Other Film" not in found
+
+    big = "\n".join([
+        "- listitem:",
+        "  - article:",
+        '    - link "Paper Tiger (2026)" [ref=e1]',
+        *[f'  - link "row {i}" [ref=x{i}]' for i in range(snap.FIND_WIDE_LINES + 5)],
+    ])
+    found = snap.find_lines(big, "paper tiger")
+    assert len(found) < 5 and not any("row 3" in line for line in found)
+
+
 def test_find_is_case_insensitive_and_searches_below_the_fold():
     lines = find_lines(fixture("flights"), "$4", account_mode=False, facts=KNOWN)
     assert [line for line in lines if line.startswith("- listitem")] == [
@@ -496,6 +579,179 @@ def test_find_caps_the_number_of_blocks():
 )
 def test_strip_url(url, account, expected):
     assert strip_url(url, account) == expected
+
+
+# -- link addresses in ACCOUNT mode -------------------------------------------
+# Every task runs in ACCOUNT mode. A link there keeps the parameters that
+# say where it goes (a showtime, a date, a theatre) and loses the ones that
+# carry a credential, so the model can open a deep link it read.
+
+SHOWTIME = "https://tickets.example/seats?show=881&date=2026-11-12&theatre=amc-lincoln-square-13"
+
+
+def test_strip_url_secrets_keeps_ordinary_parameters_in_their_order():
+    assert strip_url_secrets(SHOWTIME + "&time=19%3A30#map") == SHOWTIME + "&time=19%3A30"
+    assert strip_url_secrets("/book?f=0&hl=en") == "/book?f=0&hl=en"
+    assert strip_url_secrets("https://www.bing.example/ck/a?!&&p=4f1e&ntb=1") == (
+        "https://www.bing.example/ck/a?!&&p=4f1e&ntb=1"
+    )
+    assert strip_url_secrets("javascript:void(0)") == "javascript:void(0)"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "token", "access_token", "id_token", "refresh_token", "session", "sessionid", "sid", "key",
+        "apikey", "api_key", "auth", "authorization", "code", "state", "sig", "signature",
+        "password", "passwd", "pwd", "otp", "jwt", "secret", "SAMLRequest", "SAMLResponse",
+        "ticket", "nonce", "csrf_token", "signing_key",
+        # the same names as another site spells them
+        "Token", "ACCESS_TOKEN", "accessToken", "access-token", "apiKey", "session_id",
+        "X-Amz-Security-Token", "%74oken",
+        # named for a credential without ending in token or key
+        "client_secret", "user[password]", "new_password", "PHPSESSID", "pass", "code_verifier",
+        "X-Amz-Signature",
+    ],
+)  # fmt: skip
+def test_strip_url_secrets_drops_a_parameter_named_like_a_credential(name):
+    assert strip_url_secrets(f"{SHOWTIME}&{name}=abc123&seat=F7#map") == f"{SHOWTIME}&seat=F7"
+    assert strip_url_secrets(f"/cb?{name}=abc123") == "/cb"
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["date", "q", "page", "zipcode", "promo_code", "chainCode", "statement", "keyword", "author",
+     "sidebar", "tokens"],
+)  # fmt: skip
+def test_strip_url_secrets_keeps_an_ordinary_name_and_one_that_only_holds_a_secret_word(name):
+    url = f"/find?{name}=abc123&x=1"
+    assert strip_url_secrets(url) == url
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "5f4dcc3b5aa765d61d8327deb882cf99aabbccdd",  # 40 hex characters
+        "-__-YW4gb3BhcXVlIHZhbHVlIG1hZGUgZm9yIGEgdGVzdCE",  # base64url
+        "YW4gb3BhcXVlIHZhbHVlIG1hZGUgZm9yIGEgdGVzdA==",  # padded
+        "YW4gb3BhcXVlIHZhbHVlIG1hZGUgZm9yIGEgdGVzdA%3D%3D",
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiI0MiJ9.c2lnbmF0dXJl",  # a JWT: base64 JSON, dots between
+        "eyJ0b2tlbiI6ImFiYyJ9",  # base64 JSON is opaque at any length
+    ],
+)
+def test_strip_url_secrets_drops_a_value_that_is_one_long_opaque_token(value):
+    assert strip_url_secrets(f"/open?doc=7&t={value}&page=2") == "/open?doc=7&page=2"
+    assert strip_url_secrets(f"/unsubscribe?{value}") == "/unsubscribe"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "5f4dcc3b5aa765d61d8327deb882cf99aabbccd",  # 39 characters: an id
+        "paper+tiger+2026+showtimes+near+amc+lincoln+square+13",  # words
+        "https%3A%2F%2Fwww.example.com%2Fmovies%2Fpaper-tiger-2026%2Fshowtimes",  # an address
+        "2026-11-12T19:30:00-05:00,2026-11-12T22:00:00-05:00",
+        "the-very-long-title-of-a-film-about-a-paper-tiger-2026",  # a slug
+        # a wrapped showtime link: an address with ordinary parameters of its own
+        "https%3A%2F%2Ftickets.example.com%2Fshow%3Fshow%3D42%26date%3D2026-11-12",
+    ],
+)
+def test_strip_url_secrets_keeps_a_long_value_that_is_not_one_opaque_token(value):
+    url = f"/open?doc=7&t={value}&page=2"
+    assert strip_url_secrets(url) == url
+
+
+@pytest.mark.parametrize(
+    "wrapped",
+    [
+        "https%3A%2F%2Fapp.example.com%2Fcb%3Faccess_token%3Dabc123",  # a mail link wrapper
+        "%2Faccount%3Fsession%3Dabc123%26tab%3D2",  # next=
+        "https%3A%2F%2Fapp.example.com%2Fcb%23access_token%3Dabc123",  # in the fragment
+        "https%253A%252F%252Fapp.example.com%252Fcb%253Ftoken%253Dabc123",  # encoded twice
+    ],
+)
+def test_strip_url_secrets_drops_a_wrapped_address_that_carries_a_credential(wrapped):
+    """The credential sat one level in, where neither the name of the
+    wrapper parameter nor the look of its value gave it away."""
+    assert strip_url_secrets(f"/go?doc=7&next={wrapped}&page=2") == "/go?doc=7&page=2"
+
+
+def test_a_typed_card_number_in_a_kept_query_is_still_redacted():
+    from services.tools.browser.snapshot import redact
+
+    for spelled in ("4242+4242+4242+4242", "4242%204242%204242%204242"):
+        assert "4242" not in redact(f"/pay?card={spelled}&x=1", ["4242424242424242"])
+
+
+def test_strip_url_secrets_drops_userinfo_and_the_fragment_and_never_raises():
+    assert strip_url_secrets("https://bob:pw123@h.example/a?x=1#access_token=abc") == (
+        "https://h.example/a?x=1"
+    )
+    # An address no browser can open: nothing of it is kept, and the caller
+    # (an outline, a reply) is not stopped by it.
+    assert strip_url_secrets("http://[") == ""
+
+
+LINKS = (
+    '- link "7:30 PM" [ref=e2] [cursor=pointer] [box=8,8,60,18]:\n'
+    "  - /url: /seats?show=881&date=2026-11-12&session=abc123&user=krishq#map\n"
+    '- link "Skip to content" [ref=e3] [cursor=pointer] [box=8,30,97,18]:\n'
+    '  - /url: "#content"\n'
+    '- link "Next page" [ref=e4] [cursor=pointer] [box=8,52,65,18]:\n'
+    '  - /url: "?page=2&token=abc"\n'
+    '- link "Search" [ref=e5] [cursor=pointer] [box=8,74,65,18]:\n'
+    '  - /url: "/find?q=a: b"'
+)
+
+
+def test_account_mode_link_keeps_where_it_goes_and_loses_its_credentials():
+    out = filter_yaml(LINKS, account_mode=True, facts=KNOWN)
+    assert "  - /url: /seats?show=881&date=2026-11-12&user=krishq" in out.lines
+    assert "abc123" not in text_of(out) and "token" not in text_of(out) and "#" not in text_of(out)
+    # What the toolkit typed is still redacted in a parameter that is kept,
+    # and find reads the same lines.
+    typed = filter_yaml(LINKS, account_mode=True, secrets=["krishq"], facts=KNOWN)
+    assert "  - /url: /seats?show=881&date=2026-11-12&user=[redacted]" in typed.lines
+    assert find_lines(LINKS, "show=881", facts=KNOWN) == [
+        "- /url: /seats?show=881&date=2026-11-12&user=krishq"
+    ]
+    assert find_lines(LINKS, "abc123", facts=KNOWN) == []
+
+
+def test_a_quoted_link_address_is_unquoted_stripped_and_quoted_again():
+    # Playwright double-quotes a value YAML would misread: one that starts
+    # with "#" or "?", or holds ": ". Stripped with its quotes on, a link
+    # to "#content" came out as a lone quote.
+    out = filter_yaml(LINKS, account_mode=True, facts=KNOWN)
+    assert [line for line in out.lines if "/url:" in line][1:] == [
+        '  - /url: ""',
+        '  - /url: "?page=2"',
+        '  - /url: "/find?q=a: b"',
+    ]
+    public = filter_yaml(LINKS, account_mode=False, facts=KNOWN)
+    assert [line for line in public.lines if "/url:" in line] == [
+        "  - /url: /seats?show=881&date=2026-11-12&session=abc123&user=krishq#map",
+        '  - /url: "#content"',
+        '  - /url: "?page=2&token=abc"',
+        '  - /url: "/find?q=a: b"',
+    ]
+
+
+@pytest.mark.parametrize("account_mode", [True, False])
+def test_a_link_no_browser_can_open_does_not_cost_the_page_its_outline(account_mode):
+    raw = (
+        '- link "Broken" [ref=e2] [cursor=pointer] [box=8,8,60,18]:\n'
+        "  - /url: http://[\n"
+        '- link "Home" [ref=e3] [cursor=pointer] [box=8,30,60,18]:\n'
+        "  - /url: /home"
+    )
+    out = filter_yaml(raw, account_mode=account_mode, facts=KNOWN)
+    assert out.lines == [
+        '- link "Broken" [ref=e2] [cursor=pointer]:',
+        '  - /url: ""',
+        '- link "Home" [ref=e3] [cursor=pointer]:',
+        "  - /url: /home",
+    ]
 
 
 def test_host_path_drops_scheme_query_and_a_bare_slash():
@@ -645,7 +901,9 @@ async def test_outline_end_to_end_in_account_mode(page):
         "- iframe [ref=e9]: [external tool frame: https://pay.external.test, not shown]"
         in result.lines
     )
-    assert "  - /url: /reset" in result.lines
+    # The link keeps its query and loses its fragment; the page's own
+    # address (above) still loses both.
+    assert "  - /url: /reset?user=krishq" in result.lines
     assert "4111" not in "\n".join(result.lines) and not result.truncated
 
 

@@ -59,6 +59,9 @@ from models.browser_site_rule import BrowserSiteRule
 from models.tool_rule import ToolRule, ToolRuleBuiltin
 from models.file_reputation import FileReputationCall, FileReputationCheck, FileReputationVerdict
 
+# Errand runs (migration 0033): background errands that end in one purchase card.
+from models.errand import Errand
+
 # isort: on
 
 __all__ = [
@@ -142,4 +145,6 @@ __all__ = [
     "FileReputationCall",
     "FileReputationCheck",
     "FileReputationVerdict",
+    # Errand runs (migration 0033).
+    "Errand",
 ]

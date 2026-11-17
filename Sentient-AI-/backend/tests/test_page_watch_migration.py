@@ -42,10 +42,10 @@ def _inspect(db_path: Path):
 PAGE_WATCH_MERGE = "0015_merge_page_watches"
 # Joins the page-watch merge and 0015_app_approvals into one line.
 APP_APPROVALS_MERGE = "0016_merge_app_approvals"
-# The single head: the last of the revisions reserved on top of that merge
+# The single head: after the revisions reserved on top of that merge
 # (0017-0024 for the top10 skills, then 0025-0032 for the security wave;
-# tests/test_integration_seams.py).
-HEAD = "0032_file_reputation"
+# tests/test_integration_seams.py), the errands' 0033 and 0034.
+HEAD = "0035_errand_fingerprint"
 
 
 def _versions(db_path: Path) -> list[str]:

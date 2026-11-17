@@ -64,6 +64,7 @@ from models.user import User
 from services.agent import providers as llm_providers
 from services.agent.providers import ProviderError
 from services.audit import append_auth_event
+from services.auth import get_current_user
 from services.installation import UNREADABLE_KEYS_MESSAGE, RegistrationLocked
 
 logger = structlog.get_logger(__name__)
@@ -426,6 +427,93 @@ async def list_providers(
         )
     provider, model = await installation.llm_defaults()
     return {"providers": providers, "current": {"provider": provider, "model": model}}
+
+
+# Where each provider lists the models a key can use. SUGGESTED_MODELS is
+# only a fallback: any id the provider accepts can be saved, and new
+# releases appear here without a code change.
+_MODEL_LIST_URLS: dict[str, str] = {
+    "openai": "https://api.openai.com/v1/models",
+    "grok": "https://api.x.ai/v1/models",
+    "deepseek": "https://api.deepseek.com/models",
+    "groq": "https://api.groq.com/openai/v1/models",
+    "mistral": "https://api.mistral.ai/v1/models",
+    "anthropic": "https://api.anthropic.com/v1/models?limit=1000",
+    "gemini": "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000",
+}
+# Ids that cannot chat with tools (pictures, speech, embeddings, moderation,
+# legacy completions), which the OpenAI and Gemini lists mix in.
+_NON_CHAT_MODEL = re.compile(
+    r"embed|tts|whisper|transcri|dall-e|image|imagen|veo|lyria|banana|audio|realtime"
+    r"|-live|moderation|aqa|robotics|search-preview|computer-use|deep-research|babbage"
+    r"|davinci|ocr|sora|guard",
+    re.IGNORECASE,
+)
+_MODEL_LIST_TTL_S = 600.0
+# ponytail: per-process cache, keyed by provider and key; fine for one backend.
+_model_list_cache: dict[tuple[str, int], tuple[float, list[str]]] = {}
+
+
+async def _live_models(provider: str, key: Optional[str]) -> Optional[list[str]]:
+    """The chat models *key* can use on *provider*, newest-looking first, or
+    None when the provider could not be asked (no key, network, refusal)."""
+    if provider == "ollama":
+        url = f"{llm_providers.ollama_base_url(settings.OLLAMA_BASE_URL)}/api/tags"
+        headers: dict[str, str] = {}
+    elif key and provider in _MODEL_LIST_URLS:
+        url = _MODEL_LIST_URLS[provider]
+        if provider == "gemini":
+            headers = {"x-goog-api-key": key}
+        elif provider == "anthropic":
+            headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
+        else:
+            headers = {"Authorization": f"Bearer {key}"}
+    else:
+        return None
+    cache_key = (provider, hash(key))
+    cached = _model_list_cache.get(cache_key)
+    if cached and time.monotonic() - cached[0] < _MODEL_LIST_TTL_S:
+        return cached[1]
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url, headers=headers)
+        resp.raise_for_status()
+        body = resp.json()
+    except Exception as exc:
+        # The URL and headers carry the key, so only the type is logged.
+        logger.info("model_list_failed", provider=provider, error_type=type(exc).__name__)
+        return None
+    if provider == "ollama":
+        ids = [m.get("name", "") for m in body.get("models", [])]
+    elif provider == "gemini":
+        ids = [
+            m.get("name", "").removeprefix("models/")
+            for m in body.get("models", [])
+            if "generateContent" in m.get("supportedGenerationMethods", [])
+        ]
+    else:
+        ids = [m.get("id", "") for m in body.get("data", [])]
+    models = sorted(
+        {i for i in ids if i and is_valid_model_id(i) and not _NON_CHAT_MODEL.search(i)},
+        reverse=True,
+    )
+    _model_list_cache[cache_key] = (time.monotonic(), models)
+    return models
+
+
+@router.get("/models/{provider}")
+async def list_models(
+    provider: str, request: Request, _user: User = Depends(get_current_user)
+) -> dict[str, Any]:
+    """Every chat model this Crawler's key for *provider* can use, asked of
+    the provider itself; the suggested few when it cannot be asked. Names
+    only: the key never leaves the server."""
+    name = provider.strip().lower()
+    if name not in LLM_PROVIDERS:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown provider")
+    key = await installation_service(request).llm_api_key(name)
+    live = await _live_models(name, key)
+    return {"models": live or list(SUGGESTED_MODELS.get(name, [])), "live": bool(live)}
 
 
 @router.post("/provider/test")

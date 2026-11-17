@@ -14,9 +14,12 @@ in code, and what is still open.
 2. **Consent before impact.** Write actions (sending email, submitting
    assignments, creating events) and *all* finance reads require explicit
    per-action user approval. Approvals are single-use, owned, and expire.
-3. **Money never moves.** Trading, transfers, withdrawals, and purchases are
+3. **Money never moves on its own.** Trading, transfers and withdrawals are
    hard-blocked at four independent layers and cannot be enabled by any
-   configuration, prompt, or API call.
+   configuration, prompt, or API call. The one exception is a purchase
+   through `browser.checkout`, off by default ("Buy things for me"), which
+   pays only after the owner approves a card showing the site, the amount
+   and the items read from the page (see Financial safety).
 4. **External content is data, not instructions.** Tool results, emails,
    documents, and MCP responses are sanitized and wrapped in an untrusted
    envelope before the model sees them.
@@ -273,6 +276,242 @@ approval ran are audited (`app_approval_granted`, `app_approval_revoked`,
 `approval: "weekly"` on the act's rows). A grant the audit log cannot record
 is taken back.
 
+**One-hour site approvals** (`services/agent/app_approvals.py`,
+`AgentRuntime._site_run`): a `browser.act` card for a click, a choice or a
+tick on an https page also offers "Allow clicks on <site> for 1 hour". The
+approval covers that exact host on port 443 only (never an IP literal),
+from the channel it was given in, and only acts the live page calls quiet
+(`act._quiet`: no form is sent, the page shows no order total, payment
+method on file or wallet, the control is not worded like a purchase and
+does not sit in a form) whose own words do not read as changing or sending
+something (`_SITE_CONSEQUENTIAL`: delete, cancel, send, post, book, agree,
+log out and the like). The control's words come from the toolkit
+(`_page.target`, written at bind time from the live page); a `_page` the
+model sends is stripped first. Typing, submitting, Enter, anything with
+money on the page, and every act after a tool result PromptGuard flagged
+this turn keep their card, and tutor mode's graded-page refusal still
+applies. Listed and revoked with the weekly approvals (Settings →
+Permissions, Telegram `/apps`); audited the same way. Its clicks run
+unasked, so the guard lets them send nothing but to a cart (below); one
+that tries asks with a card next time. With "Ask before
+every website step" on (below), an hour is the only way a website act runs
+without its card; with it off, an hour still covers the quiet clicks an
+errand step does not (the hour is looked up after the errand check, from the
+same bind).
+
+**Website steps without asking** (the "Ask before every website step" switch,
+`browser_ask_every_step`, off by default; `services/tools/browser/act.py`
+`_errand`, `services/agent/app_approvals.py` `errand_covers`,
+`AgentRuntime._errand_run`, the guard's `EgressState.no_orders`): the owner
+asked for one approval per outcome, not one per step. While the switch is
+off, a `browser.act` that the act toolkit judged an errand step on the live
+page runs with no card, in any turn and from any channel. It must be on an
+https page of one public host (never an IP literal or another port) where
+no frame shows an order total or a payment method on file and the card's
+money facts show nothing to pay (a wallet button elsewhere on the page does
+not count: the wallet button itself is refused), and be one of: a key that
+only moves (Tab, Escape, the arrows); typing into fields that are each a
+search box, a quantity, a zip or postal code or a promo code (never a field
+whose words or autocomplete token ask for a name, email, phone, address,
+birth date, card or account details, and never a secret field); a site
+search sent by GET (its button, a submit or Enter, every text field of the
+form one of those); a plain link, unless it is worded like something a
+one-click link does by itself (unsubscribe, sign out, delete, confirm,
+cancel, accept or decline, leave, remove, authorise, grant, connect, opt
+out, end a membership, activate, install...) or like a purchase ("Place
+order", "Buy now", "Book now": a page's script can take a link over
+and send the order with it; a ticket funnel's "Buy tickets" link only
+opens the seat step, and runs); or, on a page that declares
+English, a click or a choice whose words read as no purchase, no price and
+no outcome. The words judged are the ones a person reads on the control
+(its label, text, a button's value, its title), never its name or id
+attributes. The outcome list is the site approvals' list and the owner's,
+by stem (pay, buy, place, book, reserve, order, send, post, share, reply,
+comment, review, follow, subscribe, sign anything but "Sign in", register,
+join, apply, submit, confirm, donate, bid, vote, delete, remove, cancel in
+any form, close an account, block, report, transfer, refund, redeem, agree,
+accept, decline, leave, authorise, grant, connect, add a friend, opt in or
+out, end, stop or pause a membership, repost, retweet, upvote, install,
+activate, disable, log out, clear, save, restart, resume, switch a plan or
+billing, premium, sell, request, turn on or off, make public or private, a
+return, finish, "end my", a bare "Yes", every stem also with re, un, dis or
+down before it (unsend, unblock, downvote, disconnect, reactivate,
+resubscribe), and, for ticks, consent, acknowledge, "I have read", "I
+confirm"); short names a person presses to move on (Cancel, Close,
+Dismiss, OK, Continue, Next, Back, Got it, Accept cookies, Accept all,
+Reject all) are steps by their whole name only, and a cookie banner's own
+Agree, Accept, Allow, Yes or OK is a step only inside a region whose name
+or text says cookies (one that says consent alone, an OAuth screen or a
+terms dialog, is not), its POST form only when that form goes to a cookie
+or consent address. The words only choose which steps are tried unasked;
+the network guard below is what holds. A button that sends a POST form,
+or a script button inside a form, counts only with cart words (add to
+cart, update cart,
+proceed to checkout, "increase" or "decrease" with the quantity, a
+stepper's own name, "Check out" sent to a cart). The toolkit writes its
+verdict (`_page.errand`) with the control's words, the region fact and the
+fields' kinds, and the runtime checks those again before it runs anything;
+a call that carries its own `_page` goes to its card. A step that runs
+with no card (an errand step, and a site approval's click) is marked
+unasked (`app_approvals.unasked_arguments`), and from the step until its
+page has gone quiet (no request for a second, two seconds at most, so a
+save the page debounces is caught; a plain link until its page commits a
+new document, so the page it opens loads as it would for the owner, and a
+link a script takes over instead is judged as a script button) the guard
+is an allowlist, its write window open or not: no request or navigation
+of any frame reaches an order address or an order step (a checkout's entry
+page is a step only when it is not itself an order step), no WebSocket
+message of a page goes out (a shop that runs every click over one socket
+would send the order there), and nothing is sent (a page's fetch or XHR, a frame's
+form, a top-level form) but a GET, a request to a cart address
+(`guard.CART_PATH_RE`: a cart, basket or bag segment, Amazon's
+add-to-cart and buy box addresses; never one with an order verb after the
+cart, such as `/cart/complete`, `/basket/confirm` or
+`/cart/payment-information`, `guard.CART_ORDER_RE`; from a page's script
+only when the step itself is a cart step, its words cart words or a
+quantity) or, by a form, the one form the toolkit judged the step by on
+cart words or as a cookie choice, at the address the card pinned (a form
+that moved elsewhere since the card is refused). A beacon
+(`navigator.sendBeacon`, a link's ping), and a page's POST to another site
+than its own (an analytics or ad host: Fandango's posted on every click),
+is held back without counting as the step sending anything; one whose page
+cannot be told (a worker's) still counts. An order endpoint no list knows (WooCommerce's
+`?wc-ajax=checkout`, Magento's payment-information) is stopped like any
+other address. What may go, and every GET of a page or a frame (an image,
+a GET fetch, a frame's page), is fetched by the guard with its redirects
+held and each hop judged: a page's own request goes on only to a cart or
+a checkout's entry page (Amazon's `/gp/buy/spc/handlers/display.html`,
+`/checkout/entry`, Shopify's `/checkouts/`), the next hop made by the
+guard; a 307 or 308 only to a cart on the same site; a form's redirect is
+a hop the guard judges like any navigation (never to an order address but
+a cart's checkout entry page); a page's or a frame's GET never reaches an
+order step through any number of hops. A step stopped so is refused as
+`auto_submit` and asks with a card the next time it comes on that page
+(remembered by the page's path and the control's name, not by the ref a
+new look renumbers), so a word missing from the lists costs one card, not
+an outcome. A step whose own send already went out (the cart add) is
+reported done, with a note that something else the page sent was held
+back, never as not taken, so it is not taken twice. An approved act's
+window is as it always was. So money moves only through
+`browser.checkout` and its card, except as the residuals below say.
+Everything the site approvals
+keep holds here too: the taint gate (a fill whose text came from a tool
+result gets a card with the risk note; the one exception is short plain
+words, up to 100 characters with no link, email, host name or six-digit
+number, typed into fields that are all errand fields, such as a product
+name read on one page typed into the shop's search box, which runs as an
+errand step with no site approval offered), no unasked step after a tool result
+PromptGuard flagged this turn, a call check that asks for a card (an Always
+ask or sensitive site keeps its card), tutor mode's graded-page refusal and
+every hard rule of the toolkit. Each step is in the turn's tool calls and
+audited with `approval: "errand"`; the count per turn is logged
+(`browser_errand_steps`) and the toolkit's action caps bound it. A scheduled
+or triggered run still makes a card for every non-read; only an errand run
+takes website steps unasked, under these same rules. Turning the switch on
+brings back a card for every step.
+
+The threat this guards against is a legitimate shop where an
+innocent-looking control commits an order, or a page steering the model
+to click one. A hostile site can already misuse a card saved with it as
+soon as the page loads, without any click, so a site working against
+Crawler on purpose is not what this stops. Accepted residuals:
+
+- A deliberately delayed send. The stop lasts one to two seconds after
+  the step; holding it for the page's whole life would break the many
+  real pages that load their own data by POST. So on a page with no money
+  markers, an order a page sends more than a quiet second after the step
+  (on a timer, or after a slow request) goes out.
+- An order sent to a cart-looking address by a cart step. A cart step's
+  page script may send to any cart address that names no order verb
+  after the cart, and a form judged by cart words may send to its own
+  address, so an order a page sends there goes out.
+- A socket a worker opens is never seen, so whatever a click makes the
+  worker send on it goes out.
+- Anything a site does on its own, without a click: on load, on a timer
+  outside a step. A page's own GET
+  outside an unasked step is judged by its first address only, since the
+  browser follows its redirect itself.
+- The word lists are English (a page that declares another language, or
+  none, runs only links, keys and search boxes unasked); a bare
+  "Continue", "OK" or "Cancel" in a dialog whose question gives it weight
+  ("Cancel your plan?") is a step, and so is "Agree" in a cookie dialog
+  that also asks to accept new terms, but what either sends is stopped
+  unless it goes to a cart (or, for "Agree", the banner's own cookie
+  form).
+- Extra cards, never an outcome: a keepalive fetch looks like any other
+  fetch to the browser driver, so analytics sent that way while a step
+  runs are stopped and count as a send; so do typing into a search box
+  whose suggestions the site fetches by POST (Algolia), a single-page
+  app's "Continue" that saves by POST, a cookie platform's consent
+  receipt, a page that a link opens in a new tab and that loads itself by
+  POST at once, a single-page app's link whose new view loads its data by
+  POST in the window (that load fails once and the step asks next time), a
+  step on a page whose socket sends a heartbeat while it runs, and a link
+  whose page committed while something beside it was stopped; a stream
+  (EventSource, long poll) opened in the window waits until its server
+  ends it; a search whose text copies a link or a long
+  run of text Crawler read (a product's full name and link in a calendar
+  note or an email) gets a card, since the taint gate cannot tell the
+  owner's note from a stranger's page.
+
+An owner who wants none of these residuals turns "Ask before every
+website step" on: every website step then gets its card.
+
+**What a browser.act card is tied to** (`services/tools/browser/act.py`
+`_check_outline`): the page's origin and address, and the structure of its
+outline. Typing, a submit and a key press keep that whole-page check (a
+key goes to whatever has the focus). A click, a choice or a tick names one
+control, so its card also stays good when the structure changed around it
+(an advert that loaded, a banner that left, a scroll) as long as the whole
+page still has that control's ref under the name the card was made for. A
+control that is gone or renamed voids the card. What the control would do
+is judged on the live page when the card is made and again when the
+approved act runs (purchase rules, secret fields). Refs a `find` answered
+with can be acted on like refs of an outline (`PageMemory.add_names`).
+
+**Clicks with no card** (`browser.read` click, `services/tools/browser/actions.py`):
+only on a plain link, or a control outside any form on a page with
+nothing to pay; while the click runs and settles, the guard stops every
+request a page script sends but a GET, and every order address. A click
+that did open a page is described as the page it opened, with a note when
+something beside it was stopped (a script's request to an order address is
+named as that, not as statistics); one that opened nothing stays left to
+`browser.act`. A page that came up empty because its own start-up requests
+were stopped with the click is loaded again once, outside the click's
+window, and then gets what any page opened with `open` gets. When a
+stopped navigation leaves the tab on an error page, the tab goes back with
+the window still up, so the page cannot send itself on to the stopped
+address. The answer carries the link the click followed (`opened_link`,
+credentials stripped), which a reply may pass on with its query. A click
+on a link that left the page where it was (a carousel slide that moved, a
+link a banner covers) is finished by opening the link's address, at both
+tiers: with no card that is an `open`, and with a card it is what the
+owner approved; the write window stays shut and the guard judges the
+navigation. A page that checks for automated browsers ("unusual traffic")
+is described as a block with a note to go another way, not handed to the
+person; the model can still hand it over when the task needs that site.
+
+**Turn steering** (`services/agent/steering.py`): before a turn ends on a
+reply, the runtime checks three facts it knows for itself and, when one
+holds, sends the model one fixed correction and lets the turn go on: the
+reply is a tool call written as text (nothing ran), the newest result is a
+click `browser.read` left to `browser.act` (the approval step was never
+asked for), or the reply claims a permission is off while nothing was
+refused this turn. It never parses or runs a call written as text, never
+tells the model to make a call it was quoting from a page, and tells a
+reply that declined for another reason to keep to it. Each correction is
+bounded (two in a row for text calls, one for each of the others per
+state), so the round budget still bounds the turn.
+
+**Approved step, resumed turn**: the turn resumed after an approval starts
+from the approved call's result in the untrusted envelope. A result that
+needs the person (a captcha, a one-time code) or hit a cap ends the turn in
+the runtime's own words with no model call. A failed result says "did not
+run" only when the step was refused before anything was sent; otherwise
+"ran but did not finish". A `browser.checkout` result never closes with
+"call the next browser action": the model is told to report, and not to
+pay again unless the result says nothing was paid and the person asks.
+
 ## Financial safety (four layers)
 
 1. The permission engine hard-blocks the FINANCIAL category and a name
@@ -283,6 +522,51 @@ is taken back.
    trading/transfer method, and its network policy only allowlists
    read endpoints. MCP tools with financial-looking names are suppressed at
    discovery and blocked at dispatch.
+
+**Purchases** (`services/tools/browser/checkout/`, spec
+`docs/superpowers/specs/2026-09-25-purchases-design.md`): with "Buy things
+for me" on, `browser.checkout` is the only way money moves. Its approval
+card is built from facts the toolkit reads off the live page (host, total,
+items, what pays), never from the model's words. On a page with card fields
+it fills the card stored in the vault, never typed by the model; on a final
+review page that shows a card the shop keeps on file next to the order
+total and exactly one order button (Amazon's "Place your order"), the
+approved run presses that one button, bound to a POST to the page's own
+origin, and never opens the vault. Any other control that could place an
+order makes the page ambiguous and nothing is pressed: a button or link in
+order or pay words in any frame, and every other submit button of a POST
+form in the page whatever it says, even one posting to the order's own
+address (an upsell's "Buy now" beside a real "Continue"). Limits: an order
+control that sends by script with plain words ("Continue" as a
+`type=button`), or sits in a shadow root, is not seen; then the card's
+screenshot is the person's check. Per-purchase and daily caps apply to
+both, and every purchase row records which way it paid. Right after the
+order is sent, a frame on another origin than the shop's, drawn on screen,
+in a bank's check words (3-D Secure, "Verified by Visa", a one-time code)
+and with no card field is handed to the person as the bank's check, with
+the order window open for the bank's return to the shop. `browser.read` and
+`browser.act` refuse a step that pays
+(`markers.pay_rule`): an order address, a control next to a typed card, a
+bare price, a wallet button, and purchase wording on a control that sends
+a POST form or sits on a page that shows an order total or a payment
+method on file (a plain link worded that way on such a page too). Purchase
+wording with none of that gets an ordinary approval card that carries a
+money warning. The purchase card warns when the person never named the
+site it pays on ("You didn't name this site. Make sure <host> is where you
+want to buy."): the model choosing Fandango for "a ticket at the AMC" is
+shown, not hidden. A purchase card is tied to the page's structure
+including ticked boxes and chosen options, so a choice made after the card
+voids it.
+
+**Web search through the AI service** (`services/tools/web.py`,
+`GeminiProvider.search_web`): on Gemini, `web.search` first asks the model
+provider's own Google Search grounding, then falls back to the browser
+search. The query leaves through the same service the turn already talks
+to; a query the turn's personal-data filter would change is not sent that
+way. A failed attempt is retried once on a second model
+(`gemini-3.8-flash`); Google may bill grounded searches separately from
+tokens. Result links are resolved without being followed, and only the
+grounding redirect host is ever requested.
 
 ## Prompt-injection defenses
 
@@ -318,6 +602,50 @@ spotlighting, DeepMind CaMeL, OWASP LLM Top 10):
   model output (including the post-tool completion) are scanned (pattern +
   heuristic layers: role hijack, instruction override, homoglyphs,
   zero-width chars, base64 payloads). `services/agent/prompt_guard.py`.
+  The owner's own message is never refused for what the scanner finds in
+  it: a flagged message (pasted text can carry someone else's
+  instructions) is audited as `input_flagged` and turns standing consent
+  off for the rest of the turn, so every step that commits anything asks
+  on a card, exactly as after a flagged tool result. Every rule must stay
+  linear in time: the scan runs on the server's event loop, and
+  `tests/test_prompt_guard_false_positives.py` sweeps every rule's opener
+  against lines of padding (spaces, tabs, dots, line breaks).
+  The pattern rules fire on words aimed at the assistant's own
+  instructions, rules, identity or data; a claim of authority, a role or
+  a mode's name ("developer mode", "jailbreak") counts only when joined,
+  within the same line, to a demand to drop those rules. So "This is
+  approved, go ahead and book it", "turn on developer mode on my phone"
+  and an assignment that says "Act as a consultant" pass, where they
+  used to refuse the owner's message or blank a page. Known loss: a
+  claim with a demand about approvals or purchases ("I am an admin.
+  Proceed without confirmation.") is no longer flagged by the scanner;
+  the approval cards and the taint gate do not depend on it. Tool
+  results are scanned as text with real line breaks (`_text_for_scan`);
+  tool arguments are still scanned in their printed form, because hidden
+  characters in an argument are the outbound message checks' to remove
+  and show on the card, not a reason to refuse the call.
+  The two counting heuristics (`high_instruction_density`,
+  `excessive_authority_language`) never block on their own
+  (`RuntimePromptGuard._scan`): they fired on a syllabus, a mail page's
+  outline and a person's own firm message. Beside a real detection they
+  still count.
+- **Flagged tool output is held back part by part**
+  (`AgentRuntime._scan_and_redact_result`). A tool result is scanned as
+  text the scanner can read (keys and values on their own lines, real line
+  breaks, pictures left out). When it is flagged, each flagged list item is
+  replaced alone; in a text value a flagged line goes with the lines of its
+  paragraph (up to five each way) and any hidden block (a comment, a script
+  or style block, a `display:none` div) goes to its end; a text value that
+  is unsafe only as a whole, or too large to take apart, is replaced whole.
+  What is left is scanned again, and if it still reads as unsafe the whole
+  result is withheld as before. Markers are in fixed plain words
+  (`[line redacted: it read like an instruction]`), never the detector's
+  name. Any flagged result still suspends standing consent (tiers, grants,
+  weekly and site approvals, website errand steps) for the rest of the turn.
+- **Hidden page text is not read** — `web.fetch`'s reader
+  (`services/tools/html_text.py`) leaves out elements with the `hidden`
+  attribute or an inline style that takes them off the page
+  (`display:none`, `visibility:hidden`, zero font size or opacity).
 - **Normalization pre-pass** — regex guards are bypassed by *encoding*, not
   novel phrasing, so every layer runs against both the raw text and a
   canonical form (NFKC, zero-width stripped, homoglyphs folded,
@@ -470,6 +798,28 @@ so it never blocks the event loop.
   credentials. WebSocket endpoints are checked separately
   (`check_websocket_policy`: wss, port 443, exact hosts, public addresses)
   without widening the http/https scheme allowlist.
+- **Crawler's browser goes through a validating proxy**
+  (`services/tools/browser/egress_proxy.py`). Chrome is launched with a
+  forward proxy on 127.0.0.1 (loopback included, `<-loopback>` set
+  explicitly; WebRTC sends no UDP around it): every CONNECT tunnel and
+  plain-http request is to a host resolved once on the proxy's own threads
+  (5 s timeout), every address judged by the egress guard's blocked ranges
+  (`Guard.checked_addresses`), and connected to the judged address. A
+  refused or unreachable host is closed with no answer, so Chrome reports
+  the page as not loaded. The guard still fetches every admitted top-level
+  GET itself and judges each redirect hop. That fetch is not Chrome on the
+  wire, and AMC's Cloudflare (403) and Amazon's search (503) walled it while
+  a plain Chrome got 200; so on a short list of such sites
+  (`guard._CHROME_LOADS_WALLS`: Amazon, AMC, a few large retailers and
+  cinemas), a walled answer to a plain read (no order, checkout or write
+  window, no unasked step, no read click, no change, no handoff) is loaded
+  by Chrome itself. Residual: the redirects Chrome then follows are judged
+  by the proxy for their address only, not for order steps, the owner's
+  site rules or the link lookup, so an open redirect on a listed site
+  could take a read to an order step by GET. Any other site keeps the
+  guard's fetch: one that walls it on purpose cannot hand Chrome an
+  unjudged redirect. Judging Chrome's own redirects at the protocol level
+  would remove the list (docs/BACKLOG.md).
 - **Error text**: connector errors report the HTTP status, a short vendor
   error code and a fixed hint, never the vendor's response body (which can
   echo a token).

@@ -1,6 +1,6 @@
 """The contract between whatever decides an unattended run should happen (the
-schedule sweeper now, the trigger sweeper in wave 2) and what runs it: the
-request, the outcome, the budget state and the runner protocol.
+schedule, trigger and errand sweepers) and what runs it: the request, the
+outcome, the budget state and the runner protocol.
 
 Why it exists: the implementation lives next to the chat pipeline in
 api/routes/agent.py (``build_unattended_runner``: conversations, tools,
@@ -12,7 +12,7 @@ and never import the routes.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional, Protocol
+from typing import Any, Optional, Protocol
 
 from services.agent.unattended import SeedResult
 
@@ -41,7 +41,9 @@ class UnattendedRequest:
     ``max_usd`` None means the owner's per-run cap; ``run_id`` is the
     ledger row this run records into (left out of the budget check);
     ``queue_wait_s`` bounds the wait for a free runner slot, which is not
-    part of ``deadline_s`` (no slot in time: "skipped_busy")."""
+    part of ``deadline_s`` (no slot in time: "skipped_busy");
+    ``card_ttl_minutes`` is how long a card the run parks waits (an
+    errand's purchase card waits longer)."""
 
     user_id: str
     origin: str
@@ -58,14 +60,19 @@ class UnattendedRequest:
     deadline_s: float = 180.0
     run_id: Optional[str] = None
     queue_wait_s: float = 60.0
+    card_ttl_minutes: int = 180
 
 
 @dataclass(frozen=True)
 class UnattendedOutcome:
     """What one run did. ``reply`` is the assistant's text (as stored);
-    ``cards`` how many approval cards it parked; ``unavailable`` the listed
-    tools it could not be offered; ``blocked`` the calls the fence or the
-    taint gate refused; ``budget_usd`` the per-run cap it ran under."""
+    ``cards`` how many approval cards it parked and ``card_ids`` their
+    action ids; ``unavailable`` the listed tools it could not be offered;
+    ``blocked`` the calls the fence or the taint gate refused;
+    ``budget_usd`` the per-run cap it ran under; ``stopped_on`` the browser
+    result that ended the run, when one did (a page that needs the owner:
+    ``needs_human``; a site that turned the browser away: ``site_refused``;
+    a browser cap: ``cap``), with those keys and the link only."""
 
     status: str
     reply: str = ""
@@ -80,6 +87,8 @@ class UnattendedOutcome:
     model: str = ""
     blocked: tuple[str, ...] = ()
     budget_usd: Optional[float] = None
+    card_ids: tuple[str, ...] = ()
+    stopped_on: Optional[dict[str, Any]] = None
 
 
 @dataclass(frozen=True)

@@ -16,30 +16,52 @@ Only ``re`` is imported: ``snapshot.py`` reads this module and must stay
 free of Playwright and of the rest of the checkout package.
 
 The purchase rules browser.act applies to a click, a submit or an Enter
-(``pays``) judge the control that would send the form, never only the
-element the model named: a submit through a plain field sends the form
-through its default button, and Enter activates whatever has the focus.
-Words alone are not enough either. A review page with a payment method
-on file has no card field to protect and its button may say "Confirm",
-so an order form's target path (``ORDER_ACTION_RE``) and a page that
+(``pays``, by the rule ``pay_rule`` names) judge the control that would
+send the form, never only the element the model named: a submit through
+a plain field sends the form through its default button, and Enter
+activates whatever has the focus. An act is refused only where money can
+move from it. A plain link (an http(s) ``<a href>`` to another page,
+opened by GET, with no script or role of its own) that is not aimed at
+an order path is navigation, whatever it says and whatever the page
+around it shows: a film poster that hides "Buy Tickets" in its anchor
+opens the film's page, and refusing it left no tool that could follow
+it. A link or a form aimed at an order path (``ORDER_ACTION_RE``) is
+refused wherever it is. For every other control, words are one signal
+among several. Words that are a purchase refuse the act when it sends a
+POST form or the page shows an order total or a payment method on file;
+with none of that ("Buy tickets", a script button that opens the
+ticketing page) the act goes to its approval card, which shows the owner
+the page and warns. A review page with a payment method on file has no
+card field to protect and its button may say "Confirm", so a typed card
+in the form, a control that is little more than a price and a page that
 shows an order total next to a saved payment method (``TOTAL_LABEL_RE``,
-``SAVED_PAYMENT_RE``) refuse the act too. A page (or any frame of it) that
-shows a payment method on file (a masked card, "ending in 4242", a wallet
-button) next to any price refuses every sending act and every choice
-(check, select) except a plain link; a link or a form aimed at an order
-path is refused wherever it is (``pays``, ``change_pays``). The word lists
-cover the main languages a shop is read in, not English alone.
+``SAVED_PAYMENT_RE``) refuse the act too. A page (or any frame of it)
+that names a payment method on file (a masked card, "ending in 4242")
+next to any price refuses every sending act and every choice (check,
+select) except a plain link (``pays``, ``change_pays``). A wallet button
+(Apple Pay, PayPal...) refuses the act that clicks or chooses it, by its
+own words, not every act on its page: most shops show one next to "Add
+to cart". The word lists cover the main languages a shop is read in, not
+English alone.
 
 A click is judged by the element it lands on, not only the one named: the
 point Playwright clicks (the centre of the element's first box), followed
 into open shadow roots, a <label> mapped to the control it activates. A
 shadow tree nobody can read (a closed root) makes the page's facts unknown,
 which counts as every fact shown. browser.read's click has no approval
-card at all, so it follows only a plain link that is no order path (an
-order history aside: ``READ_LINK_RE``), or clicks a control outside any
-form, with no purchase words, on a page with no order total, payment
-method on file or wallet (``read_click_allowed``); ``read_click_pays``
-refuses first, as before.
+card at all, so it stays strict: it follows only a plain link that is no
+order path (an order history aside: ``READ_LINK_RE``), or clicks a
+control outside any form, with no purchase words, on a page with no
+order total, payment method on file or wallet (``read_click_allowed``);
+``read_click_pays`` refuses first: whatever ``pays`` refuses, any other
+control whose words are a purchase, and anything but a plain link on a
+page that shows a payment method on file or a wallet next to a price.
+
+The judge also says whether the act sends a form by any method
+(``submits``: a search box's "Go" sends by GET). No rule here refuses by
+it; browser.act reads it, with the words and facts above, to say which
+acts only click around (``act._quiet``: what a site approval may run
+with no card).
 
 These lists are defence in depth, not the guarantee: no word list or page
 pattern can be shown to catch every way a click on an arbitrary shop page
@@ -296,9 +318,14 @@ def field_kind(field: dict[str, str]) -> str | None:
 
 # -- buttons that pay ---------------------------------------------------------
 
-# What a control that moves money says. browser.act refuses to click,
-# submit or press Enter on one of these whatever the purchases switch
-# says: paying goes through browser.checkout and its card, or not at all.
+# What a control that moves money says. Where money can move from the act
+# (the control sends a POST form, or the page shows an order total or a
+# payment method on file) browser.act refuses to click, submit or press
+# Enter on one of these whatever the purchases switch says: paying goes
+# through browser.checkout and its card, or not at all (``pay_rule``).
+# Anywhere else the act goes to its approval card, which then carries the
+# money warning. browser.read, which has no card, follows a plain link
+# worded like one (it only opens a page) and clicks nothing else that is.
 # "Checkout" and "Proceed to checkout" are left out on purpose: on a cart
 # page they lead to the checkout page (no money moves there), and the
 # button that does move it is one of these. A shop is not always read in
@@ -365,9 +392,36 @@ PURCHASE_RE = re.compile(
     + "|".join(re.escape(w) for w in PURCHASE_WORDS if _spaceless(w)),
     re.I,
 )
+# A ticket funnel's first link ("Buy tickets for 7:15 PM showtime", a
+# poster's hidden "Buy Tickets"): it opens the seat or quantity step and
+# never pays by itself, so its words are no purchase on a link.
+_TICKET_LINK_RE = re.compile(r"\b(?:buy|purchase|get)\s+tickets?\b", re.I)
+
+
+def link_orders(words: str) -> bool:
+    """Whether a plain link's *words* read as placing an order by
+    themselves (``PURCHASE_RE``, a ticket funnel's "Buy tickets" aside): a
+    page's script can take such a link over and send the order."""
+    return bool(PURCHASE_RE.search(_TICKET_LINK_RE.sub(" ", words)))
+
+
+# What browser.act answers a step that pays. A result the model reads, so
+# it names the tool to call next, and it holds whether 'Buy things for me'
+# is on or off: the old sentence named only the switch, and a refusal with
+# the switch on was passed on to the owner as "permissions are turned off".
 USE_CHECKOUT_MESSAGE = (
-    "Crawler only pays through its own checkout step, which needs 'Buy things for me' on "
-    "in Permissions."
+    "This step pays or places an order, so browser.act does not do it. On the payment page "
+    "call browser.checkout with the site's domain: the person approves the amount first. "
+    "Only if you have no browser.checkout tool is 'Buy things for me' off: then stop here "
+    "and tell the person the page is ready for them, and that they can turn it on in "
+    "Settings, under Permissions."
+)
+# What the person is told about the same refusal (browser.act answers it
+# as ``reason``, and the chat's "I didn't ..." line quotes it): why the
+# step was not done and what happens instead, with no tool named.
+USE_CHECKOUT_REASON = (
+    "That step pays or places an order. I only pay through my payment step, where you "
+    "approve the amount first."
 )
 
 # The label of the amount to pay ("Total", "Order total", "Amount due";
@@ -452,13 +506,21 @@ _ADD_TO_CART_RE = re.compile(
     re.IGNORECASE,
 )
 _LETTERS_RE = re.compile(r"[^\W\d_]+")
+
+
+def adds_to_cart(words: str) -> bool:
+    """Whether *words* put a thing in a cart ("Add to Cart", "Add to bag")."""
+    return bool(_ADD_TO_CART_RE.search(words))
 # How a page says it already holds a way to pay: "the card on file",
 # "your default card", "ending in 4242", "•••• 4242", "Visa ...4242",
-# "Payment method: Visa". Brand names on
+# "Payment method: Visa", "Paying with Visa 1234" (a network and its last
+# four only right after "paying with" or "pay with"). Brand names on
 # their own do not count (a cart page lists the cards it accepts). A
 # masked number reads the same in every language; "ending in" and
 # "Payment method:" are listed in the main ones.
 SAVED_PAYMENT_RE = re.compile(
+    r"\b(?:paying|pay)\s+with\s+(?:visa|master\s?card|amex|american\s+express|discover|jcb"
+    r"|diners(?:\s+club)?|unionpay)\s+\d{4}(?!\d)|"
     r"(?:card|payment(?: method)?|paying|pay|charged?|billed?)\s+(?:on file|saved|stored)"
     r"|(?:saved|stored|default|primary|preferred)\s+(?:card|payment)"
     r"|(?<!\d)(?:\.{2,}|…)\d{4}(?!\d)"
@@ -472,8 +534,9 @@ SAVED_PAYMENT_RE = re.compile(
     re.IGNORECASE,
 )
 # A wallet button (Apple Pay, Google Pay, PayPal, Shop Pay) pays with what
-# the wallet holds: on a button, a wallet's own element or a wallet's
-# frame, it counts as a payment method on file.
+# the wallet holds. On a button, a wallet's own element or a wallet's
+# frame it is the page fact ``wallet``, which a read treats as a payment
+# method on file; browser.act refuses the act whose own target says it.
 WALLET_RE = re.compile(r"apple\s*pay|google\s*pay|\bg\s?pay\b|paypal|shop\s*pay|amazon\s*pay", re.IGNORECASE)
 
 # A form "holds a card" when a number or a security code has been typed
@@ -511,7 +574,7 @@ _CLOSED_HOST_FN = r"""(node => {
 # ``total_line`` is the on-screen total's own text ("Order total: $499.00"),
 # which browser.act's approval card quotes the amount from.
 _PAGE_FACTS_FN = (
-    r"""(() => {
+    r"""((strict) => {
   const clean = s => (s || '').replace(/\s+/g, ' ').trim();
   const TOTAL = __TOTAL__, MONEY = __MONEY__, SAVED = __SAVED__, WALLET = __WALLET__;
   const closed = __CLOSED__;
@@ -522,7 +585,7 @@ _PAGE_FACTS_FN = (
     for (let i = 0; i < roots.length && roots.length < 200; i++) {
       for (const el of roots[i].querySelectorAll('*')) {
         if (el.shadowRoot) roots.push(el.shadowRoot);
-        else if (closed(el)) return unknown;
+        else if (strict && closed(el)) return unknown;
       }
     }
     text = document.body ? document.body.innerText : '';
@@ -573,12 +636,19 @@ _PAGE_FACTS_FN = (
 )
 # ``frame.evaluate(PAGE_FACTS_JS)``: those facts for one frame; browser.act
 # asks every frame of the page and joins the answers (``join_page``).
-PAGE_FACTS_JS = f"() => {_PAGE_FACTS_FN}()"
+PAGE_FACTS_JS = f"() => {_PAGE_FACTS_FN}(true)"
+# The same facts from what can be read, a closed shadow tree left out: for
+# a frame of another site than the page's (an ad's banner, a video player),
+# whose unreadable widget is no part of the page's order.
+PAGE_FACTS_READABLE_JS = f"() => {_PAGE_FACTS_FN}(false)"
 PAGE_FACT_KEYS: tuple[str, ...] = ("order_total", "saved_payment", "wallet", "money")
 
 # What a click, a submit or an Enter would do, as ``pays`` judges it: the
 # words on the control that sends the form (``name``), whether that form
 # holds a card right now, whether the act sends a POST form (``sends``)
+# or a form by any method (``submits``: a search box's "Go" sends by GET;
+# no rule here refuses by it, browser.act reads it to tell an act that
+# only clicks around from one that sends a form)
 # and where to (``action``: the path of the button's ``formaction`` or
 # the form's ``action``), whether the target is a button of any kind
 # (``buttonish``: a script may send an order from one, and an element
@@ -634,6 +704,7 @@ _JUDGE_FN = f"""((control, form) => {{
     card_in_form: cardIn(holder),
     in_form: !!holder,
     sends: !!(sentForm && method === 'post'),
+    submits: !!sentForm,
     buttonish,
     action,
     link,
@@ -818,8 +889,10 @@ def join_page(target: object, pages: list[object]) -> object:
 
 def holds_payment(target: dict[str, object]) -> bool:
     """The page shows a payment method on file (in words, masked, or as a
-    wallet button) and a price: whatever is clicked or chosen there may
-    be the order being placed, in any language."""
+    wallet button) and a price: whatever is clicked there may be the order
+    being placed, in any language. This is browser.read's rule, which has
+    no approval card; browser.act counts only the words (``pay_rule``),
+    since a wallet button sits on most product pages."""
     return bool((target.get("saved_payment") or target.get("wallet")) and target.get("money"))
 
 
@@ -837,46 +910,80 @@ def priced_control(name: str) -> bool:
     return False
 
 
-def pays(target: object, *, order_links: re.Pattern[str] = ORDER_ACTION_RE) -> bool:
-    """Whether the act the scripts above described would place an order:
-    the sending control's words are a purchase, or little more than a
-    price; its form holds a typed card; it sends a form, or is a link,
-    aimed at an order path (*order_links* for a link); it is anything but a
-    plain link on a page that holds a payment method next to a price; or
-    it is a button, or sends a form, on a page that shows an order total
-    and a payment method on file. Anything that is not the scripts' answer
-    (a focus in a frame nobody asked, a click whose landing cannot be
-    known) fails closed."""
+def pay_rule(target: object, *, order_links: re.Pattern[str] = ORDER_ACTION_RE) -> str | None:
+    """The rule under which the act the scripts above described could move
+    money, or None when it could not. browser.act logs the name with its
+    refusal, so a refusal can be traced without the page's words.
+
+    - ``unjudged``: not the scripts' answer (a focus in a frame nobody
+      asked, a click whose landing cannot be known). Fails closed.
+    - ``order_path``: a link aimed at an order path (*order_links*), or a
+      control whose form is. A plain link aimed anywhere else is
+      navigation: None, whatever it says, whatever form it sits in and
+      whatever the page around it shows.
+    - ``card_in_form``: its form holds a typed card.
+    - ``priced_control``: it is little more than a price.
+    - ``wallet_control``: its own words are a wallet's.
+    - ``saved_payment``: the page names a payment method on file next to
+      a price.
+    - ``purchase_words``: its words are a purchase, and it sends a POST
+      form or the page shows an order total or a payment method on file.
+      Words with none of that are left to the approval card.
+    - ``order_review``: it is a button, or sends a form, on a page that
+      shows an order total and a payment method on file."""
     if not isinstance(target, dict) or target.get("frame"):
-        return True
-    name = str(target.get("name") or "")
-    if PURCHASE_RE.search(name):
-        return True
-    if target.get("card_in_form"):
-        return True
-    if ORDER_ACTION_RE.search(str(target.get("action") or "")):
-        return True
+        return "unjudged"
     if target.get("link") and order_links.search(str(target.get("href") or "")):
-        return True
+        return "order_path"
+    name = str(target.get("name") or "")
+    if target.get("plain_link"):
+        # Following a link is navigation, unless the page already shows a
+        # way to pay and the link is worded like the order itself: a link
+        # a script handles ("Place order" in a React cart) looks plain too.
+        shown = target.get("order_total") or target.get("saved_payment")
+        return "purchase_words" if shown and PURCHASE_RE.search(name) else None
+    if target.get("card_in_form"):
+        return "card_in_form"
+    if ORDER_ACTION_RE.search(str(target.get("action") or "")):
+        return "order_path"
     sends = bool(target.get("sends"))
-    if (sends or target.get("buttonish")) and not target.get("link") and priced_control(name):
-        return True
-    if holds_payment(target) and not target.get("plain_link"):
-        return True
-    return bool(
-        (sends or target.get("buttonish")) and target.get("order_total") and target.get("saved_payment")
-    )
+    button = sends or bool(target.get("buttonish"))
+    if button and not target.get("link") and priced_control(name):
+        return "priced_control"
+    if WALLET_RE.search(name):
+        return "wallet_control"
+    saved = bool(target.get("saved_payment"))
+    if saved and target.get("money"):
+        return "saved_payment"
+    if PURCHASE_RE.search(name) and (sends or saved or target.get("order_total")):
+        return "purchase_words"
+    if button and saved and target.get("order_total"):
+        return "order_review"
+    return None
+
+
+def pays(target: object, *, order_links: re.Pattern[str] = ORDER_ACTION_RE) -> bool:
+    """Whether the act the scripts above described could move money
+    (``pay_rule``): browser.act refuses it as ``use_checkout``."""
+    return pay_rule(target, order_links=order_links) is not None
 
 
 def read_click_pays(target: object) -> bool:
     """Whether browser.read, which clicks with no approval card, must leave
-    this click to browser.act: whatever ``pays`` refuses (a link when it
-    is aimed at an order path other than an order history,
-    ``READ_LINK_RE``: /orders is read, /buy/1 is not), and any button (not
-    a link) on a page that shows a price next to an order total or a
-    payment method, where a script behind a button with any words may
-    place the order."""
+    this click to browser.act. A link is judged by its address: one aimed
+    at an order path other than an order history is left (``READ_LINK_RE``:
+    /orders is read, /buy/1 is not), and a plain link aimed anywhere else
+    is followed. For everything else a read stays stricter than an act:
+    whatever ``pays`` refuses, any control whose words are a purchase,
+    anything on a page that shows a payment method on file or a wallet
+    button next to a price, and any button on a page that shows a price
+    next to an order total, where a script behind a button with any words
+    may place the order."""
     if pays(target, order_links=READ_LINK_RE) or not isinstance(target, dict):
+        return True
+    if target.get("plain_link"):
+        return False
+    if PURCHASE_RE.search(str(target.get("name") or "")) or holds_payment(target):
         return True
     return bool(
         target.get("buttonish")
@@ -886,11 +993,16 @@ def read_click_pays(target: object) -> bool:
     )
 
 
-# What browser.read answers a click it will not make: acting is the
-# owner's other switch, and every act shows the owner the page first.
+# What browser.read answers a click it will not make. A result the model
+# reads, so it names the tool that does make it (every act shows the owner
+# the page first), and it holds whether the owner's switch for acting is
+# on or off: the old sentence named only the switch, and with the switch
+# on the model told the owner that permissions were turned off.
 READ_CLICK_MESSAGE = (
-    "Reading can't click that. Ask to fill in forms and click (needs 'Fill in forms and "
-    "click on sites' in Permissions)."
+    'browser.read does not make this click. Call browser.act with action "click" and the '
+    "same ref: the person approves it on a request that shows the page, then it runs. Only "
+    "if you have no browser.act tool is 'Fill in forms and click on sites' off: then tell "
+    "the person they can turn it on in Settings, under Permissions."
 )
 
 
@@ -929,9 +1041,16 @@ def read_click_allowed(target: object) -> bool:
 def change_pays(target: object) -> bool:
     """Whether a check or a select (``CHANGE_TARGET_JS``) may be the order
     being placed: the choice's words are a purchase ("Pay with the card on
-    file"), or the page holds a payment method next to a price. What the
+    file") or a wallet's ("PayPal"), or the page names a payment method on
+    file next to a price. A wallet button elsewhere on the page refuses no
+    choice: a size picker sits next to one on most product pages. What the
     form's own button would do is not asked: a choice sends nothing, and
     the network guard stops a page that sends its form on a change."""
     if not isinstance(target, dict):
         return True
-    return bool(PURCHASE_RE.search(str(target.get("name") or ""))) or holds_payment(target)
+    name = str(target.get("name") or "")
+    return bool(
+        PURCHASE_RE.search(name)
+        or WALLET_RE.search(name)
+        or (target.get("saved_payment") and target.get("money"))
+    )

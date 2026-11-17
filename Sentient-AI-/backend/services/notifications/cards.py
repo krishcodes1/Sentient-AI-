@@ -3,9 +3,10 @@ as plain labelled lines with nothing cut, split into labelled message-sized
 parts when it is long, ending with the question and a short check code of
 the exact arguments; and paces the sending of the parts. Also holds the
 channel-neutral texts that go with a card (the decision line, the reply
-notes for requests waiting on an OK and steps the safety settings skipped,
-the 7-day grant offer, the requests still waiting after a stop) that each
-chat channel finishes with its own commands.
+notes for requests waiting on an OK and for steps that were not allowed,
+each with its own reason when the channel passes one, the 7-day grant
+offer, the requests still waiting after a stop) that each chat channel
+finishes with its own commands.
 
 Why it exists: an approval card must never hide or cut what the owner is
 approving (spec F3), and it must read like a person wrote it, not like a
@@ -47,13 +48,14 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Optional
 
 from services.action_text import (
     GUARD_PHRASES,
     exact_moment,
     field_label,
     field_value,
+    known_tools,
     short_phrase,
 )
 from services.security.call_checks import has_warnings, notes_from
@@ -464,19 +466,99 @@ def _phrases(names: Any) -> tuple[int, list[str]]:
     ]
 
 
-def turn_notes(outcome: dict[str, Any], *, pending_hint: str) -> str:
+# How the runtime's own reply for a turn that parked cards and wrote nothing
+# else begins (services.agent.runtime.pending_reply: "I need your OK before
+# I send an email. Tap Approve or Deny on the request."). A reply that
+# starts this way has already asked, so its note does not ask again.
+OWN_ASK_START = "I need your OK before I"
+
+# Longest reason a blocked step's line quotes, on one line: about a sentence
+# or two, as the fallback line after an approval caps a toolkit's error
+# (api/routes/agent._APPROVED_ERROR_CHARS).
+BLOCKED_REASON_CHARS = 200
+
+
+def _tool_id_pattern() -> re.Pattern[str]:
+    """A tool's id as a reason written for the model names it: a known
+    family, an optional per-account slug, a dot and one of that family's own
+    actions ("browser.act", "google_workspace__1a2b3c4d.send_email"), or an
+    MCP tool ("mcp.linear.create_issue"). Whole names only, so a website
+    whose first label is a family's is not one: "canvas.nyit.edu",
+    "github.com" and "web.dev" stay."""
+    actions: dict[str, set[str]] = {}
+    for name in known_tools():
+        family, _, action = name.partition(".")
+        if action:
+            actions.setdefault(family, set()).add(action)
+    names = [
+        rf"{re.escape(family)}(?:__[0-9a-f]{{8}})?\.(?:{'|'.join(sorted(map(re.escape, of), key=len, reverse=True))})"
+        for family, of in sorted(actions.items())
+    ]
+    return re.compile(
+        r"\b(?:" + "|".join(names) + r"|mcp\.[\w-]+\.[\w-]+)(?![\w-]*\.[a-z])", re.IGNORECASE
+    )
+
+
+# A reason that holds one, or one of the words a person is never shown
+# (docs/bot-message-style.md), was written for the model or a developer.
+_TOOL_ID = _tool_id_pattern()
+_INTERNAL_WORDS = re.compile(r"\b(?:tools?|arguments?|json|schema|parameters?)\b", re.IGNORECASE)
+# The shortest text a long reason is cut back to at a sentence end; a first
+# sentence shorter than this is cut at a word instead.
+_REASON_SENTENCE_FLOOR = 40
+
+
+def _reason_line(reason: Any) -> str:
+    """A blocked step's reason as the reply quotes it: on one line, and when
+    longer than ``BLOCKED_REASON_CHARS`` cut back to the last whole sentence
+    that fits (or, with none, to a whole word and "…"). "" for no reason,
+    one that is not text, and one that names a tool or uses a word a person
+    is never shown: that one was written for the model or a developer."""
+    text = " ".join(reason.split()) if isinstance(reason, str) else ""
+    if not text or _TOOL_ID.search(text) or _INTERNAL_WORDS.search(text):
+        return ""
+    if len(text) <= BLOCKED_REASON_CHARS:
+        return text
+    head = text[:BLOCKED_REASON_CHARS]
+    end = max(head.rfind(". "), head.rfind("! "), head.rfind("? "))
+    if end >= _REASON_SENTENCE_FLOOR:
+        return head[: end + 1]
+    return head[: BLOCKED_REASON_CHARS - 1].rsplit(" ", 1)[0].rstrip(" ,;:") + "…"
+
+
+def turn_notes(
+    outcome: dict[str, Any],
+    *,
+    pending_hint: str,
+    reasons: Any = None,
+    reply: str = "",
+) -> str:
     """What a chat reply adds for what the turn left the person, in plain
-    words and never by tool name: the requests waiting on their OK (the
-    cards are already in the chat, just above the reply) and the steps
-    their safety settings did not allow. Each note starts with a blank
-    line; empty when there is neither. *pending_hint* says how to list the
-    cards again ("send pending", "send /pending").
+    words and never by tool name: the requests waiting on their OK and the
+    steps that were not allowed. Each note starts with a blank line; empty
+    when there is neither. *pending_hint* says how to list the cards again
+    ("send pending", "send /pending").
 
         🔐 I need your OK first to send an email. The request is just
         above, or send pending to see it again.
 
         ⛔ I skipped one step because your safety settings don't allow
         it: click or type in an app on your computer.
+
+    *reply* is the text the notes follow. When it is the runtime's own ask
+    (``OWN_ASK_START``), the first note would say the same thing twice, so
+    it only says how to see the request again, and not where the card is
+    (a card with a picture can reach the chat after the reply):
+
+        Send /pending to see the request again.
+
+    *reasons* are why each blocked step was refused, in the order of the
+    outcome's ``blocked`` names (a switch that is off, a toolkit's rule, a
+    spending cap). A step with a reason gets a line of its own that says
+    it, and only a step without one gets the general sentence above:
+
+        ⛔ I didn't pay for something on a website. No payment card is
+        stored. Add one in Settings, under Payment card.
     """
     notes = ""
     again = pending_hint.strip() if isinstance(pending_hint, str) else ""
@@ -487,7 +569,11 @@ def turn_notes(outcome: dict[str, Any], *, pending_hint: str) -> str:
         return ""
     if pending:
         count, phrases = _phrases(pending)
-        if count == 1:
+        if isinstance(reply, str) and reply.lstrip().startswith(OWN_ASK_START):
+            if again:
+                which = "request" if count == 1 else "requests"
+                notes += f"\n\n{again[:1].upper()}{again[1:]} to see the {which} again."
+        elif count == 1:
             notes += f"\n\n🔐 I need your OK first to {phrases[0]}. The request is just above"
             notes += f", or {again} to see it again." if again else "."
         else:
@@ -496,13 +582,39 @@ def turn_notes(outcome: dict[str, Any], *, pending_hint: str) -> str:
                 "The requests are just above"
             )
             notes += f", or {again} to see them again." if again else "."
-    # What the prompt guard stopped (the person's message, or my reply) is
-    # no skipped step: the reply it wrote already says why
-    # (action_text.GUARD_PHRASES), so it gets no note here.
-    if isinstance(blocked, (list, tuple)):
-        blocked = [name for name in blocked if not (isinstance(name, str) and name in GUARD_PHRASES)]
-    elif isinstance(blocked, str) and blocked in GUARD_PHRASES:
-        blocked = None
+    # Each blocked step with its reason ("" for none). The reasons are in
+    # the names' order, so they are paired before anything is left out.
+    if not isinstance(blocked, (list, tuple)):
+        blocked = [blocked] if blocked else []
+    why = list(reasons) if isinstance(reasons, (list, tuple)) else []
+
+    def said(index: int) -> Optional[str]:
+        """The step's reason as quoted; "" for one that was given but is not
+        a person's to read (the step is then only named); None for none."""
+        raw = why[index] if index < len(why) else None
+        if not isinstance(raw, str) or not raw.strip():
+            return None
+        return _reason_line(raw)
+
+    steps = [
+        (name, said(index))
+        for index, name in enumerate(blocked)
+        # What the prompt guard stopped (the person's message, or my reply)
+        # is no skipped step: the reply it wrote already says why
+        # (action_text.GUARD_PHRASES), so it gets no note here.
+        if not (isinstance(name, str) and name in GUARD_PHRASES)
+    ]
+    # One line per step that has a reason; the same step refused again for
+    # the same reason is said once. A reason written for the model is not
+    # quoted, and the step is not blamed on the person's settings either:
+    # the line only says it was not done.
+    for line in dict.fromkeys(
+        f"⛔ I didn't {short_phrase(name)}. {reason}".rstrip()
+        for name, reason in steps
+        if reason is not None
+    ):
+        notes += f"\n\n{line}"
+    blocked = [name for name, reason in steps if reason is None]
     if blocked:
         count, phrases = _phrases(blocked)
         if count == 1:
