@@ -91,10 +91,12 @@ router = APIRouter(prefix="/setup", tags=["setup"])
 #   https://developers.openai.com/api/docs/deprecations). GPT-6 Astra is
 #   left out on purpose: it cannot call tools over Chat Completions.
 SUGGESTED_MODELS: dict[str, list[str]] = {
-    # 2.5 Flash is refused for new API keys ("no longer available to new
+    # 3.8 Flash first: on 2026-11-17 3.5 Flash-Lite gave up on browser and
+    # computer tasks after one look ("I cannot book..."), and the wizard
+    # preselects the first id. 2.5 Flash is refused for new API keys ("no longer available to new
     # users"), so it is not offered. Each id here has a price in
     # services/usage/pricing.py.
-    "gemini": ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.1-flash-lite"],
+    "gemini": ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"],
     "anthropic": ["claude-sonnet-5", "claude-haiku-4-5-20251001"],
     "openai": ["gpt-6-luna", "gpt-5.4-nano", "gpt-5.6-luna"],
     "grok": ["grok-4.3"],
