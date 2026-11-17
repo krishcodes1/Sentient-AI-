@@ -90,7 +90,7 @@ const PERMISSION_TIERS = [
 const LLM_MODELS: Record<string, string[]> = {
   anthropic: ["claude-sonnet-5", "claude-opus-5-5", "claude-haiku-4-5"],
   openai: ["gpt-5.4-nano", "gpt-5-mini", "gpt-6-luna"],
-  gemini: ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.7-flash", "gemini-3.8-flash"],
+  gemini: ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"],
   grok: ["grok-4.3"],
   deepseek: ["deepseek-flash"],
   groq: ["openai/gpt-oss-120b"],

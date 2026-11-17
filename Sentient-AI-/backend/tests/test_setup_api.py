@@ -347,7 +347,7 @@ async def test_providers_lists_every_provider_without_values(client, env, monkey
     # Gemini id the wizard suggests has a price, so a turn on it is costed.
     from services.usage import price_for
 
-    assert by_name["gemini"]["models"][0] == "gemini-3.5-flash-lite"
+    assert by_name["gemini"]["models"][0] == "gemini-3.8-flash"
     assert "gemini-2.5-flash" not in by_name["gemini"]["models"]
     assert all(price_for("gemini", m) is not None for m in by_name["gemini"]["models"])
     assert by_name["ollama"]["models"] == ["llama3.2"]

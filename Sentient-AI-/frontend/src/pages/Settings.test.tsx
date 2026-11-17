@@ -174,7 +174,7 @@ describe("Settings LLM provider", () => {
   it("pins a provider with its model", async () => {
     vi.mocked(getMe).mockResolvedValue(user());
     vi.mocked(updateSettings).mockResolvedValue(
-      user({ llm_provider: "gemini", llm_model: "gemini-3.5-flash-lite" }),
+      user({ llm_provider: "gemini", llm_model: "gemini-3.8-flash" }),
     );
     render(<Settings />);
 
@@ -184,7 +184,7 @@ describe("Settings LLM provider", () => {
     await waitFor(() =>
       expect(updateSettings).toHaveBeenCalledWith({
         llm_provider: "gemini",
-        llm_model: "gemini-3.5-flash-lite",
+        llm_model: "gemini-3.8-flash",
       }),
     );
   });
