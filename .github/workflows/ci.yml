@@ -46,7 +46,8 @@ jobs:
           # grep's options: -q quiet, -v "a line that does NOT match".
           has() { echo "$files" | grep -q $1 "$2" && echo true || echo false; }
           echo "backend=$(has -vE '^Sentient-AI-/(frontend|desktop)/')" >> "$GITHUB_OUTPUT"
-          echo "frontend=$(has -E '^(Sentient-AI-/frontend/|\.github/workflows/ci\.yml$)')" >> "$GITHUB_OUTPUT"
+          # purchase_notice.txt: frontend/src/pages/purchaseNotice.test.ts compares against it.
+          echo "frontend=$(has -E '^(Sentient-AI-/frontend/|Sentient-AI-/backend/tests/fixtures/purchase_notice\.txt$|\.github/workflows/ci\.yml$)')" >> "$GITHUB_OUTPUT"
           echo "desktop=$(has -E '^(Sentient-AI-/desktop/|\.github/workflows/ci\.yml$)')" >> "$GITHUB_OUTPUT"
 
   # Static gates for the backend. Fast and independent of the test jobs, so
@@ -470,3 +471,17 @@ jobs:
 
       - name: Types
         run: python -m mypy services/platform services/tools/browser
+
+  # The one check to require in branch protection. A skipped job counts as
+  # passing, and a skipped matrix job never reports its per-shard names, so
+  # requiring those would block frontend-only PRs. always(), not !cancelled():
+  # a skipped gate would also count as passing. Coverage and gitleaks are
+  # reporting only and stay out.
+  ci-result:
+    name: CI result
+    if: always()
+    needs: [changes, lint, frontend, desktop-ui, backend, backend-postgres, backend-windows-unit]
+    runs-on: ubuntu-latest
+    steps:
+      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: echo "A required job failed or was cancelled." && exit 1
