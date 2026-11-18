@@ -1,11 +1,14 @@
 """Tests for the built-in web tools: search parsing and truncation, page-fetch
 text extraction and redirect handling, and screenshot capture all work over a
 mocked transport while the real SSRF address-validation policy still runs in
-front of it.
+front of it. Search is also checked on answers that match only part of the
+query (Bing's plain page searching a long query's first word alone): the
+browser is asked, or the rows come back with a note, and research reads none.
 
 Why it exists: The egress policy is deliberately not mocked, so a tool that
 bypasses `validated_addresses` and reaches an internal address would still be
-caught here.
+caught here. A search answer about something else used to come back as a
+plain success, and the model went on to guess page addresses.
 
 Tests for the built-in web tools.
 
@@ -19,6 +22,7 @@ transport, and refusal tests use IP literals or names resolvable from
 
 from __future__ import annotations
 
+from html import escape
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
@@ -35,10 +39,14 @@ from services.tools.net import (
 from services.tools.html_text import clean_result_rows, parse_bing_results
 from services.tools.web import (
     BROWSER_SEARCH_PAGES,
+    FETCH_REFUSED_HINT,
     MAX_PAGE_CHARS,
+    RESEARCH_OFF_TOPIC_NOTE,
     SEARCH_BLOCKED,
+    SEARCH_OFF_TOPIC_NOTE,
     WebToolError,
     WebToolkit,
+    _off_topic,
 )
 
 PUBLIC_ADDRESS = "93.184.216.34"
@@ -207,6 +215,8 @@ async def test_a_bot_check_is_reported_as_blocked_not_as_an_empty_search():
     assert result["blocked"] is True
     assert result["error"] == SEARCH_BLOCKED
     assert "Don't guess addresses" in result["hint"]
+    # Worded for any search, not only for finding a shop.
+    assert "shop" not in result["hint"] and "its own search" in result["hint"]
     assert result["status_code"] == 202
     assert "results" not in result and "count" not in result
 
@@ -252,6 +262,29 @@ WRAPPED_DBRAND = (
     "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.dbrand.com%2Fshop%2Fgrip"
     "%2Fiphone-16-pro-max-cases&rut=abc"
 )
+
+
+@pytest.mark.asyncio
+async def test_the_browser_fallback_reads_rows_only_off_the_search_engines_own_page():
+    """A results address can end up somewhere else (a redirect, a search
+    engine's shortcut syntax). Another site could mark up its page like a
+    results page, so rows are read only when the page that loaded is the
+    engine's own; the next engine is asked instead."""
+    elsewhere = {
+        "ok": True,
+        "host": "tickets.attacker.example",
+        "rows": [{"title": "dbrand grip case", "url": "https://tickets.attacker.example/x", "snippet": "s"}],
+    }
+    real = {
+        "ok": True,
+        "host": "www.bing.com",
+        "rows": [{"title": "Grip Case - dbrand", "url": DBRAND, "snippet": "The grippiest case."}],
+    }
+    browser = FakeBrowser(elsewhere, real)
+    result = await toolkit(challenged, ENGINES).search("dbrand grip case", browser=browser)
+    assert len(browser.urls) == 2  # the first page was skipped, the second read
+    assert [row["url"] for row in result["results"]] == [DBRAND]
+    assert "attacker" not in str(result)
 
 
 @pytest.mark.asyncio
@@ -447,6 +480,29 @@ def test_bings_session_id_is_dropped_from_result_addresses_and_nothing_else():
     ]
 
 
+def test_bings_stand_in_for_a_missing_description_is_not_a_snippet():
+    # Bing prints this where a site keeps its crawler out. Read by the model
+    # it passes for the search tool reporting a block.
+    html = (
+        "<li class='b_algo'><h2><a href='https://www.fandango.com/'>Fandango</a></h2>"
+        "<div class='b_caption'><p>We would like to show you a description here but the "
+        "site won&#8217;t allow us.</p></div></li>"
+        "<li class='b_algo'><h2><a href='https://x.example/'>X</a></h2>"
+        "<div class='b_caption'><p>A real description.</p></div></li>"
+    )
+    assert parse_bing_results(html, 10, 200) == [
+        {"title": "Fandango", "url": "https://www.fandango.com/", "snippet": ""},
+        {"title": "X", "url": "https://x.example/", "snippet": "A real description."},
+    ]
+    # The same words read off Bing's page in the browser.
+    row = {
+        "title": "Fandango",
+        "url": "https://www.fandango.com/",
+        "snippet": "We would like to show you a description here but the site won't allow us.",
+    }
+    assert clean_result_rows([row], 10, 200) == [{**row, "snippet": ""}]
+
+
 @pytest.mark.asyncio
 async def test_a_bot_check_is_answered_from_bings_plain_page_without_a_browser():
     asked: list[tuple[str, str]] = []
@@ -539,6 +595,378 @@ async def test_research_reads_the_sources_bing_found():
     ]
     assert requested[:2] == ["html.duckduckgo.com", "www.bing.com"]
     assert sorted(requested[2:]) == ["docs.python.org", "www.python.org"]
+
+
+# ---------------------------------------------------------------------------
+# search: rows that answer only part of the query
+#
+# Bing's plain page answers a long query with the results for its first word
+# alone: organic, well-formed rows about something else. The Lincoln, AMC and
+# Paper Tiger rows are rebuilt from what it returned on 2026-11-12 for the
+# queries below (lincoln.com, Lincoln Financial and Abraham Lincoln; AMC
+# Theatres' home page, amc.com and AMC+; Wikipedia and IMDb on the film).
+# Their addresses, titles and snippets are written to match, not recorded.
+# The Fandango rows are the same pattern for a query that starts with a
+# site's name.
+# ---------------------------------------------------------------------------
+
+LINCOLN_ROWS = [
+    {
+        "title": "Lincoln Luxury Crossovers and SUVs | Lincoln.com",
+        "url": "https://www.lincoln.com/",
+        "snippet": "Explore the 2026 Lincoln lineup. Build and price a vehicle or find a retailer.",
+    },
+    {
+        "title": "Lincoln Financial: Retirement, Insurance and Wealth Protection",
+        "url": "https://www.lincolnfinancial.com/",
+        "snippet": "Lincoln Financial helps people plan for retirement and protect their income.",
+    },
+    {
+        "title": "Abraham Lincoln - Wikipedia",
+        "url": "https://en.wikipedia.org/wiki/Abraham_Lincoln",
+        "snippet": "Abraham Lincoln was the 16th president of the United States.",
+    },
+]
+AMC_ROWS = [
+    {
+        "title": "AMC Theatres - movie times, movie trailers, buy tickets and gift cards.",
+        "url": "https://www.amctheatres.com/",
+        "snippet": "Find movies near you, view showtimes, watch trailers and buy movie tickets.",
+    },
+    {
+        "title": "AMC: Shows, Movies and Schedule",
+        "url": "https://www.amc.com/",
+        "snippet": "Watch full episodes and video extras for AMC shows.",
+    },
+    {
+        "title": "AMC+ | Stream Exclusive Shows and Movies",
+        "url": "https://www.amcplus.com/",
+        "snippet": "Stream series and films from AMC, Shudder and Sundance Now.",
+    },
+]
+FANDANGO_ROWS = [
+    {
+        "title": "Movie Tickets & Movie Times | Fandango",
+        "url": "https://www.fandango.com/",
+        "snippet": "Buy movie tickets in advance, find showtimes, watch trailers and read reviews.",
+    },
+    {
+        "title": "Fandango Media - Wikipedia",
+        "url": "https://en.wikipedia.org/wiki/Fandango_Media",
+        "snippet": "Fandango Media is a ticketing company that sells movie tickets online.",
+    },
+    {
+        "title": "Fandango at Home",
+        "url": "https://athome.fandango.com/",
+        "snippet": "Rent or buy new movies and TV shows.",
+    },
+]
+PAPER_TIGER_ROWS = [
+    {
+        "title": "Paper Tiger (2026 film) - Wikipedia",
+        "url": "https://en.wikipedia.org/wiki/Paper_Tiger_(2026_film)",
+        "snippet": "Paper Tiger is a 2026 crime drama film.",
+    },
+    {
+        "title": "Paper Tiger (2026) - IMDb",
+        "url": "https://www.imdb.com/title/tt0000000/",
+        "snippet": "Paper Tiger: cast, crew, trailer and release date.",
+    },
+]
+SHOWTIMES_QUERY = "AMC Lincoln Square Paper Tiger showtimes"
+# What a search of the whole query finds.
+SHOWTIMES_ROWS = [
+    {
+        "title": "Paper Tiger showtimes at AMC Lincoln Square 13",
+        "url": "https://www.amctheatres.com/movie-theatres/new-york-city/amc-lincoln-square-13",
+        "snippet": "Tonight's showtimes for Paper Tiger at AMC Lincoln Square 13 in New York.",
+    }
+]
+THEATRE_ROWS = [
+    {
+        "title": "Showtimes",
+        "url": "https://www.amctheatres.com/movie-theatres/lincoln-square-13",
+        "snippet": "",
+    }
+]
+
+
+@pytest.mark.parametrize(
+    ("query", "rows", "off_topic"),
+    [
+        ("Lincoln Square AMC Paper Tiger 2026 showtimes tonight", LINCOLN_ROWS, True),
+        (SHOWTIMES_QUERY, AMC_ROWS, True),
+        ("fandango amc lincoln square 13 showtimes", FANDANGO_ROWS, True),
+        ('"Paper Tiger" movie 2026', PAPER_TIGER_ROWS, False),
+        (SHOWTIMES_QUERY, SHOWTIMES_ROWS, False),
+        # Half of the query's words is enough (paper and tiger of four); under
+        # half is not (the same two of five).
+        ("Paper Tiger AMC showtimes", PAPER_TIGER_ROWS, False),
+        ("Paper Tiger AMC Lincoln showtimes", PAPER_TIGER_ROWS, True),
+        # Two words say too little to judge by.
+        ("AMC showtimes", LINCOLN_ROWS, False),
+        # Fillers and words of one or two letters are not counted: paper,
+        # tiger and 2026 of four, not of ten.
+        ("what are the Paper Tiger 2026 showtimes for tonight near me", PAPER_TIGER_ROWS, False),
+        # A word counts wherever it appears, an address included, in any
+        # case and whatever punctuation the query wraps it in.
+        ('"PAPER TIGER" (AMC), Lincoln-Square: Showtimes?', THEATRE_ROWS, False),
+    ],
+)
+def test_rows_holding_under_half_of_the_querys_words_are_off_topic(query, rows, off_topic):
+    assert _off_topic(query, rows) is off_topic
+
+
+def bing_page(rows: list[dict[str, str]]) -> str:
+    """Bing's plain results page for *rows*, in the markup the parser reads."""
+    items = "".join(
+        f'<li class="b_algo"><h2><a href="{escape(row["url"])}">{escape(row["title"])}</a></h2>'
+        f'<div class="b_caption"><p>{escape(row["snippet"])}</p></div></li>'
+        for row in rows
+    )
+    return f'<html><body><ol id="b_results">{items}</ol></body></html>'
+
+
+def bing_answers(rows: list[dict[str, str]]):
+    """DuckDuckGo asks for a bot check; Bing's plain page answers *rows*."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "www.bing.com":
+            return httpx.Response(200, html=bing_page(rows))
+        return challenged(request)
+
+    return handler
+
+
+def hosts_of_rows(*row_sets: list[dict[str, str]]) -> dict[str, tuple[str, ...]]:
+    """The engines plus every host the rows name, so no test asks real DNS."""
+    hosts = dict(ENGINES)
+    for rows in row_sets:
+        hosts.update({urlparse(row["url"]).hostname: (PUBLIC_ADDRESS,) for row in rows})
+    return hosts
+
+
+@pytest.mark.asyncio
+async def test_bing_rows_for_part_of_the_query_come_back_with_a_note():
+    result = await toolkit(bing_answers(AMC_ROWS), ENGINES).execute(
+        "search", {"query": SHOWTIMES_QUERY}
+    )
+
+    assert result == {
+        "ok": True,
+        "query": SHOWTIMES_QUERY,
+        "source": "bing",
+        "results": AMC_ROWS,
+        "count": 3,
+        "note": SEARCH_OFF_TOPIC_NOTE,
+    }
+    assert result["note"] == (
+        "These results match only part of the query. Search again with fewer words, with "
+        "the exact name first and in quotes, or open the site you need and use its own "
+        "search. Don't guess addresses."
+    )
+
+
+@pytest.mark.asyncio
+async def test_bing_rows_for_part_of_the_query_send_the_search_to_the_browser():
+    browser = FakeBrowser({"ok": True, "rows": SHOWTIMES_ROWS})
+    result = await toolkit(bing_answers(AMC_ROWS), ENGINES).execute(
+        "search", {"query": SHOWTIMES_QUERY}, browser=browser
+    )
+
+    # The browser's answer, as it would be had Bing had no rows at all.
+    assert result == {
+        "ok": True,
+        "query": SHOWTIMES_QUERY,
+        "source": "browser",
+        "results": SHOWTIMES_ROWS,
+        "count": 1,
+    }
+    assert len(browser.urls) == 1
+
+
+@pytest.mark.parametrize(
+    ("query", "rows"),
+    [("python 3.14 release date", BING_ROWS), ('"Paper Tiger" movie 2026', PAPER_TIGER_ROWS)],
+)
+@pytest.mark.asyncio
+async def test_bing_rows_on_topic_stay_as_they_were_and_never_touch_the_browser(query, rows):
+    browser = FakeBrowser()
+    result = await toolkit(bing_answers(rows), ENGINES).search(query, browser=browser)
+
+    assert result == {
+        "ok": True,
+        "query": query,
+        "source": "bing",
+        "results": rows,
+        "count": len(rows),
+    }
+    assert browser.urls == []
+
+
+@pytest.mark.parametrize(
+    "answers",
+    [
+        # "Control a browser" is off.
+        [{"ok": False, "unavailable": True, "error": "Browser control is turned off."}],
+        # Both results pages were challenged or empty.
+        [{"ok": True, "rows": [], "challenge": True}, {"ok": True, "rows": [], "text": ""}],
+    ],
+)
+@pytest.mark.asyncio
+async def test_bings_partial_rows_are_kept_with_the_note_when_the_browser_has_none(answers):
+    browser = FakeBrowser(*answers)
+    result = await toolkit(bing_answers(AMC_ROWS), ENGINES).search(SHOWTIMES_QUERY, browser=browser)
+
+    assert result["ok"] is True and result["source"] == "bing"
+    assert result["results"] == AMC_ROWS and result["note"] == SEARCH_OFF_TOPIC_NOTE
+    assert len(browser.urls) == len(answers)
+
+
+@pytest.mark.asyncio
+async def test_a_browser_that_raises_is_a_browser_with_no_rows_not_a_failed_search():
+    # The browser is now asked after an answer Bing did give, so its failure
+    # must not turn that answer into an error.
+    asked: list[str] = []
+
+    async def closed(url: str, script: str, ready: str) -> dict[str, Any]:
+        asked.append(url)
+        raise RuntimeError("Target page, context or browser has been closed")
+
+    kept = await toolkit(bing_answers(AMC_ROWS), ENGINES).execute(
+        "search", {"query": SHOWTIMES_QUERY}, browser=closed
+    )
+    assert kept["ok"] is True and kept["source"] == "bing"
+    assert kept["results"] == AMC_ROWS and kept["note"] == SEARCH_OFF_TOPIC_NOTE
+    assert len(asked) == len(BROWSER_SEARCH_PAGES)
+
+    blocked = await toolkit(challenged, ENGINES).execute(
+        "search", {"query": SHOWTIMES_QUERY}, browser=closed
+    )
+    assert blocked["ok"] is False and blocked["blocked"] is True
+    assert blocked["error"] == SEARCH_BLOCKED
+
+
+@pytest.mark.asyncio
+async def test_browser_rows_for_part_of_the_query_get_the_note_and_no_second_page():
+    # challenged() answers Bing's plain page with the bot check too. The one
+    # answer is all the browser has: asking it for a second page would raise.
+    browser = FakeBrowser({"ok": True, "rows": AMC_ROWS})
+    result = await toolkit(challenged, ENGINES).search(SHOWTIMES_QUERY, browser=browser)
+
+    assert result == {
+        "ok": True,
+        "query": SHOWTIMES_QUERY,
+        "source": "browser",
+        "results": AMC_ROWS,
+        "count": 3,
+        "note": SEARCH_OFF_TOPIC_NOTE,
+    }
+    assert len(browser.urls) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_largest_search_answer_is_under_ten_thousand_characters_as_shown():
+    """What runtime.RESULT_CHAR_BUDGETS has to hold for web.search: ten rows at
+    their caps (title 140, address 500, snippet 200), the note and a 300
+    character query. The runtime's default of 2000 cuts the middle out of any
+    answer of more than about five rows. With an entry for web.search this
+    checks that entry; until then, the 10000 it needs."""
+    import json
+
+    from services.agent.runtime import RESULT_CHAR_BUDGETS
+
+    rows = [
+        {
+            "title": f"{n} " + "t" * 300,
+            "url": f"https://example.org/{n}/" + "u" * 800,
+            "snippet": "s" * 500,
+        }
+        for n in range(12)
+    ]
+    query = "alpha beta gamma " + "q" * 283
+    result = await toolkit(challenged, ENGINES).search(
+        query, max_results=50, browser=FakeBrowser({"ok": True, "rows": rows})
+    )
+    assert result["count"] == 10 and result["note"] == SEARCH_OFF_TOPIC_NOTE
+    # As the runtime renders a result for the model (_wrap_tool_results).
+    shown = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+    assert 9000 < len(shown) <= RESULT_CHAR_BUDGETS["web.search"]
+
+
+@pytest.mark.asyncio
+async def test_research_reads_nothing_when_the_search_answers_part_of_the_query():
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.host)
+        return bing_answers(AMC_ROWS)(request)
+
+    result = await toolkit(handler, hosts_of_rows(AMC_ROWS)).execute(
+        "research", {"query": SHOWTIMES_QUERY}
+    )
+
+    assert result == {
+        "ok": True,
+        "query": SHOWTIMES_QUERY,
+        "results": [],
+        "note": RESEARCH_OFF_TOPIC_NOTE,
+    }
+    assert "none was read" in result["note"] and "Don't guess addresses" in result["note"]
+    # Not one of the three pages about something else was fetched.
+    assert requested == ["html.duckduckgo.com", "www.bing.com"]
+
+
+@pytest.mark.asyncio
+async def test_research_reads_what_the_browser_found_for_the_whole_query():
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.host)
+        if request.url.host in ENGINES:
+            return bing_answers(AMC_ROWS)(request)
+        return httpx.Response(200, html=PAGE_HTML)
+
+    browser = FakeBrowser({"ok": True, "rows": SHOWTIMES_ROWS})
+    result = await toolkit(handler, hosts_of_rows(AMC_ROWS, SHOWTIMES_ROWS)).execute(
+        "research", {"query": SHOWTIMES_QUERY}, browser=browser
+    )
+
+    assert result["ok"] is True and result["source"] == "browser" and "note" not in result
+    assert [(r["url"], r["ok"]) for r in result["results"]] == [(SHOWTIMES_ROWS[0]["url"], True)]
+    assert requested == ["html.duckduckgo.com", "www.bing.com", "www.amctheatres.com"]
+
+
+@pytest.mark.asyncio
+async def test_the_fixed_notes_and_hints_reach_the_model_through_the_runtimes_scan():
+    """The runtime scans every tool result and redacts one that reads like an
+    instruction to the model. These sentences do tell it what to do next, so
+    each is checked against the real guard: flagged, it would take the whole
+    answer with it."""
+    from tests.test_agent_loop_security import ScriptedProvider, _runtime
+
+    def refused(request: httpx.Request) -> httpx.Response:
+        if request.url.host in ENGINES:
+            return bing_answers(PAPER_TIGER_ROWS)(request)
+        return httpx.Response(403, text="no bots")
+
+    partial = await toolkit(bing_answers(AMC_ROWS), ENGINES).search(SHOWTIMES_QUERY)
+    unread = await toolkit(bing_answers(AMC_ROWS), ENGINES).research(SHOWTIMES_QUERY)
+    blocked = await toolkit(challenged, ENGINES).search(SHOWTIMES_QUERY)
+    wall = await toolkit(refused, {"example.com": (PUBLIC_ADDRESS,)}).fetch_page(
+        "https://example.com/wall"
+    )
+    # Both sources the search found refuse the reader.
+    walled = await toolkit(refused, hosts_of_rows(PAPER_TIGER_ROWS)).research(
+        '"Paper Tiger" movie 2026'
+    )
+    assert (partial["note"], unread["note"]) == (SEARCH_OFF_TOPIC_NOTE, RESEARCH_OFF_TOPIC_NOTE)
+    assert blocked["hint"] and wall["hint"] == FETCH_REFUSED_HINT
+    assert [source["hint"] for source in walled["results"]] == [FETCH_REFUSED_HINT] * 2
+
+    runtime, _, _ = _runtime(ScriptedProvider([]))
+    for result in (partial, unread, blocked, wall, walled):
+        assert await runtime._scan_and_redact_result(result, "u1") == result
 
 
 def test_bing_and_duckduckgo_tracking_links_are_unwrapped_without_being_followed():
@@ -681,6 +1109,42 @@ async def test_fetch_page_reports_http_error_status():
     )
     assert result["ok"] is False
     assert result["status_code"] == 404
+
+
+async def fetch_answered_with(status: int) -> dict[str, Any]:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, html="<p>Access denied</p>")
+
+    return await toolkit(handler, {"example.com": (PUBLIC_ADDRESS,)}).fetch_page(
+        "https://example.com/wall"
+    )
+
+
+@pytest.mark.parametrize("status", [401, 403, 429, 503])
+@pytest.mark.asyncio
+async def test_fetch_page_says_what_to_do_when_a_site_refuses_automated_readers(status: int):
+    assert await fetch_answered_with(status) == {
+        "ok": False,
+        "error": f"Fetch failed with HTTP {status}.",
+        "status_code": status,
+        "url": "https://example.com/wall",
+        "hint": (
+            "This site refuses automated readers. Use another source, or open the page in "
+            "the browser if you can."
+        ),
+    }
+
+
+@pytest.mark.parametrize("status", [404, 410, 500])
+@pytest.mark.asyncio
+async def test_fetch_page_gives_that_hint_for_no_other_failure(status: int):
+    # A missing or broken page is not a refusal: the browser would not help.
+    assert await fetch_answered_with(status) == {
+        "ok": False,
+        "error": f"Fetch failed with HTTP {status}.",
+        "status_code": status,
+        "url": "https://example.com/wall",
+    }
 
 
 # ---------------------------------------------------------------------------

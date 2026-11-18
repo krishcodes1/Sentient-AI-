@@ -4,9 +4,14 @@ user's spend and run count over the last 24 hours, and pruning old rows.
 
 Why it exists: the unique (task_id, scheduled_for) index makes ``start_run``
 the idempotency guard across workers and restarts: a second start for the
-same occurrence gets None and does nothing. Scheduled tasks and (wave 2)
-event triggers share one ledger, so one daily budget covers both. Rows hold
-ids, statuses, token counts and cost only.
+same occurrence gets None and does nothing. Scheduled tasks and event
+triggers share one daily budget. Errand runs (origin ``errand:``) are in the
+same table but have a budget of their own: a ledger made with
+``errands=True`` sums only their rows, every other ledger leaves them out,
+so a 40-cent errand never stops the morning briefing. The calendar finder's
+note reads (origin ``calendar:``) are rows too, one per model call, so their
+daily cap holds across restarts (``spent_since``); no run budget counts them.
+Rows hold ids, statuses, token counts and cost only.
 """
 
 from __future__ import annotations
@@ -46,6 +51,10 @@ RUN_STATUSES = frozenset(
     }
 )
 RETENTION_DAYS = 90
+# The origin prefix of an errand run (services.agent.unattended).
+ERRAND_ORIGIN = "errand:"
+# The origin prefix of the calendar finder's note reads (services/errands).
+CALENDAR_ORIGIN = "calendar:"
 PRUNE_BATCH = 500
 _ERROR_CHARS = 200
 _FINISH_FIELDS = frozenset(
@@ -79,9 +88,11 @@ class AutomationLedger:
         session_factory: Callable[[], Any],
         *,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        errands: bool = False,
     ) -> None:
         self._session_factory = session_factory
         self._clock = clock
+        self._errands = errands
 
     async def start_run(
         self,
@@ -146,15 +157,18 @@ class AutomationLedger:
 
     async def spent_today(self, user_id: Any, *, exclude: Any = None) -> tuple[float, int]:
         """(USD spent, runs made) by *user_id*'s unattended runs over the
-        last 24 hours. Skipped occurrences count as neither, and neither
-        does run *exclude* (the run whose budget is being checked, opened
-        as "running" before it starts)."""
+        last 24 hours: errand runs only, or every other run (see the module
+        docstring). Skipped occurrences count as neither, and neither does
+        run *exclude* (the run whose budget is being checked, opened as
+        "running" before it starts)."""
         from models.scheduled_task import AutomationRun
 
         owner = _uuid(user_id)
         if owner is None:
             return 0.0, 0
         since = self._clock() - timedelta(hours=24)
+        errand = AutomationRun.origin.startswith(ERRAND_ORIGIN, autoescape=True)
+        calendar = AutomationRun.origin.startswith(CALENDAR_ORIGIN, autoescape=True)
         query = select(
             func.coalesce(func.sum(AutomationRun.cost_usd), 0.0),
             func.count(AutomationRun.id),
@@ -162,6 +176,8 @@ class AutomationLedger:
             AutomationRun.user_id == owner,
             AutomationRun.started_at >= since,
             AutomationRun.status.not_in(SKIPPED_STATUSES),
+            errand if self._errands else ~errand,
+            ~calendar,
         )
         skip = _uuid(exclude) if exclude is not None else None
         if skip is not None:
@@ -169,6 +185,21 @@ class AutomationLedger:
         async with self._session_factory() as session:
             spent, runs = (await session.execute(query)).one()
         return float(spent or 0.0), int(runs or 0)
+
+    async def spent_since(self, user_id: Any, origin: str, since: datetime) -> float:
+        """USD *user_id*'s rows of exactly *origin* cost since *since*."""
+        from models.scheduled_task import AutomationRun
+
+        owner = _uuid(user_id)
+        if owner is None:
+            return 0.0
+        query = select(func.coalesce(func.sum(AutomationRun.cost_usd), 0.0)).where(
+            AutomationRun.user_id == owner,
+            AutomationRun.origin == origin,
+            AutomationRun.started_at >= since,
+        )
+        async with self._session_factory() as session:
+            return float((await session.execute(query)).scalar_one() or 0.0)
 
     async def count_since(
         self, user_id: Any, status: str, since: datetime, *, exclude: Any = None

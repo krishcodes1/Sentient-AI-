@@ -37,7 +37,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -49,6 +49,7 @@ from models.conversation import Conversation, Message, MessageRole
 from models.memory import Memory
 from models.pending_action import PendingAction
 from models.user import User
+from models.vault_item import VaultItem
 from services import action_text
 from services import capabilities as capability_registry
 from services.auth import get_current_user
@@ -61,6 +62,7 @@ from services.agent.app_approvals import DEVICE_HEADER, Channel
 from services.agent.providers import ProviderError, ProviderNotConfigured
 from services.agent.runtime import (
     AgentRuntime,
+    ApprovedStep,
     EventSink,
     LoadedTools,
     TurnUsage,
@@ -496,6 +498,10 @@ class PendingApprovalOut(BaseModel):
     # None when the card offers only Approve and Deny
     # (services.agent.app_approvals).
     weekly_app: Optional[str] = None
+    # The website the card's "Allow clicks on this site for 1 hour" button
+    # allows ("tickets.example.com"; a browser.act card), or None when the
+    # card offers none (services.agent.app_approvals).
+    hourly_site: Optional[str] = None
     # The account the card's "Allow low-risk changes" button allows for 7
     # days ("School Gmail"), or None when the card offers no grant
     # (services.agent.permission_grants).
@@ -563,6 +569,7 @@ def _pending_approval_out(pa: Any) -> PendingApprovalOut:
         risk_note=pa.risk_note,
         image=pa.image,
         weekly_app=pa.weekly_app,
+        hourly_site=pa.hourly_site,
         low_risk_account=pa.low_risk_account,
         security_notes=[SecurityNoteOut.model_validate(n) for n in pa.security_notes],
         **_approval_card_fields(pa.tool_name, pa.arguments),
@@ -635,7 +642,10 @@ class ApprovalDecisionRequest(BaseModel):
     # card is approved once. "low_risk": the card's "Allow low-risk changes
     # on <account> for 7 days" button; on a card that offers no grant, or
     # when the action no longer grades LOW, the card is approved once.
-    remember: Optional[Literal["week", "low_risk"]] = None
+    # "site": a browser.act card's "Allow clicks on this site for 1 hour"
+    # button, tied to this browser the same way as "week"; on a card that
+    # offers none the card is approved once.
+    remember: Optional[Literal["week", "low_risk", "site"]] = None
 
 
 class WeeklyApprovalOut(BaseModel):
@@ -654,8 +664,10 @@ class ApprovalDecisionResponse(BaseModel):
     view only, as a turn's ``images`` are; ``message_id`` is the transcript
     row that records the decision, which they belong under (its saved
     tool call keeps the placeholder, spec §9). ``weekly`` is the app the
-    decision allowed for a week, and until when; ``low_risk`` the account
-    it allowed low-risk changes on for 7 days, and until when."""
+    decision allowed for a week, and until when; ``site`` the website it
+    allowed clicks on for an hour (as ``app``), and until when;
+    ``low_risk`` the account it allowed low-risk changes on for 7 days,
+    and until when."""
 
     action_id: str
     approved: bool
@@ -663,12 +675,29 @@ class ApprovalDecisionResponse(BaseModel):
     images: list[TurnImageOut] = []
     message_id: Optional[str] = None
     weekly: Optional[WeeklyApprovalOut] = None
+    site: Optional[WeeklyApprovalOut] = None
     low_risk: Optional[LowRiskGrantOut] = None
 
 
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
+
+# What a turn is told, after <permissions>, while buying is on and this
+# account has no card in the vault. The model repeats what it reads, so it is
+# written the way the person should hear it (docs/bot-message-style.md).
+NO_CARD_BLOCK = (
+    "<payment>\n"
+    "No payment card is stored in Crawler for this person. A shop that keeps their "
+    "card on file (an Amazon account with a saved card) can still be paid: go on to "
+    "the shop's final review page, where the saved card, the total and the order "
+    "button show, and call browser.checkout there. A page that asks for a card "
+    "number can't be paid until they add a card on the computer Crawler runs on, in "
+    "Settings, under Payment card (it can't be typed in chat): say that once, only "
+    "at such a page. Never stop a task early because of it.\n"
+    "</payment>"
+)
 
 
 async def _capability_view(installation: Any) -> tuple[frozenset[str], str]:
@@ -761,6 +790,18 @@ async def _build_tools_and_memory(
         for c in connector_rows
     ]
     enabled_capabilities, permissions_text = await _capability_view(installation)
+    if "purchases" in enabled_capabilities:
+        # The switch is the install's, the vault is each account's: with
+        # buying on and no card stored, say so before the task starts. The
+        # checkout only found out at its last step, after the person had
+        # approved every click on the way there.
+        cards = await db.execute(
+            select(func.count())
+            .select_from(VaultItem)
+            .where(VaultItem.user_id == current_user.id, VaultItem.kind == "card")
+        )
+        if not cards.scalar_one():
+            permissions_text = f"{permissions_text}\n{NO_CARD_BLOCK}"
     tools = build_tools(
         connector_specs,
         user_default_tier=current_user.default_permission_tier,
@@ -2008,12 +2049,20 @@ class ResumedTurn:
     to persist, and what a channel's reply must add to its text — the
     approvals the turn parked, the calls security policy blocked, and the
     photos it captured (the same facts ``build_chat_applier`` returns for
-    a message turn)."""
+    a message turn). ``blocked_reasons`` holds each blocked call's own
+    reason, in the order of ``blocked``."""
 
     message: Message
     pending_approvals: list[str] = field(default_factory=list)
+    # The ids of those requests, in the same order: a chat ties what it
+    # asked for to the exact card (a bare "yes" is about that one).
+    pending_ids: list[str] = field(default_factory=list)
     blocked: list[str] = field(default_factory=list)
+    blocked_reasons: list[str] = field(default_factory=list)
     images: list[dict[str, str]] = field(default_factory=list)
+    # The links the turn's pages showed (and the approved step's page):
+    # the reply may pass these on with their query (strip_reply_urls).
+    shown_links: frozenset[str] = frozenset()
 
 
 def resume_failure_text(exc: BaseException) -> str:
@@ -2142,25 +2191,22 @@ async def _resume_after_approval(
     turn's acts in an app allowed for a week from there need no card.
     """
     rows = await _recent_messages(db, conversation.id)
+    approved_step: Optional[ApprovedStep] = None
     if approved is not None:
         history = _history_from_rows(rows, skip_id=approved.row_id)
+        # The runtime ends the history on the approved call's result, as tool
+        # output (fenced, tainted, never scanned as the person's message).
         # The model is told a picture reached the person only when the
         # channel forwards one (_channel_image: the web chat and Telegram
         # deliver the same set, from _apply_decision).
-        history.append(
-            {
-                "role": "user",
-                "content": runtime.approved_call_message(
-                    approved.tool_name,
-                    approved.result,
-                    image_delivered=_channel_image(approved.tool_name, approved.result)
-                    is not None,
-                ),
-            }
+        approved_step = ApprovedStep(
+            approved.tool_name,
+            approved.result,
+            image_delivered=_channel_image(approved.tool_name, approved.result) is not None,
         )
     else:
         history = _history_from_rows(rows)
-    if not history:
+    if not history and approved_step is None:
         return None
     # The decision row is an assistant message, so this is still the user
     # message that started the task: the resume keeps its caps.
@@ -2202,6 +2248,7 @@ async def _resume_after_approval(
             loaded_tools=loaded_tools,
             channel=channel,
             tutor=turn_context.tutor,
+            approved_step=approved_step,
         )
     except asyncio.CancelledError:
         # Stopped from a chat channel mid-turn: keep the calls already
@@ -2229,7 +2276,20 @@ async def _resume_after_approval(
     return ResumedTurn(
         message=message,
         pending_approvals=[pa.tool_name for pa in agent_response.pending_approvals],
+        pending_ids=[pa.action_id for pa in agent_response.pending_approvals],
         blocked=[ba.tool_name for ba in agent_response.blocked_actions],
+        blocked_reasons=[ba.reason for ba in agent_response.blocked_actions],
+        shown_links=shown_links(
+            [
+                *agent_response.tool_calls,
+                # The approved step's own page counts as one of the turn's.
+                *(
+                    [{"name": approved.tool_name, "result": approved.result}]
+                    if approved is not None
+                    else []
+                ),
+            ]
+        ),
         images=_channel_photos(
             agent_response.tool_calls, _account_mode(agent_response.tool_calls)
         ),
@@ -2363,7 +2423,16 @@ async def _apply_decision(
     if approved and "error" not in result and result.get("origin"):
         # A card an unattended run parked: its one call ran and is recorded;
         # no model turn resumes (services.agent.unattended).
-        return await _finish_origin_card(db, result, conversation)
+        return await _finish_origin_card(
+            db, result, conversation, user_id=current_user.id, action_id=action_id
+        )
+    if not approved and "error" not in result and result.get("tool") == "browser.checkout":
+        # Denying an errand's purchase card cancels the errand and lets its
+        # held page go (services/automation/errands.py); any other card is
+        # just denied.
+        from services.automation import errands
+
+        await errands.card_denied(db, action_id, current_user.id)
     if "error" in result or conversation is None or not approved:
         return result
 
@@ -2439,14 +2508,17 @@ async def _apply_decision(
             # turn's usage lets the channel show what it cost, and the
             # notes what its reply must add (a card it parked, a block).
             result["assistant_reply"] = (
-                strip_url_queries(resumed.message.content)
-                if _account_mode(resumed.message.tool_calls)
+                strip_reply_urls(resumed.message.content, resumed.shown_links)
+                # The approved step's own page counts as one of the turn's.
+                if _account_mode([*(resumed.message.tool_calls or []), *own_call])
                 else resumed.message.content
             )
             result["assistant_turn"] = turn
             result["assistant_notes"] = {
                 "pending_approvals": resumed.pending_approvals,
+                "pending_ids": resumed.pending_ids,
                 "blocked": resumed.blocked,
+                "blocked_reasons": resumed.blocked_reasons,
                 "images": (own_photos + resumed.images)[:MAX_CHANNEL_IMAGES],
             }
     except Exception as exc:
@@ -2456,7 +2528,12 @@ async def _apply_decision(
 
 
 async def _finish_origin_card(
-    db: AsyncSession, result: Dict[str, Any], conversation: Optional[Conversation]
+    db: AsyncSession,
+    result: Dict[str, Any],
+    conversation: Optional[Conversation],
+    *,
+    user_id: Any = None,
+    action_id: Any = None,
 ) -> Dict[str, Any]:
     """Close an approved card that an unattended run parked: one line,
     "Done. It went through." (or, when the call reported a failure, that it
@@ -2464,18 +2541,38 @@ async def _finish_origin_card(
     follows the card (or the transcript's decision row), which already
     names the action, so it never names the tool. Nothing else runs: the
     scheduled turn that proposed the call is over, and an approval unlocks
-    that one call, not a new turn."""
-    if _result_failed(result.get("result")):
-        line = "It didn't work. Ask me to try again if you still want it done."
-    else:
-        line = "Done. It went through."
+    that one call, not a new turn.
+
+    An errand's purchase card (origin "errand:") gets the errand's own
+    message instead (services/automation/errands.purchase_decided): what
+    was bought, for how much, where and the confirmation the checkout read,
+    with the confirmation picture; or that the page went stale and a new
+    run is on its way. Only the card *action_id* moves the errand on, and
+    only when it is the card the errand waits on (or it bought)."""
+    from services.automation import errands
+
+    origin = result.pop("origin", None)
+    line: Optional[str] = None
+    images: list[dict[str, str]] = []
+    if errands.is_errand_origin(origin) and user_id is not None:
+        line = await errands.purchase_decided(
+            db, origin, user_id, result.get("result"), action_id
+        )
+        if line is not None:
+            line = strip_url_queries(line)
+            own_call = [{"name": str(result.get("tool", "")), "result": result.get("result")}]
+            images = _channel_photos(own_call, _account_mode(own_call))
+    if line is None:
+        if _result_failed(result.get("result")):
+            line = "It didn't work. Ask me to try again if you still want it done."
+        else:
+            line = "Done. It went through."
     if conversation is not None:
         db.add(Message(conversation_id=conversation.id, role=MessageRole.assistant, content=line))
         conversation.updated_at = datetime.now(timezone.utc)
         await db.flush()
-    result.pop("origin", None)
     result["assistant_reply"] = line
-    result["assistant_notes"] = {}
+    result["assistant_notes"] = {"images": images} if images else {}
     return result
 
 
@@ -2763,7 +2860,9 @@ def build_decision_applier(app: Any, session_factory: Any = async_session):
             outcome.update(
                 {
                     "pending_approvals": list(notes.get("pending_approvals") or []),
+                    "pending_ids": list(notes.get("pending_ids") or []),
                     "blocked": list(notes.get("blocked") or []),
+                    "blocked_reasons": list(notes.get("blocked_reasons") or []),
                     "images": list(notes.get("images") or []),
                 }
             )
@@ -2774,6 +2873,8 @@ def build_decision_applier(app: Any, session_factory: Any = async_session):
             **outcome,
             # The app the tap allowed for a week, for the card's own line.
             **({"weekly": result["weekly"]} if result.get("weekly") else {}),
+            # The website the tap allowed clicks on for an hour.
+            **({"site": result["site"]} if result.get("site") else {}),
             # The account the tap allowed low-risk changes on, and until when.
             **({"low_risk": result["low_risk"]} if result.get("low_risk") else {}),
         }
@@ -2837,6 +2938,73 @@ def strip_url_queries(text: str) -> str:
     return _URL_WITH_QUERY.sub(r"\1", text)
 
 
+# A link line of a page outline (services/tools/browser/snapshot.py), and a
+# URL in a reply with what may trail it in a sentence.
+_OUTLINE_LINK = re.compile(r"/url:\s*\"?([^\"\s]+)")
+_URL_IN_TEXT = re.compile(r"https?://[^\s<>\"'()]+", re.IGNORECASE)
+_URL_TRAILING = ".,;:!?"
+
+
+def shown_links(tool_calls: Any) -> frozenset[str]:
+    """The addresses this turn's pages showed as links: every ``/url:`` line
+    of a browser result's outline or find matches, made absolute against the
+    page that showed it and without credentials (the outline already drops
+    them; ``strip_url_secrets`` is applied again here). A reply may pass
+    these on with their query (``strip_reply_urls``)."""
+    from urllib.parse import urljoin
+
+    from services.tools.browser import snapshot as snap
+
+    links: set[str] = set()
+    for tc in tool_calls if isinstance(tool_calls, list) else []:
+        result = tc.get("result") if isinstance(tc, dict) else None
+        if not isinstance(result, dict) or not is_browser_tool(tc.get("name")):
+            continue
+        base = result.get("url") if isinstance(result.get("url"), str) else ""
+        for key in ("opened_link", "finish_link"):
+            # The link a click followed, and the one a person finishes a step
+            # on: already without credentials.
+            opened = result.get(key)
+            if isinstance(opened, str) and opened.startswith(("https://", "http://")):
+                links.add(opened)
+        for key in ("outline", "matches"):
+            lines = result.get(key)
+            for line in lines if isinstance(lines, list) else []:
+                found = _OUTLINE_LINK.search(line) if isinstance(line, str) else None
+                if found is None:
+                    continue
+                try:
+                    clean = snap.strip_url_secrets(urljoin(base, found.group(1)))
+                except ValueError:
+                    continue
+                if clean.startswith(("https://", "http://")):
+                    links.add(clean)
+    return frozenset(links)
+
+
+def strip_reply_urls(text: str, shown: frozenset[str]) -> str:
+    """*text* as ``strip_url_queries`` leaves it, except that a link one of
+    this turn's pages showed (``shown_links``) keeps its query, without the
+    parameters that may carry a credential. The query is where a showtime,
+    a date or a seat lives, and a reply that passes a booking link on
+    without it passes on a dead link. An address the model put together
+    itself is never in *shown*, so it loses its query as before: a page
+    cannot talk the model into mailing private data out in a link."""
+    from services.tools.browser import snapshot as snap
+
+    def keep(match: re.Match[str]) -> str:
+        url = match.group(0)
+        tail = ""
+        while url and url[-1] in _URL_TRAILING:
+            url, tail = url[:-1], url[-1] + tail
+        clean = snap.strip_url_secrets(url)
+        if clean and clean in shown:
+            return clean + tail
+        return _URL_WITH_QUERY.sub(r"\1", url) + tail
+
+    return _URL_IN_TEXT.sub(keep, text)
+
+
 def _task_id_of(rows: list[Any]) -> Optional[str]:
     """The task identity (spec §10): the newest user message's id, so a
     task keeps its caps across approval and handoff resumes."""
@@ -2861,9 +3029,14 @@ def _account_mode(tool_calls: Any) -> bool:
 
 
 def _channel_caption(name: str, result: dict[str, Any]) -> str:
+    # A held-back value is a marker for the model, never a caption.
+    def shown(value: Any) -> str:
+        text = str(value) if value else ""
+        return "" if text.startswith("[line redacted") else text
+
     needs = result.get("needs_human")
-    if isinstance(needs, dict) and needs.get("detail"):
-        return str(needs["detail"])
+    if isinstance(needs, dict) and shown(needs.get("detail")):
+        return shown(needs["detail"])
     if name == "browser.checkout":
         # From the toolkit's facts: the host it paid on and the amount it
         # read off the page, never the model's words.
@@ -2871,10 +3044,10 @@ def _channel_caption(name: str, result: dict[str, Any]) -> str:
         if result.get("ok") is True and isinstance(merchant, str) and isinstance(amount, str):
             return f"Order confirmation on {merchant}: ${amount}"
         return "The page after the order was sent"
-    return str(
-        result.get("title")
-        or result.get("final_url")
-        or result.get("url")
+    return (
+        shown(result.get("title"))
+        or shown(result.get("final_url"))
+        or shown(result.get("url"))
         or ("Your screen" if name.startswith("desktop.") else "")
     )
 
@@ -3207,7 +3380,11 @@ def build_chat_applier(
         # logged-in site, URLs lose their query strings and fragments
         # before they reach Telegram's servers (spec §9).
         account = _account_mode(agent_response.tool_calls)
-        reply = strip_url_queries(agent_response.content) if account else agent_response.content
+        reply = (
+            strip_reply_urls(agent_response.content, shown_links(agent_response.tool_calls))
+            if account
+            else agent_response.content
+        )
 
         return {
             "content": reply,
@@ -3217,7 +3394,13 @@ def build_chat_applier(
             "pending_approvals": [
                 pa.tool_name for pa in agent_response.pending_approvals
             ],
+            # Their ids, in the same order (a chat ties a bare "yes" to the
+            # exact request it was asked about).
+            "pending_ids": [pa.action_id for pa in agent_response.pending_approvals],
             "blocked": [ba.tool_name for ba in agent_response.blocked_actions],
+            # Each blocked call's own reason, in the same order: the chat
+            # says why a step did not happen instead of a general sentence.
+            "blocked_reasons": [ba.reason for ba in agent_response.blocked_actions],
             # This turn's own calls only (every round of its tool loop), and
             # the model that ran it: what a per-reply cost line prices.
             "usage": dict(agent_response.usage or turn.usage),
@@ -3347,6 +3530,7 @@ async def decide_approval(
     images = result.pop("decision_images", None) or []
     message_id = result.pop("decision_message_id", None)
     weekly = result.pop("weekly", None)
+    site = result.pop("site", None)
     low_risk = result.pop("low_risk", None)
     # The pictures travel once, checked, in ``images``; the result keeps
     # the placeholder, as the transcript row and the model's view do.
@@ -3360,6 +3544,7 @@ async def decide_approval(
         images=[TurnImageOut(**image) for image in images],
         message_id=message_id,
         weekly=WeeklyApprovalOut(**weekly) if weekly else None,
+        site=WeeklyApprovalOut(**site) if site else None,
         low_risk=LowRiskGrantOut(**low_risk) if low_risk else None,
     )
 

@@ -1,9 +1,11 @@
 """Lists and revokes the apps the signed-in user allowed Crawler to operate
-for a week (weekly app approvals, spec 2026-09-25-weekly-app-approvals).
+for a week (weekly app approvals, spec 2026-09-25-weekly-app-approvals) and
+the websites they allowed it to click around on for an hour (site approvals).
 
 Why it exists: an approval lets desktop acts in one app run with no card for
-7 days, so the owner must be able to see every one (which app, from which
-chat or browser, until when, last used) and end any of them at once. The
+7 days, and a site approval lets clicks on one website run with no card for
+an hour, so the owner must be able to see every one (which app or site, from
+which chat or browser, until when, last used) and end any of them at once. The
 Settings page reads and revokes through here; Telegram's /apps does the same
 through the store. Each approval belongs to its user: another user's id is a
 404, as an unknown one is.
@@ -26,7 +28,7 @@ from api.routes.agent import get_runtime, web_channel
 from core.database import get_db
 from models.audit import AuditStatus
 from models.user import User
-from services.agent.app_approvals import TOOL
+from services.agent.app_approvals import SITE_TOOL
 from services.agent.runtime import AgentRuntime
 from services.audit import append_audit_log
 from services.auth import get_current_user
@@ -38,7 +40,11 @@ router = APIRouter(prefix="/agent/app-approvals", tags=["agent"])
 
 class AppApprovalOut(BaseModel):
     id: str
+    # The app's name, or the website's host for a site approval.
     app: str
+    # "app" (desktop acts in an app, for a week) | "site" (clicks on a
+    # website, for an hour).
+    kind: str = "app"
     # "telegram" | "web"
     channel: str
     # Given from the browser this request came from.
@@ -61,6 +67,7 @@ async def list_app_approvals(
         AppApprovalOut(
             id=a.id,
             app=a.app,
+            kind="site" if a.tool == SITE_TOOL else "app",
             channel=a.channel_kind,
             this_device=a.holds_for(here),
             granted_at=a.granted_at.isoformat(),
@@ -87,7 +94,7 @@ async def revoke_app_approval(
     )
     if revoked is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No such approval.")
-    connector, _, action = TOOL.partition(".")
+    connector, _, action = revoked.tool.partition(".")
     try:
         await append_audit_log(
             db,

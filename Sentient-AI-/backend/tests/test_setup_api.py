@@ -347,7 +347,7 @@ async def test_providers_lists_every_provider_without_values(client, env, monkey
     # Gemini id the wizard suggests has a price, so a turn on it is costed.
     from services.usage import price_for
 
-    assert by_name["gemini"]["models"][0] == "gemini-3.5-flash-lite"
+    assert by_name["gemini"]["models"][0] == "gemini-3.8-flash"
     assert "gemini-2.5-flash" not in by_name["gemini"]["models"]
     assert all(price_for("gemini", m) is not None for m in by_name["gemini"]["models"])
     assert by_name["ollama"]["models"] == ["llama3.2"]
@@ -1337,3 +1337,54 @@ async def test_clearing_secrets_stops_the_poller(client, env, monkeypatch):
     assert resp.status_code == 204
     assert await env.installation.telegram_token() is None
     assert env.manager.is_running is False
+
+
+@pytest.mark.asyncio
+async def test_live_models_lists_chat_models_and_falls_back(monkeypatch):
+    """Model pickers list what the key can use, not a hardcoded few: chat
+    models only, newest first, and None (so the suggestions show) when the
+    provider cannot be asked."""
+    setup_routes._model_list_cache.clear()
+    gemini = {
+        "models": [
+            {"name": "models/gemini-3.1-pro-preview", "supportedGenerationMethods": ["generateContent"]},
+            {"name": "models/gemini-3.8-flash", "supportedGenerationMethods": ["generateContent"]},
+            {"name": "models/gemini-embedding-001", "supportedGenerationMethods": ["embedContent"]},
+            {"name": "models/imagen-5", "supportedGenerationMethods": ["generateContent"]},
+            {"name": "models/gemma-4-31b-it", "supportedGenerationMethods": ["generateContent"]},
+        ]
+    }
+    seen: list[dict] = []
+
+    async def fake_get(self, url, *args, **kwargs):
+        seen.append(kwargs.get("headers") or {})
+        return httpx.Response(200, json=gemini, request=httpx.Request("GET", str(url)))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    assert await setup_routes._live_models("gemini", "k1") == [
+        "gemini-3.8-flash",
+        "gemini-3.1-pro-preview",
+    ]
+    assert seen == [{"x-goog-api-key": "k1"}]
+    assert await setup_routes._live_models("gemini", "k1") is not None and len(seen) == 1  # cached
+    assert await setup_routes._live_models("openai", None) is None
+
+    async def failing_get(self, url, *args, **kwargs):
+        return httpx.Response(401, json={}, request=httpx.Request("GET", str(url)))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", failing_get)
+    assert await setup_routes._live_models("openai", "bad") is None
+
+
+@pytest.mark.asyncio
+async def test_openai_model_list_keeps_only_chat_families(monkeypatch):
+    setup_routes._model_list_cache.clear()
+    ids = ["gpt-6-luna", "o5-mini", "chatgpt-5-latest", "dall-e-3", "whisper-1",
+           "text-embedding-3-large", "babbage-002", "gpt-6-luna-tts"]
+
+    async def fake_get(self, url, *args, **kwargs):
+        return httpx.Response(200, json={"data": [{"id": i} for i in ids]},
+                              request=httpx.Request("GET", str(url)))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    assert await setup_routes._live_models("openai", "k") == ["o5-mini", "gpt-6-luna", "chatgpt-5-latest"]

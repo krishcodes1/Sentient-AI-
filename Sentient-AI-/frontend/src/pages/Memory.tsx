@@ -30,6 +30,7 @@ import {
   updateSettings,
 } from "@/services/api";
 import ConfirmDialog from "@/components/ConfirmDialog";
+import Switch from "@/components/Switch";
 
 const CATEGORIES: { value: MemoryCategory; label: string; help: string }[] = [
   { value: "profile", label: "Profile", help: "Who you are — name, role, school." },
@@ -276,25 +277,13 @@ export default function MemoryPage() {
             </div>
           </div>
         </div>
-        <button
-          type="button"
-          onClick={handleToggleMemory}
-          disabled={togglingMemory || !me}
-          role="switch"
-          aria-checked={memoryEnabled}
+        <Switch
+          checked={memoryEnabled}
+          onChange={() => void handleToggleMemory()}
+          disabled={!me}
+          busy={togglingMemory}
           aria-labelledby={memoryToggleId}
-          className="tap-target relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50"
-          style={{ background: memoryEnabled ? "var(--accent-primary)" : "var(--claw-border)" }}
-        >
-          <span
-            aria-hidden
-            className="inline-block h-4 w-4 transform rounded-full transition-transform"
-            style={{
-              background: "var(--text-on-accent)",
-              transform: memoryEnabled ? "translateX(24px)" : "translateX(4px)",
-            }}
-          />
-        </button>
+        />
       </section>
 
       {/* Add memory */}

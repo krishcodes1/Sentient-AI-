@@ -10,6 +10,7 @@ import structlog
 
 from services.capabilities import (
     browser_act,
+    browser_ask_every_step,
     browser_control,
     computer_control,
     installs,
@@ -76,6 +77,10 @@ from services.capabilities import browser_site_rules
 from services.capabilities import tool_rules
 from services.capabilities import file_reputation
 
+# Errand runs: background errands that end in one purchase card.
+from services.capabilities import errand_runs
+from services.capabilities import calendar_errands
+
 # isort: on
 
 logger = structlog.get_logger(__name__)
@@ -91,6 +96,7 @@ REGISTRY: tuple[Capability, ...] = (
     slack.CAPABILITY,
     browser_control.CAPABILITY,
     browser_act.CAPABILITY,
+    browser_ask_every_step.CAPABILITY,
     computer_control.CAPABILITY,
     purchases.CAPABILITY,
     page_watch.CAPABILITY,
@@ -139,6 +145,10 @@ REGISTRY: tuple[Capability, ...] = (
     browser_site_rules.CAPABILITY,
     tool_rules.CAPABILITY,
     file_reputation.CAPABILITY,
+    # Errand runs (off by default, high risk; needs browser_act and purchases).
+    errand_runs.CAPABILITY,
+    # Errands planned from the owner's calendar notes (off; needs errand_runs).
+    calendar_errands.CAPABILITY,
 )
 
 # Owner-editable settings a capability carries, by key, with their defaults
@@ -177,6 +187,11 @@ _SETTINGS_DEFAULTS: Mapping[str, Mapping[str, Any]] = {
     scam_check.CAPABILITY.key: scam_check.SCAM_CHECK_SETTINGS_DEFAULTS,
     link_reputation.CAPABILITY.key: link_reputation.LINK_REPUTATION_SETTINGS_DEFAULTS,
     file_reputation.CAPABILITY.key: file_reputation.FILE_REPUTATION_SETTINGS_DEFAULTS,
+    # Errand runs: what one run and a day of runs may cost, rounds, minutes,
+    # how long the purchase card waits and how early a run starts.
+    errand_runs.KEY: errand_runs.ERRAND_SETTINGS_DEFAULTS,
+    # Calendar errands: what the AI reads of calendar notes may cost a day.
+    calendar_errands.KEY: calendar_errands.CALENDAR_ERRANDS_SETTINGS_DEFAULTS,
 }
 
 

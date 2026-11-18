@@ -10,9 +10,11 @@ only hands it a send function. ``on_event`` goes only to a chat callback that
 accepts it (``takes_on_event``), so one written without it still answers.
 
 Every phrase is fixed text chosen by the tool's name and, for the tools that
-take one, its action; the only variable part is the host of a page being
-opened, which the runtime extracts (``runtime.tool_call_facts``). Never model
-text, a URL's path or query, search terms or typed text.
+take one, its action; the only variable part is the host of the page being
+opened or clicked on, when the event carries one (the runtime extracts it
+from the call's URL, ``runtime.tool_call_facts``, so a browser.act click,
+which takes no URL, reads "Clicking on the page…" until its event names the
+page). Never model text, a URL's path or query, search terms or typed text.
 
 Pacing, per turn:
 
@@ -80,6 +82,15 @@ _TOOL_PHRASES: dict[str, Optional[str]] = {
     "browser.read/note": None,
     # The turn ends right after with its own explanation.
     "browser.read/handoff": None,
+    # browser.act's click names the page's host when the event has one
+    # (_HOST_PHRASES). What is typed, chosen or pressed is never said.
+    "browser.act/fill": "Filling in a form…",
+    "browser.act/fill_form": "Filling in a form…",
+    "browser.act/select": "Choosing an option…",
+    "browser.act/check": "Choosing an option…",
+    "browser.act/press": "Pressing a key…",
+    "browser.act/submit": "Sending a form…",
+    "browser.checkout": "Getting the payment ready…",
     "desktop.screenshot": "Taking a screenshot…",
     "desktop.observe/outline": "Looking at the app on your screen…",
     "desktop.observe/apps": "Checking which apps are open…",
@@ -176,11 +187,12 @@ _TOOL_PHRASES: dict[str, Optional[str]] = {
 
 }
 
-# Phrases that name the host of the page being opened, with the wording
-# used when the event carries no usable host.
+# Phrases that name the host of the page being opened or clicked on, with
+# the wording used when the event carries no usable host.
 _HOST_PHRASES: dict[str, tuple[str, str]] = {
     "web.fetch_page": ("Reading {host}…", "Reading a web page…"),
     "browser.read/open": ("Opening {host}…", "Opening a web page…"),
+    "browser.act/click": ("Clicking on {host}…", "Clicking on the page…"),
     "watch.create": ("Setting up a watch on {host}…", "Setting up a page watch…"),
     # top10:secret_pii_redaction
 

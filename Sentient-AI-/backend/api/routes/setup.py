@@ -64,6 +64,7 @@ from models.user import User
 from services.agent import providers as llm_providers
 from services.agent.providers import ProviderError
 from services.audit import append_auth_event
+from services.auth import get_current_user
 from services.installation import UNREADABLE_KEYS_MESSAGE, RegistrationLocked
 
 logger = structlog.get_logger(__name__)
@@ -90,10 +91,12 @@ router = APIRouter(prefix="/setup", tags=["setup"])
 #   https://developers.openai.com/api/docs/deprecations). GPT-6 Astra is
 #   left out on purpose: it cannot call tools over Chat Completions.
 SUGGESTED_MODELS: dict[str, list[str]] = {
-    # 2.5 Flash is refused for new API keys ("no longer available to new
+    # 3.8 Flash first: on 2026-11-17 3.5 Flash-Lite gave up on browser and
+    # computer tasks after one look ("I cannot book..."), and the wizard
+    # preselects the first id. 2.5 Flash is refused for new API keys ("no longer available to new
     # users"), so it is not offered. Each id here has a price in
     # services/usage/pricing.py.
-    "gemini": ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.1-flash-lite"],
+    "gemini": ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"],
     "anthropic": ["claude-sonnet-5", "claude-haiku-4-5-20251001"],
     "openai": ["gpt-6-luna", "gpt-5.4-nano", "gpt-5.6-luna"],
     "grok": ["grok-4.3"],
@@ -159,6 +162,12 @@ class ProviderChoice(BaseModel):
     api_key: Optional[str] = None
 
 
+class ModelListRequest(BaseModel):
+    provider: str = Field(max_length=32)
+    # A key typed into the setup form but not saved yet (admins only).
+    api_key: Optional[str] = None
+
+
 class TelegramTokenBody(BaseModel):
     token: str
 
@@ -183,7 +192,11 @@ def _validated_choice(body: ProviderChoice) -> tuple[str, str, Optional[str]]:
     # Same rule auth.update_settings applies to a per-user model choice.
     if not is_valid_model_id(model):
         raise HTTPException(status_code=_UNPROCESSABLE, detail=MODEL_ID_RULES)
-    api_key = (body.api_key or "").strip() or None
+    return provider, model, _validated_key(body.api_key)
+
+
+def _validated_key(raw: Optional[str]) -> Optional[str]:
+    api_key = (raw or "").strip() or None
     if api_key is not None and (
         len(api_key) > _MAX_API_KEY_LENGTH
         or not api_key.isascii()
@@ -194,7 +207,7 @@ def _validated_choice(body: ProviderChoice) -> tuple[str, str, Optional[str]]:
             status_code=_UNPROCESSABLE,
             detail="That API key is not in a recognisable format.",
         )
-    return provider, model, api_key
+    return api_key
 
 
 def _validated_telegram_token(body: TelegramTokenBody) -> str:
@@ -426,6 +439,102 @@ async def list_providers(
         )
     provider, model = await installation.llm_defaults()
     return {"providers": providers, "current": {"provider": provider, "model": model}}
+
+
+# Where each provider lists the models a key can use. SUGGESTED_MODELS is
+# only a fallback: any id the provider accepts can be saved, and new
+# releases appear here without a code change.
+_MODEL_LIST_URLS: dict[str, str] = {
+    "openai": "https://api.openai.com/v1/models",
+    "grok": "https://api.x.ai/v1/models",
+    "deepseek": "https://api.deepseek.com/models",
+    "groq": "https://api.groq.com/openai/v1/models",
+    "mistral": "https://api.mistral.ai/v1/models",
+    "anthropic": "https://api.anthropic.com/v1/models?limit=1000",
+    "gemini": "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000",
+}
+# Ids that cannot chat with tools (pictures, speech, embeddings, moderation,
+# legacy completions), which the OpenAI and Gemini lists mix in.
+_NON_CHAT_MODEL = re.compile(
+    r"embed|tts|whisper|transcri|dall-e|image|imagen|veo|lyria|banana|audio|realtime"
+    r"|-live|moderation|aqa|robotics|search-preview|computer-use|deep-research|babbage"
+    r"|davinci|ocr|sora|guard|gemma",
+    re.IGNORECASE,
+)
+# OpenAI's list also holds every legacy and fine-tuned id; only its chat
+# families can run Crawler's tool calls.
+_OPENAI_CHAT_MODEL = re.compile(r"^(gpt-|o\d|chatgpt-)")
+_MODEL_LIST_TTL_S = 600.0
+# ponytail: per-process cache, keyed by provider and key; fine for one backend.
+_model_list_cache: dict[tuple[str, int], tuple[float, list[str]]] = {}
+
+
+async def _live_models(provider: str, key: Optional[str]) -> Optional[list[str]]:
+    """The chat models *key* can use on *provider*, newest-looking first, or
+    None when the provider could not be asked (no key, network, refusal)."""
+    if provider == "ollama":
+        url = f"{llm_providers.ollama_base_url(settings.OLLAMA_BASE_URL)}/api/tags"
+        headers: dict[str, str] = {}
+    elif key and provider in _MODEL_LIST_URLS:
+        url = _MODEL_LIST_URLS[provider]
+        if provider == "gemini":
+            headers = {"x-goog-api-key": key}
+        elif provider == "anthropic":
+            headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
+        else:
+            headers = {"Authorization": f"Bearer {key}"}
+    else:
+        return None
+    cache_key = (provider, hash(key))
+    cached = _model_list_cache.get(cache_key)
+    if cached and time.monotonic() - cached[0] < _MODEL_LIST_TTL_S:
+        return cached[1]
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url, headers=headers)
+        resp.raise_for_status()
+        body = resp.json()
+    except Exception as exc:
+        # The URL and headers carry the key, so only the type is logged.
+        logger.info("model_list_failed", provider=provider, error_type=type(exc).__name__)
+        return None
+    if provider == "ollama":
+        ids = [m.get("name", "") for m in body.get("models", [])]
+    elif provider == "gemini":
+        ids = [
+            m.get("name", "").removeprefix("models/")
+            for m in body.get("models", [])
+            if "generateContent" in m.get("supportedGenerationMethods", [])
+        ]
+    else:
+        ids = [m.get("id", "") for m in body.get("data", [])]
+        if provider == "openai":
+            ids = [i for i in ids if _OPENAI_CHAT_MODEL.match(i)]
+    models = sorted(
+        {i for i in ids if i and is_valid_model_id(i) and not _NON_CHAT_MODEL.search(i)},
+        reverse=True,
+    )
+    _model_list_cache[cache_key] = (time.monotonic(), models)
+    return models
+
+
+@router.post("/models")
+async def list_models(
+    body: ModelListRequest, request: Request, user: User = Depends(get_current_user)
+) -> dict[str, Any]:
+    """Every chat model *provider* offers this Crawler's key (or, for an
+    admin, the key just typed into the setup form), asked of the provider
+    itself, so new releases show up without a code change. The suggested
+    few when it cannot be asked. Names only: no key is ever returned."""
+    name = body.provider.strip().lower()
+    if name not in LLM_PROVIDERS:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown provider")
+    supplied = _validated_key(body.api_key)
+    if supplied and not user.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admins only")
+    key = await _resolve_key(installation_service(request), name, supplied)
+    live = await _live_models(name, key)
+    return {"models": live or list(SUGGESTED_MODELS.get(name, [])), "live": bool(live)}
 
 
 @router.post("/provider/test")

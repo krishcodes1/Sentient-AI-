@@ -740,7 +740,7 @@ async def test_a_refused_bind_is_filed_under_purchase_rule_with_no_card():
 
 @pytest.mark.asyncio
 async def test_a_refused_toolkit_precheck_is_filed_the_same_way():
-    no_card = {"ok": False, "rule": "no_card", "error": "No payment card is stored. Add one in Settings → Payment card."}
+    no_card = {"ok": False, "rule": "no_card", "error": "No payment card is stored. Add one in Settings → Permissions → Money."}
     ex = executor(*BOTH, checkout=FakeCheckoutToolkit(precheck=no_card))
     turn = Turn(ex, _gate(*BOTH))
     response = await turn.run(call("t1", CHECKOUT, merchant="shop.example.com"))
@@ -951,6 +951,32 @@ def test_a_checkout_card_names_no_risk_when_the_merchant_is_the_page_it_read():
     mail = {"to": "someone@tickets.example.com"}
     heads_up = note("google_workspace.send_email", mail, mail, taint.taint_reason(mail), taint)
     assert str(heads_up) == f"Check this before you approve: {taint.taint_reason(mail)}."
+
+
+def test_a_purchase_card_says_so_when_the_person_never_named_the_site():
+    """ "Book a ticket at the Lincoln Square AMC" ended on a payment page at
+    fandango.com. The page's host matched the merchant the model named, so
+    the card carried no note: nothing said the person never chose this
+    shop. Naming it as a link, a host or by its brand word is naming it."""
+    from services.agent.taint import TaintTracker
+
+    taint = TaintTracker()
+    taint.add_result({"url": "https://tickets.fandango.com/checkout"})
+    args = {"merchant": "fandango.com", "amount": 18}
+    card = {**args, "_checkout": {"checkout_id": "c1", "host": "tickets.fandango.com"}}
+    note = AgentRuntime._card_risk_note
+    reason = taint.taint_reason(args)
+
+    unnamed = note(CHECKOUT, args, card, reason, taint, owner_text="book a ticket at lincoln square amc")
+    assert unnamed == "You didn't name this site. Make sure tickets.fandango.com is where you want to buy."
+    # Named by its brand word, its host, or a link: nothing to say.
+    for said in ("get it on Fandango", "buy at fandango.com", "use https://www.fandango.com/x"):
+        assert note(CHECKOUT, args, card, reason, taint, owner_text=said) is None
+    # A word that only contains the brand, or another site's link, is not it.
+    for said in ("fandangos are great", "buy at https://fandango.com.evil.example/x"):
+        assert note(CHECKOUT, args, card, reason, taint, owner_text=said) == unnamed
+    # No owner text given (older callers): as before.
+    assert note(CHECKOUT, args, card, reason, taint) is None
 
 
 def test_bind_refusal_policies():

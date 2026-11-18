@@ -64,6 +64,7 @@ import {
 } from "@/components/ApprovalDetails";
 import SecurityNotes from "@/components/SecurityNotes";
 import WeeklyAppButton, {
+  HourlySiteButton,
   WeeklyAllowedNote,
   type ApprovalDecision,
   type WeeklyGrant,
@@ -381,6 +382,11 @@ function ApprovalCard({
         disabled={pending || expired}
         onAllow={() => handle(true, "week")}
       />
+      <HourlySiteButton
+        approval={approval}
+        disabled={pending || expired}
+        onAllow={() => handle(true, "site")}
+      />
       <LowRiskGrantButton
         approval={approval}
         disabled={pending || expired}
@@ -462,6 +468,8 @@ export default function Chat() {
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
   // The app the last decision allowed for a week, shown under the cards.
   const [weeklyAllowed, setWeeklyAllowed] = useState<WeeklyGrant | null>(null);
+  // Whether that grant is a website's hour (the site button) rather than an app's week.
+  const [allowedIsSite, setAllowedIsSite] = useState(false);
   // The account the last decision allowed low-risk changes on, likewise.
   const [lowRiskAllowed, setLowRiskAllowed] = useState<LowRiskGrant | null>(null);
   const [loadingMessages, setLoadingMessages] = useState(false);
@@ -1042,7 +1050,8 @@ export default function Chat() {
     // put this card back on screen.
     decidedApprovals.current.add(actionId);
     setApprovals((prev) => prev.filter((pa) => pa.action_id !== actionId));
-    setWeeklyAllowed(decided.weekly ?? null);
+    setWeeklyAllowed(decided.weekly ?? decided.site ?? null);
+    setAllowedIsSite(!decided.weekly && Boolean(decided.site));
     setLowRiskAllowed(decided.low_risk ?? null);
     // The backend persists an assistant message with the tool outcome —
     // refetch the thread so the result of the decision is visible.
@@ -1612,7 +1621,9 @@ export default function Chat() {
               </div>
             </div>
           )}
-          {weeklyAllowed && <WeeklyAllowedNote weekly={weeklyAllowed} className="ml-11" />}
+          {weeklyAllowed && (
+            <WeeklyAllowedNote weekly={weeklyAllowed} site={allowedIsSite} className="ml-11" />
+          )}
           {lowRiskAllowed && <LowRiskAllowedNote grant={lowRiskAllowed} className="ml-11" />}
           {/* A turn that never reached the server. The user's message is
               still on screen above; this offers it back rather than making

@@ -5,14 +5,34 @@ page, makes the card's arguments and keeps its screenshot in memory) ->
 the owner approved: fills the card from the vault, submits, reads the
 confirmation).
 
+Two ways to pay, decided at ``begin`` from the live page and never from
+the model: a page with card fields is paid with the card in the owner's
+vault (``vault_unavailable`` when the vault cannot open, ``no_card``
+when none is stored); a page with no card field in the page or any
+frame (and no more fields than the facts read) that shows a payment
+method saved at the shop (painted on screen, outside links and buttons,
+near the order total or the order button, not said to be missing), with
+exactly one order button in the page itself (Amazon's "Place your
+order" page, however the tab got there), is paid with what the shop
+keeps on file: the approved run presses that button once and never
+opens the vault. So the vault is checked only on a page with card
+fields: a locked Keychain never stops a card on file. The card says which ("with Visa
+····4242", "with Visa ····4242 on file at www.amazon.com", "with the
+card on file at www.amazon.com"), from page facts only. Neither step
+scrolls the page: a payment line scrolled away is refused with a
+sentence that says to bring it back beside the total.
+
 Why every step is a safeguard and not a block: buying is on only when the
 owner turned it on, and then Crawler still (1) reads the amount and the
 merchant off the page itself, (2) refuses http, a look-alike host, a
-missing or foreign total, a missing card form and anything over the caps
-before the card exists, (3) shows one card with the amount, the host, the
-items, a screenshot and the notice, and (4) after Approve, runs only
-while the page the card was made from is still the page on screen, then
-fills the card fields from the vault at that moment and never earlier.
+missing or foreign total, a page with neither a card form nor a saved
+payment method and one order button, and anything over the caps before
+the card exists, (3) shows one card with the amount, the host, the
+items, what pays, a screenshot and the notice, and (4) after Approve,
+runs only while the page the card was made from is still the page on
+screen, then fills the card fields from the vault at that moment and
+never earlier (or, paying with the card on file, presses the bound
+order button once, with the same write window, and types nothing).
 The card is decrypted inside ``run`` only. Before it is typed, every
 value (the number as digits and as a page groups them, the security
 code, the expiry in every form a site writes it) goes on the session's
@@ -32,14 +52,28 @@ holds that way, as it could at any moment before the submit.
 Failures are results, never exceptions: a refusal is ``{"ok": False,
 "refused": True, "rule", "error"}`` (the runtime files it under
 ``purchase_rule``), anything else ``{"ok": False, "error"}``. A checkout
-that failed after the card was filled says ``"filled": True`` so the
-owner is told to check the site, and the ledger counts it as spent
-unless the merchant declined it (a submit the guard stopped counts too:
-the guard cannot always tell whether the merchant read the card first).
+that failed after the card was filled or the order button pressed says
+``"filled": True`` so the owner is told to check the site, and the
+ledger counts it as spent unless the merchant declined it (a submit the
+guard stopped counts too: the guard cannot always tell whether the
+merchant read the card first).
 
 The executor's pre-approval hook is synchronous; ``precheck_sync`` is the
-part of ``precheck`` it can run (arguments, the stop flag, the vault's
-availability). ``precheck`` adds the checks that need the database.
+part of ``precheck`` it can run (the arguments, the stop flag).
+``precheck`` adds the database check (the caps); whether the vault and
+a stored card are needed depends on the page, so ``begin`` decides both.
+
+A pending checkout lasts ``pending_ttl_s`` (the chat card's 15 minutes).
+An errand's purchase card waits hours for the owner, so the errand service
+calls ``hold`` right after its run parks the card, for that card's own
+checkout: that checkout then lasts as long as its card, and the browser
+session stays parked on its page (``BrowserSessionManager.park_for_purchase``).
+``hold`` with 0 seconds lets both go (a denied card, a cancelled errand),
+for that checkout only; ``run`` ends the parking of a held checkout its
+approval used, whatever the outcome.
+Approving a card held longer than ``pending_ttl_s`` loads its page again
+before the same-page check, so a shop session that ran out meanwhile is
+seen. ``busy`` tells the errand service the owner is using the browser.
 """
 
 from __future__ import annotations
@@ -89,6 +123,11 @@ MAX_MERCHANT_CHARS = 200
 MAX_NOTE_CHARS = 500
 MAX_AMOUNT = Decimal("100000")
 NAVIGATION_TIMEOUT_MS = 20_000
+# An errand run waits while a chat task used the browser this recently
+# (``busy``). Unattended runs' task ids start with _UNATTENDED_TASK
+# (services/agent/unattended.UNATTENDED_TASK_PREFIX).
+BUSY_SECONDS = 300.0
+_UNATTENDED_TASK = "unattended:"
 # Fields whose pixels never leave the machine, in every frame (the one
 # classifier every toolkit shares); the card fields found on the page are
 # masked by ref on top of this.
@@ -109,7 +148,10 @@ _CONFIRMATION_LEAD = 150
 _MAX_PENDING = 64
 _ALLOWED_PARAMS = frozenset({"merchant", "amount", "note"})
 
-_NO_CARD = "No payment card is stored. Add one in Settings → Payment card."
+_NO_CARD = (
+    "This page asks for a card number, and no payment card is stored. Add one in "
+    "Settings → Permissions → Money."
+)
 _UNBOUND = (
     "This approval is not tied to a checkout Crawler prepared (it may have expired), so "
     "nothing was paid. Ask me to check out again."
@@ -139,6 +181,8 @@ class _Guard(Protocol):
 
 class _HandoffDetector(Protocol):
     async def detect_challenge(self, page: Any) -> Optional[Challenge]: ...
+
+    async def detect_bank_check(self, page: Any, shop: set[str]) -> Optional[Challenge]: ...
 
 
 class _Refused(Exception):
@@ -180,6 +224,23 @@ class _Pending:
     card_label: str
     user_image: Optional[str]
     created: float
+    # How long this one waits, when ``hold`` set it (an errand's card);
+    # otherwise the toolkit's TTL.
+    ttl: Optional[float] = None
+
+
+_REF_RE = re.compile(r"\[ref=[^\]]*\]")
+
+
+async def _shape(page: Any) -> str:
+    """The page's controls and their states (``outline_digest`` with
+    states), with every element ref blanked: a fresh load of the same
+    page numbers its elements anew (``_reload_held``)."""
+    from services.tools.browser.pagememory import outline_digest
+
+    raw = await snap.snapshot_raw(page)
+    outline = snap.filter_yaml(raw, full=True, account_mode=True, limit_chars=snap.FULL_LIMIT_CHARS)
+    return outline_digest([_REF_RE.sub("[ref=]", line) for line in outline.lines], states=True)
 
 
 def _error(message: str, **extra: Any) -> dict[str, Any]:
@@ -303,7 +364,7 @@ def _parse(params: Any) -> _Request:
     if not isinstance(merchant, str) or not merchant.strip():
         raise _Refused(
             "invalid_arguments",
-            "checkout needs 'merchant': the site the person asked to buy from, e.g. ticketmaster.com.",
+            "checkout needs 'merchant': the domain of the site the payment page is on, e.g. ticketmaster.com.",
         )
     merchant = " ".join(merchant.split())[:MAX_MERCHANT_CHARS]
     amount: Optional[Decimal] = None
@@ -328,6 +389,23 @@ def _card(arguments: Any) -> Optional[dict[str, Any]]:
     if not isinstance(card, Mapping) or not isinstance(card.get("checkout_id"), str):
         return None
     return dict(card)
+
+
+def _method(facts: CheckoutFacts) -> Optional[str]:
+    """``card`` (card fields: the vault's card is typed), ``on_file`` (no
+    card field anywhere and a saved method shown: the order button pays
+    with what the shop keeps on file), or None for a page that can be paid
+    neither way, so its refusal row names no method."""
+    if facts.card_fields is not None:
+        return "card"
+    return "on_file" if facts.saved_payment and not facts.stray_card_fields else None
+
+
+def _on_file_label(facts: CheckoutFacts) -> str:
+    """What the card says pays when the shop charges what it keeps on file:
+    the one card the page names in the strict shape, else "the card", and
+    the page's host. No other page text."""
+    return f"{facts.saved_card or 'the card'} on file at {facts.host}"
 
 
 def _items_phrase(count: int) -> str:
@@ -373,12 +451,13 @@ class BrowserCheckoutToolkit:
 
     def precheck_sync(self, params: Mapping[str, Any], *, user_id: str) -> Optional[dict[str, Any]]:
         """The checks that need neither a browser nor a database: the
-        arguments, the stop flag, the vault's availability. The executor's
-        synchronous pre-approval hook runs exactly these."""
+        arguments and the stop flag. The executor's synchronous
+        pre-approval hook runs exactly these. The vault is not checked
+        here: only a page with card fields needs it, and ``begin`` sees
+        the page."""
         try:
             _parse(params)
             self._check_cancel(user_id)
-            self._check_vault()
         except _Refused as refusal:
             return _refusal(refusal.rule, refusal.message)
         except Exception as exc:  # fail closed: an unchecked call gets no card
@@ -390,21 +469,19 @@ class BrowserCheckoutToolkit:
         return None
 
     async def precheck(self, params: Mapping[str, Any], *, user_id: str) -> Optional[dict[str, Any]]:
-        """``precheck_sync`` plus the database checks: the caps can be read
-        and a card is stored (rule ``no_card``)."""
+        """``precheck_sync`` plus the database check: the caps can be read.
+        Neither the vault nor a stored card is asked for here: a page that
+        pays with the card the shop keeps on file needs neither, so
+        ``vault_unavailable`` and ``no_card`` are ``begin``'s."""
         refusal = self.precheck_sync(params, user_id=user_id)
         if refusal is not None:
             return refusal
         try:
             await self._settings.purchase_caps()
-            await self._card_label(user_id)
-        except _Refused as refused:
-            return _refusal(refused.rule, refused.message)
         except Exception as exc:
             _log_failure("checkout_precheck_failed", exc)
             return _refusal(
-                "check_failed",
-                "Could not read the purchase settings or the stored card, so nothing was done.",
+                "check_failed", "Could not read the purchase settings, so nothing was done."
             )
         return None
 
@@ -452,9 +529,7 @@ class BrowserCheckoutToolkit:
         try:
             request = _parse(params)
             self._check_cancel(user_id)
-            self._check_vault()
             caps = await self._settings.purchase_caps()
-            card_label = await self._card_label(user_id)
             session = await self._session(user_id, task_id)
             async with session.lock:
                 await self._ensure_guard(session)
@@ -475,8 +550,19 @@ class BrowserCheckoutToolkit:
                 if verdict is not None:
                     await self._record_refusal(user_id, task_id, facts, request, verdict)
                     raise _Refused(*verdict)
+                # Only a page with card fields needs the vault and its card.
+                card_label = _on_file_label(facts)
+                if facts.card_fields is not None:
+                    self._check_vault()
+                    try:
+                        card_label = await self._card_label(user_id)
+                    except _Refused:
+                        raise
+                    except Exception as exc:
+                        _log_failure("checkout_card_read_failed", exc)
+                        raise _Failed("Could not read the stored card, so nothing was done.") from exc
                 charge = usd(facts.total)
-                assert charge is not None and facts.card_fields is not None  # classify_facts checked
+                assert charge is not None and facts.submit_ref is not None  # classify_facts checked
                 amount = max(charge, request.amount) if request.amount is not None else charge
                 image = await self._screenshot(page, facts.card_fields)
                 session.task.actions += 1
@@ -496,6 +582,10 @@ class BrowserCheckoutToolkit:
             )
         checkout_id = _new_checkout_id()
         self._purge_expired()
+        replaced = self._pending.get(user_id)
+        if replaced is not None and replaced.ttl is not None:
+            # A held errand card is replaced: its session parking ends with it.
+            self._sessions.release_purchase(user_id)
         self._pending[user_id] = _Pending(
             checkout_id=checkout_id,
             user_id=user_id,
@@ -516,6 +606,7 @@ class BrowserCheckoutToolkit:
                 items=len(facts.items),
                 task_id=task_id,
                 checkout_id=checkout_id,
+                method=_method(facts),
             )
         except Exception as exc:  # the card cannot exist unrecorded
             _log_failure("checkout_audit_failed", exc, purchase_event="purchase_requested")
@@ -545,6 +636,7 @@ class BrowserCheckoutToolkit:
             host=facts.host,
             amount_usd=fmt_usd(charge),
             items=len(facts.items),
+            method=_method(facts),
             user_id=user_id,
         )
         return arguments
@@ -571,6 +663,7 @@ class BrowserCheckoutToolkit:
                 items=len(facts.items),
                 task_id=task_id,
                 reason=rule,
+                method=_method(facts),
             )
         except Exception as exc:
             _log_failure("checkout_audit_failed", exc, purchase_event="purchase_refused")
@@ -578,8 +671,10 @@ class BrowserCheckoutToolkit:
     # -- what the card shows ------------------------------------------------------
 
     def describe(self, arguments: Mapping[str, Any], *, user_id: str) -> str:
-        """``Pay $23.40 to shop.example.com (2 items) with Visa ····4242``,
-        from the card's own ``_checkout`` facts, never the model's words."""
+        """``Pay $23.40 to shop.example.com (2 items) with Visa ····4242``
+        (or ``with Visa ····4242 on file at shop.example.com``, ``with the
+        card on file at shop.example.com``), from the card's own
+        ``_checkout`` facts, never the model's words."""
         card = _card(arguments)
         if card is None:
             merchant = arguments.get("merchant") if isinstance(arguments, Mapping) else None
@@ -599,19 +694,65 @@ class BrowserCheckoutToolkit:
         pending = self._pending_for(user_id, card["checkout_id"] if card else "")
         return pending.user_image if pending is not None else None
 
+    def _expired(self, pending: _Pending, now: float) -> bool:
+        return now - pending.created > (pending.ttl if pending.ttl is not None else self._ttl)
+
     def _pending_for(self, user_id: str, checkout_id: str) -> Optional[_Pending]:
         pending = self._pending.get(user_id)
         if pending is None or not checkout_id or pending.checkout_id != checkout_id:
             return None
-        if self._clock() - pending.created > self._ttl:
+        if self._expired(pending, self._clock()):
             self._pending.pop(user_id, None)
             return None
         return pending
 
+    def hold(self, user_id: str, seconds: float, checkout_id: str) -> bool:
+        """Keep *user_id*'s pending checkout *checkout_id* (the errand card's
+        own), and the browser session its page is open in, for *seconds*
+        from now: an errand's purchase card waits that long for the owner
+        (services/automation/errands.py). With 0 seconds, let it go now (the
+        card was denied or its errand cancelled): when *checkout_id* is the
+        one pending, the checkout is dropped and the session's purchase
+        parking ends; any other id changes nothing (the parking may be
+        another card's, and one already used ended it in ``run``). False
+        when that checkout is not the one pending (another checkout replaced
+        it), or its session is gone (the approval would then find the page
+        changed and the errand is planned again)."""
+        pending = self._pending.get(user_id)
+        now = self._clock()
+        if seconds <= 0:
+            if pending is not None and pending.checkout_id == checkout_id:
+                del self._pending[user_id]
+                self._sessions.release_purchase(user_id)
+            return True
+        if pending is None or pending.checkout_id != checkout_id or self._expired(pending, now):
+            return False
+        pending.ttl = now - pending.created + seconds
+        return self._sessions.park_for_purchase(user_id, seconds)
+
+    def busy(self, user_id: str) -> bool:
+        """Whether *user_id* is using Crawler's browser now, so an errand run
+        must wait rather than take their page: a checkout of theirs waits on
+        its card (one no errand holds), the session is in a step or handed
+        to them, or a chat task used it in the last ``BUSY_SECONDS``. Both
+        clocks are the monotonic clock in the app. A website-step card
+        waiting in chat leaves no mark on the session; the errand service
+        reads that one from the approval store."""
+        pending = self._pending.get(user_id)
+        if pending is not None and pending.ttl is None and not self._expired(pending, self._clock()):
+            return True
+        session = self._sessions.sessions.get(user_id)
+        if session is None or session.closed:
+            return False
+        if session.lock.locked() or session.pending == "handoff":
+            return True
+        chat = not session.task.task_id.startswith(_UNATTENDED_TASK)
+        return chat and self._clock() - session.last_used < BUSY_SECONDS
+
     def _purge_expired(self) -> None:
         now = self._clock()
         for user, pending in list(self._pending.items()):
-            if now - pending.created > self._ttl:
+            if self._expired(pending, now):
                 del self._pending[user]
         while len(self._pending) > _MAX_PENDING:
             oldest = min(self._pending, key=lambda u: self._pending[u].created)
@@ -625,7 +766,8 @@ class BrowserCheckoutToolkit:
         """Pay. Only from an approved card whose checkout is still pending
         (``unbound_approval``), only while the page is the one the card
         was made from (``screen_changed``), with the caps checked again,
-        and only once the approval is on the ledger (``check_failed``)."""
+        and only once the approval is on the ledger (``check_failed``).
+        A held checkout's purchase parking ends here, paid or not."""
         if not approved:
             return _refusal("unbound_approval", _UNAPPROVED)
         card = _card(arguments)
@@ -642,6 +784,7 @@ class BrowserCheckoutToolkit:
                 await self._no_challenge(session, page)
                 facts = await collect_checkout_facts(page)
                 self._same_page(pending, card, facts)
+                facts = await self._reload_held(page, pending, facts)
                 caps = await self._settings.purchase_caps()
                 spent = await self._ledger.spent_last_24h(user_id)
                 verdict = classify_facts(
@@ -654,7 +797,7 @@ class BrowserCheckoutToolkit:
                 )
                 if verdict is not None:
                     raise _Refused(*verdict)
-                assert facts.card_fields is not None and facts.submit_ref is not None
+                assert facts.submit_ref is not None
                 self._check_cancel(user_id)
                 self._pending.pop(user_id, None)
                 try:
@@ -667,6 +810,7 @@ class BrowserCheckoutToolkit:
                         items=len(facts.items),
                         task_id=task_id,
                         checkout_id=pending.checkout_id,
+                        method=_method(facts),
                     )
                 except Exception as exc:
                     # This row counts the purchase against the daily cap
@@ -687,11 +831,55 @@ class BrowserCheckoutToolkit:
         except Exception as exc:
             _log_failure("checkout_run_failed", exc)
             return _error("browser.checkout failed before anything was paid.")
+        finally:
+            if pending.ttl is not None:
+                # A held checkout (an errand's card) is used up by its
+                # approval, whatever happened: the session's purchase
+                # parking ends (a bank check's handoff stays).
+                self._sessions.release_purchase(user_id)
+
+    async def _reload_held(
+        self, page: Any, pending: _Pending, facts: CheckoutFacts
+    ) -> CheckoutFacts:
+        """A held checkout (an errand's card) older than a chat card's TTL
+        is loaded again once the page on screen matched the card (*facts*):
+        the shop's session may have run out while the card waited, and only
+        a fresh page shows it. The fresh page must be the same checkout
+        (same address, totals, way to pay and controls, whatever element
+        refs the new load gave them), else screen_changed and the errand is
+        planned again; a load that fails answers screen_changed too. Returns
+        the fresh page's facts, whose refs the payment then uses."""
+        if pending.ttl is None or self._clock() - pending.created <= self._ttl:
+            return facts
+        try:
+            before = await _shape(page)
+            await page.goto(
+                pending.facts.url, wait_until="domcontentloaded", timeout=NAVIGATION_TIMEOUT_MS
+            )
+            await _shared.settle(page)
+            # The shape first: a snapshot retires the refs of the one before.
+            after = await _shape(page)
+            fresh = await collect_checkout_facts(page)
+        except Exception as exc:
+            _log_failure("checkout_reload_failed", exc)
+            raise _Refused("screen_changed", _SCREEN_CHANGED) from exc
+        same = (
+            after == before
+            and (fresh.origin, fresh.url, fresh.total, fresh.totals, fresh.submit_target)
+            == (facts.origin, facts.url, facts.total, facts.totals, facts.submit_target)
+            and _method(fresh) == _method(facts)
+            and fresh.saved_card == facts.saved_card
+        )
+        if not same:
+            raise _Refused("screen_changed", _SCREEN_CHANGED)
+        return fresh
 
     @staticmethod
     def _same_page(pending: _Pending, card: Mapping[str, Any], facts: CheckoutFacts) -> None:
         """The page the owner approved is the page on screen: same origin,
-        same URL, same interactive outline, same total."""
+        same URL, same interactive outline, same total, and the same way
+        to pay (the outline leaves text out, so a changed saved card is
+        compared here)."""
         before = pending.facts
         submit_to = facts.submit_target.action if facts.submit_target is not None else ""
         same = (
@@ -702,6 +890,8 @@ class BrowserCheckoutToolkit:
             and facts.totals == before.totals
             and facts.submit_target == before.submit_target
             and submit_to == card.get("submit_to", "")
+            and _method(facts) == _method(before)
+            and facts.saved_card == before.saved_card
         )
         if not same:
             raise _Refused("screen_changed", _SCREEN_CHANGED)
@@ -717,9 +907,12 @@ class BrowserCheckoutToolkit:
         """Decrypt, fill, submit, read the confirmation. Every card value
         goes on the session's redaction list before it is typed, so a page
         that echoes it is redacted for the rest of the task; every way out
-        that leaves the form on screen clears the card fields first."""
+        that leaves the form on screen clears the card fields first. A page
+        with no card fields is paid with the card on file (``_place_on_file``)."""
         user_id = session.user_id
-        assert facts.card_fields is not None and facts.submit_ref is not None
+        if facts.card_fields is None:
+            return await self._place_on_file(session, page, facts, pending, task_id)
+        assert facts.submit_ref is not None
         fields = facts.card_fields
         filled = False
         blocked: list[dict[str, str]] = []  # what the guard stopped while the order was sent
@@ -730,7 +923,7 @@ class BrowserCheckoutToolkit:
             await self._refused(user_id, task_id, facts, pending, "vault_open_failed")
             return _error(
                 "The stored card could not be opened, so nothing was paid. The owner can check "
-                "Settings → Payment card."
+                "Settings → Permissions → Money."
             )
         try:
             try:
@@ -772,6 +965,31 @@ class BrowserCheckoutToolkit:
             )
         return await self._after_submit(session, page, facts, pending, task_id, blocked)
 
+    async def _place_on_file(
+        self,
+        session: BrowserSession,
+        page: Any,
+        facts: CheckoutFacts,
+        pending: _Pending,
+        task_id: str,
+    ) -> dict[str, Any]:
+        """Press the bound order button once, in the same write window a
+        card's submit gets, and read what follows. Nothing is typed and the
+        vault is never opened: the shop charges what it keeps on file. A
+        press that fails is never tried again; it counts as sent, since the
+        order may have gone through."""
+        try:
+            blocked = await self._submit(session, page, facts)
+        except Exception as exc:
+            _log_failure("checkout_pay_failed", exc, detail=False)
+            await self._refused(session.user_id, task_id, facts, pending, "submit_failed")
+            return _error(
+                "The order button did not work, so the order may or may not have been placed. "
+                "Ask the person to check the site.",
+                filled=True,
+            )
+        return await self._after_submit(session, page, facts, pending, task_id, blocked)
+
     async def _after_submit(
         self,
         session: BrowserSession,
@@ -782,16 +1000,40 @@ class BrowserCheckoutToolkit:
         blocked: list[dict[str, str]],
     ) -> dict[str, Any]:
         self._forget_page(session.user_id)
-        assert facts.card_fields is not None
         # Whatever page is on screen now, a card form still on it is
-        # emptied before anything is read or photographed.
-        left = await self._clear_card(page, facts.card_fields)
+        # emptied before anything is read or photographed (nothing was
+        # typed when the shop charged the card it keeps on file).
+        left = 0
+        if facts.card_fields is not None:
+            left = await self._clear_card(page, facts.card_fields)
         challenge = await self._handoff.detect_challenge(page)
+        shop = {facts.origin}
+        action = facts.submit_target.action if facts.submit_target is not None else ""
+        from services.security.lookalike import registrable_domain
+
+        if action and registrable_domain(urlsplit(action).hostname or "") == registrable_domain(facts.host):
+            shop.add(_origin_of(action))
+        if challenge is None:
+            challenge = await self._handoff.detect_bank_check(page, shop)
         if challenge is not None:
             # The person finishes the code in Crawler's window: their
             # submit, and the bank's return to the shop's payment
             # address, must pass the guard until the agent acts again.
-            _shared.hand_over(self._guard, session, page, checkout=True)
+            # The window is chosen by where the challenge is, the frame it
+            # was found in, else the page: a sign-in on the shop's own
+            # order origin is no part of paying and gets an ordinary
+            # handoff, which opens no order address to the page's scripts;
+            # any challenge on another host (the bank's 3-D Secure, in a
+            # frame on the shop's page or on a page of its own, a PIN page
+            # titled "Payment Authentication") keeps it. The order form's
+            # action origin is the shop's only on the shop's registrable
+            # domain: a hosted payment form posts to the processor. A
+            # bank's check in a frame on another origin (detect_bank_check)
+            # is one too.
+            on_shop = _origin_of(challenge.frame or str(page.url)) in shop
+            _shared.hand_over(
+                self._guard, session, page, checkout=not (challenge.kind == "signin" and on_shop)
+            )
             await self._event(session.user_id, task_id, facts, pending, "purchase_pending_human", challenge.kind)
             payload: dict[str, Any] = {
                 "kind": challenge.kind,
@@ -841,7 +1083,8 @@ class BrowserCheckoutToolkit:
         summary = f"[step {session.task.actions}] checkout → {snap.host_path(where)}"
         session.task.summaries.append(summary)
         logger.info(
-            "checkout_completed", host=facts.host, amount_usd=fmt_usd(pending.charge), user_id=session.user_id
+            "checkout_completed", host=facts.host, amount_usd=fmt_usd(pending.charge),
+            method=_method(facts), user_id=session.user_id,
         )
         return {
             "ok": True,
@@ -1119,6 +1362,7 @@ class BrowserCheckoutToolkit:
                 task_id=task_id,
                 reason=reason,
                 checkout_id=pending.checkout_id,
+                method=_method(facts),
             )
         except Exception as exc:
             logger.error(

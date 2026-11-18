@@ -4,13 +4,15 @@ behind browser.act, with its availability rule and the switch it needs on.
 Why it exists: Reading a page and acting on it are different risks. With
 "Control a browser" on, Crawler can open and read sites; typing into a form
 or clicking a button there can send a message, sign the owner up or place an
-order. So acting is a switch of its own, off by default: every act still
-waits for the owner's approval card, and that card shows a picture of the
-page with the target outlined, so nothing is sent (and no money moves)
-without the owner having seen the page first.
+order. So acting is a switch of its own, off by default. A step that commits
+the owner to nothing (a search, a choice, adding to the cart) runs without a
+card unless "Ask before every website step" is on (browser_ask_every_step);
+anything else waits for the owner's approval card, and that card shows a
+picture of the page with the target outlined, so nothing is sent (and no
+money moves) without the owner having seen the page first.
 
 Fill in forms and click on sites: browser.act (WRITE, one approval card per
-step). It needs "Control a browser" on as well (the page is opened and read
+outcome, or per step with that switch on). It needs "Control a browser" on as well (the page is opened and read
 through browser.read): ``requires`` makes the report say so, and the tool
 registry's ``_REQUIRED_CAPABILITIES`` makes every gate refuse it.
 
@@ -46,7 +48,11 @@ CAPABILITY = Capability(
     label="Fill in forms and click on sites",
     description=(
         "Type into forms, choose options and click buttons on sites in Crawler's "
-        "browser; you approve every step on a card with a picture of the page."
+        "browser; steps that commit you to nothing (searching, choosing options, adding to "
+        "the cart) run on their own, and anything that pays, sends, posts, deletes, cancels, "
+        "signs you up, agrees to terms or types your details waits for your OK on a card "
+        "with a picture of the page (turn on 'Ask before every website step' for a card on "
+        "every step)."
     ),
     tools=("browser.act",),
     default_enabled=False,

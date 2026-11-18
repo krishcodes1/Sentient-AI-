@@ -83,9 +83,11 @@ def _alembic(db_path: Path) -> Config:
 
 def test_the_reserved_revisions_form_one_linear_chain_from_0016_to_0032():
     script = ScriptDirectory.from_config(_alembic(Path("unused.db")))
-    assert script.get_heads() == ["0032_file_reputation"]
-    # Walking down from the head passes through exactly the reserved ids, in
-    # order, and lands on the 0016 merge.
+    # One head, reached from the chain's end (later revisions follow it).
+    [head] = script.get_heads()
+    assert "0032_file_reputation" in {r.revision for r in script.walk_revisions("base", head)}
+    # Walking down from the chain's end passes through exactly the reserved
+    # ids, in order, and lands on the 0016 merge.
     walked = []
     revision = script.get_revision("0032_file_reputation")
     while revision is not None and revision.revision != "0016_merge_app_approvals":
@@ -98,7 +100,9 @@ def test_the_reserved_revisions_form_one_linear_chain_from_0016_to_0032():
     )
     for (rev, _, _), (child, _, _) in zip(RESERVED, RESERVED[1:], strict=False):
         assert script.get_revision(rev).nextrev == frozenset({child})
-    assert script.get_revision("0032_file_reputation").nextrev == frozenset()
+    # The next revision after the chain is the errands table, and nothing
+    # else branches off its end.
+    assert script.get_revision("0032_file_reputation").nextrev <= frozenset({"0033_errands"})
 
 
 def test_each_reserved_revision_lives_in_its_own_file():
@@ -498,7 +502,7 @@ GOLDEN_HELP = (
     "/stop: stop what I'm working on right now\n"
     "/new: start a new conversation\n"
     "/pending: show again everything that's waiting for your OK\n"
-    "/apps: apps I can use without asking for 7 days, with a button to undo each\n"
+    "/apps: apps and websites I can use without asking, with a button to undo each\n"
     "/usage: what I've used today and over the last 30 days, and about what it cost\n"
     "/help: show this list"
 )

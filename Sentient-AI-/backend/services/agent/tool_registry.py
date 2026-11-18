@@ -467,8 +467,10 @@ CONNECTOR_CATALOG: dict[str, list[ToolSpec]] = {
             "screenshot(ref?, for_model?) sends the person a picture (for_model=true "
             "also returns a small copy you can look at); note(text) keeps a fact for "
             "later steps; handoff(reason) asks the person to take over (sign-in, "
-            "CAPTCHA). Every result carries the fresh outline, so do not snapshot "
-            "right after open or click.",
+            "CAPTCHA). Every result carries the fresh outline of the visible part of "
+            "the page, so do not snapshot right after open or click unless the page "
+            "was still loading or what you need is further down (find, scroll or "
+            "snapshot(full=true)).",
             ActionCategory.READ,
             _schema(
                 action={
@@ -492,7 +494,12 @@ CONNECTOR_CATALOG: dict[str, list[ToolSpec]] = {
         ToolSpec(
             "act",
             "Type, choose and click in Crawler's own browser, one action per "
-            "call; the person approves every call before it runs. Read the page "
+            "call. A step that only moves an errand along (opening a link, "
+            "choosing an option, adding to the cart, going on to the next page, "
+            "typing a search, quantity, zip or promo code) runs at once unless the owner "
+            "asks to approve every step; anything that pays, sends, posts, "
+            "deletes, cancels, signs up, agrees to terms or types the person's "
+            "details waits for their approval card, which ends your turn. Read the page "
             "first (browser.read) and use refs from its latest outline: "
             "fill(ref, text) types into a field; fill_form(fields) fills up to "
             f"{BROWSER_MAX_FORM_FIELDS} fields at once; select(ref, value) picks an "
@@ -538,10 +545,13 @@ CONNECTOR_CATALOG: dict[str, list[ToolSpec]] = {
         ToolSpec(
             "checkout",
             "Pay for what is in the cart on the checkout page open in Crawler's "
-            "browser, with the card the owner stored (filled from the vault, never "
-            "typed); the person approves a card showing the site, the amount, the "
-            "items and a screenshot before anything is paid, so wait for that "
-            "decision. Bring the browser to the merchant's checkout page first "
+            "browser: on a page with card fields, with the card the owner stored "
+            "(filled from the vault, never typed); on a final review page that shows "
+            "a card the shop keeps on file next to the total and one order button "
+            "(Amazon's Place your order page), with that card. The person approves a "
+            "card showing the site, the amount, the items, what pays and a screenshot "
+            "before anything is paid, so wait for that decision. Never press the order "
+            "button with browser.act. Bring the browser to the merchant's checkout page first "
             "(browser.read; browser.act for delivery details). Refused unless the "
             "page is HTTPS, the merchant is the one the person asked for, a USD "
             "total is visible, and it is within the owner's spending caps. The "
@@ -550,7 +560,10 @@ CONNECTOR_CATALOG: dict[str, list[ToolSpec]] = {
             _schema(
                 merchant={
                     "type": "string",
-                    "description": "The site the person asked to buy from, e.g. ticketmaster.com",
+                    "description": (
+                        "The website the payment page is on, as its domain, e.g. fandango.com "
+                        "(a site the person asked for or agreed to use)"
+                    ),
                     "required": True,
                 },
                 amount={
@@ -3537,7 +3550,9 @@ class ConnectorToolExecutor:
         if result is None:
             return None
         return PrecheckRefusal(
-            reason=str(result.get("error") or _refused_text(tool_name)),
+            # "reason" is the toolkit's sentence for the person; "error" is
+            # written for the model and may name the tool to use instead.
+            reason=str(result.get("reason") or result.get("error") or _refused_text(tool_name)),
             policy=policy,
             result=dict(result),
             rule=_toolkit_rule(result),

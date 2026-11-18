@@ -1,6 +1,6 @@
 /**
- * Tests for Settings: they prove the LLM provider choice sends nulls to follow the install
- * default, deletion requires the password and signs out, the Telegram bot token is admin-only, the
+ * Tests for Settings: they prove each section sits on its tab (Permissions, Approvals, Account,
+ * AI model, Your data), the LLM provider choice sends nulls to follow the install default, deletion requires the password and signs out, the Telegram bot token is admin-only, the
  * Server and Payment card sections are owner-only, and a changed purchase cap saves through
  * updateCapabilitySettings.
  *
@@ -9,6 +9,7 @@
  */
 
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CapabilityStatus, SetupProviders, SetupStatus, User } from "@/types";
 
@@ -24,6 +25,7 @@ vi.mock("@/services/api", () => {
   return {
     ApiError,
     changePassword: vi.fn(),
+    getProviderModels: vi.fn(() => new Promise(() => {})),
     createTelegramLink: vi.fn(),
     deleteAccount: vi.fn(),
     exportAccount: vi.fn(),
@@ -133,6 +135,27 @@ function user(overrides: Partial<User> = {}): User {
 
 const DEFAULT_OPTION = "Use this Crawler's default";
 
+/** Settings opened at one tab, inside the router its `?tab=` needs. */
+function renderSettings(tab: "permissions" | "approvals" | "account" | "ai" | "data") {
+  return render(
+    <MemoryRouter initialEntries={[`/settings?tab=${tab}`]}>
+      <Settings />
+    </MemoryRouter>,
+  );
+}
+
+/** Opens a Permissions category: the button whose name starts with its label. */
+async function openCategory(label: string) {
+  fireEvent.click(await screen.findByRole("button", { name: new RegExp(`^${label}`) }));
+}
+
+/** For owner-only checks: wait until the account has loaded (its name fills the Account tab),
+ *  then open `tab`, so asserting that something is absent is not just racing getMe. */
+async function afterAccountLoads(tab: string) {
+  await waitFor(() => expect(screen.getByLabelText("Name")).toHaveValue("Me"));
+  fireEvent.click(screen.getByRole("tab", { name: tab }));
+}
+
 describe("Settings LLM provider", () => {
   afterEach(() => {
     vi.mocked(getMe).mockReset();
@@ -141,7 +164,7 @@ describe("Settings LLM provider", () => {
 
   it("selects the install default for an account with no provider of its own", async () => {
     vi.mocked(getMe).mockResolvedValue(user());
-    render(<Settings />);
+    renderSettings("ai");
 
     const option = await screen.findByRole("radio", { name: new RegExp(DEFAULT_OPTION) });
     await waitFor(() => expect(option).toHaveAttribute("aria-checked", "true"));
@@ -156,7 +179,7 @@ describe("Settings LLM provider", () => {
   it("returns a pinned account to the install default by sending nulls", async () => {
     vi.mocked(getMe).mockResolvedValue(user({ llm_provider: "openai", llm_model: "gpt-5-mini" }));
     vi.mocked(updateSettings).mockResolvedValue(user());
-    render(<Settings />);
+    renderSettings("ai");
 
     const openai = await screen.findByRole("radio", { name: /^openai/i });
     await waitFor(() => expect(openai).toHaveAttribute("aria-checked", "true"));
@@ -173,9 +196,9 @@ describe("Settings LLM provider", () => {
   it("pins a provider with its model", async () => {
     vi.mocked(getMe).mockResolvedValue(user());
     vi.mocked(updateSettings).mockResolvedValue(
-      user({ llm_provider: "gemini", llm_model: "gemini-3.5-flash-lite" }),
+      user({ llm_provider: "gemini", llm_model: "gemini-3.8-flash" }),
     );
-    render(<Settings />);
+    renderSettings("ai");
 
     fireEvent.click(await screen.findByRole("radio", { name: /^gemini/i }));
     fireEvent.click(screen.getByRole("button", { name: /save llm settings/i }));
@@ -183,7 +206,7 @@ describe("Settings LLM provider", () => {
     await waitFor(() =>
       expect(updateSettings).toHaveBeenCalledWith({
         llm_provider: "gemini",
-        llm_model: "gemini-3.5-flash-lite",
+        llm_model: "gemini-3.8-flash",
       }),
     );
   });
@@ -198,7 +221,7 @@ describe("Settings account deletion", () => {
 
   it("refuses to delete without the current password", async () => {
     vi.mocked(getMe).mockResolvedValue(user());
-    render(<Settings />);
+    renderSettings("data");
 
     fireEvent.click(await screen.findByRole("button", { name: "Delete Account" }));
     const dialog = await screen.findByRole("dialog");
@@ -213,7 +236,7 @@ describe("Settings account deletion", () => {
   it("sends the entered password and signs out on success", async () => {
     vi.mocked(getMe).mockResolvedValue(user());
     vi.mocked(deleteAccount).mockResolvedValue(undefined);
-    render(<Settings />);
+    renderSettings("data");
 
     fireEvent.click(await screen.findByRole("button", { name: "Delete Account" }));
     const dialog = await screen.findByRole("dialog");
@@ -233,7 +256,7 @@ describe("Settings account deletion", () => {
     vi.mocked(deleteAccount).mockRejectedValue(
       new ApiError("Transfer ownership before deleting the last owner account", 409),
     );
-    render(<Settings />);
+    renderSettings("data");
 
     fireEvent.click(await screen.findByRole("button", { name: "Delete Account" }));
     const dialog = await screen.findByRole("dialog");
@@ -260,7 +283,7 @@ describe("Settings Telegram bot token", () => {
   it("hides the bot token block from a non-admin and tells them to ask the owner", async () => {
     vi.mocked(getMe).mockResolvedValue(user({ is_admin: false }));
     vi.mocked(getTelegramStatus).mockResolvedValue({ configured: false, linked: false });
-    render(<Settings />);
+    renderSettings("approvals");
 
     await screen.findByText("Ask the owner to add a bot token.");
     expect(screen.queryByText("Bot token")).not.toBeInTheDocument();
@@ -273,7 +296,7 @@ describe("Settings Telegram bot token", () => {
       .mockResolvedValueOnce({ configured: true, linked: false, bot_username: "crawler_bot" });
     vi.mocked(testTelegram).mockResolvedValue({ ok: true, bot_username: "crawler_bot" });
     vi.mocked(saveTelegram).mockResolvedValue({ bot_username: "crawler_bot", running: false });
-    render(<Settings />);
+    renderSettings("approvals");
 
     await screen.findByText("Bot token");
     fireEvent.change(screen.getByPlaceholderText("123456789:AA…"), {
@@ -301,7 +324,7 @@ describe("Settings Telegram bot token", () => {
     vi.mocked(saveTelegram).mockRejectedValue(
       new ApiError("Provided by server configuration; remove it from .env to manage it here.", 409),
     );
-    render(<Settings />);
+    renderSettings("approvals");
 
     await screen.findByText("Bot token");
     fireEvent.change(
@@ -326,7 +349,7 @@ describe("Settings Telegram bot token", () => {
       .mockResolvedValueOnce({ configured: true, linked: false, bot_username: "crawler_bot" })
       .mockResolvedValueOnce({ configured: false, linked: false });
     vi.mocked(removeTelegramToken).mockResolvedValue(undefined);
-    render(<Settings />);
+    renderSettings("approvals");
 
     fireEvent.click(await screen.findByRole("button", { name: "Remove" }));
 
@@ -345,7 +368,7 @@ describe("Settings Server section", () => {
 
   it("shows the owner this Crawler's current provider and who can create accounts", async () => {
     vi.mocked(getMe).mockResolvedValue(user({ is_admin: true }));
-    render(<Settings />);
+    renderSettings("ai");
 
     const server = await serverSection();
     expect(await server.findByText(/current default/i)).toHaveTextContent(
@@ -358,10 +381,8 @@ describe("Settings Server section", () => {
 
   it("never shows the section, or asks for its data, for an account that is not the owner", async () => {
     vi.mocked(getMe).mockResolvedValue(user({ is_admin: false }));
-    render(<Settings />);
-
-    // Wait for the account itself, so the check below is not just racing it.
-    await waitFor(() => expect(screen.getByLabelText("Name")).toHaveValue("Me"));
+    renderSettings("account");
+    await afterAccountLoads("AI model");
     expect(screen.queryByRole("region", { name: "Server" })).not.toBeInTheDocument();
     expect(screen.queryByText("AI provider for this Crawler")).not.toBeInTheDocument();
     expect(getSetupStatus).not.toHaveBeenCalled();
@@ -371,7 +392,7 @@ describe("Settings Server section", () => {
   it("opens sign-ups through updateRegistration", async () => {
     vi.mocked(getMe).mockResolvedValue(user({ is_admin: true }));
     vi.mocked(updateRegistration).mockResolvedValue(undefined);
-    render(<Settings />);
+    renderSettings("ai");
 
     const server = await serverSection();
     const signups = await server.findByRole("switch", { name: /allow other people to create accounts/i });
@@ -384,7 +405,7 @@ describe("Settings Server section", () => {
   it("renders the switch disabled when ALLOW_REGISTRATION=false in .env locks it", async () => {
     vi.mocked(getMe).mockResolvedValue(user({ is_admin: true }));
     vi.mocked(getSetupStatus).mockResolvedValue({ ...SERVER_STATUS, registration_env_locked: true });
-    render(<Settings />);
+    renderSettings("ai");
 
     const server = await serverSection();
     const signups = await server.findByRole("switch", { name: /allow other people to create accounts/i });
@@ -400,7 +421,7 @@ describe("Settings Server section", () => {
     vi.mocked(updateRegistration).mockRejectedValue(
       new ApiError("ALLOW_REGISTRATION=false in .env keeps registration closed.", 409),
     );
-    render(<Settings />);
+    renderSettings("ai");
 
     const server = await serverSection();
     const signups = await server.findByRole("switch", { name: /allow other people to create accounts/i });
@@ -417,7 +438,7 @@ describe("Settings Server section", () => {
     vi.mocked(getMe).mockResolvedValue(user({ is_admin: true }));
     vi.mocked(testProvider).mockResolvedValue({ ok: true, reply: "OK" });
     vi.mocked(saveProvider).mockResolvedValue(undefined);
-    render(<Settings />);
+    renderSettings("ai");
 
     const server = await serverSection();
     fireEvent.click(await server.findByRole("radio", { name: /anthropic/i }));
@@ -456,7 +477,7 @@ describe("Settings Server section", () => {
     vi.mocked(saveProvider).mockRejectedValue(
       new ApiError("The gemini key comes from the server's .env and cannot be changed here.", 409),
     );
-    render(<Settings />);
+    renderSettings("ai");
 
     const server = await serverSection();
     expect(await server.findByText("Provided by server configuration")).toBeInTheDocument();
@@ -478,7 +499,7 @@ describe("Settings Server section", () => {
       .mockResolvedValueOnce({ ...SERVER_STATUS, secrets_unreadable: true })
       .mockResolvedValueOnce(SERVER_STATUS);
     vi.mocked(clearStoredSecrets).mockResolvedValue(undefined);
-    render(<Settings />);
+    renderSettings("ai");
 
     const server = await serverSection();
     fireEvent.click(await server.findByRole("button", { name: "Clear stored keys" }));
@@ -498,7 +519,8 @@ describe("Settings Payment card", () => {
 
   it("shows the owner the Payment card section and reads the vault", async () => {
     vi.mocked(getMe).mockResolvedValue(user({ is_admin: true }));
-    render(<Settings />);
+    renderSettings("permissions");
+    await openCategory("Money");
 
     const section = within(await screen.findByRole("region", { name: "Payment card" }));
     expect(await section.findByText(/no card is stored/i)).toBeInTheDocument();
@@ -509,9 +531,10 @@ describe("Settings Payment card", () => {
 
   it("never shows the section, or asks for the vault, for an account that is not the owner", async () => {
     vi.mocked(getMe).mockResolvedValue(user({ is_admin: false }));
-    render(<Settings />);
-
-    await waitFor(() => expect(screen.getByLabelText("Name")).toHaveValue("Me"));
+    renderSettings("account");
+    await afterAccountLoads("Permissions");
+    await screen.findByRole("button", { name: /^Connected apps/ });
+    expect(screen.queryByRole("button", { name: /^Money/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "Payment card" })).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Card number")).not.toBeInTheDocument();
     expect(getVaultItems).not.toHaveBeenCalled();
@@ -555,7 +578,9 @@ describe("Settings purchase caps", () => {
     vi.mocked(updateCapabilitySettings).mockResolvedValue([
       { ...PURCHASES, settings: { per_purchase_cap_usd: 40, per_day_cap_usd: 50 } },
     ]);
-    render(<Settings />);
+    renderSettings("permissions");
+    await openCategory("Money");
+    fireEvent.click(await screen.findByRole("button", { name: "About Buy things for me" }));
 
     const perPurchase = await screen.findByLabelText("Per purchase (USD)");
     await waitFor(() => expect(perPurchase).toBeEnabled());
@@ -577,7 +602,9 @@ describe("Settings purchase caps", () => {
     vi.mocked(updateCapabilitySettings).mockRejectedValue(
       new ApiError("Caps must be between $1 and $10,000.", 422),
     );
-    render(<Settings />);
+    renderSettings("permissions");
+    await openCategory("Money");
+    fireEvent.click(await screen.findByRole("button", { name: "About Buy things for me" }));
 
     const perDay = await screen.findByLabelText("Per day (USD)");
     await waitFor(() => expect(perDay).toBeEnabled());
@@ -591,7 +618,9 @@ describe("Settings purchase caps", () => {
   it("refuses a cap over $10,000 on the page, before the server sees it", async () => {
     vi.mocked(getMe).mockResolvedValue(user({ is_admin: true }));
     vi.mocked(getCapabilities).mockResolvedValue([PURCHASES]);
-    render(<Settings />);
+    renderSettings("permissions");
+    await openCategory("Money");
+    fireEvent.click(await screen.findByRole("button", { name: "About Buy things for me" }));
 
     const perDay = await screen.findByLabelText("Per day (USD)");
     await waitFor(() => expect(perDay).toBeEnabled());
@@ -606,9 +635,10 @@ describe("Settings purchase caps", () => {
   it("keeps the caps read-only for an account that is not the owner", async () => {
     vi.mocked(getMe).mockResolvedValue(user({ is_admin: false }));
     vi.mocked(getCapabilities).mockResolvedValue([PURCHASES]);
-    render(<Settings />);
-
-    await waitFor(() => expect(screen.getByLabelText("Name")).toHaveValue("Me"));
+    renderSettings("account");
+    await afterAccountLoads("Permissions");
+    await openCategory("Money");
+    fireEvent.click(await screen.findByRole("button", { name: "About Buy things for me" }));
     expect(screen.getByLabelText("Per purchase (USD)")).toBeDisabled();
   });
 });
@@ -618,7 +648,7 @@ describe("Settings apps allowed for a week", () => {
     vi.mocked(getMe).mockReset();
   });
 
-  it("lists them inside Permissions, with Revoke, for an account that is not the owner too", async () => {
+  it("lists them under Permissions ▸ Connected apps, with Revoke, for an account that is not the owner too", async () => {
     vi.mocked(getMe).mockResolvedValue(user({ is_admin: false }));
     vi.mocked(listAppApprovals).mockResolvedValue([
       {
@@ -631,13 +661,13 @@ describe("Settings apps allowed for a week", () => {
         last_used_at: null,
       },
     ]);
-    render(<Settings />);
+    renderSettings("permissions");
+    await openCategory("Connected apps");
 
     const region = await screen.findByRole("region", { name: "Apps allowed for a week" });
     expect(await within(region).findByText("Calendar")).toBeInTheDocument();
     expect(within(region).getByRole("button", { name: "Revoke Calendar (this browser)" })).toBeEnabled();
-    const permissions = screen.getByRole("heading", { name: "Permissions" }).closest("section");
-    expect(permissions).toContainElement(region);
+    expect(screen.getByRole("region", { name: "Connected apps" })).toContainElement(region);
   });
 });
 
@@ -647,22 +677,23 @@ describe("Settings tutor locks", () => {
     vi.mocked(listTutorLocks).mockClear();
   });
 
-  it("shows the owner the Tutor locks inside Permissions", async () => {
+  it("shows the owner the Tutor locks under Permissions ▸ Memory and learning", async () => {
     vi.mocked(getMe).mockResolvedValue(user({ is_admin: true }));
-    render(<Settings />);
+    renderSettings("permissions");
+    await openCategory("Memory and learning");
 
     const region = await screen.findByRole("region", { name: "Tutor locks" });
     expect(await within(region).findByText(/No tutor locks/)).toBeInTheDocument();
-    const permissions = screen.getByRole("heading", { name: "Permissions" }).closest("section");
-    expect(permissions).toContainElement(region);
+    expect(screen.getByRole("region", { name: "Memory and learning" })).toContainElement(region);
     expect(listTutorLocks).toHaveBeenCalled();
   });
 
   it("never shows them, or asks for them, for an account that is not the owner", async () => {
     vi.mocked(getMe).mockResolvedValue(user({ is_admin: false }));
-    render(<Settings />);
-
-    await waitFor(() => expect(screen.getByLabelText("Name")).toHaveValue("Me"));
+    renderSettings("account");
+    await afterAccountLoads("Permissions");
+    await screen.findByRole("button", { name: /^Connected apps/ });
+    expect(screen.queryByRole("button", { name: /^Memory and learning/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "Tutor locks" })).not.toBeInTheDocument();
     expect(listTutorLocks).not.toHaveBeenCalled();
   });
@@ -675,7 +706,7 @@ describe("Settings permission tiers", () => {
 
   it("offers Allow low-risk changes and says plainly what each tier does", async () => {
     vi.mocked(getMe).mockResolvedValue(user({ default_permission_tier: "auto_approve" }));
-    render(<Settings />);
+    renderSettings("approvals");
 
     const select = await screen.findByLabelText("Default Permission Tier");
     await waitFor(() => expect(select).toHaveValue("auto_approve"));
@@ -690,7 +721,7 @@ describe("Settings permission tiers", () => {
     expect(screen.getByText(/^Every change needs your approval; reads run without asking\./)).toBeInTheDocument();
   });
 
-  it("lists low-risk grants inside Permissions, with Revoke, for an account that is not the owner too", async () => {
+  it("lists low-risk grants under Permissions ▸ Connected apps, with Revoke, for an account that is not the owner too", async () => {
     vi.mocked(getMe).mockResolvedValue(user({ is_admin: false }));
     vi.mocked(listPermissionGrants).mockResolvedValue([
       {
@@ -706,12 +737,12 @@ describe("Settings permission tiers", () => {
         uses: 0,
       },
     ]);
-    render(<Settings />);
+    renderSettings("permissions");
+    await openCategory("Connected apps");
 
     const region = await screen.findByRole("region", { name: "Accounts allowed low-risk changes" });
     expect(await within(region).findByText("School Gmail")).toBeInTheDocument();
     expect(within(region).getByRole("button", { name: "Revoke low-risk changes on School Gmail" })).toBeEnabled();
-    const permissions = screen.getByRole("heading", { name: "Permissions" }).closest("section");
-    expect(permissions).toContainElement(region);
+    expect(screen.getByRole("region", { name: "Connected apps" })).toContainElement(region);
   });
 });

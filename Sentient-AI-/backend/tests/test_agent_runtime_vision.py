@@ -134,7 +134,7 @@ async def test_image_blocks_survive_the_context_pipeline_to_the_provider():
 async def test_the_guard_screens_the_text_of_a_multimodal_turn():
     """Attaching a photo must not be a way to slip text past the scanner."""
     guard = RecordingGuard(unsafe_substring="ignore all previous instructions")
-    provider = RecordingProvider([LLMResponse(content="should never run")])
+    provider = RecordingProvider([LLMResponse(content="Looked at it.")])
     runtime, audit = _runtime(provider, guard=guard)
 
     response = await runtime.chat(
@@ -143,9 +143,10 @@ async def test_the_guard_screens_the_text_of_a_multimodal_turn():
         user_id="u1",
     )
 
-    assert provider.calls == []
-    assert response.blocked_actions[0].policy == "prompt_guard"
-    assert any(e["event"] == "input_blocked" for e in audit.entries)
+    # The text is screened; a flagged one is on the audit trail and turns
+    # standing consent off, but the person's own message is never refused.
+    assert len(provider.calls) == 1 and not response.blocked_actions
+    assert any(e["event"] == "input_flagged" for e in audit.entries)
 
 
 @pytest.mark.asyncio

@@ -1,16 +1,22 @@
 """browser.act: the agent types, chooses, clicks and submits in Crawler's
 own browser (purchases spec §5).
 
-WRITE tier, one approval card per call: the model may fill a field,
-fill a form, pick an option, tick a box, click anything (a "Sign up"
-button included: that is what the card is for), press a key or submit a
-form. The same session, egress guard, handoff detector, caps and loop
+WRITE tier, an approval card per call unless the act is an errand step
+(below): the model may fill a field, fill a form, pick an option, tick a
+box, click anything (a "Sign up" button included: that is what the card
+is for), press a key or submit a form. The same session, egress guard, handoff detector, caps and loop
 detector as browser.read; every act ends with the fresh outline the way
 browser.read's actions do, plus ``did`` ("Typed 12 characters into
-"Email"") so the model knows what happened without re-reading.
+"Email"") so the model knows what happened without re-reading. An act
+that opens a new tab (a ``target=_blank`` link, a script's
+``window.open``) goes on in that tab, as a read's click does
+(``BrowserSession.adopt_new_tab``): the outline is the new tab's and the
+result says ``new_tab``; a new tab that shows no page is closed and the
+result says so.
 
-Hard rules, checked before the card (``precheck``, no browser call) and
-again when the approved act runs:
+Hard rules, checked before the card (``precheck`` on the page memory,
+with no browser call, then ``bind_async`` on the live page when the card
+would be made) and again when the approved act runs:
 
 - never into a password, one-time-code or card field (number, security
   code, expiry, name on card: ``checkout.markers`` decides). Those are
@@ -24,19 +30,31 @@ again when the approved act runs:
   button; Enter activates the focused element itself, whatever it is,
   followed into open shadow roots and into a focused frame, which is
   asked the same question or, when it cannot be, refuses, as a focus
-  hidden in a shadow tree nobody can read does), and it is
-  refused as ``use_checkout`` whatever the purchases switch says when its
-  words are a purchase ("Place order", "Pay now", "Jetzt kaufen"...: the
-  lists in ``checkout.markers``), when its form holds a card right now,
+  hidden in a shadow tree nobody can read does), and it is refused as
+  ``use_checkout`` whatever the purchases switch says when money can
+  move from it (``markers.pays``, with every frame's facts joined in):
   when it or a link is aimed at an order path (/place-order, /pay), when
-  it is anything but a plain link on a page (any frame of it) that shows
-  a payment method on file next to a price, or when it is a button (a
-  clickable <div> included) on a page that shows an order total next to
-  a payment method on file (``markers.pays``, with every frame's facts
-  joined in): money moves through browser.checkout and its own card, or
-  not at all. A check or a select is refused the same way when its own
-  words are a purchase or the page shows a payment method on file next
-  to a price (``markers.change_pays``).
+  its form holds a card right now, when it is little more than a price,
+  when it is a wallet button (Apple Pay, PayPal...), when its words are a
+  purchase ("Place order", "Pay now", "Jetzt kaufen"...: the lists in
+  ``checkout.markers``) and it sends a POST form or the page (any frame
+  of it) shows an order total or a payment method on file, when it is
+  anything but a plain link on a page that names a payment method on
+  file next to a price, or when it is a button (a clickable <div>
+  included) on a page that shows an order total next to a payment method
+  on file: money moves through browser.checkout and its own card, or not
+  at all. What cannot move money is not refused: a plain link that is not
+  aimed at an order path is navigation whatever it says (a film poster
+  that hides "Buy Tickets" in its anchor), and a control whose words are
+  a purchase with none of the above (a script button "Buy tickets" that
+  opens the ticketing page) gets its card, with the money warning. Words
+  are judged on the live page; before that, from the outline's names
+  alone, only a submit is refused (a submit sends a form; its own name
+  and its form's default button's). A check or a select is refused the
+  same way when its own words are a purchase (before the card too) or a
+  wallet's, or the page names a payment method on file next to a price
+  (``markers.change_pays``). A wallet button elsewhere on the page
+  refuses nothing: most shops show one next to "Add to cart".
 - never on an ``http://`` page (``insecure_page``): what the model types
   can be the person's address or a message, and it must not cross the
   network in clear.
@@ -47,12 +65,88 @@ again when the approved act runs:
   when the address or the outline digest differs (``outline_changed``),
   whatever the act: a ref is only meaningful against the outline it came
   from, and Enter activates whatever has the focus on the page open now,
-  which must be the page the card showed.
+  which must be the page the card showed. The digest is of the page's
+  structure (which refs there are and what each is called:
+  ``pagememory.outline_digest``), so a countdown, a typed value or a
+  ticked box between the card and the owner's tap does not void the
+  approval. A moved focus does not void an act on a ref either; it does
+  void a key press, whose digest keeps the focus marker.
 
-Every card shows the owner the page. ``bind_async`` (the executor's
-card-time bind) takes a screenshot of the page as it is when the card is
-made, with the target outlined in a 3px red box (an overlay added and
-removed around the capture) and secret fields masked by the shared mask,
+No card for a step that can only be refused. ``bind_async`` (the
+executor's card-time bind) first runs the live checks the approved act
+will run (``_live_rules``: the field, purchase and choice rules above)
+and, when one refuses, answers that refusal instead of card arguments;
+the runtime files it like a precheck refusal and makes no card, so the
+owner is never asked to approve a step that is then refused. A ref that
+no longer resolves, and a page that is no longer the one the model
+looked at (judging a click scrolls its target into view, as the click
+will), are answered the same way, as ``stale_ref``: the model looks
+again and asks again. A ``use_checkout`` refusal logs one line,
+``browser_act_use_checkout``: the rule that refused and what was
+judged, as booleans, never the page's words.
+
+Two sentences on every refusal. ``error`` is for the model and may name
+the tool to call next; ``reason`` is for the person (``_REASONS``, and
+``markers.USE_CHECKOUT_REASON``): why the step was not done and what
+happens next, with no tool named, since the chat quotes it to the owner.
+
+What may run with no card. The owner can allow clicks on a site for an
+hour (``services/agent/app_approvals``); nobody looks at the acts that
+then run, so which ones count is decided here from the live page, never
+by the model. ``bind_async`` stores ``_page.quiet``: True only for a
+click, a select or a check by ref, or a press of Tab, Escape, ArrowDown
+or ArrowUp, that passed the live rules, on an https page of which every
+frame was read and none shows an order total, a payment method on file
+or a wallet, whose card carries no money warning, and whose target sends
+no form by any method (``markers``' ``sends`` and ``submits``), is aimed
+at no order path and has words that read as no purchase, wallet or price
+(``_quiet``). A control with no words is not quiet, a plain link aside.
+Typing, a submit and Enter never are. Anything that could not be judged
+is not quiet, ``bind`` (no browser) never says it, and a ``_page`` the
+call brings itself is refused by ``precheck`` and replaced by the bind.
+
+The owner can also leave "Ask before every website step" off (its
+default): an errand step then runs with no card at all, and only outcomes
+get one. ``bind_async`` stores ``_page.errand`` beside ``quiet``, from the
+same live page (``_errand``): on an https page that shows no order total
+and no payment method on file (a wallet button elsewhere on it does not
+count), a key that only moves; typing into search boxes, quantities, zip
+or promo fields only (``_page.fields``, their kinds); a site search sent
+by GET; a plain link; and, on a page that declares English, a choice or a
+click whose words, as a person reads them (never a name or id attribute),
+read as no outcome and no purchase (services/agent/app_approvals
+``errand_outcome``), a POST button or a script button in a form only when
+its words are cart words or "Check out" sent to a cart, and a cookie
+banner's own Agree, Accept, Yes or OK in a region that says cookies (its
+POST form only to a cookie or consent address). ``target`` then carries
+the control's words (``words``, and ``consent``) for the runtime's own
+check (``app_approvals.errand_covers``). Pays, sends, posts, deletes,
+cancels, signs, agrees, consents or types a person's details: a card, as
+before. A plain link worded like a purchase ("Place order", "Buy
+tickets") gets its card too: a page's script can take it over. The words
+only choose which steps are tried unasked; the guard is what holds. A
+step the runtime runs with no card (an errand step, a site approval's
+click) comes marked unasked (``app_approvals.UNASKED_MARK``) and runs
+with the guard's ``no_orders`` until its page has gone quiet
+(``UNASKED_QUIET_S``; a plain link until its page commits a new
+document): no order address or order step opens for it, its write window
+included, no socket message goes out, and nothing of any frame or script
+is sent but a GET, a request to a cart (a page script's only on a cart
+step), or its own form when the card judged that form by cart words or
+as a cookie choice (``_unasked_sends``, from the form address the card
+pinned; a live form that goes elsewhere is refused as
+``outline_changed``); every redirect hop of what it sends or loads is
+judged, and a beacon is held back. One stopped so is refused as
+``auto_submit`` and asks with a card the next time it comes on that page
+(by the page's path and the control's name), so a word missing from the
+lists costs one card; one whose own send already went out is done, with
+a note, so it is never taken twice.
+
+Every card shows the owner the page. ``bind_async`` then takes a
+screenshot of the page as it is when the card is made, with the target
+outlined in a 3px red box (an overlay added and removed around the
+capture) and secret fields masked by the shared mask (an errand step
+that runs unasked drops its picture when it runs),
 keeps it in memory only (``approval_image`` serves it to the web card and
 the Telegram photo; it is never stored with the card) and adds to the
 card's sentence, from the page's own facts, the line "This page shows
@@ -61,8 +155,9 @@ normally pays only through its checkout step." whenever any frame shows
 an order total, a payment method on file or a wallet button, or the
 target matches a purchase pattern that did not refuse it. A capture that
 fails leaves the card with "No picture of the page could be taken." So
-no act, and no money it could move, runs without the owner having seen
-the page on its card; the rules above are defence in depth. A card whose
+no act that could move money runs without the owner having seen the page
+on its card (an errand step needs a page with nothing to pay); the rules
+above are defence in depth. A card whose
 picture is no longer kept (its approval outlived it, more cards were
 pending than are kept, Crawler restarted) says so and its act is refused
 (``picture_gone``).
@@ -76,7 +171,8 @@ check, a select, another key, a plain link) runs with the window shut and
 the guard's ``changing`` set: a page whose script sends its form on that
 change, from any frame, or opens an order address or sends a request
 to one (a ``fetch()``), is stopped, and the act is refused as
-``auto_submit`` with one plain sentence. An act is the agent's next action on the
+``auto_submit`` with one plain sentence (an unasked step: see above). An
+act is the agent's next action on the
 session, so it shuts a pending handoff's window first
 (``_shared.take_back``); a challenge after an act hands the window to
 the person the way browser.read's handoff does. Model text is not a secret:
@@ -87,15 +183,27 @@ ever appears in a summary, a log line or ``did``.
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 import secrets
 import time
 import unicodedata
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional, Sequence
+from urllib.parse import urljoin
 
 import structlog
 
 from core.config import settings
+from services.agent.app_approvals import (
+    CHECKOUT_WORDS_RE,
+    ERRAND_FIELD_KINDS,
+    UNASKED_MARK,
+    cart_words,
+    consent_words,
+    errand_money_ok,
+    errand_outcome,
+)
 from services.tools.browser import _shared
 from services.tools.browser import snapshot as snap
 from services.tools.browser._shared import (
@@ -104,13 +212,30 @@ from services.tools.browser._shared import (
     PlaywrightError,
     PlaywrightTimeoutError,
 )
-from services.tools.browser.actions import LOOP_REPEATS, Guard, mode_for
+from services.tools.browser.actions import (
+    LOAD_QUIET_CAP_S,
+    LOOP_REPEATS,
+    NEW_TAB_WAIT_MS,
+    BrowserReadToolkit,
+    Guard,
+    mode_for,
+)
 from services.tools.browser.checkout import markers
 from services.tools.browser.checkout.amounts import fmt_usd, parse_money
-from services.tools.browser.guard import SENDING_REASONS, EgressHooks
+from services.tools.browser.guard import (
+    CART_ORDER_RE,
+    CART_PATH_RE,
+    SENDING_REASONS,
+    UNASKED_HELD,
+    UNASKED_REASONS,
+    EgressHooks,
+    page_place,
+    wait_for_quiet,
+)
 from services.tools.browser.pagememory import (
     LastPage,
     PageMemory,
+    _ref_names,
     outline_digest,
     page_address,
     page_origin,
@@ -132,6 +257,14 @@ CARD_KEY = "_page"
 # write window closes: a form POST is issued at the click, and the route
 # guard reads ``write_allowed`` when the request is issued, not answered.
 NAVIGATION_GRACE_MS = 300
+# How long a step with no card keeps the guard's send stop on after it
+# starts: until no request has been in flight for UNASKED_QUIET_S, at most
+# UNASKED_QUIET_CAP_S, so a save the page debounces (450 ms, 700 ms) is
+# still stopped. ponytail: a send delayed past the window goes out
+# unstopped (SECURITY.md residuals); holding the stop for the page's life
+# would break the pages that load their own data by POST.
+UNASKED_QUIET_S = 1.0
+UNASKED_QUIET_CAP_S = 2.0
 _SUMMARY_LABEL_CHARS = 40
 _NAMED_FIELDS_SHOWN = 3
 # How many card pictures are kept at most across users; each is kept for
@@ -198,6 +331,9 @@ _SENDING_ACTIONS = frozenset({"click", "submit", "press"})
 # Acts that choose something on the page: the purchase rules apply to
 # what they choose and to the page around it.
 _CHOICE_ACTIONS = frozenset({"check", "select"})
+# Acts made on one control by ref, whose card stays good while that control
+# is still on the page under its name (``_check_outline``).
+_SAME_TARGET_ACTIONS = frozenset({"click", "check", "select"})
 # How many frames deep Enter's focus is followed before it is refused.
 _MAX_FRAME_DEPTH = 4
 
@@ -228,6 +364,240 @@ _PAGE_MOVED = (
     "The page changed since this was approved (it is not the page the card showed). Look again first."
 )
 _AUTO_SUBMIT = "That change tried to send the page. Crawler didn't let it."
+# A step that ran with no card and tried to reach an order address, or to
+# send what a choice changed: it asks with a card when it comes again.
+# What an "Add to cart" click's result says comes next.
+CART_NEXT_STEP = (
+    "It is in the cart. If the person asked you to order or buy it, keep going without asking in "
+    "chat: open the cart, go to checkout, and on the final review page (the total, how it is paid "
+    "and the order button) call browser.checkout. The person approves the purchase there, once. "
+    "If they only asked you to add it or to look, tell them it is in the cart."
+)
+_UNASKED_STOPPED = (
+    "That step tried to send something or reach an order address, so it was not taken "
+    "without asking. Call browser.act again with the same arguments: the person is then "
+    "asked on a request that shows the page."
+)
+_UNASKED_REASON = (
+    "That step tried to send something, so I didn't take it on my own. I'll ask you first."
+)
+# What an unasked step that went through says when the guard held back
+# something else its page sent meanwhile (a beacon, a request the step
+# does not need): the step is done, and must not be taken again.
+_HELD_NOTE = (
+    "The step went through. Something else the page sent while it ran was held back; "
+    "do not repeat the step for that."
+)
+# How many such steps are remembered per person (``_ask_first``).
+_ASK_FIRST_KEPT = 16
+_NEW_TAB_DEAD = "The page that step opened in a new tab did not load."
+# What the PERSON reads when a rule refuses a step (``reason`` on every
+# refusal; the chat's "I didn't click on the page." line quotes it). The
+# texts above are for the model and may name the tool to call next; these
+# say why the step wasn't done and what happens next, in the owner's
+# words (docs/bot-message-style.md), and never hold anything of the page.
+_REASONS: dict[str, str] = {
+    "invalid_arguments": "I didn't set that step up right, so nothing happened.",
+    "check_failed": "I couldn't check that step first, so I left it.",
+    "cancelled": "You asked me to stop, so I left the page as it is.",
+    "needs_observe": "I need to look at the page before I can do that. I'll look first.",
+    "stale_ref": "The page changed before I could do that. I'll look at it again.",
+    "secure_field": (
+        "That's a password or card field, and I never type into those. "
+        "Card details only go in during my payment step, after you approve."
+    ),
+    "use_checkout": markers.USE_CHECKOUT_REASON,
+    "insecure_page": "That page isn't encrypted, so I don't type or click on it.",
+    "unbound_approval": (
+        "I couldn't match that approval to a page, so I left it. "
+        "I'll look at the page and ask you again."
+    ),
+    "picture_gone": (
+        "The picture of the page on that request is gone, so I left it. "
+        "I'll look at the page and ask you again."
+    ),
+    "page_changed": "A different site is open now, so I left it. I'll look at the page again.",
+    "outline_changed": "The page changed before I could do that. I'll look at it again.",
+    "auto_submit": "That change tried to send the page, and I didn't let it.",
+}
+_REASON_FALLBACK = "I couldn't do that step, so nothing happened."
+# What a site approval may run with no card when the live page agrees
+# (``_quiet``): a click or a choice by ref, and the keys that only move
+# the focus or close something. Typing, a submit and Enter keep their card.
+_QUIET_ACTIONS = frozenset({"click", "select", "check"})
+_QUIET_KEYS = frozenset({"Tab", "Escape", "ArrowDown", "ArrowUp"})
+# What an errand step may type into (``_errand``), judged by the field's own
+# name, id, placeholder, labels and autocomplete token on the live page: a
+# site's search box, a quantity, a zip or postal code, a promo code. Words
+# that ask for the person's own details win over all of them, and so does
+# the card-field classifier; an autocomplete token other than a postal code
+# names a detail too ("email", "street-address", "bday").
+_DETAILS_WORDS = re.compile(
+    r"name|e ?mail|phone|mobile|\btel\b|address|street|\bcity\b|birth|\bdob\b|card|account"
+    r"|\biban\b|routing|\bssn\b|social security|passport|licen[cs]e|login|password|passcode|\bpin\b"
+)
+_SEARCH_WORDS = re.compile(r"search|query|keyword|\bfind\b")
+_QUANTITY_WORDS = re.compile(r"quantity|\bqty\b")
+_ZIP_WORDS = re.compile(r"zip|postal|post ?code")
+_PROMO_WORDS = re.compile(r"promo|coupon|voucher|discount")
+
+
+def _js(pattern: re.Pattern[str]) -> str:
+    return f"new RegExp({json.dumps(pattern.pattern)}, 'i')"
+
+
+_ERRAND_FIELD_FN = (
+    r"""(el => {
+  const secret = __SECRET__;
+  try {
+    if (!el || !el.tagName) return '';
+    const tag = el.tagName.toLowerCase();
+    if (tag !== 'input' && tag !== 'textarea') return '';
+    const type = (el.getAttribute('type') || 'text').toLowerCase();
+    if (tag === 'input' && !['text', 'search', 'number', 'tel'].includes(type)) return '';
+    if (secret(el)) return '';
+    const a = n => el.getAttribute(n) || '';
+    let labels = '', byId = '';
+    try { labels = [...(el.labels || [])].map(l => l.innerText).join(' '); } catch (e) {}
+    try {
+      const root = el.getRootNode && el.getRootNode().getElementById ? el.getRootNode() : document;
+      byId = a('aria-labelledby').split(/\s+/).filter(Boolean)
+        .map(id => { const n = root.getElementById(id); return n ? n.textContent : ''; }).join(' ');
+    } catch (e) {}
+    const words = [a('name'), a('id'), a('placeholder'), a('aria-label'), a('title'), byId, labels]
+      .join(' ').replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_.-]+/g, ' ').toLowerCase();
+    const auto = (a('autocomplete').trim().toLowerCase().split(/\s+/).pop()) || '';
+    if (!['', 'on', 'off', 'postal-code'].includes(auto) || __DETAILS__.test(words)) return '';
+    if (a('role').toLowerCase() === 'searchbox' || type === 'search' || __SEARCH__.test(words)) return 'search';
+    if (tag === 'textarea') return '';
+    if (__QUANTITY__.test(words)) return 'quantity';
+    if (auto === 'postal-code' || __ZIP__.test(words)) return 'zip';
+    if (__PROMO__.test(words)) return 'promo';
+    return '';
+  } catch (e) { return ''; }
+})"""
+    .replace("__SECRET__", markers.FIELD_KIND_FN)
+    .replace("__DETAILS__", _js(_DETAILS_WORDS))
+    .replace("__SEARCH__", _js(_SEARCH_WORDS))
+    .replace("__QUANTITY__", _js(_QUANTITY_WORDS))
+    .replace("__ZIP__", _js(_ZIP_WORDS))
+    .replace("__PROMO__", _js(_PROMO_WORDS))
+)
+# ``locator.evaluate(ERRAND_FIELD_JS)``: that kind for one field, or "".
+_ERRAND_FIELD_JS = f"el => {_ERRAND_FIELD_FN}(el)"
+# A site search: a form whose every field a person types into is one of
+# those (a department <select>, ticks, radios and hidden fields aside).
+# Whether it is sent by GET is the judge's ``sends``, not asked here.
+_ERRAND_FORM_FN = f"""(form => {{
+  const field = {_ERRAND_FIELD_FN};
+  if (!form) return false;
+  try {{
+    for (const f of form.elements) {{
+      const tag = f.tagName.toLowerCase();
+      const type = (f.getAttribute('type') || '').toLowerCase();
+      if (['button', 'fieldset', 'output', 'object', 'select'].includes(tag)) continue;
+      if (tag === 'input' && ['hidden', 'submit', 'button', 'reset', 'image', 'checkbox', 'radio']
+          .includes(type)) continue;
+      if (!field(f)) return false;
+    }}
+    return true;
+  }} catch (e) {{ return false; }}
+}})"""
+# ``locator.evaluate``: the form a submit or a click on the element sends.
+_ERRAND_FORM_JS = f"""el => {{
+  const control = (el.closest && el.closest('button, input')) || el;
+  return {_ERRAND_FORM_FN}(control.form || el.form || (el.closest ? el.closest('form') : null));
+}}"""
+# ``frame.evaluate``: the form Enter sends from the focus in the top page;
+# a focus inside a frame is no site search here.
+_ERRAND_ENTER_JS = f"""() => {{
+  const el = ({markers.FOCUSED_JS})();
+  if (!el || !el.tagName || ['iframe', 'frame'].includes(el.tagName.toLowerCase())) return false;
+  return {_ERRAND_FORM_FN}(el.form || el.closest('form'));
+}}"""
+# The page's own language, for the English word lists (``_lang_is_english``).
+_PAGE_LANG_JS = "() => (document.documentElement.getAttribute('lang') || '').trim().toLowerCase()"
+# The words a person reads on a control: its aria-label, the text it is
+# labelled by, its <label> (without the fields inside it), its own text, a
+# button input's value, its title, and the option a select chooses. Never
+# its name or id attributes, which nobody reads (Amazon's "Add to Cart" is
+# name="submit.add-to-cart").
+_HUMAN_WORDS_FN = r"""((node, choice) => {
+  if (!node || !node.getAttribute) return '';
+  const clean = s => (s || '').replace(/\s+/g, ' ').trim();
+  const a = n => node.getAttribute(n) || '';
+  const tag = node.tagName.toLowerCase(), type = a('type').toLowerCase();
+  let byId = '', labels = '';
+  try {
+    const root = node.getRootNode && node.getRootNode().getElementById ? node.getRootNode() : document;
+    byId = a('aria-labelledby').split(/\s+/).filter(Boolean)
+      .map(id => { const n = root.getElementById(id); return n ? n.textContent : ''; }).join(' ');
+  } catch (e) {}
+  try {
+    labels = [...(node.labels || [])].map(label => {
+      const copy = label.cloneNode(true);
+      copy.querySelectorAll('input, select, textarea, button').forEach(n => n.remove());
+      return copy.textContent;
+    }).join(' ');
+  } catch (e) {}
+  const parts = [a('aria-label'), byId, labels, tag === 'select' ? '' : node.innerText, a('title')];
+  if (tag === 'input' && ['submit', 'button', 'reset', 'image'].includes(type)) parts.push(node.value, a('alt'));
+  parts.push(choice || '');
+  return parts.map(clean).filter((v, i, all) => v && all.indexOf(v) === i).join(' | ').slice(0, 400);
+})"""
+# Whether a control sits in a cookie banner: the nearest dialog, region,
+# aside, element named for cookies or consent, or form sent to a cookie or
+# consent address, whose label, name, address or text says cookies. One
+# that says consent alone (an OAuth screen, a terms dialog) is no banner.
+_CONSENT_REGION_FN = r"""(node => {
+  try {
+    const box = node.closest('dialog, [role=dialog], [role=alertdialog], [aria-modal=true], [role=region], '
+      + 'aside, [id*=cookie i], [class*=cookie i], [id*=consent i], [class*=consent i], '
+      + 'form[action*=cookie i], form[action*=consent i]');
+    if (!box) return false;
+    const said = [box.getAttribute('aria-label'), box.id, box.getAttribute('class'),
+                  box.getAttribute('action'), (box.innerText || '').slice(0, 3000)].join(' ');
+    return /cookie/i.test(said);
+  } catch (e) { return false; }
+})"""
+# The address a cookie banner's own POST form may be sent to and still be
+# a cookie choice: a cookie or consent preferences address (/cookieprefs).
+_COOKIE_ADDRESS_RE = re.compile(r"cookie|consent", re.IGNORECASE)
+# ``locator.evaluate(_ERRAND_WORDS_JS, [action, value])``: the words and the
+# region of the control the act is judged by, as the live rules find it (a
+# click: the control the click lands on; a submit: the button that sends
+# the form; a choice: the field itself, with the option it chooses).
+_ERRAND_WORDS_JS = f"""(el, [action, value]) => {{
+  const words = {_HUMAN_WORDS_FN};
+  const consent = {_CONSENT_REGION_FN};
+  try {{
+    let control = el, choice = '';
+    if (action === 'click') {{
+      const hit = {markers._HIT_FN}(el);
+      if (!hit) return null;
+      control = {markers._ACTIVATED_FN}(hit);
+    }} else if (action === 'submit') {{
+      const form = el.form || el.closest('form');
+      const tag = el.tagName.toLowerCase(), type = (el.getAttribute('type') || '').toLowerCase();
+      const own = ((tag === 'button' && (type === '' || type === 'submit'))
+        || (tag === 'input' && (type === 'submit' || type === 'image'))) && el.form === form;
+      control = form && !own ? {markers.DEFAULT_BUTTON_FN}(form) : el;
+    }} else if (action === 'select') {{
+      const want = String(value || '').replace(/\\s+/g, ' ').trim();
+      const chosen = [...el.options].find(o => o.value === String(value || '')
+        || o.label.replace(/\\s+/g, ' ').trim() === want || o.text.replace(/\\s+/g, ' ').trim() === want);
+      choice = chosen ? chosen.text : '';
+    }}
+    return {{ words: words(control, choice), consent: !!control && consent(control) }};
+  }} catch (e) {{ return null; }}
+}}"""
+
+
+def _lang_is_english(lang: str) -> bool:
+    """Whether a page's declared language is English, which the word lists
+    are in. A page that names none is in a language nobody knows."""
+    lang = lang.strip().lower()
+    return lang == "en" or lang.startswith("en-")
 # A submit through an element: a submit control sends its form as itself;
 # anything else sends it through the form's default button, the one
 # ``markers.SUBMIT_TARGET_JS`` judged (so the formaction and the words
@@ -252,7 +622,8 @@ el => {{
 
 
 class _Refused(Exception):
-    """A rule refused the act: the result is ``{ok, refused, rule, error}``."""
+    """A rule refused the act: the result is ``{ok, refused, rule, error,
+    reason}``: ``error`` for the model, ``reason`` for the person."""
 
     def __init__(self, rule: str, message: str, **extra: Any) -> None:
         super().__init__(message)
@@ -266,6 +637,7 @@ class _Refused(Exception):
             "refused": True,
             "rule": self.rule,
             "error": self.message,
+            "reason": _REASONS.get(self.rule, _REASON_FALLBACK),
             **self.extra,
         }
 
@@ -303,10 +675,43 @@ class _Bound:
     # page_address of the page's URL; None on a card bound before the
     # address was kept (the outline and origin checks still apply).
     address: Optional[str] = None
+    # The outline name of the one control a click, a choice or a tick is
+    # made on, as the card's page had it; None for every other act.
+    ref_name: Optional[str] = None
 
 
 def _invalid(message: str) -> _Refused:
     return _Refused("invalid_arguments", message)
+
+
+# What a ``use_checkout`` refusal's log line says of the judged target:
+# these facts as booleans, never its words, its address or the page's text.
+_JUDGED_FACTS: tuple[str, ...] = (
+    "link", "plain_link", "buttonish", "sends", "in_form", "card_in_form",
+    "order_total", "saved_payment", "wallet", "money",
+)
+
+
+def _use_checkout(action: str, why: str, target: object = None) -> _Refused:
+    """The refusal of a step that would pay, logged once on the way: the
+    rule that refused (*why*: a ``markers.pay_rule`` name, or ``choice``
+    for a check or a select) and what was judged (*target*, when the live
+    page was asked), so a refusal the owner asks about can be traced to
+    its rule. Rule names and booleans only."""
+    judged = isinstance(target, dict)
+    facts: Mapping[str, Any] = target if isinstance(target, dict) else {}
+    # Before the card only the outline's names were read: no target then.
+    words = why == "purchase_words" or markers.PURCHASE_RE.search(str(facts.get("name") or ""))
+    logger.info(
+        "browser_act_use_checkout",
+        action=action,
+        rule="use_checkout",
+        why=why,
+        judged=judged,
+        purchase_words=bool(words),
+        **{key: bool(facts.get(key)) for key in _JUDGED_FACTS},
+    )
+    return _Refused("use_checkout", markers.USE_CHECKOUT_MESSAGE)
 
 
 def _text_arg(value: Any, what: str) -> str:
@@ -381,7 +786,10 @@ def _bound_page(card: Any) -> Optional[_Bound]:
     address = card.get("address")
     if address is not None and not isinstance(address, str):
         return None
-    return _Bound(str(origin), str(outline), str(scheme), address)
+    ref_name = card.get("ref_name")
+    return _Bound(
+        str(origin), str(outline), str(scheme), address, ref_name if isinstance(ref_name, str) else None
+    )
 
 
 def _host(origin: str) -> str:
@@ -402,14 +810,39 @@ def _characters(count: int) -> str:
 
 
 def _target(ref: str, names: Mapping[str, str]) -> str:
+    """The control as the card names it: its own words in quotes, or
+    "an unnamed control" (a seat on a seat map, an icon with no label).
+    Never its ref: that is an internal id, and the card's picture shows
+    which control is meant."""
     name = _short(names.get(ref) or "")
-    return f'"{name}"' if name else ref
+    return f'"{name}"' if name else "an unnamed control"
 
 
-def _sentence(request: _Request, names: Mapping[str, str], on_host: str) -> str:
+# A button's own words that say nothing of what it acts on ("Add to cart"
+# under each of four products): its card also names the item it sits with.
+_ITEM_WORDS = re.compile(r"\b(?:add|cart|basket|bag|buy|select|choose|pick|order|book|reserve|get|view)\b", re.I)
+# The nearest heading around a control that is not inside it: a product's
+# name in a search result, the title of a product page.
+_ITEM_NAME_JS = """el => {
+  for (let node = el.parentElement, depth = 0; node && depth < 12; node = node.parentElement, depth++) {
+    const heading = node.querySelector('h1, h2, h3, h4, [role=heading]');
+    if (heading && !heading.contains(el) && !el.contains(heading)) {
+      const text = (heading.innerText || heading.textContent || '').replace(/\\s+/g, ' ').trim();
+      if (text.length >= 3) return text.slice(0, 300);
+    }
+  }
+  return '';
+}"""
+
+
+def _sentence(
+    request: _Request, names: Mapping[str, str], on_host: str, item: str = ""
+) -> str:
     """The approval-card sentence, built from facts the page memory holds,
     never from the model's words: the element's name, the count of
-    characters (not the text), the key, the host."""
+    characters (not the text), the key, the host, and for a click whose
+    button names no item, the item it sits with (*item*, read off the page
+    by ``bind_async``)."""
     action = request.action
     if action == "fill":
         count = len(request.text or "")
@@ -429,7 +862,8 @@ def _sentence(request: _Request, names: Mapping[str, str], on_host: str) -> str:
     if action == "check":
         return f"Check {target}{on_host}"
     if action == "click":
-        return f"Click {target}{on_host}"
+        about = f' for "{_short(item)}"' if item else ""
+        return f"Click {target}{about}{on_host}"
     if action == "press":
         return f"Press {request.key}{on_host}"
     return f"Submit the form with {target}{on_host}"
@@ -491,6 +925,226 @@ def _amount_text(frames: Sequence[Mapping[str, Any]]) -> str:
     return ""
 
 
+def _nothing_to_pay(scheme: str, answers: Sequence[Any], money: Optional[Mapping[str, Any]]) -> bool:
+    """The page half of what may run with no card: https, a card that would
+    warn of no money (*money*), and every frame read (*answers*) with none
+    showing an order total, a payment method on file or a wallet. A fact
+    that is missing counts as shown."""
+    if money is not None or scheme != "https" or not answers:
+        return False
+    for facts in answers:
+        if not isinstance(facts, Mapping) or facts.get("unread"):
+            return False
+        if any(facts.get(key, True) for key in ("order_total", "saved_payment", "wallet")):
+            return False
+    return True
+
+
+def _quiet(
+    request: _Request,
+    scheme: str,
+    judged: Optional[Mapping[str, Any]],
+    answers: Sequence[Any],
+    money: Optional[Mapping[str, Any]],
+) -> bool:
+    """Whether a site approval may run this act with no card: it only
+    clicks around. Decided here, from the live page as ``bind_async`` read
+    it, never from the call: the act is a click or a choice by ref, or a
+    key that only moves; the page is https; the card warns of no money
+    (*money*); every frame was read (*answers*) and none shows an order
+    total, a payment method on file or a wallet; and the target (*judged*:
+    what the live rules judged for a click, or what a check or a select
+    chooses; a key has none) sends no form by any method, is aimed at no
+    order path, sits next to no typed card, and has words that read as no
+    purchase, wallet or price. A control with no words at all is not
+    quiet either, a plain link aside (it is followed by GET whatever it
+    says), and neither is a button inside a form (a script can send the
+    form; only a native submit says so). Anything missing counts against
+    it: nobody looks at a quiet act."""
+    if not _nothing_to_pay(scheme, answers, money):
+        return False
+    if request.action == "press":
+        return request.key in _QUIET_KEYS
+    if request.action not in _QUIET_ACTIONS or not isinstance(judged, Mapping):
+        return False
+    name = judged.get("name")
+    if not isinstance(name, str) or markers.PURCHASE_RE.search(name):
+        return False
+    if markers.WALLET_RE.search(name) or markers.priced_control(name):
+        return False
+    if request.action != "click":
+        return bool(name)
+    if judged.get("sends") is not False or judged.get("submits") is not False:
+        return False
+    if judged.get("in_form", True) and judged.get("plain_link") is not True:
+        # A script button inside a form can send it; only a native submit
+        # says so (``sends``), so such a click keeps its card.
+        return False
+    if judged.get("card_in_form", True) or any(
+        markers.ORDER_ACTION_RE.search(str(judged.get(key) or "")) for key in ("href", "action")
+    ):
+        return False
+    return bool(name) or judged.get("plain_link") is True
+
+
+def _errand_page(scheme: str, answers: Sequence[Any], money: Any) -> bool:
+    """The page half of an errand step: https, every frame read (*answers*)
+    and none showing an order total or a payment method on file, and a card
+    whose money facts (*money*) show nothing to pay
+    (``app_approvals.errand_money_ok``). A wallet button elsewhere on the
+    page is no reason to ask: most shops show one next to "Add to cart",
+    the wallet button itself is refused, and an unasked step reaches no
+    order address. A fact that is missing counts as shown."""
+    if scheme != "https" or not answers or not errand_money_ok(money):
+        return False
+    return all(
+        isinstance(facts, Mapping) and not facts.get("unread")
+        and not facts.get("order_total", True) and not facts.get("saved_payment", True)
+        for facts in answers
+    )
+
+
+def _errand(
+    request: _Request,
+    scheme: str,
+    judged: Optional[Mapping[str, Any]],
+    answers: Sequence[Any],
+    money: Optional[Mapping[str, Any]],
+    *,
+    fields: Sequence[str] = (),
+    form_ok: bool = False,
+    english: bool = False,
+    words: Optional[str] = None,
+    consent: bool = False,
+) -> bool:
+    """Whether this act is an errand step, one that commits the person to
+    nothing and so may run with no card while "Ask before every website
+    step" is off. Decided here from the live page as ``bind_async`` read it,
+    never from the call, and checked again from what it wrote by
+    ``app_approvals.errand_covers``. On an https page with nothing to pay
+    (``_errand_page``; the purchase rules already refused what pays):
+
+    - a key that only moves (Tab, Escape, ArrowDown, ArrowUp);
+    - typing into fields that are each a search box, a quantity, a zip or
+      postal code or a promo code (*fields*, one kind per field typed into;
+      "" for any other);
+    - a submit or Enter that sends a GET form whose fields are all those
+      (*form_ok*: a site search), its button not worded as an outcome;
+    - a plain link, unless its words are what a one-click link does by
+      itself (unsubscribe, sign out, delete, cancel, accept, decline...)
+      or a purchase (``markers.link_orders``: "Place order", "Book now";
+      a ticket funnel's "Buy tickets" is none), which a page's script can
+      make it do;
+    - on a page that declares English (*english*: the word lists are
+      English; a page that names no language is not), a choice or a click
+      whose words read as no outcome (``app_approvals.errand_outcome``)
+      and as no purchase or price: a button that sends a POST form, or a
+      script button inside a form, only when its words are cart words
+      (``cart_words``) or "Check out" sent to a cart; a form's own GET
+      button only for a site search; a cookie banner's own Agree, Accept,
+      Allow, Yes or OK in a region that says cookies (*consent*), a POST
+      form's only when it is sent to a cookie or consent address; a
+      control with no words never.
+
+    The words judged are the ones a person reads on the control (*words*,
+    never its name or id attributes), else the live rules' name. Anything
+    missing counts against it. The words only choose which steps are tried
+    unasked: one that runs sends nothing but to a cart or its own judged
+    form and reaches no order address (the guard's ``no_orders``; a cart
+    whose address names an order, ``CART_ORDER_RE``, is none)."""
+    if not _errand_page(scheme, answers, money):
+        return False
+    action = request.action
+    if action == "press" and request.key != "Enter":
+        return request.key in _QUIET_KEYS
+    if action in ("fill", "fill_form"):
+        return len(fields) == len(request.refs) and all(k in ERRAND_FIELD_KINDS for k in fields)
+    if not isinstance(judged, Mapping):
+        return False
+    if action in _SENDING_ACTIONS and markers.pay_rule(dict(judged)) is not None:
+        return False  # the live rules refused it already; never unasked
+    name = judged.get("name")
+    if not isinstance(name, str):
+        return False
+    said = words if isinstance(words, str) else name
+    if action == "click" and judged.get("plain_link") is True:
+        # Worded like a purchase, a link gets its card: a page's script can
+        # take it over and send the order (a single-page app's handler).
+        return not errand_outcome(said, link=True) and not markers.link_orders(f"{name} | {said}")
+    if action in _SENDING_ACTIONS and (
+        markers.PURCHASE_RE.search(name) or markers.priced_control(name)
+    ):
+        return False  # worded like a purchase or a price: a person looks at it
+    sends, submits, in_form = judged.get("sends"), judged.get("submits"), judged.get("in_form")
+    if action in ("submit", "press"):
+        return form_ok and submits is True and sends is False and not errand_outcome(said)
+    if not said.strip() or not english:
+        return False
+    # A cookie choice: its words only agree, in a cookie banner, and a POST
+    # form it sends goes to a cookie or consent address.
+    consented = consent and consent_words(said) and (
+        sends is False or bool(_COOKIE_ADDRESS_RE.search(str(judged.get("action") or "")))
+    )
+    if not consented and errand_outcome(said):
+        return False
+    if action in _CHOICE_ACTIONS:
+        return True
+    if not all(isinstance(fact, bool) for fact in (sends, submits, in_form)):
+        return False
+    if consented:
+        return True
+    if sends:
+        path = str(judged.get("action") or "")
+        to_cart = bool(CART_PATH_RE.search(path)) and not CART_ORDER_RE.search(path)
+        return cart_words(said) or (to_cart and bool(CHECKOUT_WORDS_RE.search(said)))
+    if submits:
+        return form_ok
+    # A script button inside a form can send it; outside one it only moves.
+    return not in_form or cart_words(said)
+
+
+def _unasked_sends(said: Any) -> frozenset[str]:
+    """Where an unasked step's own form may send besides a cart (the
+    guard's ``unasked_sends``): the path of the POST form the card was
+    judged by, as the card pinned it (*said*, the card's ``target``, its
+    ``action``), when the card's words for it are cart words or "Check
+    out" sent to a cart, or a cookie
+    choice and that path is a cookie or consent address. Nothing for
+    anything else. ``_run`` refuses a step whose live form now goes
+    elsewhere, so this is also where it goes."""
+    if not isinstance(said, Mapping):
+        return frozenset()
+    path, words = said.get("action"), said.get("words", said.get("name"))
+    if not isinstance(path, str) or not path or not isinstance(words, str):
+        return frozenset()
+    cookie = said.get("consent") is True and consent_words(words) and _COOKIE_ADDRESS_RE.search(path)
+    # "Check out" sent to a cart (Shopify's cart form), as ``_errand`` judged it.
+    to_cart = bool(CART_PATH_RE.search(path)) and not CART_ORDER_RE.search(path)
+    checkout = to_cart and bool(CHECKOUT_WORDS_RE.search(words))
+    return frozenset({path}) if cookie or cart_words(words) or checkout else frozenset()
+
+
+def _cart_step(said: Any, fields: Any) -> bool:
+    """Whether an unasked step is a cart step, whose page script may send
+    to a cart (the guard's ``unasked_cart``): the card's words for its
+    control (*said*, the card's ``target``) are cart words, a quantity
+    select's among them, or it types only into quantity fields (*fields*,
+    the card's kinds)."""
+    if isinstance(fields, list) and fields and all(kind == "quantity" for kind in fields):
+        return True
+    words = said.get("words", said.get("name")) if isinstance(said, Mapping) else None
+    return isinstance(words, str) and cart_words(words)
+
+
+def _live_action(target: Optional[Mapping[str, Any]]) -> str:
+    """The path the live control's form is sent to, "" when it sends none:
+    what the card pins (``target.action``) and the unasked run compares."""
+    if not isinstance(target, Mapping) or target.get("sends") is not True:
+        return ""
+    action = target.get("action")
+    return action if isinstance(action, str) else ""
+
+
 class BrowserActToolkit:
     """browser.act over the shared browser session.
 
@@ -533,17 +1187,23 @@ class BrowserActToolkit:
         # user_id -> the context the egress guard is installed on, by
         # identity (see BrowserReadToolkit._guarded).
         self._guarded: dict[str, Any] = {}
+        # user_id -> the steps (``_step_key``: page path and control name,
+        # never the ref) that, run with no card, tried to send or to reach
+        # an order address: each asks with a card when it comes again on
+        # that page (newest last, bounded).
+        self._ask_first: dict[str, list[tuple[str, ...]]] = {}
 
     # -- the card's three hooks (no browser call) ------------------------------
 
     def precheck(self, params: Mapping[str, Any], *, user_id: str) -> Optional[dict[str, Any]]:
         """The refusal a browser.act call would get from the checks that
         need no browser (arguments, the stop flag, no page looked at yet,
-        a ref the latest outline does not have, a secure field, an
-        http:// page), or None. The runtime asks it before making an
-        approval card, so a call it refuses never gets one; ``execute``
-        runs the same checks again. A check that fails refuses the call
-        (rule ``check_failed``)."""
+        a ref the latest outline does not have, a secure field, a submit
+        or a choice named like a purchase, an http:// page), or None. The
+        runtime asks it before making an approval card, so a call it
+        refuses never gets one, then asks the live page (``bind_async``);
+        ``execute`` runs the same checks again. A check that fails refuses
+        the call (rule ``check_failed``)."""
         try:
             if params is not None and not isinstance(params, Mapping):
                 raise _invalid("browser.act arguments must be an object.")
@@ -554,12 +1214,10 @@ class BrowserActToolkit:
             return refusal.result()
         except Exception as exc:  # fail closed: an unchecked act gets no card
             _shared.log_failure("browser_act_precheck_failed", exc)
-            return {
-                "ok": False,
-                "refused": True,
-                "rule": "check_failed",
-                "error": "Could not check this action before asking for approval, so nothing was done.",
-            }
+            return _Refused(
+                "check_failed",
+                "Could not check this action before asking for approval, so nothing was done.",
+            ).result()
         return None
 
     def bind(self, params: Mapping[str, Any], *, user_id: str) -> dict[str, Any]:
@@ -567,15 +1225,23 @@ class BrowserActToolkit:
         page the card is made from under ``CARD_KEY`` (origin, address,
         outline digest and scheme of *user_id*'s latest observation, all
         empty when there is none), replacing anything the call itself put
-        there. The approved act then runs only on that page."""
+        there. The approved act then runs only on that page. A key press
+        acts on whatever has the focus, so its digest keeps the focus
+        marker; any other act names its target by ref. No ``quiet`` here:
+        only ``bind_async``, which asks the live page, may say it."""
         last = self._memory.get(user_id)
+        call = dict(params or {})
+        press = call.get("action") == "press"
         page = {
             "origin": last.origin if last else "",
             "address": page_address(last.url) if last else "",
-            "outline": last.outline_digest if last else "",
+            "outline": (last.focus_digest if press else last.outline_digest) if last else "",
             "scheme": last.scheme if last else "",
         }
-        return {**dict(params or {}), CARD_KEY: page}
+        ref = call.get("ref")
+        if last and call.get("action") in _SAME_TARGET_ACTIONS and isinstance(ref, str) and last.names.get(ref):
+            page["ref_name"] = last.names[ref]
+        return {**call, CARD_KEY: page}
 
     def describe(self, params: Mapping[str, Any], *, user_id: str) -> str:
         """The approval-card sentence: ``Type 12 characters into "Email" on
@@ -601,7 +1267,10 @@ class BrowserActToolkit:
             if bound is None or last is None or last.outline_digest != bound.outline:
                 last = None
         names: Mapping[str, str] = last.names if last else {}
-        sentence = _sentence(request, names, f" on {host}" if host else "")
+        item = card.get("item") if isinstance(card, Mapping) else None
+        sentence = _sentence(
+            request, names, f" on {host}" if host else "", item if isinstance(item, str) else ""
+        )
         notes = _card_notes(card)
         if self._picture_gone(card, user_id):
             notes += f" {PICTURE_GONE_NOTE}"
@@ -612,34 +1281,214 @@ class BrowserActToolkit:
     async def bind_async(
         self, params: Mapping[str, Any], *, user_id: str, task_id: str
     ) -> dict[str, Any]:
-        """``bind``, plus what the owner sees on the card: a picture of the
-        page as it is now, with the target outlined in red and secret
-        fields masked (kept in memory under ``_page.picture``; "" when it
-        could not be taken, which the card then says), and, under
-        ``_page.money``, the page's own facts when it shows an order total,
-        a payment method on file or a wallet button, or the target matches
-        a purchase pattern (the card then warns that the step may place an
-        order). Never raises: a page that cannot be looked at gives a card
-        without a picture, never no card."""
+        """``bind``, after the live page was asked what the approved act
+        will be asked again (``_live_rules``, then the page binding).
+
+        A step the page refuses gets no card: the refusal is the answer,
+        in a precheck refusal's shape (``{"ok": False, "refused": True,
+        "rule": ..., "error": ..., "reason": ...}``), which the runtime
+        files under ``browser_rule``. A ref that no longer resolves, and a page that
+        is no longer the one the model looked at, are answered the same
+        way as ``stale_ref``, so the model looks again.
+
+        Otherwise the card's arguments, plus what the owner sees on the
+        card: a picture of the page as it is now, with the target outlined
+        in red and secret fields masked (kept in memory under
+        ``_page.picture``; "" when it could not be taken, which the card
+        then says), and, under ``_page.money``, the page's own facts when
+        it shows an order total, a payment method on file or a wallet
+        button, or the target matches a purchase pattern (the card then
+        warns that the step may place an order), and, under
+        ``_page.quiet``, whether the act only clicks around (``_quiet``:
+        what a site approval may run with no card), and under
+        ``_page.errand`` whether it is an errand step (``_errand``: what may
+        run with no card while "Ask before every website step" is off).
+        Never raises: a page that cannot be looked at gives a card without
+        a picture, neither quiet nor an errand, and the approved act then
+        judges it."""
         card = self.bind(params, user_id=user_id)
         page_card = dict(card[CARD_KEY])
-        picture, money = "", None
+        picture, money, quiet, errand, item = "", None, False, False, ""
+        errand_facts: dict[str, Any] = {}
+        judged: Optional[Mapping[str, Any]] = None
         try:
             call = {k: v for k, v in dict(params or {}).items() if k != CARD_KEY}
             request = _parse(call)
             session = await self._sessions.get(user_id, mode=mode_for(user_id), task_id=task_id)
             async with session.lock:
                 page = await session.page()
-                money = await self._money_facts(page, request)
+                target, answers, choice = await self._live_rules(page, request)
+                try:
+                    # After the rules: judging a click scrolls its target
+                    # into view, which can change what the outline shows.
+                    await self._check_outline(
+                        session, page, None, press=request.action == "press",
+                        target=self._same_target(request, page_card.get("ref_name")),
+                    )
+                except _Refused:
+                    raise _Done(_shared.stale_result()) from None
+                if answers is None:  # a fill or a key: no rule asked the frames
+                    answers = await _shared.page_facts(page)
+                money = self._money_facts(answers, target)
+                judged = target if target is not None else choice
+                scheme = page_origin(page.url)[0]
+                quiet = _quiet(request, scheme, judged, answers, money)
+                errand_facts = await self._errand_facts(page, request, judged)
+                errand = _errand(request, scheme, judged, answers, money, **errand_facts)
+                step = self._step_key(user_id, page.url, request, judged)
+                if (quiet or errand) and self._asks_first(user_id, step):
+                    # The same step, run unasked here, tried to send or to
+                    # reach an order address: this time the owner is asked.
+                    quiet = errand = False
+                item = await self._item_of(session, page, request, judged)
                 image = await self._picture(page, request)
             if image is not None:
                 picture = self._keep_picture(user_id, image)
+        except _Refused as refusal:
+            return refusal.result()
+        except _Done as done:
+            # A ref that no longer resolves, or a page that is no longer
+            # the one the model looked at, is the call's own error: told
+            # now, in the precheck's shape, so the model looks again.
+            return {
+                **done.result,
+                "refused": True,
+                "rule": "stale_ref",
+                "reason": _REASONS["stale_ref"],
+            }
         except Exception as exc:  # noqa: BLE001 - the card is still made, and says so
+            quiet = errand = False  # what could not be looked at runs nowhere unasked
             _shared.log_failure("browser_act_card_picture_failed", exc)
         page_card["picture"] = picture
+        page_card["quiet"] = quiet
+        page_card["errand"] = errand
+        if errand and errand_facts.get("fields"):
+            page_card["fields"] = errand_facts["fields"]  # each field's kind, for errand_covers
+        if item:
+            page_card["item"] = item
+        name = judged.get("name") if isinstance(judged, Mapping) else None
+        if (quiet or errand) and isinstance(name, str):
+            # The words of the control as the page had them, for the
+            # approvals' own check of what they run unasked
+            # (services/agent/app_approvals.site_covers, errand_covers):
+            # its name as the live rules read it and, for an errand step,
+            # the words a person reads on it and whether it sits in a
+            # region about cookies or consent. Longer than its limit on
+            # purpose when the name is: a cut name could lose the word
+            # that matters.
+            named: dict[str, Any] = {"name": name[:400]}
+            if errand:
+                words = errand_facts.get("words")
+                named["words"] = (words if isinstance(words, str) else name)[:400]
+                if errand_facts.get("consent") is True:
+                    named["consent"] = True
+            if request.action == "click" and judged is not None and judged.get("plain_link") is True:
+                named["plain_link"] = True
+            if _live_action(judged):
+                # The form it was judged by: the unasked run sends there
+                # only, and is refused when the live form goes elsewhere.
+                named["action"] = _live_action(judged)
+            page_card["target"] = named
         if money is not None:
             page_card["money"] = money
         return {**card, CARD_KEY: page_card}
+
+    async def _item_of(
+        self, session: BrowserSession, page: Any, request: _Request, judged: Optional[Mapping[str, Any]]
+    ) -> str:
+        """The item a click's button sits with, for a button whose own words
+        name none ("Add to cart"): the nearest heading around it, as the
+        page has it, typed secrets redacted. "" for anything else, and when
+        the page cannot say."""
+        name = judged.get("name") if isinstance(judged, Mapping) else None
+        if request.action != "click" or not request.ref or not isinstance(name, str):
+            return ""
+        if len(name) > 40 or not _ITEM_WORDS.search(name):
+            return ""
+        try:
+            text = await page.locator(f"aria-ref={request.ref}").evaluate(
+                _ITEM_NAME_JS, timeout=REF_TIMEOUT_MS
+            )
+        except Exception as exc:  # noqa: BLE001 - the card is made without it
+            _shared.log_failure("browser_act_item_name_failed", exc)
+            return ""
+        item = self._label(session, str(text or ""))
+        return item if item and item.lower() != name.strip().lower() else ""
+
+    @staticmethod
+    async def _errand_facts(
+        page: Any, request: _Request, judged: Optional[Mapping[str, Any]]
+    ) -> dict[str, Any]:
+        """What ``_errand`` needs beyond the live rules' answers, as its
+        keyword arguments: the kind of each field a fill types into
+        (``fields``), whether the form a submit, a GET form's own button or
+        Enter would send is a site search (``form_ok``), whether the page
+        declares English (``english``; none declared is not), and for an
+        act on one control the words a person reads on it and whether it
+        sits in a region about cookies or consent (``words``, ``consent``).
+        Asked only of the acts that need it; one that fails reads as no
+        errand."""
+        facts: dict[str, Any] = {
+            "fields": [], "form_ok": False, "english": False, "words": None, "consent": False,
+        }
+        try:
+            lang = str(await _shared.frame_evaluate(page.main_frame, _PAGE_LANG_JS) or "")
+            facts["english"] = _lang_is_english(lang)
+            if request.action in ("fill", "fill_form"):
+                for ref in request.refs:
+                    kind = await page.locator(f"aria-ref={ref}").evaluate(
+                        _ERRAND_FIELD_JS, timeout=REF_TIMEOUT_MS
+                    )
+                    facts["fields"].append(str(kind or ""))
+                return facts
+            if request.ref:
+                said = await page.locator(f"aria-ref={request.ref}").evaluate(
+                    _ERRAND_WORDS_JS, [request.action, request.value or ""], timeout=REF_TIMEOUT_MS
+                )
+                if isinstance(said, dict) and isinstance(said.get("words"), str):
+                    facts["words"], facts["consent"] = said["words"], said.get("consent") is True
+            search = request.action == "submit" or (
+                request.action == "click" and isinstance(judged, Mapping)
+                and judged.get("submits") is True and judged.get("sends") is False
+            )
+            if search and request.ref:
+                form_ok = await page.locator(f"aria-ref={request.ref}").evaluate(
+                    _ERRAND_FORM_JS, timeout=REF_TIMEOUT_MS
+                )
+                facts["form_ok"] = form_ok is True
+            elif request.action == "press" and request.key == "Enter":
+                form_ok = await _shared.frame_evaluate(page.main_frame, _ERRAND_ENTER_JS)
+                facts["form_ok"] = form_ok is True
+            return facts
+        except Exception as exc:  # noqa: BLE001 - not judged: not an errand step
+            _shared.log_failure("browser_act_errand_facts_failed", exc, action=request.action)
+            return {
+                "fields": [], "form_ok": False, "english": False, "words": None, "consent": False,
+            }
+
+    def _step_key(
+        self, user_id: str, url: str, request: _Request, judged: Optional[Mapping[str, Any]]
+    ) -> tuple[str, ...]:
+        """What ask-first remembers a step by: its page's host and path
+        (``guard.page_place``), the act, the control's name as the live
+        page judged it (else the outline's names of the refs it types
+        into), and the key or the option chosen. Never the ref, which a new
+        look at the page numbers afresh, nor the text typed."""
+        name = judged.get("name") if isinstance(judged, Mapping) else None
+        if not isinstance(name, str):
+            last = self._memory.get(user_id)
+            name = " | ".join(last.names.get(ref, "") for ref in request.refs) if last else ""
+        return (page_place(url), request.action, name, request.key or "", request.value or "")
+
+    def _asks_first(self, user_id: str, step: tuple[str, ...]) -> bool:
+        """Whether this step (``_step_key``) was stopped when it ran with
+        no card (``_run``): it then gets its card, never an unasked run."""
+        return step in self._ask_first.get(user_id, ())
+
+    def _ask_first_next_time(self, user_id: str, step: tuple[str, ...]) -> None:
+        kept = self._ask_first.setdefault(user_id, [])
+        kept.append(step)
+        del kept[:-_ASK_FIRST_KEPT]
 
     def approval_image(self, arguments: Mapping[str, Any], *, user_id: str) -> Optional[str]:
         """The picture ``bind_async`` took for this card, while the card is
@@ -710,15 +1559,21 @@ class BrowserActToolkit:
                 return_exceptions=True,  # a frame that went away took its box along
             )
 
-    async def _money_facts(self, page: Any, request: _Request) -> Optional[dict[str, Any]]:
+    @staticmethod
+    def _money_facts(
+        answers: Sequence[Any], target: Optional[Mapping[str, Any]]
+    ) -> Optional[dict[str, Any]]:
         """What the card's money warning is built from, or None when there
-        is nothing to warn about: every frame's facts (an order total and
-        its amount, a payment method on file, a wallet button, a frame or
-        shadow tree that could not be read), and whether the target itself
-        matches a purchase pattern (``markers.read_click_pays`` for a click,
-        a submit or Enter; ``markers.change_pays`` for a check or a select).
-        A target that cannot be judged counts as one that may order."""
-        answers = await _shared.page_facts(page)
+        is nothing to warn about: every frame's facts (*answers*: an order
+        total and its amount, a payment method on file, a wallet button, a
+        frame or shadow tree that could not be read), and whether the
+        target of a click, a submit or Enter (*target*, as the live rules
+        judged it and let it through) still matches a purchase pattern: a
+        control browser.read would leave alone (``markers.read_click_pays``),
+        or one whose words are a purchase, a plain link among them ("Buy
+        tickets" opens the next page; the owner is told what it says all
+        the same). A check or a select that may order was refused before
+        this."""
         frames = [a for a in answers if isinstance(a, dict)]
         unread = len(frames) < len(answers) or any(f.get("unread") for f in frames)
         read = [f for f in frames if not f.get("unread")]
@@ -729,36 +1584,13 @@ class BrowserActToolkit:
             "wallet": any(f.get("wallet") for f in read),
             "unread": unread,
         }
-        try:
-            may_order = await self._target_may_order(page, request, answers)
-        except Exception as exc:  # noqa: BLE001 - not judged counts as may order
-            _shared.log_failure("browser_act_card_judge_failed", exc)
-            may_order = True
+        may_order = target is not None and (
+            markers.read_click_pays(target)
+            or bool(markers.PURCHASE_RE.search(str(target.get("name") or "")))
+        )
         if may_order or any(facts[k] for k in ("order_total", "saved_payment", "wallet", "unread")):
             return facts
         return None
-
-    async def _target_may_order(self, page: Any, request: _Request, answers: list[Any]) -> bool:
-        """Whether the act's target matches a purchase pattern, judged as the
-        approved act will judge it (the control the click reaches, the
-        form's default button, the focus; what a choice chooses)."""
-        if request.action in _SENDING_ACTIONS and (request.refs or request.key == "Enter"):
-            if request.refs:
-                script = (
-                    markers.SUBMIT_TARGET_JS if request.action == "submit" else markers.PURCHASE_TARGET_JS
-                )
-                target = await page.locator(f"aria-ref={request.refs[0]}").evaluate(
-                    script, timeout=REF_TIMEOUT_MS
-                )
-            else:
-                target = await self._enter_target(page)
-            return markers.read_click_pays(markers.join_page(target, answers))
-        if request.action in _CHOICE_ACTIONS:
-            target = await page.locator(f"aria-ref={request.refs[0]}").evaluate(
-                markers.CHANGE_TARGET_JS, request.value or "", timeout=REF_TIMEOUT_MS
-            )
-            return markers.change_pays(markers.join_page(target, answers))
-        return False
 
     # -- execution -----------------------------------------------------------
 
@@ -796,6 +1628,9 @@ class BrowserActToolkit:
         # Only an approved act reads a card's page; anywhere else the
         # reserved key is an argument no action takes, and is refused.
         card = params.pop(CARD_KEY, None) if approved else None
+        # A step the runtime runs with no card (an errand step, a site
+        # approval's click) says so on its page: it reaches no order address.
+        unasked = isinstance(card, Mapping) and card.get(UNASKED_MARK) is True
         # A card bound with a picture runs only while that picture is kept:
         # the owner saw the page on it, or approved without it.
         picture_gone = self._picture_gone(card, user_id)
@@ -838,7 +1673,8 @@ class BrowserActToolkit:
                 )
             session.task.actions += 1
             try:
-                return await self._run(session, request, bound)
+                pinned = card if unasked and isinstance(card, Mapping) else None
+                return await self._run(session, request, bound, unasked=unasked, card=pinned)
             except _Refused as refusal:
                 self._log_refusal(action, refusal, user_id)
                 self._record(session, f"act {action} refused: {refusal.rule}")
@@ -872,16 +1708,20 @@ class BrowserActToolkit:
             for ref in request.refs:
                 if ref in last.secret_refs or snap._SECRET_NAME_RE.search(last.names.get(ref, "")):
                     raise _Refused("secure_field", _SECURE_MESSAGE)
-        if request.action in _SENDING_ACTIONS or request.action in _CHOICE_ACTIONS:
+        # Names alone refuse a submit (it sends a form) and a choice (its
+        # words say what it chooses). A click is left to the live page: a
+        # name cannot say whether money moves ("Buy tickets" may only open
+        # the next page), and the page is judged when the card would be made.
+        if request.action == "submit" or request.action in _CHOICE_ACTIONS:
             for ref in request.refs:
                 if markers.PURCHASE_RE.search(f"{last.names.get(ref, '')} | {request.value or ''}"):
-                    raise _Refused("use_checkout", markers.USE_CHECKOUT_MESSAGE)
+                    raise _use_checkout(request.action, "purchase_words")
                 # A submit through a field sends the form by its default
                 # button, whose words the page memory kept for the field.
                 if request.action == "submit" and markers.PURCHASE_RE.search(
                     last.form_buttons.get(ref, "")
                 ):
-                    raise _Refused("use_checkout", markers.USE_CHECKOUT_MESSAGE)
+                    raise _use_checkout(request.action, "purchase_words")
         if last.scheme != "https":
             raise _Refused("insecure_page", _INSECURE_MESSAGE)
 
@@ -937,11 +1777,43 @@ class BrowserActToolkit:
 
     def _sent_anyway(self, session: BrowserSession, *, since: int) -> bool:
         """Whether the guard stopped the page sending itself (a form POST
-        of any frame, an order address) during an act not meant to send."""
+        of any frame, an order address) during an act not meant to send,
+        or stopped a step run with no card reaching an order address or
+        sending what it changed (``UNASKED_REASONS``)."""
         state = self._guard.egress_state(session.context)
         return state is not None and any(
-            entry.get("reason") in SENDING_REASONS for entry in state.blocked[since:]
+            entry.get("reason") in SENDING_REASONS or entry.get("reason") in UNASKED_REASONS
+            for entry in state.blocked[since:]
         )
+
+    def _held_back(self, session: BrowserSession, *, since: int) -> bool:
+        """Whether the guard held back a beacon while a step ran with no
+        card (``UNASKED_HELD``): no reason to say the step tried to send."""
+        state = self._guard.egress_state(session.context)
+        return state is not None and any(entry.get("reason") == UNASKED_HELD for entry in state.blocked[since:])
+
+    @staticmethod
+    def _lift_at_commit(page: Any, state: Any) -> Callable[[], None]:
+        """For a plain link run with no card: lift the guard's send stop once
+        the page's main frame commits a new document, so the page the link
+        opens loads as it would for the person, while every request of the
+        clicked document is still judged. Playwright tells a new document
+        (``newDocument``) only on its frame's own "navigated" event, which
+        a same-document change (pushState) lacks; it is read through the
+        frame's implementation object, and a page whose frame cannot be
+        listened to keeps the stop for the whole window. Returns what
+        removes the listener."""
+
+        def committed(event: Any) -> None:
+            if isinstance(event, Mapping) and "newDocument" in event and not event.get("error"):
+                state.no_orders = False
+
+        try:
+            emitter = page.main_frame._impl_obj._event_emitter
+            emitter.on("navigated", committed)
+        except Exception:  # noqa: BLE001 - not a Playwright page: the stop holds the whole window
+            return lambda: None
+        return lambda: emitter.remove_listener("navigated", committed)
 
     @staticmethod
     def _label(session: BrowserSession, value: str) -> str:
@@ -950,8 +1822,33 @@ class BrowserActToolkit:
     # -- the approved act -------------------------------------------------------
 
     async def _run(
-        self, session: BrowserSession, request: _Request, bound: Optional[_Bound]
+        self,
+        session: BrowserSession,
+        request: _Request,
+        bound: Optional[_Bound],
+        *,
+        unasked: bool = False,
+        card: Optional[Mapping[str, Any]] = None,
     ) -> dict[str, Any]:
+        """The act on the live page, in its window. *unasked*: no person
+        approved this step (it runs as an errand step or on a site
+        approval), so the guard keeps every order address shut for it,
+        inside its write window too, and lets it send nothing but to a
+        cart (a page script only on a cart step, ``_cart_step``) or to its
+        own form when the card judged that form by cart words or as a
+        cookie choice (*card*'s ``target``, whose pinned ``action`` the live
+        form must still have: else ``outline_changed``;
+        ``_unasked_sends``), until the page has gone quiet after it, so a
+        save the page makes a moment later is stopped too
+        (``EgressState.no_orders``). A plain link has the same stop until
+        its page commits a new document (``_lift_at_commit``): one a
+        script takes over instead of opening it is judged as a script
+        button. A step stopped so answers ``auto_submit`` and gets its card
+        the next time it comes on that page (``_asks_first``), unless what
+        the step itself sent went out (``EgressState.unasked_went``): it
+        is then done, with a note, so it is not taken twice. A beacon held
+        back meanwhile only adds the note. An approved act's window is as
+        it was."""
         await _shared.take_back(self._guard, session)
         page = await session.page()
         challenge = await self._handoff.detect_challenge(page)
@@ -967,51 +1864,209 @@ class BrowserActToolkit:
             raise _Refused("insecure_page", _INSECURE_MESSAGE)
         # Every act, a key press included, runs only on the page the card
         # showed: Enter activates whatever has the focus there.
-        await self._check_outline(session, page, bound)
-        if request.refs and request.action in _TYPING_ACTIONS:
-            await self._check_fields(page, request.refs)
-        sends = False
-        if request.action in _SENDING_ACTIONS and (request.refs or request.key == "Enter"):
-            target = await self._check_purchase(page, request)
-            sends = not target.get("plain_link")
-        elif request.action in _CHOICE_ACTIONS:
-            await self._check_choice(page, request)
+        await self._check_outline(
+            session, page, bound, press=request.action == "press",
+            target=self._same_target(request, bound.ref_name if bound is not None else None),
+        )
+        target, _facts, choice = await self._live_rules(page, request)
+        said = card.get("target") if card is not None else None
+        if unasked:
+            pinned = said.get("action", "") if isinstance(said, Mapping) else ""
+            if pinned != _live_action(target):
+                # The form now goes elsewhere than the card judged it by.
+                raise _Refused("outline_changed", _OUTLINE_CHANGED)
+        # Only a click, a submit or an Enter is meant to send, and a plain
+        # link among them is followed with the write window shut.
+        sends = target is not None and not target.get("plain_link")
         state = self._guard.egress_state(session.context)
         blocked_before = self._blocked_count(session)
+        went_before = getattr(state, "unasked_went", 0)
+        step = self._step_key(session.user_id, page.url, request, target if target is not None else choice)
+        # What tells afterwards whether the act opened a tab of its own.
+        tabs_before = list(session.context.pages)
+        in_flight_before = set(getattr(state, "in_flight", ()))
+        address_before = page_address(page.url)
+        url_before = page.url
+        link = str(target.get("href") or "") if target is not None and target.get("plain_link") else ""
+        lift: Callable[[], None] = lambda: None  # noqa: E731 - nothing to remove
         try:
             if state is not None:
                 state.write_allowed = sends
                 state.write_page = page  # the card's page: no other tab sends
                 state.changing = not sends
+                state.no_orders = unasked
+                state.unasked_cart = unasked and _cart_step(said, card.get("fields") if card is not None else None)
+                state.unasked_sends = _unasked_sends(said) if unasked else frozenset()
+                if unasked and link:
+                    lift = self._lift_at_commit(page, state)
+            started = time.monotonic()
             did, args = await self._perform(session, page, request)
+            if state is not None and state.no_orders:
+                # A page may save the step a moment later (a debounced
+                # autosave): the send stop holds until it has gone quiet.
+                await wait_for_quiet(
+                    state, since=started, quiet_s=UNASKED_QUIET_S, cap_s=UNASKED_QUIET_CAP_S
+                )
         finally:
+            lift()
             if state is not None:
                 state.write_allowed = False
                 state.write_page = None
                 state.changing = False
-        if not sends and self._sent_anyway(session, since=blocked_before):
-            raise _Refused("auto_submit", _AUTO_SUBMIT)
+                state.no_orders = False
+                state.unasked_cart = False
+                state.unasked_sends = frozenset()
+        # Where the act landed, as after a read's click: the newest tab
+        # it opened (target=_blank, window.open), else the card's page.
+        new_tabs = await self._new_tabs(session, state, tabs_before, in_flight_before)
+        sent_anyway = (not sends or unasked) and self._sent_anyway(session, since=blocked_before)
+        if sent_anyway and unasked:
+            self._ask_first_next_time(session.user_id, step)
+        # What the step itself sent went out: it is done, never "not taken".
+        stopped = sent_anyway and not (unasked and getattr(state, "unasked_went", 0) > went_before)
+        if (
+            request.action == "click" and link and not new_tabs and not sent_anyway
+            and not page.url.startswith("chrome-error://")
+            and page_address(page.url) == address_before
+        ):
+            # The approved click was on a plain link and the page is where
+            # it was (a carousel slide that moved under the click, a link a
+            # banner covers). Following that link is what was approved: its
+            # address is opened, with the write window shut, and the guard
+            # judges it like any navigation. The owner used to be asked for
+            # the same click again and again.
+            try:
+                await page.goto(urljoin(page.url, link), wait_until="domcontentloaded", timeout=30_000)
+            except PlaywrightError as exc:
+                _shared.log_failure("browser_act_follow_link_failed", exc)
+        landed = new_tabs[-1] if new_tabs else page
         blocked = self._blocked_reason(session, since=blocked_before)
-        if blocked is not None and page.url.startswith("chrome-error://"):
-            return _shared.error_result(f"That action was refused by the network policy: {blocked}")
+        # Its navigation was stopped, or failed: nothing to go on in.
+        dead = landed.url.startswith("chrome-error://") and (blocked is not None or bool(new_tabs))
+        if stopped or dead:
+            for tab in new_tabs:
+                await tab.close()  # the session stays on the page the card showed
+            if stopped and unasked:
+                raise _Refused("auto_submit", _UNASKED_STOPPED, reason=_UNASKED_REASON, unasked_stopped=True)
+            if stopped:
+                raise _Refused("auto_submit", _AUTO_SUBMIT)
+            if blocked is not None:
+                return _shared.error_result(
+                    f"That action was refused by the network policy: {blocked}"
+                )
+            return _shared.error_result(_NEW_TAB_DEAD)
+        extra: dict[str, Any] = {"did": did}
+        if unasked and (sent_anyway or self._held_back(session, since=blocked_before)):
+            extra["note"] = _HELD_NOTE
+        if request.action == "click" and markers.adds_to_cart(did):
+            # A small model stopped at the cart though the person said
+            # "order me": the result says what comes next.
+            extra["next_step"] = CART_NEXT_STEP
+        opened = await session.adopt_new_tab(tabs_before) if new_tabs else None
+        if opened is not None:
+            await _shared.settle(opened)
+            extra["new_tab"] = True
+        if opened is not None or page_address(page.url) != address_before:
+            # The act opened a page: described once what it fetches as it
+            # loads has gone quiet, as after an open. A ticket site's seat
+            # page came back with no line of outline, and the resumed turn
+            # started from an empty page.
+            await wait_for_quiet(state, since=time.monotonic(), cap_s=LOAD_QUIET_CAP_S)
+            if link:
+                # The link it followed: what a person opens to get to the
+                # same step (a showtime's seat map) on their own device.
+                followed = urljoin(url_before, link)
+                _shared.note_entry_link(opened or page, followed)
+                try:
+                    extra["opened_link"] = (
+                        snap.strip_url_secrets(followed) if session.mode == "account" else followed
+                    )
+                except ValueError:
+                    pass
         return await _shared.observe(
             session,
             self._handoff,
             f"act {request.action}",
             args,
-            extra={"did": did},
+            extra=extra,
             memory=self._memory,
             guard=self._guard,
         )
 
+    @staticmethod
+    async def _new_tabs(
+        session: BrowserSession, state: Any, before: Sequence[Any], in_flight_before: set[Any]
+    ) -> list[Any]:
+        """The tabs the act opened, found the way browser.read's click
+        finds them: Playwright lists a new tab only once its first page
+        has answered, so one that is still on its way (a slow site, a
+        chain of redirects) is waited for, NEW_TAB_WAIT_MS at most."""
+        opened = [tab for tab in session.context.pages if tab not in before]
+        if not opened and BrowserReadToolkit._tab_on_its_way(state, in_flight_before):
+            try:
+                await session.context.wait_for_event("page", timeout=NEW_TAB_WAIT_MS)
+            except PlaywrightError:
+                pass  # it never answered: the tab the act was made in is described
+            opened = [tab for tab in session.context.pages if tab not in before]
+        return opened
+
+    async def _live_rules(
+        self, page: Any, request: _Request
+    ) -> tuple[Optional[dict[str, Any]], Optional[list[Any]], Optional[dict[str, Any]]]:
+        """The rules only the live page can answer, asked when the card
+        would be made (``bind_async``) and again when the approved act
+        runs, through this one place so the two cannot disagree: the field
+        rule for an act that types, the purchase rule for a click, a submit
+        or Enter, the choice rule for a check or a select. Returns the
+        judged target of a click, a submit or Enter (None for any other
+        act: the approved run opens its write window by it), the frame
+        facts a rule read (None when none asked), and what a check or a
+        select chooses, as judged (None for any other act)."""
+        if request.refs and request.action in _TYPING_ACTIONS:
+            await self._check_fields(page, request.refs)
+        if request.action in _SENDING_ACTIONS and (request.refs or request.key == "Enter"):
+            target, answers = await self._check_purchase(page, request)
+            return target, answers, None
+        if request.action in _CHOICE_ACTIONS:
+            choice, answers = await self._check_choice(page, request)
+            return None, answers, choice
+        return None, None, None
+
+    @staticmethod
+    def _same_target(request: _Request, name: Optional[str]) -> Optional[tuple[str, str]]:
+        """``(ref, name)`` of the one control a click, a choice or a tick is
+        made on, when its name on the card's page is known; None for every
+        other act (typing, a submit and a key keep the whole-page check)."""
+        if request.action in _SAME_TARGET_ACTIONS and request.ref and name:
+            return request.ref, name
+        return None
+
     async def _check_outline(
-        self, session: BrowserSession, page: Any, bound: Optional[_Bound]
+        self,
+        session: BrowserSession,
+        page: Any,
+        bound: Optional[_Bound],
+        *,
+        press: bool,
+        target: Optional[tuple[str, str]] = None,
     ) -> None:
         """The page's address, and its outline taken the way the remembered
         one was, must still be what the card (or, unapproved, the latest
         observation) was made from: a ref means nothing otherwise, and a
-        key goes to whatever page is open. This snapshot also makes the
-        refs resolvable for the act itself."""
+        key goes to whatever page is open. The outline is compared by its
+        structure, so text and state that change by themselves do not
+        void an approval; for a key press (*press*) the focus must be
+        where it was too, since a key acts on whatever has it. This
+        snapshot also makes the refs resolvable for the act itself.
+
+        A page that moves by itself (a carousel, an advert that loads, a
+        banner that leaves) changed its structure between two looks, and a
+        card a person takes ten seconds to answer was void before the tap.
+        So for a click, a choice or a tick (*target*: the control's ref and
+        its name on the card's page) a changed structure is accepted when
+        the whole page still has that ref under that name: the same
+        control, on the same address. What the control would do is judged
+        on the live page either way."""
         last = self._memory.get(session.user_id)
         if bound is not None:
             address = bound.address
@@ -1027,9 +2082,20 @@ class BrowserActToolkit:
             secrets=session.typed_secrets,
             limit_chars=_shared.FULL_OUTLINE_CHARS if last and last.full else _shared.OUTLINE_CHARS,
         )
-        expected = bound.outline if bound is not None else (last.outline_digest if last else "")
-        if outline_digest(out.lines) != expected:
-            raise _Refused("outline_changed", _OUTLINE_CHANGED)
+        remembered = (last.focus_digest if press else last.outline_digest) if last else ""
+        expected = bound.outline if bound is not None else remembered
+        if outline_digest(out.lines, focus=press) != expected:
+            if target is None:
+                raise _Refused("outline_changed", _OUTLINE_CHANGED)
+            whole = await snap.outline(
+                page,
+                full=True,
+                account_mode=session.mode == "account",
+                secrets=session.typed_secrets,
+                limit_chars=_shared.FULL_OUTLINE_CHARS,
+            )
+            if _ref_names(whole.lines).get(target[0]) != target[1]:
+                raise _Refused("outline_changed", _OUTLINE_CHANGED)
 
     @staticmethod
     async def _check_fields(page: Any, refs: Sequence[str]) -> None:
@@ -1049,7 +2115,9 @@ class BrowserActToolkit:
             if kind:
                 raise _Refused("secure_field", _SECURE_MESSAGE)
 
-    async def _check_purchase(self, page: Any, request: _Request) -> dict[str, Any]:
+    async def _check_purchase(
+        self, page: Any, request: _Request
+    ) -> tuple[dict[str, Any], list[Any]]:
         """The live page decides, whatever the outline said: the control
         that would send the form (the element the click lands on, or the
         button, link or label target around it; for a submit through a
@@ -1057,8 +2125,11 @@ class BrowserActToolkit:
         or the focused field's default button, in whatever shadow root or
         frame the focus is),
         its words, its form and the page around it, every frame of it
-        (``markers.pays``). A target that would place an order is refused:
-        that is browser.checkout's job. Returns the target judged."""
+        (``markers.pay_rule``). A target that would place an order is
+        refused: that is browser.checkout's job. Returns the target judged
+        and the frame facts it was judged with, read after the target (a
+        click's target is scrolled into view first, and an order total
+        counts only on screen)."""
         if request.refs:
             ref = request.refs[0]
             locator = page.locator(f"aria-ref={ref}")
@@ -1075,17 +2146,22 @@ class BrowserActToolkit:
                 target = await self._enter_target(page)
             except Exception as exc:  # noqa: BLE001 - a focus that cannot be judged refuses
                 _shared.log_failure("browser_act_purchase_check_failed", exc, action="press")
-                raise _Refused("use_checkout", markers.USE_CHECKOUT_MESSAGE)
-        target = markers.join_page(target, await _shared.page_facts(page))
-        if markers.pays(target) or not isinstance(target, dict):
-            raise _Refused("use_checkout", markers.USE_CHECKOUT_MESSAGE)
-        return target
+                raise _use_checkout(request.action, "unjudged")
+        answers = await _shared.page_facts(page)
+        target = markers.join_page(target, answers)
+        rule = markers.pay_rule(target)
+        if rule is not None or not isinstance(target, dict):
+            raise _use_checkout(request.action, rule or "unjudged", target)
+        return target, answers
 
-    async def _check_choice(self, page: Any, request: _Request) -> None:
+    async def _check_choice(
+        self, page: Any, request: _Request
+    ) -> tuple[dict[str, Any], list[Any]]:
         """A check or a select, judged on the live page by what it chooses
         and by every frame of the page around it (``markers.change_pays``):
         choosing the card on file on a review page is the order's first
-        half, and a page may send its form on the change."""
+        half, and a page may send its form on the change. Returns what it
+        chooses, as judged, and the frame facts it read."""
         ref = request.refs[0]
         try:
             target = await page.locator(f"aria-ref={ref}").evaluate(
@@ -1096,8 +2172,11 @@ class BrowserActToolkit:
         except PlaywrightError as exc:  # e.g. a frame that is not there
             _shared.log_failure("browser_act_purchase_check_failed", exc, ref=ref)
             raise _Done(_shared.stale_result())
-        if markers.change_pays(markers.join_page(target, await _shared.page_facts(page))):
-            raise _Refused("use_checkout", markers.USE_CHECKOUT_MESSAGE)
+        answers = await _shared.page_facts(page)
+        target = markers.join_page(target, answers)
+        if not isinstance(target, dict) or markers.change_pays(target):
+            raise _use_checkout(request.action, "choice", target)
+        return target, answers
 
     @staticmethod
     async def _enter_target(page: Any) -> Any:

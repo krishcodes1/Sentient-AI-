@@ -809,7 +809,20 @@ _ASSIGNMENT = {"type": "string", "description": "Numeric Canvas assignment id fr
 OLD_CATALOG: dict[str, list[tuple[str, ActionCategory, str, Optional[str], dict, list]]] = {
     "canvas": [
         ("get_courses", R, "courses.read", None, {}, []),
-        ("get_assignments", R, "assignments.read", None, {"course_id": _COURSE}, ["course_id"]),
+        (
+            "get_assignments", R, "assignments.read", None,
+            {
+                "course_id": _COURSE,
+                "assignment_id": {
+                    "type": "string",
+                    "description": (
+                        "Omit for the course's list. Pass an id from the list (the number that ends "
+                        "an assignment's link) for that one assignment with its full description"
+                    ),
+                },
+            },
+            ["course_id"],
+        ),
         ("get_grades", R, "grades.read", None, {"course_id": _COURSE}, ["course_id"]),
         ("get_calendar_events", R, "calendar.read", None, {}, []),
         (
@@ -909,7 +922,8 @@ def _catalog_tuple(spec: ToolSpec) -> tuple[Any, ...]:
 def test_connector_catalog_entries_equal_the_old_catalog():
     for key, expected in OLD_CATALOG.items():
         by_name = {s.action: s for s in CONNECTOR_CATALOG[key]}
-        # Every old action is still there, unchanged (Google may gain more).
+        # Every old action is still there, unchanged (Google may gain more;
+        # canvas.get_assignments gained the optional assignment_id).
         for old in expected:
             spec = by_name.get(old[0])
             assert spec is not None, (key, old[0])
@@ -921,8 +935,9 @@ def test_connector_catalog_entries_equal_the_old_catalog():
         old_names = [old[0] for old in expected]
         assert [n for n in by_name if n in old_names] == old_names, key
     # Canvas and Robinhood are not extended by the connectors plan; Canvas
-    # gained get_upcoming and grade_whatif since (the assistant tools), and
-    # get_announcements and get_recent_grades (the app-event triggers).
+    # gained get_upcoming and grade_whatif since (the assistant tools),
+    # get_announcements and get_recent_grades (the app-event triggers), and
+    # an optional assignment_id on get_assignments (one assignment's text).
     assert [s.action for s in CONNECTOR_CATALOG["robinhood"]] == [
         o[0] for o in OLD_CATALOG["robinhood"]
     ]

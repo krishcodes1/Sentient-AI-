@@ -82,7 +82,7 @@ async def create_telegram_link(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=(
                 "Telegram is not configured on this server. Add a bot token "
-                "in Settings → Telegram (or TELEGRAM_BOT_TOKEN in backend/.env) "
+                "in Settings → Approvals → Telegram (or TELEGRAM_BOT_TOKEN in backend/.env) "
                 "and make sure Telegram is turned on in Settings → Permissions."
             ),
         )

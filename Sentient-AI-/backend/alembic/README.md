@@ -188,6 +188,26 @@ chain revises `0032_file_reputation`.
   `file_reputation_checks` (cascading with their user) and
   `file_reputation_calls` (user id set to null on delete).
 
+## Errands (0033 to 0035)
+
+- `0033_errands` (background errands) revises `0032_file_reputation`, the first
+  revision after the reserved chain. It creates `errands` (cascading with its
+  user; the conversation is set to NULL on delete), with indexes on
+  (`status`, `run_on`) and `approval_action_id` and a unique one on
+  (`user_id`, `source`, `source_ref`). Guarded: an adopted database built from
+  the models already has the table. Downgrade drops it.
+- `0034_errand_details` adds the nullable `errands.details` (who it is for and
+  the rest of the note) and `errands.event_day` (a calendar errand's event day,
+  for the deleted-note check), guarded the same way. A revision of its own
+  because a database may already have run 0033. Downgrade drops both columns.
+- `0035_errand_fingerprint` adds the nullable `errands.source_fingerprint` (the
+  hash of a calendar note as last read, so a restart reads a note again only
+  when it changed), guarded the same way, in its own revision for the same
+  reason. Downgrade drops the column.
+
+`tests/test_errand_migration.py` pins all three; `tests/test_integration_seams.py`
+checks that nothing but 0033 follows the reserved chain.
+
 ## Writing a new migration
 
 ```bash

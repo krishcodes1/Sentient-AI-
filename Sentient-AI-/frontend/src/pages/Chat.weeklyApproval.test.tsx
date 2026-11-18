@@ -150,6 +150,39 @@ describe("Chat's weekly button on an approval card", () => {
     expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
   });
 
+  it("offers a browser card's site for an hour and, pressed, allows it with remember site", async () => {
+    const seat: PendingApproval = {
+      action_id: "b3",
+      tool_name: "browser.act",
+      reason: 'Click "Seat F7" on tickets.example.com',
+      arguments: { action: "click", ref: "e7", _page: { origin: "https://tickets.example.com" } },
+      expires_at: "2099-01-01T00:00:00Z",
+      conversation_id: "c1",
+      hourly_site: "tickets.example.com",
+    };
+    vi.mocked(getPendingApprovals).mockResolvedValue([seat]);
+    vi.mocked(decideApproval).mockResolvedValue({
+      action_id: "b3",
+      approved: true,
+      result: { ok: true },
+      site: { app: "tickets.example.com", expires_at: UNTIL },
+    });
+    render(<Chat />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Allow clicks on tickets.example.com for 1 hour" }),
+    );
+
+    expect(
+      await screen.findByText(
+        `Clicks on tickets.example.com are allowed until ${formatAllowedUntil(UNTIL)}.`,
+      ),
+    ).toBeInTheDocument();
+    expect(vi.mocked(decideApproval).mock.calls).toEqual([["b3", true, "site"]]);
+    // A browser card never offers the weekly app button.
+    expect(screen.queryByRole("button", { name: ALLOW })).not.toBeInTheDocument();
+  });
+
   it("keeps the card with the server's reason when allowing fails", async () => {
     vi.mocked(getPendingApprovals).mockResolvedValue([CALENDAR]);
     vi.mocked(decideApproval).mockRejectedValue(new Error("Approval request not found or expired"));

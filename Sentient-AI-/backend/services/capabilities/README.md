@@ -224,6 +224,32 @@ low-risk changes" tier and 7-day grants from a card) for the whole install,
 read by `RuntimePermissionAdapter.low_risk_enabled` and by the executor's
 backstop through the owner's report. It loosens nothing by itself.
 
+`browser_ask_every_step` ("Ask before every website step", off by default,
+`requires=("browser_act",)`) is a policy switch read the other way round:
+off, a `browser.act` the act toolkit judged an errand step on the live page
+runs with no card (`app_approvals.errand_covers`); on, every step gets its
+card. The runtime reads it per call from the permission adapter's report,
+and a report that cannot be read counts as on.
+
+`errand_runs` ("Do errands for me in the background", off by default, high
+risk, `requires=("browser_act", "purchases")`) claims no tools: the errand
+sweeper (`services/automation/errands.py`) reads it before it claims an
+errand and again before each run. Its settings bound one errand run and a
+day of them (`run_cap_cents` 40, `day_cap_cents` 120, `runs_per_day` 6,
+`max_rounds` 40, `deadline_minutes` 15), how long the purchase card waits
+(`card_hours` 12) and how many days before the needed-by date a run starts
+(`lead_days` 7). An errand run also needs `browser_ask_every_step` off: with
+it on, every website step would need a card, which a run nobody watches
+cannot get.
+
+`calendar_errands` ("Do errands from my calendar notes", off by default,
+medium risk, `requires=("errand_runs",)`) claims no tools either: the
+calendar finder (`services/errands/finder.py`) reads it before every scan of
+the owner's own calendar notes (the Mac's Calendar app, and Google Calendar
+when connected) and plans an errand for each note that asks to buy
+something. Its one setting, `day_cap_cents` (10), caps what the AI reading
+those notes may cost a day.
+
 ## A capability that gates an argument
 
 Some switches decide what a tool may be asked to do rather than whether it

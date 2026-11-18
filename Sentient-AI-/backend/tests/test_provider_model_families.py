@@ -892,7 +892,7 @@ def test_gemini_default_model_is_one_a_new_key_can_reach():
 
 
 def test_setup_suggests_current_models_first():
-    assert SUGGESTED_MODELS["gemini"][0] == "gemini-3.5-flash-lite"
+    assert SUGGESTED_MODELS["gemini"][0] == "gemini-3.8-flash"
     assert SUGGESTED_MODELS["anthropic"][0] == "claude-sonnet-5"
     assert SUGGESTED_MODELS["openai"][0] == "gpt-6-luna"
     # No longer reachable with a new Gemini key (2.5) or shut down (2.0).

@@ -446,19 +446,18 @@ async def test_canvas_read_paths_and_query_parameters():
 
 @pytest.mark.asyncio
 async def test_canvas_execute_wraps_lists_and_sanitizes_course_content():
-    """A hostile assignment description reaches the agent only redacted, and
-    list payloads are normalised into the {items, count} envelope."""
-    recorder = _Recorder(
-        _json_ok([{"id": 1, "description": INJECTION}, {"id": 2, "description": "ok"}])
-    )
+    """A hostile assignment name reaches the agent only redacted, and list
+    payloads are shaped into the {count, total, truncated, items} envelope
+    (the list carries no descriptions: canvas_assignments.py)."""
+    recorder = _Recorder(_json_ok([{"id": 1, "name": INJECTION}, {"id": 2, "name": "ok"}]))
     async with _wired(_canvas(), recorder) as connector:
         await connector.authenticate({"access_token": "tok"})
         response = await connector.execute("get_assignments", {"course_id": 5})
 
     assert response.data["count"] == 2
     assert response.sanitized is True
-    assert "[REDACTED]" in response.data["items"][0]["description"]
-    assert response.data["items"][1]["description"] == "ok"
+    assert "[REDACTED]" in response.data["items"][0]["name"]
+    assert response.data["items"][1]["name"] == "ok"
 
 
 @pytest.mark.asyncio

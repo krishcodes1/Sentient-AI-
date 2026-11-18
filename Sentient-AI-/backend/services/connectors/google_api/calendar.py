@@ -191,8 +191,15 @@ def _calendar(calendar_id: Any) -> str:
 def _shape_event(raw: Any) -> dict[str, Any]:
     event = as_dict(raw)
     shaped: dict[str, Any] = {
-        key: event[key] for key in ("id", "summary", "status", "location", "htmlLink") if isinstance(event.get(key), str)
+        key: event[key]
+        for key in ("id", "iCalUID", "summary", "status", "location", "htmlLink")
+        if isinstance(event.get(key), str)
     }
+    # Whether the account's owner made or organizes it (calendar errands
+    # plan only from the owner's own notes).
+    for role in ("creator", "organizer"):
+        if as_dict(event.get(role)).get("self") is True:
+            shaped[f"{role}_self"] = True
     for key in ("start", "end"):
         when = scalar_fields(event.get(key), date="date", dateTime="dateTime", timeZone="timeZone")
         if when:

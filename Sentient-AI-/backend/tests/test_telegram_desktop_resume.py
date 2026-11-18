@@ -296,8 +296,12 @@ async def test_a_resumed_turn_that_parks_another_act_sends_its_card_and_says_so(
 
     assert fake.events == [("open_app", "Calendar")]  # the scroll waits for its card
     texts = _texts(fake_api)
-    note = "🔐 I need your OK first to click or type in an app on your computer."
-    assert note in texts[-1] and "desktop.act" not in texts[-1], texts
+    # The resumed turn wrote nothing itself, so its reply is the one plain
+    # ask, followed only by how to see the card again.
+    ask = "I need your OK before I click or type in an app on your computer."
+    assert texts[-1].startswith(ask) and texts[-1].count("I need your OK") == 1, texts
+    assert "\n\nSend /pending to see the request again." in texts[-1]
+    assert "desktop.act" not in texts[-1], texts
     assert not any(DEAD_END in t for t in texts)
     assert 'Scroll down in Calendar' in _cards(fake_api)[1]["text"]
 

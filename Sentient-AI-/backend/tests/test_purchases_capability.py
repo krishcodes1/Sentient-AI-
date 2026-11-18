@@ -61,6 +61,71 @@ def test_registry_claims_checkout_for_purchases_read_for_browser_control_act_for
     assert "purchases" in registry.keys() and registry.default_switches()["purchases"] is False
 
 
+def test_the_permissions_line_tells_the_model_the_spending_limits():
+    """The limits were checked only at the last step, after every other
+    approval: the model must be able to say "that's over your limit" when it
+    first sees a price."""
+    import dataclasses
+
+    from services.capabilities.prompt import render_permissions_block
+
+    switches = {**registry.default_switches(), "purchases": True}
+    base = registry.statuses_by_key(registry.report(switches, _ctx()))["purchases"]
+    assert base.effective == "on"
+
+    def line(status: CapabilityStatus) -> str:
+        return render_permissions_block([status]).splitlines()[1]
+
+    caps = {"per_purchase_cap_usd": 25, "per_day_cap_usd": 60.5}
+    on = line(dataclasses.replace(base, settings=caps))
+    assert on == (
+        "- Buy things for me: on. Limits: up to $25 per purchase and $60.50 per day "
+        "(the owner changes them in Settings, under Permissions)."
+    )
+    assert chr(0x2014) not in on and chr(0x2013) not in on
+    # Off: no limits to speak of. No settings on the status (a report built
+    # without the installation's merge): the plain line.
+    off = line(dataclasses.replace(base, effective="off", settings=caps))
+    assert off.startswith("- Buy things for me: off.") and "Limits" not in off
+    assert line(dataclasses.replace(base, settings={})) == "- Buy things for me: on"
+
+
+@pytest.mark.asyncio
+async def test_a_turn_is_told_when_no_payment_card_is_stored(session_factory, monkeypatch):
+    """With buying on and an empty vault the model learned about the missing
+    card only when it called the checkout, after the person had approved every
+    step on the way there. The turn is told up front, per person (the vault is
+    per account), and told nothing once a card is stored."""
+    from api.routes import agent as agent_routes
+    from models.vault_item import VaultItem
+
+    async def view(_installation):
+        return frozenset({"purchases", "browser_control"}), "<permissions>\n- Buy things for me: on\n</permissions>"
+
+    monkeypatch.setattr(agent_routes, "_capability_view", view)
+    user, _ = await make_user(session_factory, "no-card@example.com")
+    async with session_factory() as db:
+        text = (await agent_routes._build_tools_and_memory(None, user, db)).permissions_text
+    assert text.startswith("<permissions>") and "<payment>" in text
+    assert "No payment card is stored" in text and "Settings, under Payment card" in text
+
+    async with session_factory() as db:
+        db.add(VaultItem(user_id=user.id, kind="card", label="Card", masked="Visa ····4242", blob=b"x"))
+        await db.commit()
+    async with session_factory() as db:
+        text = (await agent_routes._build_tools_and_memory(None, user, db)).permissions_text
+    assert "<payment>" not in text
+
+    async def off(_installation):
+        return frozenset({"browser_control"}), "<permissions>\n- Buy things for me: off. x\n</permissions>"
+
+    monkeypatch.setattr(agent_routes, "_capability_view", off)
+    other, _ = await make_user(session_factory, "buying-off@example.com")
+    async with session_factory() as db:
+        text = (await agent_routes._build_tools_and_memory(None, other, db)).permissions_text
+    assert "<payment>" not in text  # buying off: the prompt is as before the feature
+
+
 def test_settings_defaults_are_the_purchase_caps_and_nothing_else():
     assert registry.settings_defaults("purchases") == {"per_purchase_cap_usd": 25, "per_day_cap_usd": 50}
     assert registry.settings_defaults("purchases") is not purchases.PURCHASE_SETTINGS_DEFAULTS
@@ -78,6 +143,9 @@ def test_settings_defaults_are_the_purchase_caps_and_nothing_else():
         "scam_check",
         "link_reputation",
         "file_reputation",
+        # Background errands' budgets and the calendar finder's day cap.
+        "errand_runs",
+        "calendar_errands",
     }
     for key in registry.keys():
         if key not in with_settings:

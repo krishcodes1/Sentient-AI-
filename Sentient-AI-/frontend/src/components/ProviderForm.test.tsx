@@ -16,6 +16,7 @@ import type { SetupProvider, SetupProviders } from "@/types";
 vi.mock("@/services/api", () => ({
   clearStoredSecrets: vi.fn(),
   getSetupProviders: vi.fn(),
+  getProviderModels: vi.fn(() => new Promise(() => {})),
   saveProvider: vi.fn(),
   testProvider: vi.fn(),
 }));
