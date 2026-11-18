@@ -19,26 +19,41 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
+import bcrypt
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 
 from core.config import settings
 from services.security.policies import LOG_KEY_NAMES
 
 # ── Password hashing ─────────────────────────────────────────────────────────
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# bcrypt only ever reads the first 72 bytes of a password. passlib (used here
+# until bcrypt 5) cut longer ones to 72 silently; bcrypt 5 raises instead. The
+# cut is kept so every stored hash and every long password in use still match.
+_BCRYPT_MAX_BYTES = 72
+
+
+def _bcrypt_secret(plain: str) -> bytes:
+    secret = plain.encode("utf-8")
+    # passlib refused NUL bytes, so no stored hash can come from one.
+    if b"\x00" in secret:
+        raise ValueError("bcrypt does not allow NUL bytes in a password")
+    return secret[:_BCRYPT_MAX_BYTES]
 
 
 def hash_password(plain: str) -> str:
-    """Return a bcrypt hash of *plain*."""
-    return pwd_context.hash(plain)
+    """Return a bcrypt hash of *plain* ($2b$, cost 12, as passlib wrote them)."""
+    return bcrypt.hashpw(_bcrypt_secret(plain), bcrypt.gensalt(rounds=12)).decode("ascii")
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    """Return ``True`` if *plain* matches *hashed*."""
-    return pwd_context.verify(plain, hashed)
+    """Return ``True`` if *plain* matches *hashed*.
+
+    Raises ``ValueError`` for a password with a NUL byte or a stored value
+    that is not a bcrypt hash, as passlib did.
+    """
+    return bcrypt.checkpw(_bcrypt_secret(plain), hashed.encode("ascii"))
 
 
 # ── JWT tokens ────────────────────────────────────────────────────────────────

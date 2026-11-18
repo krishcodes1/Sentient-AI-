@@ -1093,9 +1093,10 @@ describe("existing rows", () => {
     expect(within(dead).getByText("needs reconnect")).toBeInTheDocument();
     expect(within(dead).queryByText("active")).not.toBeInTheDocument();
     expect(within(dead).getByRole("status")).toHaveTextContent(/Press Reconnect to sign in again/);
-    expect(within(dead).getByRole("button", { name: "Reconnect Dead mail" })).toHaveStyle({
-      color: "var(--accent-warning)",
-    });
+    // Inline style, not computed: jsdom 31 resolves var() against a theme tests don't load.
+    expect(within(dead).getByRole("button", { name: "Reconnect Dead mail" }).style.color).toBe(
+      "var(--accent-warning)",
+    );
 
     const live = screen.getByRole("article", { name: "Live mail" });
     expect(within(live).getByText("active")).toBeInTheDocument();
