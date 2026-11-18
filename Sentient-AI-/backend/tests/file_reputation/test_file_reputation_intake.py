@@ -33,7 +33,10 @@ EXE = b"MZ\x90\x00\x03 a windows program"
 
 
 def _intake(session_factory, service) -> FileIntake:
-    return FileIntake(UserFileStore(session_factory, sandbox=InProcessSandbox()), screen=service)
+    # The service's own SerializedSessions: on the shared SQLite connection, an upload's
+    # session closing beside a background lookup's write rolls that write back.
+    sessions = service._session_factory
+    return FileIntake(UserFileStore(sessions, sandbox=InProcessSandbox()), screen=service)
 
 
 def _gated_vt() -> tuple[FakeVirusTotal, asyncio.Event]:

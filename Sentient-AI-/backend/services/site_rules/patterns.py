@@ -657,7 +657,10 @@ def host_hash(host: str, secret: str) -> str:
     ``settings.ENCRYPTION_KEY``. Rows can say "the same site twice" without a
     dictionary of bank names reversing them."""
     key = hashlib.sha256(_AUDIT_KEY_DOMAIN + secret.encode("utf-8")).digest()
-    return hmac.new(key, (host_of(host) or host).encode("utf-8"), hashlib.sha256).hexdigest()[:16]
+    digest = hmac.new(key, (host_of(host) or host).encode("utf-8"), hashlib.sha256).hexdigest()
+    # Sixteen digits alone read as a card number, and the audit log masks them
+    # (about one host in 1,800), so such a host takes the next sixteen.
+    return digest[16:32] if digest[:16].isdigit() else digest[:16]
 
 
 # --- The owner's input -----------------------------------------------------

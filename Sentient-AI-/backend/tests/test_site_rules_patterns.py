@@ -502,6 +502,16 @@ def test_host_hash_is_keyed_stable_and_never_the_host_itself():
     assert "chase" not in first
 
 
+def test_a_host_hash_is_never_all_digits_so_the_audit_log_keeps_it():
+    # bank619.example's first sixteen hex characters under key-one are all digits, which the
+    # audit log masks as a card number (main's CI failed on such a hash on 2026-11-18).
+    from services.audit import sanitize_request_data
+
+    digest = host_hash("bank619.example", "key-one")
+    assert len(digest) == 16 and not digest.isdigit()
+    assert digest in sanitize_request_data({"host_hash": digest})
+
+
 # --- Hostile spellings and hostile lengths (checker findings, early core) ---
 
 # Code points Chromium drops from a host before it opens it, read from
