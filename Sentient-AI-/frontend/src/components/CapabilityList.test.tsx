@@ -12,6 +12,7 @@
  */
 
 import { fireEvent, render, screen, within } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import CapabilityList, { CapabilityListError } from "@/components/CapabilityList";
@@ -46,7 +47,7 @@ function renderList(items: CapabilityStatus[] = CAPS, editable = true) {
 describe("CapabilityList", () => {
   it("shows one button per category with its status, and opens one at a time", async () => {
     renderList();
-    expect(screen.getByRole("button", { name: /^Your computer.*1 needs attention/ })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: /^Your computer.*1 needs setup/ })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: /^Background tasks.*Off/ })).toHaveAttribute("aria-pressed", "false");
     // Only the open category's switches are on screen.
     expect(screen.getByRole("switch", { name: /see my screen/i })).toHaveAttribute("aria-checked", "true");
@@ -57,10 +58,42 @@ describe("CapabilityList", () => {
     expect(screen.queryByRole("switch", { name: /see my screen/i })).not.toBeInTheDocument();
   });
 
-  it("marks a risky switch and says why it is blocked", () => {
+  it("marks a blocked switch Needs setup, offers its one fix, and keeps the reason behind the info button", async () => {
     renderList();
     expect(screen.getByText("High risk")).toBeInTheDocument();
-    expect(screen.getByText(/^Blocked — .*not granted screen recording/i)).toBeInTheDocument();
+    expect(screen.getByText("Needs setup")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /grant access/i })).toBeInTheDocument();
+    expect(screen.queryByText(/not granted screen recording/i)).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "About See my screen" }));
+    expect(screen.getByText("To finish setup:").parentElement).toHaveTextContent(/not granted screen recording/i);
+  });
+
+  it("sends a missing key to Service keys and Slack setup to Connectors", async () => {
+    const needs = (key: string, label: string, reason: string): CapabilityStatus => ({
+      ...CAPS[0],
+      key,
+      label,
+      effective: "blocked",
+      reason,
+    });
+    render(
+      <MemoryRouter>
+        <CapabilityList
+          items={[
+            needs("file_reputation", "Check files with VirusTotal", "Add a VirusTotal API key in Security → Service keys."),
+            needs("slack", "Slack chat and approvals", "Open your Slack connector in Connectors and follow the steps."),
+          ]}
+          editable
+          onToggle={vi.fn()}
+          onRequestAccess={vi.fn()}
+          onInstall={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+    expect(screen.getByRole("link", { name: "Add key" })).toHaveAttribute("href", "/security?tab=keys");
+    await openCategory("Connected apps");
+    expect(screen.getByRole("link", { name: "Open Connectors" })).toHaveAttribute("href", "/connectors");
   });
 
   it("shows the summary and pills at a glance, and the three facts behind the info button", async () => {
@@ -127,10 +160,10 @@ describe("CapabilityList", () => {
     expect(screen.getByRole("button", { name: /^install/i })).toBeDisabled();
   });
 
-  it("names what needs attention and opens its category when clicked", async () => {
+  it("names what needs setup and opens its category when clicked", async () => {
     renderList();
     const banner = screen.getByRole("status");
-    expect(banner).toHaveTextContent("2 permissions need your attention");
+    expect(banner).toHaveTextContent("2 permissions need setup");
     await userEvent.click(within(banner).getByRole("button", { name: "Take screenshots of websites" }));
     expect(screen.getByRole("button", { name: /^Websites/ })).toHaveAttribute("aria-pressed", "true");
   });
@@ -207,12 +240,13 @@ describe("CapabilityList acting on sites", () => {
     reason: "Needs 'Control a browser' on in Permissions.",
     tools: ["browser.act"],
   };
-  it("says at a glance it asks before paying, why it is blocked, and what waits for you behind the info button", async () => {
+  it("says at a glance it asks before paying, what setup is missing, and what waits for you behind the info button", async () => {
     renderList([...CAPS, ACTING]);
     await openCategory("Websites");
     expect(screen.getByRole("switch", { name: "Fill in forms and click on sites" })).toHaveAttribute("aria-checked", "true");
     expect(screen.getByText("Asks before paying or sending")).toBeInTheDocument();
-    expect(screen.getByText("Blocked — Needs 'Control a browser' on in Permissions.")).toBeInTheDocument();
+    // No button can do this step, so the reason itself stays in sight.
+    expect(screen.getByText("Needs 'Control a browser' on in Permissions.")).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "About Fill in forms and click on sites" }));
     expect(screen.getByText("Asks you first:").parentElement).toHaveTextContent(
