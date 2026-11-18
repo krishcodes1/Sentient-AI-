@@ -14,6 +14,7 @@ Crawler AI — Secure-by-Design Agentic AI Platform.
 from __future__ import annotations
 
 import asyncio
+import sys
 from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
@@ -1371,4 +1372,9 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=8000,
         reload=settings.ENVIRONMENT == "development",
+        # With reload on, uvicorn picks the selector loop on Windows, which
+        # cannot start subprocesses: Playwright's driver never launches and
+        # every browser.* call answers "Could not start the browser". The
+        # proactor loop (Windows' own default) runs it, reload included.
+        loop="asyncio:ProactorEventLoop" if sys.platform == "win32" else "auto",
     )

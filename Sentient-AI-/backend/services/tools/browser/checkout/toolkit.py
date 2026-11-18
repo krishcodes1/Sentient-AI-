@@ -1104,10 +1104,7 @@ class BrowserCheckoutToolkit:
             return await self._sessions.get(user_id, mode=mode_for(user_id), task_id=task_id)
         except Exception as exc:  # launch errors quote paths; keep them in the log
             _log_failure("checkout_session_failed", exc)
-            raise _Failed(
-                "Could not start the browser. The owner can check Settings → Permissions → "
-                "Control a browser."
-            )
+            raise _Failed(_shared.LAUNCH_FAILED)
 
     async def _ensure_guard(self, session: BrowserSession) -> None:
         """The egress guard is idempotent per context; installing it here
