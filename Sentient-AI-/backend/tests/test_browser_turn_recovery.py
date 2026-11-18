@@ -343,11 +343,20 @@ def test_the_browser_task_playbook_says_look_further_act_through_the_card_and_ke
         "take a guest path",
         "ask once, in one sentence, then go on",
         "give the person the link to the page where they can finish",
+        # 2026-11-17, OpenTable on 3.1 Pro: it said it had opened the
+        # restaurant and told the person to look at their screen to pick a
+        # time; nothing was open and no time was ever asked for.
+        "ask once for what is missing before you search",
+        "pick the one closest to what they asked",
+        "offer the nearest times on other days",
+        "Never tell the person to look at their screen",
+        "unless a tool result in this turn shows it",
     ):
         assert fragment in block, fragment
     assert chr(0x2014) not in block and chr(0x2013) not in block
-    # Short: it rides on every browser request.
-    assert len(BROWSER_TASKS_SYSTEM_PROMPT) < 1400
+    # Short: it rides on every browser request (the booking lines took it
+    # from 1,373 to about 2,000 characters, some 160 tokens).
+    assert len(BROWSER_TASKS_SYSTEM_PROMPT) < 2100
 
 
 # ── 4. a browser step that never finishes ─────────────────────────────────────

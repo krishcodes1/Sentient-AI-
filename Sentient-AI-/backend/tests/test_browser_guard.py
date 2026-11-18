@@ -1919,3 +1919,24 @@ async def test_a_walled_read_page_is_loaded_by_chrome_only_through_the_proxy_and
     route = FakeRoute(wall)
     await g._route(route, FakeRequest("https://walls-then-redirects.example/x"), state)
     assert route.calls[-1] != ("continue", None)
+
+
+@pytest.mark.asyncio
+async def test_a_wall_that_drops_the_fetch_is_loaded_by_chrome_on_a_listed_site(no_system_dns):
+    """OpenTable's CDN never answers the guard's fetch; it timed out, the
+    page was aborted and the model told the person OpenTable refused it."""
+    g = Guard(resolver=public_resolver)
+    state = _state()
+    state.proxied = True
+    route = FakeRoute(TimeoutError("no answer"))
+    await g._route(route, FakeRequest("https://www.opentable.com/r/ff-pizzeria"), state)
+    assert route.calls == [("continue", None)]
+    # Elsewhere, or with a write window open, a dropped fetch still fails.
+    for url, flag in (("https://drops.example/x", None), ("https://www.opentable.com/booking", "write_allowed")):
+        state = _state()
+        state.proxied = True
+        if flag:
+            setattr(state, flag, True)
+        route = FakeRoute(TimeoutError("no answer"))
+        await g._route(route, FakeRequest(url), state)
+        assert route.calls[-1] == ("abort", "failed"), url
