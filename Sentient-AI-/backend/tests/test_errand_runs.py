@@ -623,6 +623,9 @@ async def test_a_sign_in_at_approval_makes_the_errand_wait_for_the_owner_in_fixe
     )
     assert (await shop.errand(errand.id)).status == "waiting"
     assert (await shop.service.retry(owner, errand.id)).status == "planned"
+    # retry() wakes a sweep; let it finish here, not inside a later test
+    # (on Postgres the tests share one database).
+    await shop.service.wait_idle()
 
 
 # ── how a run ends ───────────────────────────────────────────────────────────
@@ -729,6 +732,7 @@ async def test_a_page_that_needs_the_owner_marks_the_errand_waiting_and_says_wha
     assert "/errands" in text and "Try again" in text
     # Try again plans it for today.
     assert (await service.retry(owner, errand.id)).status == "planned"
+    await service.wait_idle()  # the sweep retry() woke, see above
 
 
 @pytest.mark.asyncio
