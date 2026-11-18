@@ -1,10 +1,11 @@
 /**
  * The Permissions screen: a protection level to pick (how much Crawler does on its own), a plain
- * summary of what it can and can't do, anything that needs attention, and everyday categories
+ * summary of what it can and can't do, anything that needs setup, and everyday categories
  * that open one at a time into their switches. Each row reads at a glance (name, risk, a one-line
- * summary, small pills such as "Asks first" or an amber "Audio goes to your AI provider", why it
- * is blocked, Grant access / Install); its info button opens three short facts (on its own / asks
- * you first / your data), fix steps and limits (the purchase caps…). Also the panel shown when the
+ * summary, small pills such as "Asks first" or an amber "Audio goes to your AI provider", and for
+ * one that is on but not working a "Needs setup" pill with its one fix: Grant access, Install, Add
+ * key or Open Connectors); its info button opens three short facts (on its own / asks you first /
+ * your data), what setup is missing, fix steps and limits (the purchase caps…). Also the panel shown when the
  * list fails to load.
  *
  * Why it exists: Settings and the setup wizard's Permissions step show the same list. It used to
@@ -13,19 +14,23 @@
  */
 
 import { useId, useRef, useState, type ReactNode } from "react";
+import { Link } from "react-router-dom";
 import {
+  ArrowRight,
   ChevronRight,
   Clock,
   CloudUpload,
   Download,
   Hand,
   Info,
+  KeyRound,
   Lock,
   Monitor,
   Play,
+  Plug,
   ShieldAlert,
   SlidersHorizontal,
-  TriangleAlert,
+  Wrench,
   type LucideIcon,
 } from "lucide-react";
 import CapabilitySettings from "@/components/CapabilitySettings";
@@ -102,12 +107,13 @@ function Fact({ icon: Icon, color, label, children }: { icon: LucideIcon; color:
   );
 }
 
-/** Only when it adds something the switch does not already say. */
-function statusLine(item: CapabilityStatus): { text: string; color: string } | null {
-  if (item.effective === "blocked") return { text: `Blocked — ${item.reason}`, color: "var(--accent-danger)" };
-  if (item.effective === "off" && item.enabled && item.reason) {
-    return { text: `Off — ${item.reason}`, color: "var(--text-muted)" };
-  }
+/** Where a blocked capability's missing step lives in this app, when it is a page of its own.
+ *  ponytail: matched on the server's wording; a link field on CapabilityStatus would be sturdier
+ *  if more of these appear. */
+function fixLink(item: CapabilityStatus): { to: string; label: string; icon: LucideIcon } | null {
+  if (item.effective !== "blocked") return null;
+  if (item.reason.includes("Service keys")) return { to: "/security?tab=keys", label: "Add key", icon: KeyRound };
+  if (item.reason.includes("Connectors")) return { to: "/connectors", label: "Open Connectors", icon: Plug };
   return null;
 }
 
@@ -126,7 +132,18 @@ function CapabilityRow({ item, ...h }: RowHandlers & { item: CapabilityStatus })
   const [open, setOpen] = useState(false);
   const busy = h.busyKey === item.key;
   const disabled = !h.editable || busy;
-  const status = statusLine(item);
+  const blocked = item.effective === "blocked";
+  const link = fixLink(item);
+  const canInstall = !!item.install && !item.available;
+  const hasFix = item.can_request_access || canInstall || !!link;
+  // With a button the button says what to do and the reason waits in the info panel; without one
+  // (another switch must be on first) the reason itself is the next step, so it stays in sight.
+  const note =
+    blocked && !hasFix
+      ? { text: item.reason, color: "var(--accent-warning)" }
+      : item.effective === "off" && item.enabled && item.reason
+        ? { text: `Off — ${item.reason}`, color: "var(--text-muted)" }
+        : null;
   const about = aboutOf(item);
   const hasLimits = !!h.onSettingsChange && Object.keys(item.settings ?? {}).length > 0;
   const chips: [ChipKind | "limits", string][] = [...(about?.chips ?? []), ...(hasLimits ? [["limits", "Has limits"] as [ChipKind | "limits", string]] : [])];
@@ -141,6 +158,15 @@ function CapabilityRow({ item, ...h }: RowHandlers & { item: CapabilityStatus })
               {item.label}
             </h4>
             <RiskTag risk={item.risk} />
+            {blocked && (
+              <span
+                className="inline-flex items-center gap-1 text-[11px] px-2 py-px rounded-full font-medium whitespace-nowrap"
+                style={{ backgroundColor: "var(--fill-warning)", color: "var(--accent-warning)" }}
+              >
+                <Wrench className="w-3 h-3" aria-hidden />
+                Needs setup
+              </span>
+            )}
           </div>
           <p className="text-xs mt-0.5" style={{ color: "var(--text-secondary)" }}>
             {summaryOf(item)}
@@ -152,13 +178,13 @@ function CapabilityRow({ item, ...h }: RowHandlers & { item: CapabilityStatus })
               ))}
             </div>
           )}
-          {status && (
-            <p className="text-xs mt-2 font-medium" style={{ color: status.color }}>
-              {status.text}
+          {note && (
+            <p className="text-xs mt-2 font-medium" style={{ color: note.color }}>
+              {note.text}
             </p>
           )}
 
-          {(item.can_request_access || (item.install && !item.available)) && (
+          {hasFix && (
             <div className="flex items-center gap-2 mt-2.5 flex-wrap">
               {item.can_request_access && (
                 <button
@@ -176,19 +202,38 @@ function CapabilityRow({ item, ...h }: RowHandlers & { item: CapabilityStatus })
                   Grant access
                 </button>
               )}
-              {item.install && !item.available && (
+              {canInstall && (
                 <button
                   type="button"
                   disabled={disabled}
                   onClick={() => h.onInstall(item.key)}
                   className={smallBtn}
-                  style={{ ...surface, color: "var(--text-secondary)" }}
+                  style={{
+                    backgroundColor: "var(--accent-glow)",
+                    border: "1px solid var(--border-accent)",
+                    color: "var(--accent-primary)",
+                  }}
                 >
                   <Download className="w-3.5 h-3.5" aria-hidden />
                   {/* The size comes from the server, which knows what this
                       install actually fetches; no guess when it has none. */}
                   {item.install_size_hint ? `Install (${item.install_size_hint})` : "Install"}
                 </button>
+              )}
+              {link && (
+                <Link
+                  to={link.to}
+                  className={smallBtn}
+                  style={{
+                    backgroundColor: "var(--accent-glow)",
+                    border: "1px solid var(--border-accent)",
+                    color: "var(--accent-primary)",
+                  }}
+                >
+                  <link.icon className="w-3.5 h-3.5" aria-hidden />
+                  {link.label}
+                  <ArrowRight className="w-3.5 h-3.5" aria-hidden />
+                </Link>
               )}
             </div>
           )}
@@ -214,6 +259,7 @@ function CapabilityRow({ item, ...h }: RowHandlers & { item: CapabilityStatus })
           busy={busy}
           disabled={!h.editable}
           aria-labelledby={headingId}
+          className={blocked ? "opacity-60" : undefined}
         />
       </div>
 
@@ -242,6 +288,11 @@ function CapabilityRow({ item, ...h }: RowHandlers & { item: CapabilityStatus })
               label="Your data"
             >
               {about.data}
+            </Fact>
+          )}
+          {blocked && hasFix && (
+            <Fact icon={Wrench} color="var(--accent-warning)" label="To finish setup">
+              {item.reason}
             </Fact>
           )}
           {!about && (
@@ -278,7 +329,7 @@ function plural(n: number, one: string, many: string) {
 function categoryStatus(items: CapabilityStatus[]): { text: string; color: string; dot: string } {
   const blocked = items.filter((i) => i.effective === "blocked").length;
   if (blocked) {
-    return { text: `${plural(blocked, "needs", "need")} attention`, color: "var(--accent-warning)", dot: "var(--accent-warning)" };
+    return { text: `${plural(blocked, "needs", "need")} setup`, color: "var(--accent-warning)", dot: "var(--accent-warning)" };
   }
   const on = items.filter((i) => i.enabled).length;
   const text = items.length === 1 ? (on ? "On" : "Off") : `${on} of ${items.length} on`;
@@ -482,9 +533,9 @@ export default function CapabilityList({
             color: "var(--accent-warning)",
           }}
         >
-          <TriangleAlert className="w-4 h-4 shrink-0 mt-px" aria-hidden />
+          <Wrench className="w-4 h-4 shrink-0 mt-px" aria-hidden />
           <div className="min-w-0">
-            <span className="font-semibold">{plural(attention.length, "permission needs", "permissions need")} your attention: </span>
+            <span className="font-semibold">{plural(attention.length, "permission needs", "permissions need")} setup: </span>
             {attention.map((item, n) => {
               const category = categoryOf(item.key);
               return (
