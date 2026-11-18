@@ -1,14 +1,12 @@
 name: CI
 
-# Feature branches are where the work actually happens, and gating only on
-# `main` and open PRs meant a branch could accumulate days of commits with
-# nothing ever run against it — the first signal arrived when the PR opened,
-# which is the worst moment to learn the suite is red. Every pushed branch
-# is built; `concurrency` below throws away superseded runs so the extra
-# coverage does not cost a queue.
+# Pushes to main plus PRs into main. Building every pushed branch too meant
+# each PR commit ran the whole suite twice (push + pull_request), doubling
+# the queue. To test a branch before its PR exists, run this workflow by
+# hand (Actions > CI > Run workflow).
 on:
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -18,11 +16,47 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  # Which parts a PR touches, so a frontend-only PR skips the 40-minute
+  # backend suite. Main and manual runs build everything. Backend jobs are
+  # skipped only when every change is under frontend/ or desktop/ (the
+  # backend tests read nothing there); a change to this file runs them all.
+  changes:
+    name: Changed areas
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.diff.outputs.backend }}
+      frontend: ${{ steps.diff.outputs.frontend }}
+      desktop: ${{ steps.diff.outputs.desktop }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: diff
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ -z "$BASE" ]; then
+            echo "backend=true" >> "$GITHUB_OUTPUT"
+            echo "frontend=true" >> "$GITHUB_OUTPUT"
+            echo "desktop=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files=$(git diff --name-only "$BASE...HEAD")
+          echo "$files"
+          # grep's options: -q quiet, -v "a line that does NOT match".
+          has() { echo "$files" | grep -q $1 "$2" && echo true || echo false; }
+          echo "backend=$(has -vE '^Sentient-AI-/(frontend|desktop)/')" >> "$GITHUB_OUTPUT"
+          # purchase_notice.txt: frontend/src/pages/purchaseNotice.test.ts compares against it.
+          echo "frontend=$(has -E '^(Sentient-AI-/frontend/|Sentient-AI-/backend/tests/fixtures/purchase_notice\.txt$|\.github/workflows/ci\.yml$)')" >> "$GITHUB_OUTPUT"
+          echo "desktop=$(has -E '^(Sentient-AI-/desktop/|\.github/workflows/ci\.yml$)')" >> "$GITHUB_OUTPUT"
+
   # Static gates for the backend. Fast and independent of the test jobs, so
   # a lint or type regression is reported even when the suite is red (and
   # vice versa). Config lives in Sentient-AI-/backend/pyproject.toml.
   lint:
     name: Backend (ruff + mypy)
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -73,6 +107,8 @@ jobs:
 
   frontend:
     name: Frontend (build)
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -148,6 +184,8 @@ jobs:
   # data: resources, the browser-preview fake left in).
   desktop-ui:
     name: Desktop UI (types, lint, tests, build)
+    needs: changes
+    if: needs.changes.outputs.desktop == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -182,8 +220,16 @@ jobs:
       - name: Stack staging tests (no secrets in the bundle)
         run: node --test ../scripts/stage-stack.test.mjs
 
+  # The suite runs in 4 shards on 4 machines at once (about 10 minutes each
+  # instead of 40 in one). Test files are dealt round-robin by sorted name.
   backend:
-    name: Backend (pytest)
+    name: Backend (pytest, shard ${{ matrix.shard }})
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -209,28 +255,63 @@ jobs:
       # pytest-cov is installed here rather than pinned in
       # requirements-dev.txt: coverage is a reporting concern for CI, and a
       # developer running the suite locally should not have to carry the
-      # plugin to do it. pipefail: without it the step exits with tee's
-      # status, and failing tests left the job green.
+      # plugin to do it. Each shard keeps its raw data; backend-coverage
+      # below merges them into one report.
       - name: Run tests with coverage
+        env:
+          COVERAGE_FILE: .coverage.${{ matrix.shard }}
         run: |
-          set -o pipefail
           pip install pytest-cov
-          python -m pytest tests/ -v \
-            --cov=. --cov-report=term --cov-report=xml --cov-report=html \
-            | tee pytest.txt
+          files=$(find tests \( -name 'test_*.py' -o -name '*_test.py' \) | sort \
+            | awk -v n=4 -v s=${{ matrix.shard }} 'NR % n == s')
+          python -m pytest $files -v --cov=. --cov-report=
 
-      - name: Publish coverage summary
+      - name: Upload coverage data
         if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: backend-coverage-data-${{ matrix.shard }}
+          path: Sentient-AI-/backend/.coverage.${{ matrix.shard }}
+          include-hidden-files: true
+          if-no-files-found: ignore
+
+  # One coverage report from the 4 shards' data.
+  backend-coverage:
+    name: Backend coverage
+    needs: backend
+    if: always() && needs.backend.result != 'skipped'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Sentient-AI-/backend
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: backend-coverage-data-*
+          merge-multiple: true
+          path: Sentient-AI-/backend
+
+      - name: Combine and report
         run: |
+          pip install coverage
+          python -m coverage combine
+          python -m coverage xml
+          python -m coverage html
           {
             echo '### Backend coverage'
             echo '```'
-            grep -E '^(TOTAL|Name|-+)' pytest.txt || true
+            python -m coverage report | grep -E '^(TOTAL|Name|-+)'
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload coverage report
-        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: backend-coverage
@@ -264,8 +345,15 @@ jobs:
   # Same suite against real Postgres, so Postgres-only behavior (native
   # enums, ALTER statements, asyncpg quirks) is exercised before it first
   # runs in production. The default job stays on in-memory SQLite for speed.
+  # Sharded like the SQLite job; each shard gets its own Postgres service.
   backend-postgres:
-    name: Backend (pytest, Postgres)
+    name: Backend (pytest, Postgres, shard ${{ matrix.shard }})
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -321,13 +409,18 @@ jobs:
           python -m alembic check
 
       - name: Run tests
-        run: python -m pytest tests/ -v
+        run: |
+          files=$(find tests \( -name 'test_*.py' -o -name '*_test.py' \) | sort \
+            | awk -v n=4 -v s=${{ matrix.shard }} 'NR % n == s')
+          python -m pytest $files -v
 
   # Windows covers unit tests only (spec §11.1): the platform layer runs for
   # real here, and the browser-backed tests skip themselves through the
   # `page`/`kit` fixtures because no Chromium is installed.
   backend-windows-unit:
     name: Backend (pytest, Windows unit)
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
     runs-on: windows-latest
     defaults:
       run:
@@ -378,3 +471,17 @@ jobs:
 
       - name: Types
         run: python -m mypy services/platform services/tools/browser
+
+  # The one check to require in branch protection. A skipped job counts as
+  # passing, and a skipped matrix job never reports its per-shard names, so
+  # requiring those would block frontend-only PRs. always(), not !cancelled():
+  # a skipped gate would also count as passing. Coverage and gitleaks are
+  # reporting only and stay out.
+  ci-result:
+    name: CI result
+    if: always()
+    needs: [changes, lint, frontend, desktop-ui, backend, backend-postgres, backend-windows-unit]
+    runs-on: ubuntu-latest
+    steps:
+      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: echo "A required job failed or was cancelled." && exit 1
