@@ -352,7 +352,14 @@ async def test_at_most_two_runs_at_once(session_factory):
     runner = FakeRunner(block=gate)
     svc = service(session_factory, runner)
     assert await svc.sweep_once() == 2
-    await asyncio.sleep(0.05)
+    # Wait until both runs are inside the runner. A fixed short sleep was not
+    # enough on Postgres, where the second run could still be writing its
+    # ledger row when the gate opened, so the peak came out as 1.
+    for _ in range(200):
+        if runner.running == 2:
+            break
+        await asyncio.sleep(0.025)
+    assert runner.running == 2
     assert await svc.sweep_once() == 0  # no free slot
     gate.set()
     await svc.wait_idle()
