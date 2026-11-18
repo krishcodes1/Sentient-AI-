@@ -7,9 +7,10 @@
  */
 
 import { useEffect, useId, useState } from "react";
-import { Loader2, Lock } from "lucide-react";
+import { Lock } from "lucide-react";
 import { ErrorAlert, ResultLine } from "@/components/FormFeedback";
 import ProviderForm from "@/components/ProviderForm";
+import Switch from "@/components/Switch";
 import { errorText, panelStyle } from "@/components/formStyles";
 import { ApiError, getSetupStatus, updateRegistration } from "@/services/api";
 import type { SetupStatus } from "@/types";
@@ -153,24 +154,14 @@ export default function ServerSettings() {
                     )}
                   </p>
                 </div>
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={open}
+                <Switch
+                  checked={open}
+                  onChange={() => void toggleSignups()}
+                  busy={signupsBusy}
+                  disabled={locked}
                   aria-labelledby={signupsLabelId}
                   aria-describedby={signupsHelpId}
-                  disabled={locked || signupsBusy}
-                  onClick={() => void toggleSignups()}
-                  className="inline-flex items-center justify-center px-4 rounded-[10px] text-sm font-medium transition-colors disabled:opacity-50"
-                  style={{
-                    minHeight: 44,
-                    background: open ? "var(--fill-success)" : "var(--claw-panel)",
-                    border: open ? "1px solid var(--border-success)" : "1px solid var(--claw-border)",
-                    color: open ? "var(--accent-success)" : "var(--text-muted)",
-                  }}
-                >
-                  {signupsBusy ? <Loader2 className="w-4 h-4 animate-spin" aria-hidden /> : open ? "On" : "Off"}
-                </button>
+                />
               </div>
               {signupsFeedback && (
                 <div className="mt-3">

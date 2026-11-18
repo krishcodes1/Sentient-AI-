@@ -686,6 +686,7 @@ function PermissionsStep({ onBack, onNext }: { onBack: () => void; onNext: () =>
               return getCapabilities();
             })
           }
+          onApplyLevel={async (patch) => setItems(await updateCapabilities(patch))}
         />
       ) : !error ? (
         <p className="text-sm" style={{ color: "var(--text-muted)" }}>

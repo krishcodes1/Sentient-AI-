@@ -150,7 +150,7 @@ _ALLOWED_PARAMS = frozenset({"merchant", "amount", "note"})
 
 _NO_CARD = (
     "This page asks for a card number, and no payment card is stored. Add one in "
-    "Settings → Payment card."
+    "Settings → Permissions → Money."
 )
 _UNBOUND = (
     "This approval is not tied to a checkout Crawler prepared (it may have expired), so "
@@ -923,7 +923,7 @@ class BrowserCheckoutToolkit:
             await self._refused(user_id, task_id, facts, pending, "vault_open_failed")
             return _error(
                 "The stored card could not be opened, so nothing was paid. The owner can check "
-                "Settings → Payment card."
+                "Settings → Permissions → Money."
             )
         try:
             try:

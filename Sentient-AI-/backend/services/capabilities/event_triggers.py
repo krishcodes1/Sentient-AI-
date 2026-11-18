@@ -21,7 +21,7 @@ def availability(ctx: ReportContext) -> Availability:
     return Availability(
         False,
         "Trigger alerts go out over Telegram or Slack, and neither is set up. Connect one "
-        "in Settings → Telegram or add the Slack connector.",
+        "in Settings → Approvals → Telegram or add the Slack connector.",
     )
 
 

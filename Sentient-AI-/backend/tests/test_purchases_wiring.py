@@ -740,7 +740,7 @@ async def test_a_refused_bind_is_filed_under_purchase_rule_with_no_card():
 
 @pytest.mark.asyncio
 async def test_a_refused_toolkit_precheck_is_filed_the_same_way():
-    no_card = {"ok": False, "rule": "no_card", "error": "No payment card is stored. Add one in Settings → Payment card."}
+    no_card = {"ok": False, "rule": "no_card", "error": "No payment card is stored. Add one in Settings → Permissions → Money."}
     ex = executor(*BOTH, checkout=FakeCheckoutToolkit(precheck=no_card))
     turn = Turn(ex, _gate(*BOTH))
     response = await turn.run(call("t1", CHECKOUT, merchant="shop.example.com"))

@@ -28,7 +28,7 @@ describe("ProviderErrorText", () => {
       { code: "user_provider_unavailable", settings_url: "/settings" },
     );
 
-    expect(screen.getByRole("link", { name: "Settings" })).toHaveAttribute("href", "/settings");
+    expect(screen.getByRole("link", { name: "Settings" })).toHaveAttribute("href", "/settings?tab=ai");
     expect(screen.getByTestId("bubble")).toHaveTextContent(
       "The 'openai' provider selected in your Settings is not configured on this server. Change it in Settings.",
     );
@@ -40,7 +40,7 @@ describe("ProviderErrorText", () => {
       setup_url: "/setup",
     });
 
-    expect(screen.getByRole("link", { name: "Settings" })).toHaveAttribute("href", "/settings");
+    expect(screen.getByRole("link", { name: "Settings" })).toHaveAttribute("href", "/settings?tab=ai");
     expect(screen.getByTestId("bubble")).toHaveTextContent(
       "No AI provider is configured yet. Set it up in Settings.",
     );

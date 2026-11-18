@@ -18,6 +18,7 @@ import { useEffect, useId, useMemo, useRef, useState, type FormEvent, type React
 import { Loader2, Plus, X } from "lucide-react";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import { ErrorAlert } from "@/components/FormFeedback";
+import Switch from "@/components/Switch";
 import { errorText, inputCls, inputStyle, labelCls } from "@/components/formStyles";
 import {
   ApiError,
@@ -464,23 +465,13 @@ export default function ToolRulesTab() {
               return (
                 <li key={rule.key} className="rounded-[10px] p-3" style={rowStyle}>
                   <div className="flex items-start gap-3">
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={rule.enabled}
+                    <Switch
+                      checked={rule.enabled}
+                      onChange={() => void toggleBuiltin(rule)}
+                      busy={busy}
                       aria-labelledby={nameId}
-                      disabled={busy}
-                      onClick={() => void toggleBuiltin(rule)}
-                      className="inline-flex items-center justify-center shrink-0 w-14 rounded-[10px] text-sm font-medium transition-colors disabled:opacity-50"
-                      style={{
-                        minHeight: 36,
-                        background: rule.enabled ? "var(--fill-success)" : "var(--claw-panel)",
-                        border: rule.enabled ? "1px solid var(--border-success)" : "1px solid var(--claw-border)",
-                        color: rule.enabled ? "var(--accent-success)" : "var(--text-muted)",
-                      }}
-                    >
-                      {busy ? <Loader2 className="w-4 h-4 animate-spin" aria-hidden /> : rule.enabled ? "On" : "Off"}
-                    </button>
+                      className="mt-0.5"
+                    />
                     <div className="min-w-0">
                       <p id={nameId} className="text-sm font-semibold break-words" style={{ color: "var(--text-primary)" }}>
                         {rule.name}

@@ -336,10 +336,13 @@ describe("Setup wizard", () => {
     const user = userEvent.setup();
     await goToPermissions(user);
 
-    const web = await screen.findByRole("switch", { name: "Browse the web" });
-    expect(web).toHaveAttribute("aria-checked", "true");
-    expect(screen.getByRole("switch", { name: "See my screen" })).toBeInTheDocument();
+    // The switches sit in categories, one open at a time; Your computer opens first here.
+    expect(await screen.findByRole("switch", { name: "See my screen" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /^Background tasks/ }));
     expect(screen.getByRole("switch", { name: "Reminders" })).toHaveAttribute("aria-checked", "false");
+    await user.click(screen.getByRole("button", { name: /^Websites/ }));
+    const web = screen.getByRole("switch", { name: "Browse the web" });
+    expect(web).toHaveAttribute("aria-checked", "true");
 
     await user.click(web);
     expect(api.updateCapabilities).toHaveBeenCalledWith({ web_browsing: false });
@@ -353,7 +356,7 @@ describe("Setup wizard", () => {
     const assign = vi.fn();
     const user = userEvent.setup();
     await goToPermissions(user);
-    await screen.findByRole("switch", { name: "Browse the web" });
+    await screen.findByRole("switch", { name: "See my screen" });
     await user.click(screen.getByRole("button", { name: "Next" }));
 
     await screen.findByRole("heading", { name: "Summary" });
@@ -429,7 +432,7 @@ describe("Setup wizard", () => {
     asSignedInOwner();
     const user = userEvent.setup();
     await goToPermissions(user);
-    await screen.findByRole("switch", { name: "Browse the web" });
+    await screen.findByRole("switch", { name: "See my screen" });
     await user.click(screen.getByRole("button", { name: "Next" }));
     await screen.findByRole("heading", { name: "Summary" });
 

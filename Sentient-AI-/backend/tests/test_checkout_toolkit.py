@@ -1715,7 +1715,7 @@ async def test_a_page_with_card_fields_and_no_stored_card_is_refused_no_card(sho
     s = shop
     s.toolkit._vault = FakeVault(card=False)
     result = await begin(s, "/checkout")
-    assert result["rule"] == "no_card" and "Settings → Payment card" in result["error"]
+    assert result["rule"] == "no_card" and "Settings → Permissions → Money" in result["error"]
     assert "card number" in result["error"]
     assert s.posted == [] and s.toolkit._pending == {}
 

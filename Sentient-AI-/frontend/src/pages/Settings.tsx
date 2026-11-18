@@ -1,13 +1,16 @@
 /**
- * Settings page: profile, password, permission tier and rate limit, LLM provider choice, Telegram
- * linking and bot token, capability permissions, data export and account deletion, plus the
- * owner's Server section.
+ * Settings page, in five tabs chosen with `?tab=<id>`: Permissions (protection level and
+ * capability switches, with the payment card, app approvals, low-risk grants and tutor locks in
+ * their categories), Approvals (permission tier, rate limit, Telegram), Account (profile,
+ * password, sign out), AI model (LLM provider, plus the owner's Server section) and Your data
+ * (export, delete account).
  *
  * Why it exists: Every per-account setting the backend exposes is edited here, each section saving
- * and reporting on its own.
+ * and reporting on its own. One long page meant scrolling past forty switches to reach anything.
  */
 
 import { useEffect, useId, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   Save,
   AlertTriangle,
@@ -25,6 +28,7 @@ import CapabilityList, { CapabilityListError } from "@/components/CapabilityList
 import PaymentCardSettings from "@/components/PaymentCardSettings";
 import TutorLocks from "@/components/TutorLocks";
 import ServerSettings from "@/components/ServerSettings";
+import TabBar from "@/components/TabBar";
 import { useProviderModels } from "@/hooks/useProviderModels";
 import type { CapabilityStatus, User } from "@/types";
 import {
@@ -110,6 +114,18 @@ const PROVIDER_CHOICES: { value: string | null; label: string; hint?: string }[]
   { value: "ollama", label: "ollama", hint: "Local / Self-hosted" },
 ];
 
+// The ids are the `?tab=` values other pages link to (`/settings?tab=ai`), so they never change.
+const SETTINGS_TABS = [
+  { id: "permissions", label: "Permissions" },
+  { id: "approvals", label: "Approvals" },
+  { id: "account", label: "Account" },
+  { id: "ai", label: "AI model" },
+  { id: "data", label: "Your data" },
+] as const;
+type SettingsTabId = (typeof SETTINGS_TABS)[number]["id"];
+const TAB_PANEL_ID = "settings-tabpanel";
+const tabElementId = (id: SettingsTabId) => `settings-tab-${id}`;
+
 const panelStyle = {
   background: "var(--claw-panel)",
   border: "1px solid var(--claw-border)",
@@ -185,7 +201,20 @@ export default function Settings() {
     model: useId(),
     modelHelp: useId(),
     deletePassword: useId(),
+    permissions: useId(),
   };
+  const [params, setParams] = useSearchParams();
+  const tab: SettingsTabId = SETTINGS_TABS.find((t) => t.id === params.get("tab"))?.id ?? "permissions";
+  // Switching tabs is not a new page: Back leaves Settings instead of walking every tab looked at.
+  const openTab = (id: SettingsTabId) =>
+    setParams(
+      (previous) => {
+        const next = new URLSearchParams(previous);
+        next.set("tab", id);
+        return next;
+      },
+      { replace: true },
+    );
   const [me, setMe] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -599,12 +628,12 @@ export default function Settings() {
   };
 
   return (
-    <div className="space-y-6 max-w-3xl">
+    <div className="space-y-6 max-w-5xl">
       <div>
         <div className="eyebrow mb-2">Account</div>
         <h1 style={{ color: "var(--text-primary)" }}>Settings</h1>
         <p className="text-sm mt-1.5" style={{ color: "var(--text-secondary)" }}>
-          Configure your account, security policies, and LLM provider.
+          Choose what Crawler may do, how it asks you, and the AI it uses.
         </p>
       </div>
 
@@ -622,552 +651,583 @@ export default function Settings() {
         </div>
       )}
 
-      {/* Profile */}
-      <section className="rounded-[14px] p-6" style={panelStyle}>
-        <div className="eyebrow mb-1">Profile</div>
-        <h2 className="mb-4">Account details</h2>
-        <div className="space-y-4">
-          <div>
-            <label htmlFor={ids.name} className={labelCls}>
-              Name
-            </label>
-            <input
-              id={ids.name}
-              type="text"
-              autoComplete="name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
-              style={inputStyle}
-              placeholder={loading ? "Loading..." : "Your name"}
-            />
-          </div>
-          <div>
-            <label htmlFor={ids.email} className={labelCls}>
-              Email
-            </label>
-            <input
-              id={ids.email}
-              type="email"
-              autoComplete="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
-              style={inputStyle}
-              placeholder={loading ? "Loading..." : ""}
-            />
-          </div>
-          <div className="flex items-center gap-3">
-            <SaveButton label="Save Profile" onClick={handleSaveProfile} saving={savingProfile} />
-            <FeedbackLine feedback={profileFeedback} />
-          </div>
-        </div>
-      </section>
+      <TabBar
+        tabs={SETTINGS_TABS}
+        activeId={tab}
+        onSelect={openTab}
+        label="Settings sections"
+        panelId={TAB_PANEL_ID}
+        tabId={tabElementId}
+      />
 
-      {/* Password */}
-      <section className="rounded-[14px] p-6" style={panelStyle}>
-        <div className="eyebrow mb-1">Security</div>
-        <h2 className="mb-4">Change password</h2>
-        <div className="space-y-4">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div>
-              <label htmlFor={ids.currentPassword} className={labelCls}>
-                Current Password
-              </label>
-              <input
-                id={ids.currentPassword}
-                type="password"
-                autoComplete="current-password"
-                value={currentPassword}
-                onChange={(e) => setCurrentPassword(e.target.value)}
-                className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
-                style={inputStyle}
-                placeholder="Enter current password"
-              />
-            </div>
-            <div>
-              <label htmlFor={ids.newPassword} className={labelCls}>
-                New Password
-              </label>
-              <input
-                id={ids.newPassword}
-                type="password"
-                autoComplete="new-password"
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-                className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
-                style={inputStyle}
-                placeholder="Min. 8 characters"
-              />
-            </div>
-          </div>
-          <div className="flex items-center gap-3">
-            <SaveButton label="Change Password" onClick={handleChangePassword} saving={savingPassword} />
-            <FeedbackLine feedback={passwordFeedback} />
-          </div>
-        </div>
-      </section>
-
-      {/* Security policy */}
-      <section className="rounded-[14px] p-6" style={panelStyle}>
-        <div className="eyebrow mb-1">Policy</div>
-        <h2 className="mb-4">Security settings</h2>
-        <div className="space-y-4">
-          <div>
-            <label htmlFor={ids.tier} className={labelCls}>
-              Default Permission Tier
-            </label>
-            <select
-              id={ids.tier}
-              aria-describedby={ids.tierHelp}
-              value={permissionTier}
-              onChange={(e) => setPermissionTier(e.target.value)}
-              className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
-              style={inputStyle}
-            >
-              {PERMISSION_TIERS.map((t) => (
-                <option key={t.value} value={t.value}>
-                  {t.label}
-                </option>
-              ))}
-            </select>
-            <p id={ids.tierHelp} className="text-xs mt-1.5" style={{ color: "var(--text-muted)" }}>
-              {PERMISSION_TIERS.find((t) => t.value === permissionTier)?.help}
-              {" "}Hard-blocked scopes (like Robinhood trade execution) are
-              enforced at the platform layer regardless of this setting.
-            </p>
-          </div>
-          <div>
-            <label htmlFor={ids.rateLimit} className={labelCls}>
-              Rate Limit (requests/minute)
-            </label>
-            <input
-              id={ids.rateLimit}
-              type="number"
-              value={rateLimit}
-              onChange={(e) => setRateLimit(Number(e.target.value))}
-              min={10}
-              max={600}
-              className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none mono-num"
-              style={inputStyle}
-            />
-          </div>
-          <div className="flex items-center gap-3">
-            <SaveButton label="Save Security Settings" onClick={handleSaveSecurity} saving={savingSecurity} />
-            <FeedbackLine feedback={securityFeedback} />
-          </div>
-        </div>
-      </section>
-
-      {/* Permissions */}
-      <section className="rounded-[14px] p-6" style={panelStyle}>
-        <div className="eyebrow mb-1">Policy</div>
-        <h2 className="mb-1">Permissions</h2>
-        <p className="text-sm mb-4" style={{ color: "var(--text-secondary)" }}>
-          Control what the agent is allowed to do. Some capabilities also
-          depend on OS permission or a one-time install — those are shown
-          even when they can't be turned on yet.
-        </p>
-        {capabilitiesFeedback && !capabilitiesFeedback.ok && (
-          <div
-            className="rounded-[10px] p-3 text-sm mb-4"
-            role="alert"
-            style={{
-              background: "var(--fill-danger)",
-              border: "1px solid var(--border-danger)",
-              color: "var(--accent-danger)",
-            }}
-          >
-            {capabilitiesFeedback.text}
-          </div>
-        )}
-        {capabilitiesLoadError ? (
-          <CapabilityListError message={capabilitiesLoadError} onRetry={handleRetryLoadCapabilities} />
-        ) : capabilities === null ? (
-          <p className="text-sm" style={{ color: "var(--text-muted)" }}>
-            Loading permissions…
-          </p>
-        ) : (
-          <CapabilityList
-            items={capabilities}
-            editable={!!me?.is_admin}
-            onToggle={(key, enabled) => void handleToggleCapability(key, enabled)}
-            onRequestAccess={(key) => void handleRequestCapabilityAccess(key)}
-            onInstall={(key) => void handleInstallCapability(key)}
-            busyKey={capabilitiesBusyKey}
-            onSettingsChange={(key, patch) => void handleCapabilitySettingsChange(key, patch)}
-          />
-        )}
-        {/* Each account lists and revokes its own weekly approvals: not gated on is_admin. */}
-        <AppApprovals />
-        {/* Tutor locks are owner policy (services/tutor): the owner's only, never rendered for anyone else. */}
-        {me?.is_admin && <TutorLocks />}
-        {/* Each account also lists and revokes its own low-risk grants (permission tiers). */}
-        <PermissionGrants />
-      </section>
-
-      {/* Payment card (owner only): the card "Buy things for me" pays with.
-          Entered here and nowhere else; the vault route refuses anyone
-          else, so the section is not rendered for them at all. */}
-      {me?.is_admin && <PaymentCardSettings />}
-
-      {/* Server (owner only): the install-wide AI provider and sign-ups,
-          as set up by the wizard. Not rendered at all for anyone else. */}
-      {me?.is_admin && <ServerSettings />}
-
-      {/* Telegram approvals */}
-      <section className="rounded-[14px] p-6" style={panelStyle}>
-        <div className="eyebrow mb-1">Approvals</div>
-        <h2 className="mb-4">Telegram approvals</h2>
-        <p className="text-sm mb-4" style={{ color: "var(--text-secondary)" }}>
-          Get approval requests on your phone with Approve / Deny buttons —
-          no need to be at a computer when the assistant asks for permission.
-        </p>
-
-        {me?.is_admin && (
-          <div
-            className="rounded-[10px] p-4 mb-4 space-y-3"
-            style={{ background: "var(--bg-input)", border: "1px solid var(--claw-border)" }}
-          >
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-sm font-semibold" style={{ color: "var(--text-primary)" }}>
-                Bot token
-              </span>
-              {tgStatus?.configured && (
-                <button
-                  type="button"
-                  onClick={() => void handleTgTokenRemove()}
-                  disabled={tgTokenBusy !== null}
-                  className="text-xs font-medium underline disabled:opacity-50"
-                  style={{ color: "var(--text-secondary)" }}
+      <div
+        role="tabpanel"
+        id={TAB_PANEL_ID}
+        aria-labelledby={tabElementId(tab)}
+        className={`space-y-6${tab === "permissions" ? "" : " max-w-3xl"}`}
+      >
+        {tab === "permissions" && (
+          <>
+            <section aria-labelledby={ids.permissions} className="rounded-[14px] p-5 sm:p-6" style={panelStyle}>
+              <h2 id={ids.permissions} className="sr-only">
+                Permissions
+              </h2>
+              {capabilitiesFeedback && !capabilitiesFeedback.ok && (
+                <div
+                  className="rounded-[10px] p-3 text-sm mb-4"
+                  role="alert"
+                  style={{
+                    background: "var(--fill-danger)",
+                    border: "1px solid var(--border-danger)",
+                    color: "var(--accent-danger)",
+                  }}
                 >
-                  Remove
-                </button>
+                  {capabilitiesFeedback.text}
+                </div>
               )}
-            </div>
-            {tgTokenEnvManaged ? (
-              // The 409 from test/save said TELEGRAM_BOT_TOKEN in .env
-              // provides it; a stored one here would never be used.
-              <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
-                {tgTokenFeedback?.text}
-              </p>
-            ) : (
-              <>
-                <input
-                  type="password"
-                  value={tgToken}
-                  onChange={(e) => setTgToken(e.target.value)}
-                  autoComplete="off"
-                  spellCheck={false}
-                  placeholder={
-                    tgStatus?.configured ? "A token is saved — paste a new one to replace it" : "123456789:AA…"
-                  }
-                  className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
-                  style={inputStyle}
+              {capabilitiesLoadError ? (
+                <CapabilityListError message={capabilitiesLoadError} onRetry={handleRetryLoadCapabilities} />
+              ) : capabilities === null ? (
+                <p className="text-sm" style={{ color: "var(--text-muted)" }}>
+                  Loading permissions…
+                </p>
+              ) : (
+                <CapabilityList
+                  items={capabilities}
+                  editable={!!me?.is_admin}
+                  onToggle={(key, enabled) => void handleToggleCapability(key, enabled)}
+                  onRequestAccess={(key) => void handleRequestCapabilityAccess(key)}
+                  onInstall={(key) => void handleInstallCapability(key)}
+                  busyKey={capabilitiesBusyKey}
+                  onSettingsChange={(key, patch) => void handleCapabilitySettingsChange(key, patch)}
+                  onApplyLevel={async (patch) => setCapabilities(await updateCapabilities(patch))}
+                  extras={{
+                    // Payment card (owner only): the card "Buy things for me" pays with. The vault
+                    // route refuses anyone else, so it is not rendered for them at all.
+                    money: me?.is_admin ? <PaymentCardSettings /> : null,
+                    // Each account lists and revokes its own weekly app approvals and low-risk grants.
+                    apps: (
+                      <>
+                        <AppApprovals />
+                        <PermissionGrants />
+                      </>
+                    ),
+                    // Tutor locks are owner policy (services/tutor): never rendered for anyone else.
+                    learning: me?.is_admin ? <TutorLocks /> : null,
+                  }}
                 />
+              )}
+            </section>
+          </>
+        )}
+        {tab === "approvals" && (
+          <>
+            {/* Security policy */}
+            <section className="rounded-[14px] p-6" style={panelStyle}>
+              <div className="eyebrow mb-1">Policy</div>
+              <h2 className="mb-4">Security settings</h2>
+              <div className="space-y-4">
+                <div>
+                  <label htmlFor={ids.tier} className={labelCls}>
+                    Default Permission Tier
+                  </label>
+                  <select
+                    id={ids.tier}
+                    aria-describedby={ids.tierHelp}
+                    value={permissionTier}
+                    onChange={(e) => setPermissionTier(e.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
+                    style={inputStyle}
+                  >
+                    {PERMISSION_TIERS.map((t) => (
+                      <option key={t.value} value={t.value}>
+                        {t.label}
+                      </option>
+                    ))}
+                  </select>
+                  <p id={ids.tierHelp} className="text-xs mt-1.5" style={{ color: "var(--text-muted)" }}>
+                    {PERMISSION_TIERS.find((t) => t.value === permissionTier)?.help}
+                    {" "}Hard-blocked scopes (like Robinhood trade execution) are
+                    enforced at the platform layer regardless of this setting.
+                  </p>
+                </div>
+                <div>
+                  <label htmlFor={ids.rateLimit} className={labelCls}>
+                    Rate Limit (requests/minute)
+                  </label>
+                  <input
+                    id={ids.rateLimit}
+                    type="number"
+                    value={rateLimit}
+                    onChange={(e) => setRateLimit(Number(e.target.value))}
+                    min={10}
+                    max={600}
+                    className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none mono-num"
+                    style={inputStyle}
+                  />
+                </div>
+                <div className="flex items-center gap-3">
+                  <SaveButton label="Save Security Settings" onClick={handleSaveSecurity} saving={savingSecurity} />
+                  <FeedbackLine feedback={securityFeedback} />
+                </div>
+              </div>
+            </section>
+
+            {/* Telegram approvals */}
+            <section className="rounded-[14px] p-6" style={panelStyle}>
+              <div className="eyebrow mb-1">Approvals</div>
+              <h2 className="mb-4">Telegram approvals</h2>
+              <p className="text-sm mb-4" style={{ color: "var(--text-secondary)" }}>
+                Get approval requests on your phone with Approve / Deny buttons —
+                no need to be at a computer when the assistant asks for permission.
+              </p>
+
+              {me?.is_admin && (
+                <div
+                  className="rounded-[10px] p-4 mb-4 space-y-3"
+                  style={{ background: "var(--bg-input)", border: "1px solid var(--claw-border)" }}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-semibold" style={{ color: "var(--text-primary)" }}>
+                      Bot token
+                    </span>
+                    {tgStatus?.configured && (
+                      <button
+                        type="button"
+                        onClick={() => void handleTgTokenRemove()}
+                        disabled={tgTokenBusy !== null}
+                        className="text-xs font-medium underline disabled:opacity-50"
+                        style={{ color: "var(--text-secondary)" }}
+                      >
+                        Remove
+                      </button>
+                    )}
+                  </div>
+                  {tgTokenEnvManaged ? (
+                    // The 409 from test/save said TELEGRAM_BOT_TOKEN in .env
+                    // provides it; a stored one here would never be used.
+                    <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
+                      {tgTokenFeedback?.text}
+                    </p>
+                  ) : (
+                    <>
+                      <input
+                        type="password"
+                        value={tgToken}
+                        onChange={(e) => setTgToken(e.target.value)}
+                        autoComplete="off"
+                        spellCheck={false}
+                        placeholder={
+                          tgStatus?.configured ? "A token is saved — paste a new one to replace it" : "123456789:AA…"
+                        }
+                        className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
+                        style={inputStyle}
+                      />
+                      <div className="flex items-center gap-3 flex-wrap">
+                        <button
+                          type="button"
+                          onClick={() => void handleTgTokenTest()}
+                          disabled={!tgToken.trim() || tgTokenBusy !== null}
+                          className="px-4 py-2 rounded-[10px] text-sm font-semibold disabled:opacity-50"
+                          style={{
+                            background: "transparent",
+                            border: "1px solid var(--claw-border)",
+                            color: "var(--text-primary)",
+                          }}
+                        >
+                          {tgTokenBusy === "test" ? (
+                            <Loader2 className="w-4 h-4 animate-spin inline-block mr-1.5" />
+                          ) : null}
+                          Test
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleTgTokenSave()}
+                          disabled={!tgToken.trim() || tgTokenBusy !== null}
+                          className="px-4 py-2 rounded-[10px] text-sm font-semibold disabled:opacity-50"
+                          style={{ background: "var(--accent-primary)", color: "var(--text-on-accent)" }}
+                        >
+                          {tgTokenBusy === "save" ? (
+                            <Loader2 className="w-4 h-4 animate-spin inline-block mr-1.5" />
+                          ) : null}
+                          Save
+                        </button>
+                        <FeedbackLine feedback={tgTokenFeedback} />
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {tgStatus === null ? (
+                <p className="text-sm" style={{ color: "var(--text-muted)" }}>
+                  Checking status…
+                </p>
+              ) : !tgStatus.configured ? (
+                me?.is_admin ? (
+                  <div
+                    className="rounded-[10px] p-4 text-sm space-y-2"
+                    style={{ background: "var(--bg-input)", border: "1px solid var(--claw-border)" }}
+                  >
+                    <p style={{ color: "var(--text-primary)" }}>One-time setup (about a minute):</p>
+                    <ol className="list-decimal pl-5 space-y-1" style={{ color: "var(--text-secondary)" }}>
+                      <li>
+                        In Telegram, message{" "}
+                        <a
+                          href="https://t.me/BotFather"
+                          target="_blank"
+                          rel="noreferrer"
+                          style={{ color: "var(--accent-primary)" }}
+                        >
+                          @BotFather
+                        </a>
+                        , send <code>/newbot</code>, and pick any name.
+                      </li>
+                      <li>Paste the token it replies with into Bot token above, and Save.</li>
+                      <li>Tap Connect below to link your own chat.</li>
+                    </ol>
+                  </div>
+                ) : (
+                  <p className="text-sm" style={{ color: "var(--text-muted)" }}>
+                    Ask the owner to add a bot token.
+                  </p>
+                )
+              ) : tgStatus.linked ? (
                 <div className="flex items-center gap-3 flex-wrap">
+                  <span
+                    className="inline-flex items-center gap-1.5 text-sm"
+                    style={{ color: "var(--accent-success)" }}
+                  >
+                    <CheckCircle2 className="w-4 h-4" />
+                    Connected
+                    {tgStatus.bot_username ? ` to @${tgStatus.bot_username}` : ""} —
+                    approvals reach your Telegram.
+                  </span>
                   <button
                     type="button"
-                    onClick={() => void handleTgTokenTest()}
-                    disabled={!tgToken.trim() || tgTokenBusy !== null}
+                    onClick={() => void handleTgDisconnect()}
+                    disabled={tgBusy}
                     className="px-4 py-2 rounded-[10px] text-sm font-semibold disabled:opacity-50"
                     style={{
                       background: "transparent",
                       border: "1px solid var(--claw-border)",
-                      color: "var(--text-primary)",
+                      color: "var(--text-secondary)",
                     }}
                   >
-                    {tgTokenBusy === "test" ? (
-                      <Loader2 className="w-4 h-4 animate-spin inline-block mr-1.5" />
-                    ) : null}
-                    Test
+                    Disconnect
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => void handleTgTokenSave()}
-                    disabled={!tgToken.trim() || tgTokenBusy !== null}
-                    className="px-4 py-2 rounded-[10px] text-sm font-semibold disabled:opacity-50"
-                    style={{ background: "var(--accent-primary)", color: "var(--text-on-accent)" }}
-                  >
-                    {tgTokenBusy === "save" ? (
-                      <Loader2 className="w-4 h-4 animate-spin inline-block mr-1.5" />
-                    ) : null}
-                    Save
-                  </button>
-                  <FeedbackLine feedback={tgTokenFeedback} />
+                  <FeedbackLine feedback={tgFeedback} />
                 </div>
-              </>
-            )}
-          </div>
+              ) : (
+                <div className="space-y-3">
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={() => void handleTgConnect()}
+                      disabled={tgBusy}
+                      className="flex items-center gap-2 px-4 py-2 rounded-[10px] text-sm font-semibold disabled:opacity-50"
+                      style={{ background: "var(--accent-primary)", color: "var(--text-on-accent)" }}
+                    >
+                      {tgBusy ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Send className="w-4 h-4" />
+                      )}
+                      Connect Telegram
+                    </button>
+                    <FeedbackLine feedback={tgFeedback} />
+                  </div>
+                  {tgLink && (
+                    <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
+                      Waiting for you to tap the link on your phone… If it didn&apos;t
+                      open, use{" "}
+                      <a
+                        href={tgLink.link_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{ color: "var(--accent-primary)" }}
+                      >
+                        {tgLink.link_url}
+                      </a>{" "}
+                      (valid {tgLink.expires_in_minutes} min).
+                    </p>
+                  )}
+                </div>
+              )}
+            </section>
+          </>
         )}
+        {tab === "account" && (
+          <>
+            {/* Profile */}
+            <section className="rounded-[14px] p-6" style={panelStyle}>
+              <div className="eyebrow mb-1">Profile</div>
+              <h2 className="mb-4">Account details</h2>
+              <div className="space-y-4">
+                <div>
+                  <label htmlFor={ids.name} className={labelCls}>
+                    Name
+                  </label>
+                  <input
+                    id={ids.name}
+                    type="text"
+                    autoComplete="name"
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
+                    style={inputStyle}
+                    placeholder={loading ? "Loading..." : "Your name"}
+                  />
+                </div>
+                <div>
+                  <label htmlFor={ids.email} className={labelCls}>
+                    Email
+                  </label>
+                  <input
+                    id={ids.email}
+                    type="email"
+                    autoComplete="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
+                    style={inputStyle}
+                    placeholder={loading ? "Loading..." : ""}
+                  />
+                </div>
+                <div className="flex items-center gap-3">
+                  <SaveButton label="Save Profile" onClick={handleSaveProfile} saving={savingProfile} />
+                  <FeedbackLine feedback={profileFeedback} />
+                </div>
+              </div>
+            </section>
 
-        {tgStatus === null ? (
-          <p className="text-sm" style={{ color: "var(--text-muted)" }}>
-            Checking status…
-          </p>
-        ) : !tgStatus.configured ? (
-          me?.is_admin ? (
-            <div
-              className="rounded-[10px] p-4 text-sm space-y-2"
-              style={{ background: "var(--bg-input)", border: "1px solid var(--claw-border)" }}
-            >
-              <p style={{ color: "var(--text-primary)" }}>One-time setup (about a minute):</p>
-              <ol className="list-decimal pl-5 space-y-1" style={{ color: "var(--text-secondary)" }}>
-                <li>
-                  In Telegram, message{" "}
-                  <a
-                    href="https://t.me/BotFather"
-                    target="_blank"
-                    rel="noreferrer"
-                    style={{ color: "var(--accent-primary)" }}
-                  >
-                    @BotFather
-                  </a>
-                  , send <code>/newbot</code>, and pick any name.
-                </li>
-                <li>Paste the token it replies with into Bot token above, and Save.</li>
-                <li>Tap Connect below to link your own chat.</li>
-              </ol>
-            </div>
-          ) : (
-            <p className="text-sm" style={{ color: "var(--text-muted)" }}>
-              Ask the owner to add a bot token.
-            </p>
-          )
-        ) : tgStatus.linked ? (
-          <div className="flex items-center gap-3 flex-wrap">
-            <span
-              className="inline-flex items-center gap-1.5 text-sm"
-              style={{ color: "var(--accent-success)" }}
-            >
-              <CheckCircle2 className="w-4 h-4" />
-              Connected
-              {tgStatus.bot_username ? ` to @${tgStatus.bot_username}` : ""} —
-              approvals reach your Telegram.
-            </span>
-            <button
-              type="button"
-              onClick={() => void handleTgDisconnect()}
-              disabled={tgBusy}
-              className="px-4 py-2 rounded-[10px] text-sm font-semibold disabled:opacity-50"
-              style={{
-                background: "transparent",
-                border: "1px solid var(--claw-border)",
-                color: "var(--text-secondary)",
-              }}
-            >
-              Disconnect
-            </button>
-            <FeedbackLine feedback={tgFeedback} />
-          </div>
-        ) : (
-          <div className="space-y-3">
-            <div className="flex items-center gap-3 flex-wrap">
+            {/* Password */}
+            <section className="rounded-[14px] p-6" style={panelStyle}>
+              <div className="eyebrow mb-1">Security</div>
+              <h2 className="mb-4">Change password</h2>
+              <div className="space-y-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label htmlFor={ids.currentPassword} className={labelCls}>
+                      Current Password
+                    </label>
+                    <input
+                      id={ids.currentPassword}
+                      type="password"
+                      autoComplete="current-password"
+                      value={currentPassword}
+                      onChange={(e) => setCurrentPassword(e.target.value)}
+                      className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
+                      style={inputStyle}
+                      placeholder="Enter current password"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor={ids.newPassword} className={labelCls}>
+                      New Password
+                    </label>
+                    <input
+                      id={ids.newPassword}
+                      type="password"
+                      autoComplete="new-password"
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                      className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
+                      style={inputStyle}
+                      placeholder="Min. 8 characters"
+                    />
+                  </div>
+                </div>
+                <div className="flex items-center gap-3">
+                  <SaveButton label="Change Password" onClick={handleChangePassword} saving={savingPassword} />
+                  <FeedbackLine feedback={passwordFeedback} />
+                </div>
+              </div>
+            </section>
+
+            {/* Account actions */}
+            <section className="rounded-[14px] p-6" style={panelStyle}>
+              <div className="eyebrow mb-1">Session</div>
+              <h2 className="mb-1">Sign out</h2>
+              <p className="text-sm mb-4" style={{ color: "var(--text-muted)" }}>
+                Sign out of this device. Your data is preserved on the server.
+              </p>
               <button
                 type="button"
-                onClick={() => void handleTgConnect()}
-                disabled={tgBusy}
-                className="flex items-center gap-2 px-4 py-2 rounded-[10px] text-sm font-semibold disabled:opacity-50"
-                style={{ background: "var(--accent-primary)", color: "var(--text-on-accent)" }}
-              >
-                {tgBusy ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <Send className="w-4 h-4" />
-                )}
-                Connect Telegram
-              </button>
-              <FeedbackLine feedback={tgFeedback} />
-            </div>
-            {tgLink && (
-              <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
-                Waiting for you to tap the link on your phone… If it didn&apos;t
-                open, use{" "}
-                <a
-                  href={tgLink.link_url}
-                  target="_blank"
-                  rel="noreferrer"
-                  style={{ color: "var(--accent-primary)" }}
-                >
-                  {tgLink.link_url}
-                </a>{" "}
-                (valid {tgLink.expires_in_minutes} min).
-              </p>
-            )}
-          </div>
-        )}
-      </section>
-
-      {/* LLM Provider */}
-      <section className="rounded-[14px] p-6" style={panelStyle}>
-        <div className="eyebrow mb-1">Runtime</div>
-        <h2 className="mb-4">LLM provider</h2>
-        <div className="space-y-4">
-          <div>
-            <span id={ids.provider} className={labelCls}>
-              Provider
-            </span>
-            <div
-              role="radiogroup"
-              aria-labelledby={ids.provider}
-              className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3"
-            >
-              {PROVIDER_CHOICES.map(({ value, label, hint }) => {
-                const isActive = llmProvider === value;
-                return (
-                  <button
-                    key={value ?? "default"}
-                    type="button"
-                    role="radio"
-                    aria-checked={isActive}
-                    onClick={() => {
-                      setLlmProvider(value);
-                      setLlmModel(value === null ? "" : (LLM_MODELS[value]?.[0] ?? ""));
-                    }}
-                    className={`px-4 py-3 rounded-[10px] text-sm font-medium transition-colors${
-                      value === null ? "" : " capitalize"
-                    }`}
-                    style={{
-                      minHeight: 44,
-                      background: isActive ? "var(--accent-glow)" : "var(--claw-surface)",
-                      border: isActive
-                        ? "1px solid var(--border-accent)"
-                        : "1px solid var(--claw-border)",
-                      color: isActive ? "var(--accent-primary)" : "var(--text-secondary)",
-                    }}
-                  >
-                    {label}
-                    {hint && (
-                      <span className="block text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>
-                        {hint}
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-          {llmProvider === null ? (
-            <p className="text-xs" style={{ color: "var(--text-muted)" }}>
-              Your messages use the provider and model this Crawler was set up
-              with, and follow it if the owner changes it. Pick a provider
-              above to choose your own.
-            </p>
-          ) : (
-            <div>
-              <label htmlFor={ids.model} className={labelCls}>
-                Model
-              </label>
-              <select
-                id={ids.model}
-                aria-describedby={ids.modelHelp}
-                value={llmModel}
-                onChange={(e) => setLlmModel(e.target.value)}
-                className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
+                onClick={() => logout()}
+                className="flex items-center gap-2 px-4 py-2 rounded-[10px] text-sm font-medium"
                 style={inputStyle}
               >
-                {modelOptions.map((m) => (
-                  <option key={m} value={m}>
-                    {m}
-                  </option>
-                ))}
-              </select>
-              <p id={ids.modelHelp} className="text-xs mt-1.5" style={{ color: "var(--text-muted)" }}>
-                {offered.live ? `${offered.models.length} models from ${llmProvider}, newest first. ` : ""}
-                Takes effect on your next message. This Crawler must have an
-                API key for this provider (added during setup or in{" "}
-                <code style={{ color: "var(--accent-primary)" }}>backend/.env</code>)
-                — if it doesn't, chat says so instead of silently falling back
-                to another provider.
+                Sign out
+              </button>
+            </section>
+          </>
+        )}
+        {tab === "ai" && (
+          <>
+            {/* LLM Provider */}
+            <section className="rounded-[14px] p-6" style={panelStyle}>
+              <div className="eyebrow mb-1">Runtime</div>
+              <h2 className="mb-4">LLM provider</h2>
+              <div className="space-y-4">
+                <div>
+                  <span id={ids.provider} className={labelCls}>
+                    Provider
+                  </span>
+                  <div
+                    role="radiogroup"
+                    aria-labelledby={ids.provider}
+                    className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3"
+                  >
+                    {PROVIDER_CHOICES.map(({ value, label, hint }) => {
+                      const isActive = llmProvider === value;
+                      return (
+                        <button
+                          key={value ?? "default"}
+                          type="button"
+                          role="radio"
+                          aria-checked={isActive}
+                          onClick={() => {
+                            setLlmProvider(value);
+                            setLlmModel(value === null ? "" : (LLM_MODELS[value]?.[0] ?? ""));
+                          }}
+                          className={`px-4 py-3 rounded-[10px] text-sm font-medium transition-colors${
+                            value === null ? "" : " capitalize"
+                          }`}
+                          style={{
+                            minHeight: 44,
+                            background: isActive ? "var(--accent-glow)" : "var(--claw-surface)",
+                            border: isActive
+                              ? "1px solid var(--border-accent)"
+                              : "1px solid var(--claw-border)",
+                            color: isActive ? "var(--accent-primary)" : "var(--text-secondary)",
+                          }}
+                        >
+                          {label}
+                          {hint && (
+                            <span className="block text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>
+                              {hint}
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+                {llmProvider === null ? (
+                  <p className="text-xs" style={{ color: "var(--text-muted)" }}>
+                    Your messages use the provider and model this Crawler was set up
+                    with, and follow it if the owner changes it. Pick a provider
+                    above to choose your own.
+                  </p>
+                ) : (
+                  <div>
+                    <label htmlFor={ids.model} className={labelCls}>
+                      Model
+                    </label>
+                    <select
+                      id={ids.model}
+                      aria-describedby={ids.modelHelp}
+                      value={llmModel}
+                      onChange={(e) => setLlmModel(e.target.value)}
+                      className="w-full px-3.5 py-2.5 rounded-[10px] text-sm outline-none"
+                      style={inputStyle}
+                    >
+                      {modelOptions.map((m) => (
+                        <option key={m} value={m}>
+                          {m}
+                        </option>
+                      ))}
+                    </select>
+                    <p id={ids.modelHelp} className="text-xs mt-1.5" style={{ color: "var(--text-muted)" }}>
+                      {offered.live ? `${offered.models.length} models from ${llmProvider}, newest first. ` : ""}
+                      Takes effect on your next message. This Crawler must have an
+                      API key for this provider (added during setup or in{" "}
+                      <code style={{ color: "var(--accent-primary)" }}>backend/.env</code>)
+                      — if it doesn't, chat says so instead of silently falling back
+                      to another provider.
+                    </p>
+                  </div>
+                )}
+                <div className="flex items-center gap-3">
+                  <SaveButton label="Save LLM Settings" onClick={handleSaveLlm} saving={savingLlm} />
+                  <FeedbackLine feedback={llmFeedback} />
+                </div>
+              </div>
+            </section>
+
+            {/* Server (owner only): the install-wide AI provider and sign-ups,
+                as set up by the wizard. Not rendered at all for anyone else. */}
+            {me?.is_admin && <ServerSettings />}
+          </>
+        )}
+        {tab === "data" && (
+          <>
+            {/* Data export */}
+            <section className="rounded-[14px] p-6" style={panelStyle}>
+              <div className="eyebrow mb-1">Your data</div>
+              <h2 className="mb-1">Export everything</h2>
+              <p className="text-sm mb-4" style={{ color: "var(--text-muted)" }}>
+                Download every conversation, memory, connector setting, and audit
+                record on this account as a single JSON file. Connector credentials
+                are excluded — they stay encrypted on the server.
               </p>
-            </div>
-          )}
-          <div className="flex items-center gap-3">
-            <SaveButton label="Save LLM Settings" onClick={handleSaveLlm} saving={savingLlm} />
-            <FeedbackLine feedback={llmFeedback} />
-          </div>
-        </div>
-      </section>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={handleExport}
+                  disabled={exporting}
+                  className="flex items-center gap-2 px-4 py-2 rounded-[10px] text-sm font-medium disabled:opacity-50"
+                  style={inputStyle}
+                >
+                  {exporting ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Download className="w-4 h-4" />
+                  )}
+                  {exporting ? "Preparing…" : "Export my data"}
+                </button>
+                <FeedbackLine feedback={exportFeedback} />
+              </div>
+            </section>
 
-      {/* Data export */}
-      <section className="rounded-[14px] p-6" style={panelStyle}>
-        <div className="eyebrow mb-1">Your data</div>
-        <h2 className="mb-1">Export everything</h2>
-        <p className="text-sm mb-4" style={{ color: "var(--text-muted)" }}>
-          Download every conversation, memory, connector setting, and audit
-          record on this account as a single JSON file. Connector credentials
-          are excluded — they stay encrypted on the server.
-        </p>
-        <div className="flex items-center gap-3">
-          <button
-            type="button"
-            onClick={handleExport}
-            disabled={exporting}
-            className="flex items-center gap-2 px-4 py-2 rounded-[10px] text-sm font-medium disabled:opacity-50"
-            style={inputStyle}
-          >
-            {exporting ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <Download className="w-4 h-4" />
-            )}
-            {exporting ? "Preparing…" : "Export my data"}
-          </button>
-          <FeedbackLine feedback={exportFeedback} />
-        </div>
-      </section>
-
-      {/* Account actions */}
-      <section className="rounded-[14px] p-6" style={panelStyle}>
-        <div className="eyebrow mb-1">Session</div>
-        <h2 className="mb-1">Sign out</h2>
-        <p className="text-sm mb-4" style={{ color: "var(--text-muted)" }}>
-          Sign out of this device. Your data is preserved on the server.
-        </p>
-        <button
-          type="button"
-          onClick={() => logout()}
-          className="flex items-center gap-2 px-4 py-2 rounded-[10px] text-sm font-medium"
-          style={inputStyle}
-        >
-          Sign out
-        </button>
-      </section>
-
-      {/* Danger Zone */}
-      <section
-        className="rounded-[14px] p-6"
-        style={{
-          background: "var(--claw-panel)",
-          border: "1px solid var(--border-danger)",
-          boxShadow: "var(--shadow-card)",
-        }}
-      >
-        <div className="eyebrow mb-1" style={{ color: "var(--accent-danger)" }}>
-          Danger zone
-        </div>
-        <h2 className="mb-1 flex items-center gap-2" style={{ color: "var(--accent-danger)" }}>
-          <AlertTriangle className="w-5 h-5" /> Delete account
-        </h2>
-        <p className="text-sm mb-4" style={{ color: "var(--text-muted)" }}>
-          Permanently delete your account and all associated conversations,
-          connectors, and audit logs. This cannot be undone.
-        </p>
-        <button
-          type="button"
-          onClick={() => setConfirmDeleteOpen(true)}
-          disabled={deleting}
-          className="flex items-center gap-2 px-4 rounded-[10px] text-sm font-semibold disabled:opacity-50"
-          style={{
-            minHeight: 44,
-            background: "var(--accent-danger)",
-            color: "var(--text-on-accent)",
-          }}
-        >
-          {deleting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
-          Delete Account
-        </button>
-      </section>
+            {/* Danger Zone */}
+            <section
+              className="rounded-[14px] p-6"
+              style={{
+                background: "var(--claw-panel)",
+                border: "1px solid var(--border-danger)",
+                boxShadow: "var(--shadow-card)",
+              }}
+            >
+              <div className="eyebrow mb-1" style={{ color: "var(--accent-danger)" }}>
+                Danger zone
+              </div>
+              <h2 className="mb-1 flex items-center gap-2" style={{ color: "var(--accent-danger)" }}>
+                <AlertTriangle className="w-5 h-5" /> Delete account
+              </h2>
+              <p className="text-sm mb-4" style={{ color: "var(--text-muted)" }}>
+                Permanently delete your account and all associated conversations,
+                connectors, and audit logs. This cannot be undone.
+              </p>
+              <button
+                type="button"
+                onClick={() => setConfirmDeleteOpen(true)}
+                disabled={deleting}
+                className="flex items-center gap-2 px-4 rounded-[10px] text-sm font-semibold disabled:opacity-50"
+                style={{
+                  minHeight: 44,
+                  background: "var(--accent-danger)",
+                  color: "var(--text-on-accent)",
+                }}
+              >
+                {deleting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                Delete Account
+              </button>
+            </section>
+          </>
+        )}
+      </div>
 
       <ConfirmDialog
         open={confirmDeleteOpen}
