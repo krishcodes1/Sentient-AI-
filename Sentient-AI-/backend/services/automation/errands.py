@@ -66,6 +66,7 @@ from typing import Any, Awaitable, Callable, Mapping, Optional
 import structlog
 from sqlalchemy import and_, or_, select, update
 from sqlalchemy.orm import aliased
+from sqlalchemy.orm.attributes import flag_modified
 
 from services.agent.unattended import ERRAND_ORIGIN_PREFIX
 from services.automation.ledger import AutomationLedger
@@ -317,9 +318,14 @@ class ErrandService:
             await asyncio.wait({task}, timeout=_STOP_WAIT_S)
 
     async def wait_idle(self) -> None:
-        """Wait for the run in flight (tests, shutdown)."""
-        while self._task is not None and not self._task.done():
-            await asyncio.gather(self._task, return_exceptions=True)
+        """Wait for the run in flight and any sweep wake() started (tests,
+        shutdown): a wake sweep can start a run of its own, so loop until
+        neither is left."""
+        while True:
+            pending = [t for t in (*self._wakes, self._task) if t is not None and not t.done()]
+            if not pending:
+                return
+            await asyncio.gather(*pending, return_exceptions=True)
 
     def wake(self) -> None:
         """Sweep now rather than at the next tick (an errand was just planned
@@ -843,8 +849,12 @@ class ErrandService:
                 text = "\n\n".join(p for p in (reply, _RETRY) if p)
             if text is not None:
                 row.last_message = text
-            # The card's wait is counted from here (_release_stale).
+            # The card's wait is counted from here (_release_stale). Flagged
+            # so it is always written: a value equal to the stored one (the
+            # claim's, under a frozen clock) is otherwise skipped and the
+            # column's onupdate stamps the wall clock instead.
             row.updated_at = self._clock()
+            flag_modified(row, "updated_at")
             await session.commit()
         logger.info(
             "errand_run_finished",
