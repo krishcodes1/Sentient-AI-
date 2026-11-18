@@ -148,6 +148,17 @@ class HandoffDetector(Protocol):
     async def detect_challenge(self, page: Any) -> Optional[Challenge]: ...
 
 
+# What a tool answers when the browser would not launch. It says the switch
+# is on: pointing at Settings led the model to tell the owner "Control a
+# browser is turned off" while it was on. The cause (paths included) stays
+# in the log line, browser_session_failed.
+LAUNCH_FAILED = (
+    "Could not start the browser. This is not a setting: 'Control a browser' "
+    "is on, but the browser failed to launch on this computer. The backend "
+    "log has the cause (browser_session_failed)."
+)
+
+
 def error_result(message: str, **extra: Any) -> dict[str, Any]:
     return {"ok": False, "error": message, **extra}
 

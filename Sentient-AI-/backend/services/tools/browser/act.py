@@ -1655,10 +1655,7 @@ class BrowserActToolkit:
             session = await self._sessions.get(user_id, mode=mode_for(user_id), task_id=task_id)
         except Exception as exc:  # launch errors quote paths; keep them in the log
             _shared.log_failure("browser_session_failed", exc, action=f"act {action}")
-            return _shared.error_result(
-                "Could not start the browser. The owner can check Settings → "
-                "Permissions → Control a browser."
-            )
+            return _shared.error_result(_shared.LAUNCH_FAILED)
         async with session.lock:
             cap = _shared.cap_refusal(session.task)
             if cap is not None:
