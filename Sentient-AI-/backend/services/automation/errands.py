@@ -317,9 +317,14 @@ class ErrandService:
             await asyncio.wait({task}, timeout=_STOP_WAIT_S)
 
     async def wait_idle(self) -> None:
-        """Wait for the run in flight (tests, shutdown)."""
-        while self._task is not None and not self._task.done():
-            await asyncio.gather(self._task, return_exceptions=True)
+        """Wait for the run in flight and any sweep wake() started (tests,
+        shutdown): a wake sweep can start a run of its own, so loop until
+        neither is left."""
+        while True:
+            pending = [t for t in (*self._wakes, self._task) if t is not None and not t.done()]
+            if not pending:
+                return
+            await asyncio.gather(*pending, return_exceptions=True)
 
     def wake(self) -> None:
         """Sweep now rather than at the next tick (an errand was just planned
