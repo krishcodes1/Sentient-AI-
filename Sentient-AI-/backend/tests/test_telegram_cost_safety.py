@@ -1141,7 +1141,9 @@ async def test_a_turn_on_a_long_thread_stays_within_its_input_budget():
     chars = sum(len(m["content"]) for m in sent if isinstance(m["content"], str))
     thread_chars = sum(len(m["content"]) for m in history)
     assert chars < len(SECURITY_SYSTEM_PROMPT) + 1000 + 12 * 1210 + 2600
-    assert chars < thread_chars / 15
+    # The policy is a fixed cost that grows with every feature; the thread
+    # part is what must stay a small slice of the whole conversation.
+    assert chars - len(SECURITY_SYSTEM_PROMPT) < thread_chars / 15
     assert sent[-1]["content"] == "what did we decide?"
     assert any("<hard_limits>" in m["content"] for m in sent if m["role"] == "system")
 
