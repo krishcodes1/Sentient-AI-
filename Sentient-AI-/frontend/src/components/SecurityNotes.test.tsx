@@ -32,8 +32,10 @@ describe("SecurityNotes", () => {
     const rows = within(section).getAllByRole("listitem");
     expect(rows.map((row) => row.textContent)).toEqual(NOTES.map((n) => n.text));
     expect(rows.map((row) => row.getAttribute("data-severity"))).toEqual(["high", "warn", "info"]);
-    expect(rows[0]).toHaveStyle({ background: "var(--fill-danger)" });
-    expect(rows[1]).toHaveStyle({ background: "var(--fill-warning)" });
+    // Read the inline style: since jsdom 31 the computed value resolves var(),
+    // and the theme's custom properties are not loaded in tests.
+    expect(rows[0].style.background).toBe("var(--fill-danger)");
+    expect(rows[1].style.background).toBe("var(--fill-warning)");
     // An unknown severity reads as a warning, never as information.
     const odd = [{ kind: "x", severity: "severe", text: "Odd." }] as unknown as SecurityNote[];
     render(<SecurityNotes notes={odd} />);
