@@ -122,7 +122,7 @@ jobs:
           {
             echo '### Frontend coverage'
             echo '```'
-            tail -n 20 coverage.txt
+            tail -n 20 coverage.txt 2>/dev/null || echo 'No coverage: the tests did not run.'
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
