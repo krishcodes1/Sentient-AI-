@@ -16,8 +16,8 @@ import { withFixPointer, type ProviderErrorInfo } from "@/services/api";
  *
  * Both kinds point at Settings. Chat is only reachable once setup is
  * finished, and by then /setup just sends you home: the owner fixes this
- * Crawler's provider in Settings ▸ Server, and anyone else changes their
- * own choice under LLM provider. Any other text renders unchanged.
+ * Crawler's provider in Settings ▸ AI model ▸ Server, and anyone else
+ * changes their own choice under LLM provider on that same tab. Any other text renders unchanged.
  */
 export default function ProviderErrorText({ text, info }: { text: string; info?: ProviderErrorInfo }) {
   const pointer = info ? withFixPointer("", info) : "";
@@ -26,7 +26,7 @@ export default function ProviderErrorText({ text, info }: { text: string; info?:
   return (
     <>
       {lead} {info?.setup_url?.trim() ? "Set it up in" : "Change it in"}{" "}
-      <Link to="/settings" className="underline font-semibold">
+      <Link to="/settings?tab=ai" className="underline font-semibold">
         Settings
       </Link>
       .

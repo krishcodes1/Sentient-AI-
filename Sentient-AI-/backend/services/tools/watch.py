@@ -609,7 +609,7 @@ class WatchToolkit:
             result["telegram_linked"] = False
             result["warning"] = (
                 "This account has no linked Telegram chat, so a change will only "
-                "show in watch.list until the user links one in Settings → Telegram."
+                "show in watch.list until the user links one in Settings → Approvals → Telegram."
             )
         return result
 

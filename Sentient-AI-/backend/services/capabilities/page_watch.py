@@ -20,7 +20,7 @@ def availability(ctx: ReportContext) -> Availability:
         return Availability(
             False,
             "Page change alerts go out over Telegram, and no Telegram bot token is "
-            "configured yet. Add one in Settings → Telegram.",
+            "configured yet. Add one in Settings → Approvals → Telegram.",
         )
     if not ctx.telegram_enabled:
         return Availability(

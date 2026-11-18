@@ -17,7 +17,7 @@ from services.capabilities.base import Availability, Capability, ReportContext
 def availability(ctx: ReportContext) -> Availability:
     if ctx.telegram_configured:
         return Availability(True)
-    return Availability(False, "No Telegram bot token is configured yet. Add one in Settings → Telegram.")
+    return Availability(False, "No Telegram bot token is configured yet. Add one in Settings → Approvals → Telegram.")
 
 
 CAPABILITY = Capability(
