@@ -560,6 +560,9 @@ _WALL_STATUSES = frozenset({403, 429, 503})
 _CHROME_LOADS_WALLS = frozenset({
     "amazon.com", "amctheatres.com", "walmart.com", "target.com", "bestbuy.com", "homedepot.com",
     "lowes.com", "costco.com", "regmovies.com", "fandango.com", "ticketmaster.com", "ebay.com",
+    # Table reservations: OpenTable's CDN drops the guard's fetch outright
+    # (no answer at all), Tock and Yelp answer it 403.
+    "opentable.com", "resy.com", "exploretock.com", "yelp.com",
 })
 
 
@@ -1066,7 +1069,18 @@ class Guard:
         passed ``check_url``, the owner's site rules, the link lookup (a
         top-level page only) and the order checks. A plain answer is handed
         to the browser as it is."""
-        response = await route.fetch(max_redirects=0)
+        try:
+            response = await route.fetch(max_redirects=0)
+        except Exception:
+            # A bot wall that drops the guard's fetch instead of answering
+            # it (OpenTable: no answer until the fetch times out) is the
+            # same wall as a 403; without this the page was aborted and the
+            # model read it as the site refusing Crawler.
+            if top and _chrome_may_load(state, orders_open, checkout_window, url):
+                logger.info("browser_wall_loaded_by_chrome", url=_without_query(url), status=0)
+                await route.continue_()
+                return
+            raise
         if top and response.status >= 400:
             # A site's error page or bot wall, for the logs: the status
             # and whether its CDN says it challenged the request.
