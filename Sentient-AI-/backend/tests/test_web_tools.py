@@ -1146,7 +1146,11 @@ async def test_a_page_read_that_times_out_says_so_and_points_at_the_search_resul
     assert result == {
         "ok": False,
         "error": "The site did not answer in time (ReadTimeout).",
-        "hint": FETCH_REFUSED_HINT,
+        # Slow is not blocked: the hint never says the site blocks readers.
+        "hint": (
+            "Don't retry this page. Answer from the search results you already have and "
+            "name the source, or say plainly what is still missing."
+        ),
     }
 
 

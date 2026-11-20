@@ -533,11 +533,10 @@ class WebToolkit:
         except WebToolError as exc:
             return _error(str(exc))
         except httpx.TimeoutException as exc:
-            # A site that never answers is, for the reader, one that blocks it.
-            read = action in ("fetch_page", "screenshot")
+            # Slow is not blocked: only say what to do next (screenshots time out in Playwright, not here).
             return _error(
                 f"The site did not answer in time ({type(exc).__name__}).",
-                **({"hint": FETCH_REFUSED_HINT} if read else {}),
+                **({"hint": _USE_SEARCH_INSTEAD} if action == "fetch_page" else {}),
             )
         except httpx.HTTPError as exc:
             return _error(f"Request failed: {type(exc).__name__}")
