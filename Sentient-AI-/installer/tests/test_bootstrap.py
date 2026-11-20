@@ -139,7 +139,7 @@ def fake_preflight(paths, docker: FakeDocker | None = None, which=None, os_name=
         env=child_env(),
         run=docker or FakeDocker(),
         which=which or (lambda name: "/usr/local/bin/" + name),
-        port_free=lambda port: port != 5432,
+        port_free=lambda port: port != 8000,
         disk_free=lambda: 42.5,
         os_name=os_name,
     )
@@ -522,9 +522,9 @@ def test_check_endpoint_shape(serve):
         assert isinstance(report[key], kind), key
     assert report["docker_installed"] and report["docker_running"] and report["compose_v2"]
     assert report["ready"] is True and report["build_state"] == "idle"
-    assert [p["port"] for p in report["ports"]] == [3000, 8000, 5432, 6379]
+    assert [p["port"] for p in report["ports"]] == [3000, 8000]
     blocked = [p for p in report["ports"] if not p["free"]]
-    assert blocked == [{"port": 5432, "service": "database", "free": False,
+    assert blocked == [{"port": 8000, "service": "API", "free": False,
                         "holder": "postgres (pid 123)", "docker": False, "ours": False}]
     port_fix = [f for f in report["fixes"] if f["id"] == "ports"]
     assert len(port_fix) == 1 and "postgres (pid 123)" in port_fix[0]["text"]
@@ -540,7 +540,7 @@ def test_preflight_runs_read_only_commands_with_timeouts(project):
     assert ["/usr/local/bin/docker", "info", "--format", "{{.ServerVersion}}"] in argvs
     assert ["/usr/local/bin/docker", "compose", "version", "--short"] in argvs
     assert ["/usr/local/bin/docker", "compose", "ls", "--all", "--format", "json"] in argvs
-    assert ["/usr/local/bin/lsof", "-nP", "-iTCP:5432", "-sTCP:LISTEN"] in argvs
+    assert ["/usr/local/bin/lsof", "-nP", "-iTCP:8000", "-sTCP:LISTEN"] in argvs
     assert all(0 < timeout <= 10 for _, timeout in docker.calls)
     assert not any(verb in argv for argv in argvs for verb in ("up", "down", "build", "rm", "stop"))
 

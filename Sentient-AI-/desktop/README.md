@@ -156,7 +156,7 @@ checks below, not for the windows.
 **Before**
 
 - [ ] macOS 13 or newer; Docker Desktop installed, started once, running (`docker version`, `docker compose version`).
-- [ ] Ports free: `lsof -nP -iTCP -sTCP:LISTEN | grep -E ':(3000|8000|5432|6379) '` prints nothing
+- [ ] Ports free: `lsof -nP -iTCP -sTCP:LISTEN | grep -E ':(3000|8000) '` prints nothing
       (an old stack: `docker compose -p crawler-ai down` — keeps the data volumes).
 - [ ] Get the build: the `.dmg` from the draft release (check it: `shasum -a 256 Crawler-AI-*.dmg`
       against `SHA256SUMS.txt`), or build on the Mac with the commands above.

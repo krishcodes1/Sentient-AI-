@@ -378,7 +378,7 @@ fn diagnose_line(l: &str) -> Option<&'static str> {
         "ports are not available",
     ]) {
         return Some(
-            "A port Crawler AI needs (3000, 8000, 5432 or 6379) is taken by another app. Quit it, \
+            "A port Crawler AI needs (3000 or 8000) is taken by another app. Quit it, \
              then click Retry.",
         );
     }
@@ -1016,7 +1016,7 @@ mod tests {
         rig.runner.stream_lines(
             "up --build -d",
             1,
-            &["Error response from daemon: Ports are not available: listen tcp 0.0.0.0:5432: bind: address already in use"],
+            &["Error response from daemon: Ports are not available: listen tcp 127.0.0.1:8000: bind: address already in use"],
         );
         let (result, phases, _) = run_install(&rig.stack);
         let message = result.unwrap_err();

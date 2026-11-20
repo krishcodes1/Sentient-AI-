@@ -22,6 +22,7 @@ transport, and refusal tests use IP literals or names resolvable from
 
 from __future__ import annotations
 
+import asyncio
 from html import escape
 from pathlib import Path
 from typing import Any, Optional
@@ -1387,6 +1388,67 @@ async def test_screenshot_failure_names_the_browsers_reason_and_never_the_addres
     assert result["ok"] is False
     assert result["error"].startswith(f"Screenshot failed: {reason}. Don't retry this page.")
     assert "s3cret" not in result["error"] and "example.com" not in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_screenshot_browser_connects_only_through_the_egress_proxy():
+    """A page's frames and scripts must not reach LAN or localhost addresses:
+    Chrome is launched through the egress proxy, which is stopped afterwards."""
+    seen: dict[str, Any] = {}
+
+    class Page:
+        url = "https://example.com/"
+
+        async def goto(self, url: str, wait_until: str) -> None:
+            seen["goto"] = url
+
+        async def screenshot(self, **options: Any) -> bytes:
+            return b"png"
+
+    class Context:
+        async def new_page(self) -> Page:
+            return Page()
+
+    class Browser:
+        async def new_context(self, **kwargs: Any) -> Context:
+            seen["context"] = kwargs
+            return Context()
+
+        async def close(self) -> None:
+            seen["closed"] = True
+
+    class Chromium:
+        async def launch(self, **kwargs: Any) -> Browser:
+            seen["launch"] = kwargs
+            return Browser()
+
+    class Playwright:
+        chromium = Chromium()
+
+        async def __aenter__(self) -> "Playwright":
+            return self
+
+        async def __aexit__(self, *exc: Any) -> bool:
+            return False
+
+    class Module:
+        def async_playwright(self) -> Playwright:
+            return Playwright()
+
+    tools = WebToolkit(
+        resolver=resolver_for({"example.com": (PUBLIC_ADDRESS,)}),
+        playwright_loader=lambda: Module(),
+    )
+    result = await tools.screenshot("https://example.com/")
+
+    assert result["ok"] is True and seen["closed"]
+    proxy = seen["launch"]["proxy"]
+    assert proxy["server"].startswith("http://127.0.0.1:") and proxy["bypass"] == "<-loopback>"
+    assert "--force-webrtc-ip-handling-policy=disable_non_proxied_udp" in seen["launch"]["args"]
+    assert seen["context"]["service_workers"] == "block"
+    port = int(proxy["server"].rsplit(":", 1)[1])
+    with pytest.raises(OSError):  # the proxy is stopped with the browser
+        await asyncio.open_connection("127.0.0.1", port)
 
 
 def test_the_prompt_tells_the_model_to_report_only_tried_steps_and_to_fall_back_to_search():

@@ -23,8 +23,6 @@ export function readyReport(overrides: Partial<PreflightReport> = {}): Preflight
     ports: [
       { port: 3000, service: "web app", free: true, holder: null },
       { port: 8000, service: "backend", free: true, holder: null },
-      { port: 5432, service: "database", free: true, holder: null },
-      { port: 6379, service: "Redis", free: true, holder: null },
     ],
     disk_free_gb: 120,
     env_keys_set: false,

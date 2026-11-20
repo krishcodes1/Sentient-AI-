@@ -28,8 +28,6 @@ pub const MIN_FREE_DISK_GB: f64 = 10.0;
 pub const APP_PORTS: &[(u16, &str)] = &[
     (3000, "web app"),
     (8000, "API"),
-    (5432, "database"),
-    (6379, "Redis"),
 ];
 /// Collected output per stream for `run` (compose ls JSON, versions) is capped.
 const MAX_CAPTURE_BYTES: usize = 1024 * 1024;

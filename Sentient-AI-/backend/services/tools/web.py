@@ -1228,13 +1228,26 @@ class WebToolkit:
                 f"installed yet. {_MISSING_BROWSER_HINT}"
             )
 
+        from services.tools.browser.egress_proxy import EgressProxy
+
+        # Every connection this Chrome makes (subresources, frames, scripts,
+        # redirects, a DNS answer that changed since the check above) goes
+        # through the egress proxy, which refuses private and local addresses.
+        # Same launch as the browser toolkit (browser/session.py).
+        proxy = await EgressProxy().start()
         try:
             async with module.async_playwright() as playwright:
-                browser = await playwright.chromium.launch()
+                browser = await playwright.chromium.launch(
+                    proxy={"server": proxy.url, "bypass": "<-loopback>"},
+                    args=["--force-webrtc-ip-handling-policy=disable_non_proxied_udp"],
+                )
                 try:
-                    page = await browser.new_page(
-                        viewport={"width": width, "height": height}
+                    context = await browser.new_context(
+                        viewport={"width": width, "height": height},
+                        service_workers="block",
+                        accept_downloads=False,
                     )
+                    page = await context.new_page()
                     await page.goto(url, wait_until="load")
                     options: dict[str, Any] = {
                         "full_page": full_page,
@@ -1259,6 +1272,8 @@ class WebToolkit:
             code = _BROWSER_ERROR_CODE.search(message)
             reason = code.group(0) if code else type(exc).__name__
             raise WebToolError(f"Screenshot failed: {reason}. {_USE_SEARCH_INSTEAD}") from exc
+        finally:
+            await proxy.close()
 
         return image, final_url, width, height
 

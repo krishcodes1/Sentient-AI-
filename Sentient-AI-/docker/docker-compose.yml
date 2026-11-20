@@ -1,6 +1,7 @@
 # Runs the development stack: Postgres, Redis, the backend `dev` image (uvicorn --reload
 # over a bind-mounted ../backend) and the frontend `dev` image (Vite over ../frontend),
-# with all four ports published on the host.
+# with the web app and API published on this computer only (127.0.0.1); the
+# database and Redis are reached inside the Docker network and not published.
 #
 # Why it exists: it is the one stack that `docker compose up` and the double-click
 # installer (installer/bootstrap.py) both build, so contributors and new owners run the
@@ -16,8 +17,6 @@ services:
       POSTGRES_USER: sentientai
       POSTGRES_PASSWORD: sentientai
       POSTGRES_DB: sentientai
-    ports:
-      - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -30,8 +29,6 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    ports:
-      - "6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -49,7 +46,7 @@ services:
         WITH_SPEECH_TO_TEXT: ${WITH_SPEECH_TO_TEXT:-0}
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     env_file:
       - ../backend/.env
     environment:
@@ -85,7 +82,7 @@ services:
       target: dev
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       VITE_API_TARGET: http://backend:8000
     depends_on:

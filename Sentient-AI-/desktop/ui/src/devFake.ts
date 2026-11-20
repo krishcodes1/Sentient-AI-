@@ -51,8 +51,6 @@ function report(): PreflightReport {
   const ports = [
     { port: 3000, service: "web app", free: !state.portsBusy, holder: state.portsBusy ? "node" : null },
     { port: 8000, service: "backend", free: true, holder: null },
-    { port: 5432, service: "database", free: true, holder: null },
-    { port: 6379, service: "Redis", free: true, holder: null },
   ];
   return {
     docker_installed: installed,
