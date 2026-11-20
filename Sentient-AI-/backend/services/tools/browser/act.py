@@ -1795,14 +1795,15 @@ class BrowserActToolkit:
         the page's main frame commits a new document, so the page the link
         opens loads as it would for the person, while every request of the
         clicked document is still judged. Playwright tells a new document
-        (``newDocument``) only on its frame's own "navigated" event, which
-        a same-document change (pushState) lacks; it is read through the
-        frame's implementation object, and a page whose frame cannot be
-        listened to keeps the stop for the whole window. Returns what
-        removes the listener."""
+        (``newDocument``) only on its frame's own "navigated" event; a
+        same-document change (pushState) leaves it out (Playwright 1.64) or
+        sets it to None (1.65+). It is read through the frame's
+        implementation object, and a page whose frame cannot be listened to
+        keeps the stop for the whole window. Returns what removes the
+        listener."""
 
         def committed(event: Any) -> None:
-            if isinstance(event, Mapping) and "newDocument" in event and not event.get("error"):
+            if isinstance(event, Mapping) and event.get("newDocument") is not None and not event.get("error"):
                 state.no_orders = False
 
         try:
