@@ -2,8 +2,9 @@
 //! Open Crawler AI · Start · Stop · Show logs · Check for updates · Quit.
 //!
 //! Why it exists: closing a window only hides it, so the tray is how people get back to the
-//! app, control the stack without opening a terminal, and quit. Quit exits the app only — the
-//! stack keeps running, so Crawler AI's scheduled work and Telegram replies carry on.
+//! app, control the stack without opening a terminal, and quit. With the Docker stack Quit exits
+//! the app only — the stack keeps running, so scheduled work and Telegram replies carry on. The
+//! native (Mac) stack is the app's own processes and stops with it (main.rs, RunEvent::Exit).
 
 use crawler_ai_desktop::{commands, updates, windows};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -146,7 +147,7 @@ fn handle<R: Runtime>(app: &AppHandle<R>, action: TrayAction) {
             let _ = app.emit_to(windows::SETUP_WINDOW, SHOW_LOGS_EVENT, ());
         }
         TrayAction::CheckForUpdates => updates::check_in_background(app),
-        // Leaves the stack running: Quit closes the app, not Crawler AI.
+        // Docker: Quit closes the app, not Crawler AI. Native: RunEvent::Exit stops it.
         TrayAction::Quit => app.exit(0),
     }
 }

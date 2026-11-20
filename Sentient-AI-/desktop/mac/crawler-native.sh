@@ -126,6 +126,9 @@ cmd_install() {
   # The password lives only in .env, so the database and that line are made together. A
   # database without its line is from an install that never finished: start it over.
   if [ -f "$PGDATA/PG_VERSION" ] && ! env_has_our_database; then
+    # Never delete a database Crawler AI has run on: that is the user's data.
+    [ ! -f "$CRAWLER_HOME/installed-version" ] \
+      || die "The database password is missing from $ENV_FILE. Restore that file from a backup, or contact support; your data is untouched."
     pg_running && "$PG_BIN/pg_ctl" -D "$PGDATA" -m fast -w stop >/dev/null
     rm -rf "$PGDATA"
   fi

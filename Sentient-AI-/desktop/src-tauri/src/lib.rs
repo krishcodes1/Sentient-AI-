@@ -9,6 +9,7 @@
 
 pub mod commands;
 pub mod keys;
+pub mod native;
 pub mod platform;
 pub mod preflight;
 pub mod stack;

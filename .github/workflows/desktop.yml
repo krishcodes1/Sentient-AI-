@@ -89,7 +89,8 @@ jobs:
       # they are never written to $GITHUB_ENV (so later steps and the post-job hooks of
       # third-party actions never see them) and never echoed. Empty variables are unset,
       # because tauri treats a present-but-empty APPLE_CERTIFICATE as a certificate to import
-      # and fails. beforeBuildCommand (tauri.conf.json) builds ui/ and stages the stack source.
+      # and fails. beforeBuildCommand (tauri.mac-native.conf.json) builds ui/, stages the stack
+      # source and runs scripts/prep-mac.sh (pinned uv and PostgreSQL, the web app, the lock).
       - name: Build (universal)
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -129,7 +130,7 @@ jobs:
               echo "::warning::Signed with Developer ID but NOT notarized: add the notarization secrets."
             fi
           fi
-          npm run tauri -- build --ci --target universal-apple-darwin --bundles app,dmg
+          npm run tauri -- build --ci --config src-tauri/tauri.mac-native.conf.json --target universal-apple-darwin --bundles app,dmg
 
       - name: Collect installer
         run: |

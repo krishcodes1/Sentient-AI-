@@ -19,7 +19,8 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
-use crate::keys::{KeyMode, KeyWriter, WriteReport};
+use crate::keys::{env_key_status, KeyMode, KeyWriter, WriteReport};
+use crate::native::NativeLayout;
 use crate::platform::{self, Os, OwnerOnly};
 use crate::preflight::{CommandRunner, Preflight, PreflightReport, SystemRunner};
 use crate::stack::{
@@ -56,7 +57,39 @@ impl Core {
         let system = SystemRunner::for_this_process();
         let env = system.env().clone();
         let runner: Arc<dyn CommandRunner> = Arc::new(system);
-        Self::from_parts(os, version, root, find_bundle(resource_dir), env, runner)
+        let bundle = find_bundle(resource_dir.clone());
+        let mut core = Self::from_parts(os, version, root.clone(), bundle, env, runner)?;
+        // A Mac release build carries uv and Postgres and runs Crawler AI natively (no
+        // Docker), so screen and computer control work and permissions are the app's.
+        if os == Os::Mac {
+            if let Some(native) = NativeLayout::for_this_app(&root, resource_dir) {
+                core.stack.enable_native(native);
+            }
+        }
+        Ok(core)
+    }
+
+    pub fn is_native(&self) -> bool {
+        self.stack.native.is_some()
+    }
+
+    /// The native install has no keys step: keep an earlier version's keys, otherwise
+    /// generate them. Existing keys are never replaced. Returns what it did, for the log.
+    pub fn ensure_keys(&self) -> Result<Option<String>, String> {
+        if let Ok(Some(version)) = self.stack.adopt_previous_env() {
+            return Ok(Some(format!(
+                "Kept your security keys from version {version}."
+            )));
+        }
+        let env = self.stack.layout.env_file();
+        if env_key_status(&env).all_set() {
+            return Ok(None);
+        }
+        // An .env without real keys (placeholders) is backed up, then replaced.
+        self.keys
+            .write(KeyMode::Generate, env.exists())
+            .map(|_| Some("Created this Mac's security keys.".to_string()))
+            .map_err(|e| e.to_string())
     }
 
     pub fn from_parts(
@@ -341,7 +374,18 @@ fn emit_log<R: Runtime>(app: &AppHandle<R>, line: &str) {
     let _ = app.emit_to(SETUP_WINDOW, EVENT_LOG, line);
 }
 
+/// Runs once the job has finished healthy (on the job's thread).
+type OnHealthy = Box<dyn FnOnce() + Send>;
+
 fn start_job<R: Runtime>(app: AppHandle<R>, kind: JobKind) -> Result<JobStart, String> {
+    start_job_then(app, kind, None)
+}
+
+fn start_job_then<R: Runtime>(
+    app: AppHandle<R>,
+    kind: JobKind,
+    on_healthy: Option<OnHealthy>,
+) -> Result<JobStart, String> {
     let core = core(&app)?;
     let job = job(&app);
     if !lock(&job).begin() {
@@ -364,11 +408,25 @@ fn start_job<R: Runtime>(app: AppHandle<R>, kind: JobKind) -> Result<JobStart, S
                     }
                 }
             };
-            let _ = match kind {
-                JobKind::Install => core.stack.install(&mut emit),
+            let result = match kind {
+                JobKind::Install => {
+                    if core.is_native() {
+                        match core.ensure_keys() {
+                            Ok(Some(said)) => emit(StackEvent::Log(said)),
+                            Ok(None) => {}
+                            Err(err) => emit(StackEvent::Log(format!(
+                                "Couldn't create the security keys ({err})."
+                            ))),
+                        }
+                    }
+                    core.stack.install(&mut emit)
+                }
                 JobKind::Start => core.stack.start(&mut emit),
             };
             lock(&thread_job).finish();
+            if let (Ok(()), Some(then)) = (result, on_healthy) {
+                then();
+            }
         });
     if let Err(err) = spawned {
         lock(&job).finish();
@@ -393,7 +451,14 @@ fn stop_stack<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
             std::thread::sleep(Duration::from_millis(100));
         }
     }
-    emit_log(app, "$ docker compose -p crawler-ai stop");
+    emit_log(
+        app,
+        if core.is_native() {
+            "Stopping Crawler AI…"
+        } else {
+            "$ docker compose -p crawler-ai stop"
+        },
+    );
     core.stack.stop()?;
     // The last job's phase no longer describes the stack; install_status asks the stack.
     *lock(&job) = JobState::default();
@@ -422,6 +487,35 @@ pub fn start_stack_in_background<R: Runtime>(app: &AppHandle<R>) {
         }
         Ok(_) => {}
         Err(err) => emit_log(app, &format!("Couldn't start Crawler AI: {err}")),
+    }
+}
+
+/// Crawler AI runs natively (a Mac release build) rather than in Docker.
+pub fn is_native<R: Runtime>(app: &AppHandle<R>) -> bool {
+    core(app).map(|c| c.is_native()).unwrap_or(false)
+}
+
+/// Mac, on launch: start the installed stack and open Crawler AI as soon as it answers;
+/// progress shows in the status window meanwhile.
+pub fn start_then_open<R: Runtime>(app: &AppHandle<R>) {
+    let opener = app.clone();
+    let open: OnHealthy = Box::new(move || {
+        if let Err(err) = windows::open_crawler_window(&opener) {
+            eprintln!("crawler-ai: could not open Crawler AI: {err}");
+        }
+    });
+    if let Err(err) = start_job_then(app.clone(), JobKind::Start, Some(open)) {
+        emit_log(app, &format!("Couldn't start Crawler AI: {err}"));
+    }
+}
+
+/// Quitting the app: the native stack is the app's own processes, so it stops with it
+/// (the Docker stack keeps running, as before). Blocks until stopped.
+pub fn stop_native_on_exit<R: Runtime>(app: &AppHandle<R>) {
+    if is_native(app) {
+        if let Err(err) = stop_stack(app) {
+            eprintln!("crawler-ai: could not stop Crawler AI: {err}");
+        }
     }
 }
 
@@ -789,6 +883,38 @@ mod tests {
             runner
         )
         .is_err());
+    }
+
+    #[test]
+    fn native_keys_are_kept_or_generated_never_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = dir.path().join("bundle");
+        std::fs::create_dir_all(bundle.join("backend")).unwrap();
+        std::fs::write(
+            bundle.join("backend/.env.example"),
+            "SECRET_KEY=REPLACE_ME\nENCRYPTION_KEY=REPLACE_ME\nDATABASE_URL=x\n",
+        )
+        .unwrap();
+        let runner: Arc<dyn CommandRunner> = Arc::new(FakeRunner::new());
+        let core = Core::from_parts(
+            Os::Mac,
+            "1.0.0",
+            dir.path().join("stack"),
+            Some(bundle),
+            BTreeMap::new(),
+            runner,
+        )
+        .unwrap();
+        let env = core.stack.layout.env_file();
+
+        // First install: generated.
+        assert!(core.ensure_keys().unwrap().unwrap().contains("Created"));
+        assert!(env_key_status(&env).all_set());
+        let first = std::fs::read_to_string(&env).unwrap();
+
+        // Later installs keep them.
+        assert_eq!(core.ensure_keys().unwrap(), None);
+        assert_eq!(std::fs::read_to_string(&env).unwrap(), first);
     }
 
     #[cfg(debug_assertions)]
