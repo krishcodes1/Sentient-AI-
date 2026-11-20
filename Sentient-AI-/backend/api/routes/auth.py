@@ -316,9 +316,9 @@ async def _check_password_with_lockout(user: User, supplied: Optional[str]) -> b
             detail=f"Too many failed attempts. Try again in {locked_for} seconds.",
             headers={"Retry-After": str(locked_for)},
         )
-    ok = bool(supplied) and await asyncio.to_thread(
+    ok = bool(supplied and await asyncio.to_thread(
         verify_password, supplied, user.hashed_password
-    )
+    ))
     if ok:
         await login_lockout.reset(user.email)
     return ok
