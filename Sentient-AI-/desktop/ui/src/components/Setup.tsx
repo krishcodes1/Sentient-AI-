@@ -1,5 +1,6 @@
 /**
  * The four-step first-run setup: Check this computer → Security keys → Install & start → Open.
+ * The native Mac app (no Docker) needs only the last two, and runs them by itself.
  *
  * Why it exists: It owns which step is active, the one-line summaries of finished steps, and the
  * rules for moving between them: step 1 gates on Docker being ready, keys already set skip
@@ -10,7 +11,7 @@
 import { useEffect, useState } from "react";
 import { installStatus, type PhaseEvent, type Platform, type PreflightReport } from "../bridge";
 import { classifyPhase } from "../phase";
-import { WORDS } from "../platform";
+import { wordsFor } from "../platform";
 import { CheckStep } from "./CheckStep";
 import { InstallStep } from "./InstallStep";
 import { KeysStep } from "./KeysStep";
@@ -21,13 +22,15 @@ type StepNo = 1 | 2 | 3 | 4;
 
 interface SetupProps {
   platform: Platform;
+  /** Crawler AI runs natively (a Mac release build): no Docker check, no keys step. */
+  native?: boolean;
   /** Crawler AI was opened: switch to the status screen. */
   onFinished: () => void;
 }
 
-export function Setup({ platform, onFinished }: SetupProps) {
-  const words = WORDS[platform];
-  const [active, setActive] = useState<StepNo>(1);
+export function Setup({ platform, native = false, onFinished }: SetupProps) {
+  const words = wordsFor(platform, native);
+  const [active, setActive] = useState<StepNo>(native ? 3 : 1);
   const [summaries, setSummaries] = useState<Partial<Record<StepNo, string>>>({});
   const [installStarted, setInstallStarted] = useState(false);
   const [resume, setResume] = useState<PhaseEvent | null>(null);
@@ -65,6 +68,32 @@ export function Setup({ platform, onFinished }: SetupProps) {
       setActive(2);
     }
   };
+
+  if (native) {
+    return (
+      <>
+        <h1>{words.headline}</h1>
+        <p className="sub">Nothing to fill in: Crawler AI installs itself and opens when it’s ready.</p>
+
+        <ol className="stepper">
+          <Step n={1} title="Install & start" state={stateOf(3)} summary={summaries[3]}>
+            <InstallStep
+              native
+              resume={resume}
+              onStarted={() => setInstallStarted(true)}
+              onNext={() => {
+                setSummaries((s) => ({ ...s, 3: "Crawler AI is installed and running." }));
+                setActive(4);
+              }}
+            />
+          </Step>
+          <Step n={2} title="Open Crawler AI" state={stateOf(4)}>
+            <OpenStep auto words={words} onOpened={onFinished} />
+          </Step>
+        </ol>
+      </>
+    );
+  }
 
   const replaceKeys =
     active === 3 && !installStarted ? (

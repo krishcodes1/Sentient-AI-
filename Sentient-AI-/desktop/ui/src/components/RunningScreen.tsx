@@ -143,7 +143,7 @@ export function RunningScreen({ info, words, onSetupAgain }: RunningScreenProps)
     <>
       <h1>Crawler AI</h1>
       <p className="sub">
-        Runs in {words.docker} on this {words.computer}. Closing this window keeps it running; the {words.tray} has the
+        Runs {words.runsIn} on this {words.computer}. Closing this window keeps it running; the {words.tray} has the
         same controls.
       </p>
 

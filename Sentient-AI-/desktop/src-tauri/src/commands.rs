@@ -331,6 +331,8 @@ pub struct AppInfo {
     pub platform: Os,
     /// The stack for this version is copied and has its keys: open on the status screen.
     pub installed: bool,
+    /// Crawler AI runs natively (a Mac release build): the UI skips the Docker and keys steps.
+    pub native: bool,
 }
 
 // ── Tauri state and helpers ──────────────────────────────────────────────────
@@ -636,11 +638,12 @@ async fn stack_stop<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
 #[tauri::command(rename_all = "snake_case")]
 async fn app_info<R: Runtime>(app: AppHandle<R>) -> Result<AppInfo, String> {
     let version = app.package_info().version.to_string();
-    let installed = blocking(move || is_installed(&app)).await?;
+    let (installed, native) = blocking(move || (is_installed(&app), is_native(&app))).await?;
     Ok(AppInfo {
         version,
         platform: Os::current(),
         installed,
+        native,
     })
 }
 
@@ -801,11 +804,12 @@ mod tests {
             version: "0.1.0".into(),
             platform: Os::Mac,
             installed: false,
+            native: true,
         })
         .unwrap();
         assert_eq!(
             info,
-            serde_json::json!({"version": "0.1.0", "platform": "mac", "installed": false})
+            serde_json::json!({"version": "0.1.0", "platform": "mac", "installed": false, "native": true})
         );
         let windows = serde_json::to_value(Os::Windows).unwrap();
         assert_eq!(windows, "windows");

@@ -12,7 +12,7 @@ import { appInfo, isPreview, type AppInfo, type Platform } from "./bridge";
 import { RunningScreen } from "./components/RunningScreen";
 import { Setup } from "./components/Setup";
 import { Brand, Spinner } from "./components/ui";
-import { guessPlatform, WORDS } from "./platform";
+import { guessPlatform, wordsFor } from "./platform";
 
 type Screen = "loading" | "setup" | "running";
 
@@ -62,6 +62,7 @@ export default function App() {
       {screen === "setup" ? (
         <Setup
           platform={platform}
+          native={info?.native}
           onFinished={() => {
             setInfo((current) => (current ? { ...current, installed: true } : current));
             setScreen("running");
@@ -70,7 +71,7 @@ export default function App() {
       ) : null}
 
       {screen === "running" ? (
-        <RunningScreen info={info} words={WORDS[platform]} onSetupAgain={() => setScreen("setup")} />
+        <RunningScreen info={info} words={wordsFor(platform, info?.native)} onSetupAgain={() => setScreen("setup")} />
       ) : null}
     </main>
   );

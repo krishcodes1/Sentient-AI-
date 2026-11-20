@@ -26,6 +26,8 @@ interface InstallStepProps {
   resume: PhaseEvent | null;
   onStarted: () => void;
   onNext: () => void;
+  /** The native Mac install: starts by itself, moves on by itself, and says what it downloads. */
+  native?: boolean;
 }
 
 interface Clock {
@@ -47,7 +49,7 @@ function clockAt(elapsed: number | undefined): Clock {
   return { base: Number(elapsed) || 0, at: now, now };
 }
 
-export function InstallStep({ resume, onStarted, onNext }: InstallStepProps) {
+export function InstallStep({ resume, onStarted, onNext, native = false }: InstallStepProps) {
   const log = useLogBuffer();
   const [started, setStarted] = useState(resume !== null);
   // Phase and clock change together, so they live in one state value.
@@ -136,17 +138,38 @@ export function InstallStep({ resume, onStarted, onNext }: InstallStepProps) {
     );
   };
 
+  // The native install needs no input: start it as soon as the step shows, move on once it runs.
+  const autoStarted = useRef(false);
+  useEffect(() => {
+    if (!native || started || autoStarted.current) return;
+    autoStarted.current = true;
+    void start();
+    // Runs once, when the step first shows.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [native]);
+  useEffect(() => {
+    if (native && started && kind === "healthy") onNext();
+  }, [native, started, kind, onNext]);
+
   const elapsed = clock.base + (kind === "working" ? Math.max(0, (clock.now - clock.at) / 1000) : 0);
   const failedError =
     (typeof phase?.error === "string" && phase.error.trim()) || "Something went wrong. The output above says why.";
 
   return (
     <>
-      <ul className="facts">
-        <li>The first install downloads about 3.6&nbsp;GB (database, Python and Node images plus Crawler AI’s dependencies).</li>
-        <li>Expect 5–20 minutes depending on your connection. Later starts take seconds.</li>
-        <li>You can do something else while it runs.</li>
-      </ul>
+      {native ? (
+        <ul className="facts">
+          <li>The first setup downloads about 1&nbsp;GB (Python, Crawler AI’s packages and a browser).</li>
+          <li>Expect a few minutes depending on your connection. Later opens take seconds.</li>
+          <li>You can do something else while it runs.</li>
+        </ul>
+      ) : (
+        <ul className="facts">
+          <li>The first install downloads about 3.6&nbsp;GB (database, Python and Node images plus Crawler AI’s dependencies).</li>
+          <li>Expect 5–20 minutes depending on your connection. Later starts take seconds.</li>
+          <li>You can do something else while it runs.</li>
+        </ul>
+      )}
 
       {!started ? (
         <div className="actions">
@@ -158,7 +181,7 @@ export function InstallStep({ resume, onStarted, onNext }: InstallStepProps) {
         <div className="progress" data-state={kind}>
           <div className="phase">
             {kind === "working" ? <Spinner /> : null}
-            <span aria-live="polite">{phaseLabel(phase)}</span>
+            <span aria-live="polite">{phaseLabel(phase, native)}</span>
             <span className="elapsed">
               <span className="sr-only">Elapsed time </span>
               {formatElapsed(elapsed)}

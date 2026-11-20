@@ -24,6 +24,7 @@ const state = {
   portsBusy: params.get("ports") === "busy",
   failNext: params.get("fail") === "1",
   platform: params.get("platform") === "windows" ? ("windows" as const) : ("mac" as const),
+  native: params.get("native") === "1",
   phase: { phase: params.get("installed") === "1" ? "healthy" : "idle", elapsed_s: 0 } as PhaseEvent,
   startedAt: 0,
   timers: [] as ReturnType<typeof setTimeout>[],
@@ -134,7 +135,12 @@ export async function fakeInvoke<T>(command: string, args?: InvokeArgs): Promise
   const answer = (value: unknown) => value as T;
   switch (command) {
     case "app_info":
-      return answer({ version: "0.1.0-preview", platform: state.platform, installed: state.installed } satisfies AppInfo);
+      return answer({
+        version: "0.1.0-preview",
+        platform: state.platform,
+        installed: state.installed,
+        native: state.native,
+      } satisfies AppInfo);
     case "preflight":
       return answer(report());
     case "open_docker_desktop":

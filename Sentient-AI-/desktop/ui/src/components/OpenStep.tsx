@@ -7,7 +7,7 @@
  * moves the setup window to the status screen.
  */
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { openCrawler } from "../bridge";
 import { errorText } from "../format";
 import { LOCAL_URL, type PlatformWords } from "../platform";
@@ -16,11 +16,14 @@ import { Button, StatusMessage, type Message } from "./ui";
 interface OpenStepProps {
   words: PlatformWords;
   onOpened: () => void;
+  /** Open Crawler AI as soon as this step shows (the native Mac setup); the button stays as the fallback. */
+  auto?: boolean;
 }
 
-export function OpenStep({ words, onOpened }: OpenStepProps) {
+export function OpenStep({ words, onOpened, auto = false }: OpenStepProps) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<Message | null>(null);
+  const opened = useRef(false);
 
   const open = async () => {
     setBusy(true);
@@ -39,6 +42,14 @@ export function OpenStep({ words, onOpened }: OpenStepProps) {
     onOpened();
   };
 
+  useEffect(() => {
+    if (!auto || opened.current) return;
+    opened.current = true;
+    void open();
+    // Runs once, when the step first shows.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [auto]);
+
   return (
     <>
       <p className="lede">Crawler AI is running on this {words.computer}.</p>
@@ -50,8 +61,7 @@ export function OpenStep({ words, onOpened }: OpenStepProps) {
       <StatusMessage message={message} />
       <p className="note">The setup wizard in Crawler AI takes it from here: owner account, AI key, Telegram, permissions.</p>
       <p className="fine">
-        Closing this window keeps Crawler AI running in Docker Desktop. The {words.tray} opens, starts or stops it any
-        time.
+        {words.closeNote} The {words.tray} opens, starts or stops it any time.
       </p>
     </>
   );

@@ -85,6 +85,8 @@ export interface AppInfo {
   version: string;
   platform: Platform;
   installed: boolean;
+  /** Crawler AI runs natively on this Mac (a Mac release build): no Docker, no keys step. */
+  native?: boolean;
 }
 
 export interface UpdateInfo {
