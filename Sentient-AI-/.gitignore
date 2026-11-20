@@ -45,6 +45,10 @@ frontend/tsconfig.tsbuildinfo
 # Desktop app (desktop/README.md): the staged stack copy, Node/Rust build output and the
 # files tauri-build and build.rs regenerate on every build
 desktop/stack/
+# Mac build downloads (desktop/scripts/prep-mac.sh): uv, PostgreSQL and their archives
+desktop/postgres/
+desktop/.downloads/
+desktop/src-tauri/binaries/
 desktop/node_modules/
 desktop/src-tauri/target/
 desktop/src-tauri/gen/
