@@ -6,7 +6,7 @@ pytest>=9.1.1,<10.0.0
 pytest-asyncio>=1.4.0,<2.0.0
 # Async SQLite driver used by the test suite's in-memory database
 # (tests/conftest.py creates engines with "sqlite+aiosqlite://").
-aiosqlite>=0.20.0,<1.0.0
+aiosqlite>=0.22.1,<1.0.0
 # Lint + type gates. Both are configured in pyproject.toml and run in CI:
 #   python -m ruff check .        # lint
 #   python -m ruff format --check .   # formatting (advisory, see pyproject)
