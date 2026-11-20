@@ -798,6 +798,9 @@ class ScheduleService:
                 reason = "The feature this task uses is turned off. You can turn it on in Settings → Permissions."
             return {"ok": False, "error": reason, "capability_off": True}
         key = str(target)
+        # shortcut: the cooldown lives in this process, so a restart or a second
+        # worker resets it (the day budget still caps spend); read the task's
+        # last trigger="manual" automation_runs row if this ever runs multi-worker.
         last = self._run_now_at.get(key)
         mono = time.monotonic()
         if last is not None and mono - last < RUN_NOW_COOLDOWN_SECONDS:

@@ -517,6 +517,45 @@ def test_hmac_differs_from_legacy_and_dedicated_key_changes_hash(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_verify_endpoint_catches_a_deleted_predecessor(client, session_factory):
+    """Deleting a row leaves the next row's own HMAC intact (its stored
+    previous_hash is unchanged), so the route must also confirm the row it was
+    chained to still exists, or a deletion verifies clean."""
+    from sqlalchemy import delete
+
+    from models.audit import AuditLog
+    from tests.conftest import auth_headers, make_user
+
+    user, token = await make_user(session_factory, "deletedlink@example.com")
+    ids = []
+    async with session_factory() as session:
+        for n in range(3):
+            row = await append_audit_log(
+                session,
+                user_id=user.id,
+                connector_name="canvas",
+                action=f"step{n}",
+                endpoint="/api/v1/courses",
+                scope_used="courses.read",
+                status=AuditStatus.approved,
+            )
+            ids.append(row.id)
+        await session.commit()
+
+    async def valid(row_id) -> bool:
+        resp = await client.get(f"/api/audit/{row_id}/verify", headers=auth_headers(token))
+        assert resp.status_code == 200
+        return resp.json()["valid"]
+
+    assert await valid(ids[2]) is True
+    async with session_factory() as session:
+        await session.execute(delete(AuditLog).where(AuditLog.id == ids[1]))
+        await session.commit()
+    assert await valid(ids[2]) is False
+    assert await valid(ids[0]) is True
+
+
+@pytest.mark.asyncio
 async def test_verify_endpoint_accepts_legacy_unkeyed_row(client, session_factory):
     """A row written before the keyed-hash upgrade carries an unkeyed
     SHA-256. The endpoint must distinguish it from both a keyed-verified

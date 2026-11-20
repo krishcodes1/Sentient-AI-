@@ -21,7 +21,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database import get_db
@@ -131,5 +131,10 @@ async def cancel_reminder(
 ) -> None:
     """Cancel a scheduled reminder. Delivered rows stay as a record."""
     reminder = await _get_owned_reminder(reminder_id, current_user, db)
-    reminder.status = ReminderStatus.cancelled
-    await db.flush()
+    # Only while still scheduled: the delivery sweeper may have sent it since
+    # it was read, and a delivered row stays delivered.
+    await db.execute(
+        update(Reminder)
+        .where(Reminder.id == reminder.id, Reminder.status == ReminderStatus.scheduled)
+        .values(status=ReminderStatus.cancelled)
+    )

@@ -827,7 +827,13 @@ class WebToolkit:
             # Parsed after the connection is closed: the parse can take the
             # preset's whole deadline.
             return await self._read_document(pending, limit)
-        body = b"".join(chunks).decode(encoding, errors="replace")
+        raw = b"".join(chunks)
+        try:
+            body = raw.decode(encoding, errors="replace")
+        except LookupError:
+            # The page named a charset Python has no codec for; utf-8 with
+            # replacement always decodes rather than 500-ing the fetch.
+            body = raw.decode("utf-8", errors="replace")
         title, text = extract_readable_text(body)
         clipped = _clip_as_shown(text, limit)
         truncated = len(clipped) < len(text)

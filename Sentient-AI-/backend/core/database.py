@@ -59,6 +59,14 @@ class Base(DeclarativeBase):
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """FastAPI dependency that yields an async database session."""
+    # shortcut: at FastAPI's default "request" scope this commit runs after the
+    # response is sent, so a commit that fails after a successful flush (a
+    # dropped connection) is logged while the client already saw success.
+    # Routes that must not report success first commit themselves (account
+    # deletion, failed-login audit rows). The full fix is
+    # Depends(get_db, scope="function") at every call site and in
+    # get_current_user (one shared session), keeping request scope only where
+    # the session is used while a StreamingResponse runs (agent stream, export).
     async with async_session() as session:
         try:
             yield session

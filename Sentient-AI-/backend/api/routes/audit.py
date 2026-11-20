@@ -269,6 +269,22 @@ async def verify_audit_integrity(
         confidence_score=entry.confidence_score,
     )
     if entry.integrity_hash == compute_audit_hash(hash_payload):
+        # A matching per-row hash cannot by itself reveal that the row BEFORE
+        # this one was deleted — this row's stored previous_hash still matches
+        # its own hash. Confirm the row it was chained to still exists (matched
+        # by hash, so a legacy predecessor with no seq counts too); if it is
+        # gone, the chain was broken. The genuine head carries no previous_hash.
+        if entry.previous_hash is not None:
+            predecessor = (
+                await db.execute(
+                    select(AuditLog.id).where(
+                        AuditLog.user_id == entry.user_id,
+                        AuditLog.integrity_hash == entry.previous_hash,
+                    )
+                )
+            ).first()
+            if predecessor is None:
+                return {"id": entry.id, "valid": False, "legacy": False}
         return {"id": entry.id, "valid": True, "legacy": False}
     if entry.seq is None and entry.integrity_hash == compute_audit_hash_legacy(
         hash_payload
