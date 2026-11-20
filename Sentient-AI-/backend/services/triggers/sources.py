@@ -559,13 +559,19 @@ class _CalendarSoon:
     connector_type = ""
     action = ""
 
-    def _window(self, target: CheckTarget, now: datetime) -> tuple[datetime, datetime]:
-        lead = int(target.filters.get("lead_minutes") or LEAD_MINUTES[2])
-        return now, now + timedelta(minutes=lead)
+    def _window(self, target: CheckTarget, since: datetime, now: datetime) -> tuple[datetime, datetime]:
+        lead = timedelta(minutes=int(target.filters.get("lead_minutes") or LEAD_MINUTES[2]))
+        # Look ahead at least as far as the time since the last check: checks land
+        # 5-6 minutes apart, so with a 5-minute lead an event starting just past
+        # the window had started by the next check and was never announced. At
+        # most one interval past the lead, so the first check after an outage does
+        # not announce a meeting hours early and then stay silent when it starts.
+        interval = timedelta(minutes=SPECS[self.source].fixed_interval or 5)
+        return now, now + max(lead, min(now - since, lead + interval))
 
     @staticmethod
     def _item(ident: Any, start: Optional[datetime], window: tuple[datetime, datetime], **fields: Any) -> Optional[Item]:
-        # Once per occurrence, only before it starts, only within the lead.
+        # Once per occurrence, only before it starts, only within the window.
         if not isinstance(ident, str) or not ident or start is None:
             return None
         if not window[0] <= start <= window[1]:
@@ -577,7 +583,7 @@ class CalendarSoonGoogle(_CalendarSoon):
     connector_type, action = "google_workspace", "get_events"
 
     async def fetch(self, call: Call, target: CheckTarget, since: datetime, now: datetime) -> list[Item]:
-        window = self._window(target, now)
+        window = self._window(target, since, now)
         data = await call(self.action, {"time_min": shape.iso(window[0]), "time_max": shape.iso(window[1])})
         items = []
         for row in _rows(data):
@@ -604,7 +610,7 @@ class CalendarSoonOutlook(_CalendarSoon):
     connector_type, action = "microsoft", "list_events"
 
     async def fetch(self, call: Call, target: CheckTarget, since: datetime, now: datetime) -> list[Item]:
-        window = self._window(target, now)
+        window = self._window(target, since, now)
         data = await call(
             self.action,
             {"start": shape.iso(window[0]), "end": shape.iso(window[1]), "limit": LIST_LIMIT},

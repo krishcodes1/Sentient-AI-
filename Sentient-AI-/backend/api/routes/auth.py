@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 import uuid
 from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta, timezone
@@ -25,6 +26,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.routes.oauth import session_factory_dependency
@@ -58,6 +60,11 @@ _bearer_scheme = HTTPBearer()
 # tests can shrink it and actually exercise the multi-page path.
 _EXPORT_BATCH_SIZE = 500
 
+# A valid bcrypt hash to check an unknown email against, so a missing account
+# costs the same ~200ms as a wrong password and the two cannot be told apart
+# by response timing (login enumeration).
+_DUMMY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(32))
+
 # low_risk: "Allow low-risk changes" (permission tiers), between auto_approve
 # and user_confirm.
 PermissionTierLiteral = Literal[
@@ -67,13 +74,13 @@ PermissionTierLiteral = Literal[
 
 class RegisterRequest(BaseModel):
     email: EmailStr
-    password: str
+    password: SafeStr
     name: Optional[SafeStr] = Field(default=None, max_length=255)
 
 
 class LoginRequest(BaseModel):
     email: EmailStr
-    password: str
+    password: SafeStr
 
 
 class TokenResponse(BaseModel):
@@ -104,19 +111,19 @@ class ProfileUpdateRequest(BaseModel):
     # Required only when `email` changes — the address is the account's
     # recovery identity, so handing it over is as destructive as deleting
     # the account. See update_profile.
-    current_password: Optional[str] = None
+    current_password: Optional[SafeStr] = None
 
 
 class PasswordChangeRequest(BaseModel):
-    current_password: str
-    new_password: str = Field(min_length=8)
+    current_password: SafeStr
+    new_password: SafeStr = Field(min_length=8)
 
 
 class AccountDeleteRequest(BaseModel):
     # Optional on the model, mandatory in the handler: a missing
     # confirmation is a refusal to act, which deserves an explicit 403 with
     # a reason, not a schema-validation 422 the UI has to translate.
-    current_password: Optional[str] = None
+    current_password: Optional[SafeStr] = None
 
 
 class SettingsUpdateRequest(BaseModel):
@@ -198,7 +205,16 @@ async def create_account(
         hashed_password=await asyncio.to_thread(hash_password, password),
     )
     db.add(user)
-    await db.flush()
+    try:
+        await db.flush()
+    except IntegrityError:
+        # Two registrations raced past the duplicate check above; the unique
+        # email index is the real guard. Surface the race as the same 409 the
+        # check returns, not an opaque 500.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Email already registered",
+        )
     await db.refresh(user)
     await append_auth_event(
         db,
@@ -284,6 +300,30 @@ async def _record_auth_event(
     await db.commit()
 
 
+async def _check_password_with_lockout(user: User, supplied: Optional[str]) -> bool:
+    """Verify a re-auth password under the same per-account lockout as login.
+
+    The /password, /profile email change and account-deletion flows all
+    re-check the current password behind a bearer token. Without a counter a
+    stolen token could brute-force the password through them unthrottled —
+    the gap ``login_lockout`` closes for /login. Raises 429 while locked;
+    every attempt counts up front, a correct one clears the counter.
+    """
+    locked_for, _triggered = await login_lockout.begin_attempt(user.email)
+    if locked_for:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Too many failed attempts. Try again in {locked_for} seconds.",
+            headers={"Retry-After": str(locked_for)},
+        )
+    ok = bool(supplied) and await asyncio.to_thread(
+        verify_password, supplied, user.hashed_password
+    )
+    if ok:
+        await login_lockout.reset(user.email)
+    return ok
+
+
 async def _require_current_password(
     user: User,
     supplied: Optional[str],
@@ -301,9 +341,7 @@ async def _require_current_password(
     403 rather than 401 on purpose: the token is valid and the session
     should survive a refused confirmation, not be torn down.
     """
-    if not supplied or not await asyncio.to_thread(
-        verify_password, supplied, user.hashed_password
-    ):
+    if not await _check_password_with_lockout(user, supplied):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
 
 
@@ -316,16 +354,17 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)) -> dict:
     of the denominator — they choose the source addresses — so the account
     itself has to carry a counter for the bound to mean anything.
 
-    The lockout is checked before the password is verified, so a locked
-    account cannot be opened even with the correct password, and the
-    counter is keyed on the submitted address whether or not it resolves to
-    an account, so the two cases stay indistinguishable.
+    The lockout is checked, and the attempt counted, in one step before the
+    password is verified, so a locked account cannot be opened even with the
+    correct password and a burst of concurrent guesses cannot all slip past
+    the check. The counter is keyed on the submitted address whether or not
+    it resolves to an account, so the two cases stay indistinguishable.
     """
     email = normalize_email(body.email)
     result = await db.execute(select(User).where(User.email == email))
     user = result.scalar_one_or_none()
 
-    locked_for = await login_lockout.seconds_remaining(email)
+    locked_for, triggered = await login_lockout.begin_attempt(email)
     if locked_for:
         if user is not None:
             await _record_auth_event(
@@ -345,10 +384,12 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)) -> dict:
             headers={"Retry-After": str(locked_for)},
         )
 
-    if user is None or not await asyncio.to_thread(
-        verify_password, body.password, user.hashed_password
-    ):
-        triggered = await login_lockout.record_failure(email)
+    # Always run bcrypt, even for an unknown address (against a throwaway
+    # hash), so a missing account and a wrong password take the same time and
+    # cannot be told apart by response latency.
+    hashed = user.hashed_password if user is not None else _DUMMY_PASSWORD_HASH
+    password_ok = await asyncio.to_thread(verify_password, body.password, hashed)
+    if user is None or not password_ok:
         if user is not None:
             await _record_auth_event(
                 db,
@@ -559,9 +600,7 @@ async def change_password(
     without this, a user rotating their password because a token leaked
     would get no actual eviction until the token expired on its own.
     """
-    if not await asyncio.to_thread(
-        verify_password, body.current_password, current_user.hashed_password
-    ):
+    if not await _check_password_with_lockout(current_user, body.current_password):
         await _record_auth_event(
             db,
             user=current_user,
@@ -1191,9 +1230,7 @@ async def delete_account(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Deleting your account requires your current password",
         )
-    if not await asyncio.to_thread(
-        verify_password, supplied, current_user.hashed_password
-    ):
+    if not await _check_password_with_lockout(current_user, supplied):
         await _record_auth_event(
             db,
             user=current_user,

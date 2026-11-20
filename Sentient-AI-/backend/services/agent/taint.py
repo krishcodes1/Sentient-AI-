@@ -347,9 +347,6 @@ class TaintTracker:
                 return f"the text '{snippet}' {_COPIED_NOT_YOURS}"
         return None
 
-    def is_tainted(self, arguments: Any) -> bool:
-        return self.taint_reason(arguments) is not None
-
 
 # How deep ``_collect_ids`` looks into a result, and how many ids it keeps
 # per source: a result is bounded already, this only keeps a hostile one

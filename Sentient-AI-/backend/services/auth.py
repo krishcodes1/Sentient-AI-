@@ -35,12 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
 from core.database import get_db
-from core.security import (
-    create_access_token,
-    hash_password,
-    verify_access_token,
-    verify_password,
-)
+from core.security import verify_access_token
 from models.user import User
 
 logger = structlog.get_logger(__name__)
@@ -132,10 +127,16 @@ class AccountLockout:
                 return 0
             return int(state.locked_until - now) + 1
 
-    async def record_failure(self, email: str) -> int:
-        """Count one failed attempt. Returns the lock duration it triggered.
+    async def begin_attempt(self, email: str) -> tuple[int, int]:
+        """Check the lock and count one attempt in a single step, before the
+        password is verified. Returns (seconds the account is still locked,
+        else 0; lock seconds this attempt triggered, else 0). A locked
+        account's attempt is refused and not counted.
 
-        Zero means the account is still under the threshold.
+        Counting only after the ~200ms bcrypt let every attempt already in
+        flight pass the check, so N concurrent guesses were all verified before
+        the lock engaged. Counted up front, the threshold holds however many
+        arrive at once; ``reset`` clears the count when the password was right.
         """
         key = self._key(email)
         now = time.monotonic()
@@ -143,13 +144,15 @@ class AccountLockout:
         async with self._lock:
             self._purge(now)
             state = self._states.setdefault(key, _AttemptState())
+            if state.locked_until > now:
+                return int(state.locked_until - now) + 1, 0
             state.failures += 1
             state.expires_at = now + duration * self.DECAY_FACTOR
             if state.failures >= self.threshold:
                 state.locked_until = now + duration
                 state.expires_at = max(state.expires_at, state.locked_until)
-                return duration
-            return 0
+                return 0, duration
+            return 0, 0
 
     async def reset(self, email: str) -> None:
         """Clear the counter after a successful authentication."""
@@ -166,51 +169,6 @@ class AccountLockout:
 # Module-level so every worker's login handler shares one counter and
 # tests can reach in to reset it.
 login_lockout = AccountLockout()
-
-
-async def register_user(email: str, password: str, db: AsyncSession) -> User:
-    """Register a new user. Raises HTTPException on conflict or weak password."""
-    import uuid
-    from datetime import datetime, timezone
-
-    email = email.strip().lower()
-
-    if len(password) < 8:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Password must be at least 8 characters.",
-        )
-
-    existing = await db.execute(select(User).where(User.email == email))
-    if existing.scalar_one_or_none() is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="A user with this email already exists.",
-        )
-
-    user = User(
-        email=email,
-        hashed_password=await asyncio.to_thread(hash_password, password),
-    )
-    db.add(user)
-    await db.flush()
-    await db.refresh(user)
-    return user
-
-
-async def authenticate_user(
-    email: str, password: str, db: AsyncSession
-) -> Optional[User]:
-    """Validate credentials and return the User, or None on failure."""
-    email = email.strip().lower()
-    result = await db.execute(select(User).where(User.email == email))
-    user = result.scalar_one_or_none()
-
-    if user is None or not user.is_active:
-        return None
-    if not await asyncio.to_thread(verify_password, password, user.hashed_password):
-        return None
-    return user
 
 
 async def get_current_user(

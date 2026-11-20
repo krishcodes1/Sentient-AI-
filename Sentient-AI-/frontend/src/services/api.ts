@@ -148,6 +148,14 @@ function errorDetailToMessage(detail: unknown, fallback: string): string {
   return fallback;
 }
 
+/** The error path of a raw fetch (streams, blobs, binary bodies, where
+ *  `request` cannot be used): the same 401 bounce and ApiError it raises. */
+async function throwForResponse(response: Response, fallback: string): Promise<never> {
+  const errorBody = await response.json().catch(() => ({}));
+  if (response.status === 401) handleUnauthorized();
+  throw new ApiError(errorDetailToMessage(errorBody.detail, fallback), response.status);
+}
+
 function handleUnauthorized() {
   localStorage.removeItem("auth_token");
   clearMeCache();
@@ -471,12 +479,7 @@ export async function streamMessage(
   );
 
   if (!response.ok || !response.body) {
-    const errorBody = await response.json().catch(() => ({}));
-    if (response.status === 401) handleUnauthorized();
-    throw new ApiError(
-      errorDetailToMessage(errorBody.detail, `Request failed: ${response.statusText}`),
-      response.status,
-    );
+    return throwForResponse(response, `Request failed: ${response.statusText}`);
   }
 
   const reader = response.body.getReader();
@@ -1150,14 +1153,7 @@ export async function uploadFile(file: File, signal?: AbortSignal): Promise<Uplo
     body: file,
     signal,
   });
-  if (!response.ok) {
-    const errorBody = await response.json().catch(() => ({}));
-    if (response.status === 401) handleUnauthorized();
-    throw new ApiError(
-      errorDetailToMessage(errorBody.detail, `Upload failed: ${response.statusText}`),
-      response.status,
-    );
-  }
+  if (!response.ok) return throwForResponse(response, `Upload failed: ${response.statusText}`);
   return response.json();
 }
 
@@ -1607,14 +1603,7 @@ export async function requestFileUpload(checkId: string, file?: File): Promise<F
     },
     body: file,
   });
-  if (!response.ok) {
-    const errorBody = await response.json().catch(() => ({}));
-    if (response.status === 401) handleUnauthorized();
-    throw new ApiError(
-      errorDetailToMessage(errorBody.detail, `Upload failed: ${response.statusText}`),
-      response.status,
-    );
-  }
+  if (!response.ok) return throwForResponse(response, `Upload failed: ${response.statusText}`);
   return response.json();
 }
 

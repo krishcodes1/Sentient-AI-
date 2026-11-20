@@ -40,7 +40,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Optional
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import SQLAlchemyError
 
 logger = structlog.get_logger(__name__)
@@ -352,8 +352,18 @@ class ReminderToolkit:
             if row.status == ReminderStatus.delivered:
                 return _error("That reminder was already delivered.", status="delivered")
             if row.status == ReminderStatus.scheduled:
-                row.status = ReminderStatus.cancelled
+                # Only while still scheduled: the sweeper may deliver it between
+                # the read above and this write.
+                result = await session.execute(
+                    update(Reminder)
+                    .where(Reminder.id == target, Reminder.status == ReminderStatus.scheduled)
+                    .values(status=ReminderStatus.cancelled)
+                )
                 await session.commit()
+                if result.rowcount != 1:
+                    await session.refresh(row)
+                    if row.status == ReminderStatus.delivered:
+                        return _error("That reminder was already delivered.", status="delivered")
             title = row.title
 
         return {

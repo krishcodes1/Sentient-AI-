@@ -1029,6 +1029,25 @@ async def test_fetch_page_returns_readable_text_without_chrome():
 
 
 @pytest.mark.asyncio
+async def test_fetch_page_reads_a_page_that_names_an_unknown_charset():
+    """A charset Python has no codec for raised LookupError out of fetch_page."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html; charset=x-no-such-codec"},
+            content=PAGE_HTML.encode("utf-8"),
+        )
+
+    result = await toolkit(handler, {"example.com": (PUBLIC_ADDRESS,)}).fetch_page(
+        "https://example.com/mount"
+    )
+
+    assert result["ok"] is True
+    assert "VESA monitor mount" in result["text"]
+
+
+@pytest.mark.asyncio
 async def test_fetch_page_truncates_and_says_so():
     body = "<html><body>" + "<p>word word word</p>" * 400 + "</body></html>"
 

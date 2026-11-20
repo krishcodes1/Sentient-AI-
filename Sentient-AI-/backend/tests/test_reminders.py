@@ -60,6 +60,33 @@ async def test_create_list_and_cancel_reminder(client, session_factory):
 
 
 @pytest.mark.asyncio
+async def test_cancel_leaves_a_delivered_reminder_delivered(client, session_factory):
+    """The sweeper may deliver a reminder between the owner loading it and
+    cancelling it. A delivered row stays the record, never "cancelled"."""
+    import uuid
+
+    from models.reminder import Reminder, ReminderStatus
+
+    _, token = await make_user(session_factory, email="rem-race@example.com")
+    resp = await client.post(
+        "/api/reminders/",
+        headers=auth_headers(token),
+        json={"title": "Call back", "due_at": _iso(datetime.now(timezone.utc) + timedelta(hours=1))},
+    )
+    rid = uuid.UUID(resp.json()["id"])
+    async with session_factory() as session:
+        row = (await session.execute(select(Reminder).where(Reminder.id == rid))).scalar_one()
+        row.status = ReminderStatus.delivered
+        await session.commit()
+
+    resp = await client.delete(f"/api/reminders/{rid}", headers=auth_headers(token))
+    assert resp.status_code == 204
+    async with session_factory() as session:
+        row = (await session.execute(select(Reminder).where(Reminder.id == rid))).scalar_one()
+    assert row.status == ReminderStatus.delivered
+
+
+@pytest.mark.asyncio
 async def test_reminders_are_owner_scoped(client, session_factory):
     _, token_a = await make_user(session_factory, email="rem-a@example.com")
     _, token_b = await make_user(session_factory, email="rem-b@example.com")

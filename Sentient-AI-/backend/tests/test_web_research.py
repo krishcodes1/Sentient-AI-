@@ -319,10 +319,8 @@ async def test_a_failed_page_is_one_failed_source_and_the_rest_still_come_back()
         raise httpx.ConnectError("connection refused", request=request)
 
     def broken(request: httpx.Request) -> httpx.Response:
-        # An encoding Python has never heard of: fetch_page's decode raises.
-        return httpx.Response(
-            200, content=b"<p>x</p>", headers={"content-type": "text/html; charset=nonsense-9"}
-        )
+        # A failure fetch_page has no branch for (not an httpx error).
+        raise RuntimeError("unexpected")
 
     results = [
         ("https://down.example.org/", "Down"),
@@ -355,7 +353,7 @@ async def test_a_failed_page_is_one_failed_source_and_the_rest_still_come_back()
     assert by_host["error.example.org"]["hint"] == web_module.FETCH_REFUSED_HINT
     assert [host for host, source in by_host.items() if "hint" in source] == ["error.example.org"]
     assert "not readable text" in by_host["image.example.org"]["error"]
-    assert by_host["weird.example.org"]["error"] == "The page could not be read (LookupError)."
+    assert by_host["weird.example.org"]["error"] == "The page could not be read (RuntimeError)."
     for host in ("down.example.org", "error.example.org", "image.example.org", "weird.example.org"):
         assert by_host[host]["ok"] is False and by_host[host]["excerpt"] == ""
     assert by_host["fine.example.org"]["ok"] is True

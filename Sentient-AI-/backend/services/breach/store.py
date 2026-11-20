@@ -618,6 +618,10 @@ class BreachStore:
         """For Check now: NotFound, Conflict('This address is paused. Resume it first.'), or
         CheckTooSoon when last_checked_at is within *cooldown*. A row in "error" may be checked
         (a successful answer makes it active again)."""
+        # shortcut: a second click while this lookup is still out (up to ~15 s) is not
+        # refused, because last_checked_at moves only on success so a failed check can be
+        # retried at once. It costs one extra paced lookup (findings are deduped by the
+        # unique index); add an in-flight marker column if that ever matters.
         async with self._session_factory() as session:
             row = await self._owned(session, user_id, address_id)
             if row.status == STATUS_PAUSED:
@@ -632,12 +636,18 @@ class BreachStore:
                     BreachWatchAddress.id == address_id,
                     BreachWatchAddress.user_id == user_id,
                     BreachWatchAddress.status != STATUS_PAUSED,
+                    # Compare-and-set: the sweeper's claim and a second click both
+                    # move next_check_at, so only one of them runs a lookup.
+                    BreachWatchAddress.next_check_at == row.next_check_at,
                 )
                 .values(next_check_at=now + lease)
                 .execution_options(synchronize_session=False)
             )
             if getattr(result, "rowcount", 0) != 1:
-                raise Conflict(PAUSED_MESSAGE)
+                await session.refresh(row)
+                if row.status == STATUS_PAUSED:
+                    raise Conflict(PAUSED_MESSAGE)
+                raise CheckTooSoon(math.ceil(cooldown.total_seconds()))
             await session.commit()
         return claim
 

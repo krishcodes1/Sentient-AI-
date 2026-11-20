@@ -180,6 +180,10 @@ class UnattendedTurnRunner:
         runtime = self._runtime()
         if runtime is None:
             return UnattendedOutcome(status="failed", reply=_NOT_READY_REPLY, run_id=req.run_id)
+        # shortcut: a run still in flight shows cost 0 in the ledger, so the
+        # MAX_CONCURRENT_RUNS slots can overshoot the day cap by one run cap
+        # (5 of 25 cents by default); reserve run_cap per "running" row if the
+        # caps or the slots grow, after adding a reaper for crashed rows.
         max_usd = min(max_usd, max(budget.usd_left, 0.0))
         owner = uuid.UUID(req.user_id)
         run_id = req.run_id or str(uuid.uuid4())

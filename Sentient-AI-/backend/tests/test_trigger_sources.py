@@ -287,6 +287,21 @@ async def test_google_calendar_fires_once_per_occurrence_within_the_lead_and_nev
 
 
 @pytest.mark.asyncio
+async def test_calendar_looks_ahead_as_far_as_the_last_check_so_a_short_lead_leaves_no_gap():
+    """Checks land 5-6 minutes apart. With a 5-minute lead, an event 5.5 minutes
+    out was past this window and had started by the next check: never announced."""
+    soon = NOW + timedelta(minutes=5, seconds=30)
+    executor = FakeExecutor({"items": [{"id": "g1", "summary": "Gap", "start": {"dateTime": shape.iso(soon)}}]})
+    last_check = {"watermark": shape.iso(NOW - timedelta(minutes=6)), "seen": []}
+    outcome = await check(executor, target("calendar.starting_soon", "google_workspace", {"lead_minutes": 5}, cursor=last_check))
+    assert [item.ident for _key, item in outcome.items] == [f"event:g1@{shape.iso(soon)}"]
+    # After an outage, at most one interval past the lead: no meeting announced hours early.
+    outage = {"watermark": shape.iso(NOW - timedelta(hours=3)), "seen": []}
+    await check(executor, target("calendar.starting_soon", "google_workspace", {"lead_minutes": 5}, cursor=outage))
+    assert executor.calls[-1]["arguments"]["time_max"] == shape.iso(NOW + timedelta(minutes=10))
+
+
+@pytest.mark.asyncio
 async def test_outlook_calendar_reads_graph_times():
     rows = [
         {"id": "x1", "subject": "Office hours", "start": "2026-09-30T12:10:00.0000000 (UTC)", "location": "B12", "all_day": False},

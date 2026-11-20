@@ -278,7 +278,7 @@ async def test_lockout_expires_after_its_window():
     from services.auth import AccountLockout
 
     lockout = AccountLockout(threshold=1, duration_minutes=1)
-    assert await lockout.record_failure("expiry@example.com") == 60
+    assert await lockout.begin_attempt("expiry@example.com") == (0, 60)
     assert await lockout.seconds_remaining("expiry@example.com") > 0
 
     # Fast-forward past the window rather than sleeping through it.
@@ -295,12 +295,80 @@ async def test_lockout_keys_are_hashed():
     from services.auth import AccountLockout
 
     lockout = AccountLockout(threshold=5)
-    await lockout.record_failure("Secret.Person@example.com")
+    await lockout.begin_attempt("Secret.Person@example.com")
     assert "secret.person@example.com" not in "".join(lockout._states)
     # Casing must not create a second counter, or the ceiling is per spelling.
     assert len(lockout._states) == 1
-    await lockout.record_failure("SECRET.PERSON@EXAMPLE.COM")
+    await lockout.begin_attempt("SECRET.PERSON@EXAMPLE.COM")
     assert len(lockout._states) == 1
+
+
+@pytest.mark.asyncio
+async def test_lockout_holds_against_a_concurrent_burst():
+    """Attempts are counted as they arrive, not after bcrypt: when the check
+    and the count were separate, every guess already in flight passed the
+    check and was verified before the lock engaged."""
+    import asyncio
+
+    from services.auth import AccountLockout
+
+    lockout = AccountLockout(threshold=3, duration_minutes=1)
+    results = await asyncio.gather(
+        *(lockout.begin_attempt("burst@example.com") for _ in range(10))
+    )
+    assert sum(1 for locked_for, _ in results if locked_for == 0) == 3
+
+
+@pytest.mark.asyncio
+async def test_nul_in_a_password_is_a_422_whether_or_not_the_account_exists(
+    client: httpx.AsyncClient,
+):
+    """bcrypt refuses a NUL byte. Reaching it was a 500 for a real account and
+    a 401 for an unknown one, which told the two apart."""
+    await _register(client, "nul@example.com")
+    for email in ("nul@example.com", "nobody@example.com"):
+        resp = await client.post(
+            "/api/auth/login", json={"email": email, "password": "bad\x00pw"}
+        )
+        assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_unknown_email_still_runs_bcrypt(client: httpx.AsyncClient, monkeypatch):
+    """Skipping the ~200ms hash for a missing account answered measurably faster
+    than a wrong password, which enumerated accounts by timing."""
+    import api.routes.auth as auth_routes
+
+    hashes: list[str] = []
+    real = auth_routes.verify_password
+    monkeypatch.setattr(
+        auth_routes, "verify_password", lambda plain, hashed: hashes.append(hashed) or real(plain, hashed)
+    )
+    resp = await client.post(
+        "/api/auth/login", json={"email": "ghost@example.com", "password": "whatever-123"}
+    )
+    assert resp.status_code == 401
+    assert hashes == [auth_routes._DUMMY_PASSWORD_HASH]
+
+
+@pytest.mark.asyncio
+async def test_current_password_rechecks_share_the_lockout(
+    client: httpx.AsyncClient, monkeypatch
+):
+    """A stolen token could otherwise guess the password through /password at
+    bcrypt speed, with no counter at all."""
+    from core.config import settings
+
+    monkeypatch.setattr(settings, "LOCKOUT_THRESHOLD", 2)
+    headers = await _logged_in(client, "rechecks@example.com")
+    change = {"current_password": "wrong-password", "new_password": "new-password-123"}
+    for _ in range(2):
+        bad = await client.post("/api/auth/password", headers=headers, json=change)
+        assert bad.status_code == 400
+
+    change["current_password"] = "password-123"
+    locked = await client.post("/api/auth/password", headers=headers, json=change)
+    assert locked.status_code == 429
 
 
 # ---------------------------------------------------------------------------
