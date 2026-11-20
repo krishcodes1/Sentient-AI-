@@ -80,7 +80,7 @@ async def _download(db: AsyncSession, user_id: uuid.UUID, deck_id: Any, fmt: str
 async def download_by_token(
     request: Request,
     t: Optional[str] = Query(default=None),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> Response:
     """The one-time link: the deck the token was minted for, once."""
     grant = _tokens(request).redeem(t)
@@ -94,7 +94,7 @@ async def download_deck(
     deck_id: uuid.UUID,
     format: str = Query(default="anki", pattern="^(anki|csv)$"),
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> Response:
     """The signed-in user's own deck; another user's deck is a 404."""
     return await _download(db, current_user.id, deck_id, format, endpoint="/api/study/decks/export")

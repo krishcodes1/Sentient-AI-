@@ -100,7 +100,7 @@ async def list_audit_logs(
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> list[AuditLog]:
     """Retrieve the authenticated user's audit logs with optional filtering."""
     query = select(AuditLog).where(AuditLog.user_id == current_user.id)
@@ -135,7 +135,7 @@ class AuditStatsResponse(BaseModel):
 @router.get("/stats", response_model=AuditStatsResponse)
 async def get_audit_stats(
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> AuditStatsResponse:
     """Owner-scoped dashboard aggregates, computed with SQL (no
     client-side scans over raw rows).
@@ -219,7 +219,7 @@ async def get_audit_stats(
 async def get_audit_log(
     log_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> AuditLog:
     """Retrieve a single audit log entry owned by the authenticated user."""
     return await _get_owned_log(log_id, current_user, db)
@@ -229,7 +229,7 @@ async def get_audit_log(
 async def verify_audit_integrity(
     log_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict:
     """Verify the tamper-evident hash of an audit log entry.
 

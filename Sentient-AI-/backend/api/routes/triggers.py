@@ -81,7 +81,7 @@ async def patch_trigger(
     body: TriggerPatch,
     request: Request,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict[str, Any]:
     """Pause, or resume (the error count is cleared and it checks now)."""
     result = await _toolkit(request).set_paused(str(current_user.id), trigger_id, body.paused)
@@ -102,7 +102,7 @@ async def delete_trigger(
     trigger_id: str,
     request: Request,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> Response:
     """Delete one trigger and its queued events; its conversation is kept."""
     result = await _toolkit(request).delete_trigger(str(current_user.id), trigger_id)

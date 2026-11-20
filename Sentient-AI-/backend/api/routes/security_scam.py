@@ -103,7 +103,7 @@ async def run_scam_check(
     body: ScamCheckIn,
     request: Request,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict[str, Any]:
     """Check one message (text, screenshots) out of turn and save it, with its
     verdict, in the person's "Scam checks" chat."""

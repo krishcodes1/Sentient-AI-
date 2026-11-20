@@ -100,7 +100,7 @@ async def get_usage_summary(
         description="IANA timezone whose midnight starts the 'today' window.",
     ),
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict:
     """Tokens used today, over the last 7 and 30 days, and all time, with a
     per-model breakdown and an estimated cost at list prices."""

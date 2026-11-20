@@ -99,7 +99,7 @@ async def create_telegram_link(
 async def remove_telegram_link(
     request: Request,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> None:
     """Unlink this account's Telegram chat (approvals stop being pushed).
     The apps allowed for a week from Telegram end with the link

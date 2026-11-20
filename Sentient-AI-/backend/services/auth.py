@@ -173,11 +173,28 @@ login_lockout = AccountLockout()
 
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(_bearer_scheme),
+    db: AsyncSession = Depends(get_db, scope="function"),
+) -> User:
+    """FastAPI dependency: the user behind the Bearer token.
+
+    Function scope, like the routes' own ``Depends(get_db, scope="function")``:
+    FastAPI caches a dependency per scope, so a matching scope is what makes the
+    route and this lookup share one session, committed before the response.
+    """
+    return await _user_for_token(credentials.credentials, db)
+
+
+async def get_current_user_streaming(
+    credentials: HTTPAuthorizationCredentials = Depends(_bearer_scheme),
     db: AsyncSession = Depends(get_db),
 ) -> User:
-    """FastAPI dependency — extract and validate the current user from a Bearer token."""
-    token = credentials.credentials
+    """get_current_user on the request-scoped session, for a route that pairs it
+    with a plain ``Depends(get_db)`` because its StreamingResponse keeps using the
+    session after the handler returns (agent stream, account export)."""
+    return await _user_for_token(credentials.credentials, db)
 
+
+async def _user_for_token(token: str, db: AsyncSession) -> User:
     try:
         payload = verify_access_token(token)
     except JWTError:

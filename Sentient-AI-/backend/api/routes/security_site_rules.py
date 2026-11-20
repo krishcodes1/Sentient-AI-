@@ -204,7 +204,7 @@ async def _failed_write(db: AsyncSession, exc: Exception) -> HTTPException:
 async def list_site_rules(
     request: Request,
     _owner: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict[str, Any]:
     """Every rule, every built-in category with its kind, the recent hits,
     and whether the switch is on."""
@@ -226,7 +226,7 @@ async def add_site_rule(
     body: SiteRuleCreateIn,
     request: Request,
     owner: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict[str, Any]:
     """Add a rule for a typed site (validated and audited)."""
     site = _typed_site(body.site)
@@ -251,7 +251,7 @@ async def check_site(
     body: SiteCheckIn,
     request: Request,
     _owner: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict[str, Any]:
     """Which rule applies to a typed site, and why (read from the committed
     rows; explained even while the switch is off)."""
@@ -289,7 +289,7 @@ async def set_site_category(
     body: SiteRuleKindIn,
     request: Request,
     owner: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict[str, Any]:
     """Change the kind of one built-in category ("always_ask" resets it)."""
     entry: Optional[Category] = category(key)
@@ -315,7 +315,7 @@ async def change_site_rule(
     body: SiteRuleKindIn,
     request: Request,
     owner: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict[str, Any]:
     """Change one rule's kind (validated and audited)."""
     kind = _typed_kind(body.kind)
@@ -339,7 +339,7 @@ async def remove_site_rule(
     rule_id: str,
     request: Request,
     owner: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> Response:
     """Remove one rule (audited)."""
     try:

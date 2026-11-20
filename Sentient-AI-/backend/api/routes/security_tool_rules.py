@@ -271,7 +271,7 @@ def _unavailable(exc: Exception) -> HTTPException:
 async def list_tool_rules(
     request: Request,
     owner: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> ToolRulesView:
     """The built-in rules with their switches, the owner's rules oldest first, the limits and
     operators the form needs, and the owner's organisation domains. ``store_ok`` is False
@@ -305,7 +305,7 @@ async def add_tool_rule(
     body: ToolRuleCreate,
     request: Request,
     owner: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> ToolRuleOut:
     """Add one owner rule (validated and audited); 422 with the plain reason when the
     validator refuses it. Adding a rule only narrows, so no notice is sent."""

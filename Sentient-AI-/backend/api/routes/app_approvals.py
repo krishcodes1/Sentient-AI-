@@ -82,7 +82,7 @@ async def list_app_approvals(
 async def revoke_app_approval(
     approval_id: str,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     runtime: AgentRuntime = Depends(get_runtime),
 ) -> Response:
     """End one weekly app approval: the next act in that app gets a card.

@@ -52,7 +52,7 @@ from models.user import User
 from models.vault_item import VaultItem
 from services import action_text
 from services import capabilities as capability_registry
-from services.auth import get_current_user
+from services.auth import get_current_user, get_current_user_streaming
 from services.capabilities.prompt import render_permissions_block
 from services.memory import render_memory_block
 from services.notifications import cards as approval_cards
@@ -1119,7 +1119,7 @@ async def list_conversations(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> list[Conversation]:
     """List the authenticated user's conversations, newest first.
 
@@ -1160,7 +1160,7 @@ async def list_conversations(
 async def create_conversation(
     body: CreateConversationRequest,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> ConversationResponse:
     """Start a new agent conversation for the authenticated user."""
     conversation = Conversation(user_id=current_user.id, title=body.title)
@@ -1185,7 +1185,7 @@ async def create_conversation(
 async def get_conversation(
     conversation_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> ConversationResponse:
     """Retrieve one of the authenticated user's conversations with messages,
     plus what the provider has billed across the thread.
@@ -1215,7 +1215,7 @@ async def update_conversation(
     conversation_id: uuid.UUID,
     body: UpdateConversationRequest,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> Conversation:
     """Rename one of the authenticated user's conversations (owner-scoped)."""
     title = body.title.strip()
@@ -1236,7 +1236,7 @@ async def update_conversation(
 async def delete_conversation(
     conversation_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> Response:
     """Delete one of the authenticated user's conversations and all of its
     messages (owner-scoped). Returns 204 on success.
@@ -1265,7 +1265,7 @@ async def send_message(
     body: SendMessageRequest,
     request: Request,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     runtime: AgentRuntime = Depends(get_runtime),
 ) -> AgentTurnResponse:
     """Send a user message, run the agent, and persist the assistant reply.
@@ -1531,7 +1531,9 @@ async def stream_message(
     conversation_id: uuid.UUID,
     body: SendMessageRequest,
     request: Request,
-    current_user: User = Depends(get_current_user),
+    # Request scope: event_stream below persists the reply on this session
+    # after the handler has returned.
+    current_user: User = Depends(get_current_user_streaming),
     db: AsyncSession = Depends(get_db),
     runtime: AgentRuntime = Depends(get_runtime),
 ) -> StreamingResponse:
@@ -1930,7 +1932,7 @@ async def get_conversation_tutor(
     conversation_id: uuid.UUID,
     request: Request,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> TutorStateOut:
     """One of the user's conversations' tutor mode (404 for anyone else's)."""
     conversation = await _get_owned_conversation(conversation_id, current_user, db)
@@ -1950,7 +1952,7 @@ async def set_conversation_tutor(
     body: TutorStateUpdate,
     request: Request,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> TutorStateUpdateOut:
     """Switch tutor mode on or off for one of the user's conversations, as
     /tutor on and /tutor off do (audited, via "ui"). An owner lock still
@@ -3496,7 +3498,7 @@ async def decide_approval(
     body: ApprovalDecisionRequest,
     request: Request,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     runtime: AgentRuntime = Depends(get_runtime),
 ) -> ApprovalDecisionResponse:
     """Approve or deny a pending action. On approval the runtime executes the
@@ -3552,7 +3554,7 @@ async def decide_approval(
 @router.post("/stop")
 async def stop_running_task(
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> Dict[str, bool]:
     """The web Stop button: ask the signed-in user's running task to stop.
 

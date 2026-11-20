@@ -125,7 +125,7 @@ def _channel_error(request: Request, connector_id: uuid.UUID) -> Optional[str]:
 async def create_slack_link_code(
     connector_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> SlackLinkCode:
     """Mint a one-time code (10 minutes, single use) the user sends to the
     Crawler app in a Slack DM. A new code replaces any pending one; an
@@ -163,7 +163,7 @@ async def get_slack_link(
     connector_id: uuid.UUID,
     request: Request,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> SlackLinkStatus:
     connector = await _owned_slack_connector(connector_id, current_user, db)
     link = await db.get(SlackChannelLink, connector.id)
@@ -183,7 +183,7 @@ async def get_slack_link(
 async def delete_slack_link(
     connector_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> None:
     """Unlink: the channel stops serving that Slack account at once (it
     reads the link on every message) and any pending code dies."""

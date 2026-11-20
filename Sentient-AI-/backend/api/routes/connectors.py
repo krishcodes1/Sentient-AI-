@@ -223,7 +223,7 @@ async def create_connector(
     body: ConnectorCreateRequest,
     request: Request,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> ConnectorConfig:
     """Register a new external connector with encrypted credentials.
 
@@ -279,7 +279,7 @@ async def create_connector(
 @router.get("/", response_model=list[ConnectorResponse])
 async def list_connectors(
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> list[ConnectorResponse]:
     """List the authenticated user's connectors."""
     result = await db.execute(
@@ -397,7 +397,7 @@ class ConnectorHealthEntry(BaseModel):
 @router.get("/health", response_model=list[ConnectorHealthEntry])
 async def get_connector_health(
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> list[ConnectorHealthEntry]:
     """Derive a per-connector health summary for the authenticated user.
 
@@ -575,7 +575,7 @@ def _as_utc(dt: datetime) -> datetime:
 async def get_connector(
     connector_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> ConnectorResponse:
     """Retrieve a single connector owned by the authenticated user."""
     return _connector_response(await _get_owned_connector(connector_id, current_user, db))
@@ -587,7 +587,7 @@ async def update_connector(
     body: ConnectorUpdateRequest,
     request: Request,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> ConnectorResponse:
     """Update connector configuration."""
     connector = await _get_owned_connector(connector_id, current_user, db)
@@ -794,7 +794,7 @@ async def delete_connector(
     connector_id: uuid.UUID,
     request: Request,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     session_factory: Callable[[], AsyncSession] = Depends(session_factory_dependency),
 ) -> None:
     """Delete a connector owned by the authenticated user, then revoke its
@@ -870,7 +870,7 @@ async def test_connector(
     connector_id: uuid.UUID,
     request: Request,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     session_factory: Callable[[], AsyncSession] = Depends(session_factory_dependency),
 ) -> ConnectorTestResult:
     """Verify stored credentials against the live service.

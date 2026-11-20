@@ -140,7 +140,7 @@ async def get_timezone(current_user: User = Depends(get_current_user)) -> dict[s
 async def put_timezone(
     body: TimezoneBody,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict[str, Optional[str]]:
     """Save the user's IANA zone. Existing tasks keep their own zone."""
     zone, error = parse_zone(body.timezone)
@@ -156,7 +156,7 @@ async def create_schedule(
     body: ScheduleCreate,
     request: Request,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict[str, Any]:
     await _require_on(request)
     params = body.model_dump(exclude_none=True)
@@ -184,7 +184,7 @@ async def patch_schedule(
     body: SchedulePatch,
     request: Request,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict[str, Any]:
     result = await _toolkit(request).set_paused(current_user.id, task_id, body.paused)
     if not result.get("ok"):
@@ -204,7 +204,7 @@ async def delete_schedule(
     task_id: uuid.UUID,
     request: Request,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> Response:
     result = await _toolkit(request).delete_task(current_user.id, task_id)
     if not result.get("ok"):
@@ -218,7 +218,7 @@ async def run_schedule_now(
     task_id: uuid.UUID,
     request: Request,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict[str, Any]:
     await _require_on(request)
     service = getattr(request.app.state, "schedules", None)
