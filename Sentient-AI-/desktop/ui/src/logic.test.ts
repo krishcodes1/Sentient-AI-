@@ -130,7 +130,7 @@ describe("buildRows / checkNote", () => {
       ["disk", "ok"],
       ["env", "info"],
     ]);
-    expect(rows.find((r) => r.id === "ports")?.title).toBe("Ports 3000, 8000, 5432 and 6379");
+    expect(rows.find((r) => r.id === "ports")?.title).toBe("Ports 3000 and 8000");
     expect(checkNote(report, rows)).toEqual({ tone: "ok", text: "Everything looks good." });
   });
 

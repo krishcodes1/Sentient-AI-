@@ -50,7 +50,7 @@ function withDefault(given: Fix[] | undefined, fallback: Fix): Fix[] {
   return given && given.length ? given : [fallback];
 }
 
-/** "3000, 8000, 5432 and 6379" */
+/** "3000 and 8000" */
 function listPorts(ports: number[]): string {
   if (ports.length <= 1) return ports.join("");
   return `${ports.slice(0, -1).join(", ")} and ${ports[ports.length - 1]}`;

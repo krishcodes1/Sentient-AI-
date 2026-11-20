@@ -25,12 +25,7 @@ use crate::stack::COMPOSE_PROJECT;
 pub const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 pub const MIN_FREE_DISK_GB: f64 = 10.0;
 /// (port, what uses it): the host ports docker/docker-compose.yml publishes.
-pub const APP_PORTS: &[(u16, &str)] = &[
-    (3000, "web app"),
-    (8000, "API"),
-    (5432, "database"),
-    (6379, "Redis"),
-];
+pub const APP_PORTS: &[(u16, &str)] = &[(3000, "web app"), (8000, "API")];
 /// Collected output per stream for `run` (compose ls JSON, versions) is capped.
 const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
 

@@ -92,8 +92,6 @@ ENV_UNSAFE_CHARS = frozenset("\"'`\\$#")
 APP_PORTS: tuple[tuple[int, str], ...] = (
     (3000, "web app"),
     (8000, "API"),
-    (5432, "database"),
-    (6379, "Redis"),
 )
 MIN_FREE_DISK_GB = 10.0
 
@@ -1030,7 +1028,7 @@ _DIAGNOSES = (
             re.IGNORECASE,
         ),
         (
-            "A port Crawler AI needs (3000, 8000, 5432 or 6379) is taken by another app. "
+            "A port Crawler AI needs (3000 or 8000) is taken by another app. "
             "Quit it, then click Retry."
         ),
     ),

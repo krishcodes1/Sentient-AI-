@@ -18,7 +18,7 @@ stops the installer.
 ## The four steps
 
 1. **Check your computer.** Is Docker Desktop installed and running? Is
-   Docker Compose v2 or newer there? Are ports 3000, 8000, 5432 and 6379
+   Docker Compose v2 or newer there? Are ports 3000 and 8000
    free, and is there enough disk space? Are keys already set in
    `backend/.env`? Is a Crawler AI stack already set up? Each failed check
    comes with a sentence saying how to fix it and, where it helps, a link to

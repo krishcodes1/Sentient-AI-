@@ -1370,7 +1370,8 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
 if __name__ == "__main__":
     uvicorn.run(
         "main:app",
-        host="0.0.0.0",
+        # This computer only. Docker starts uvicorn itself with --host 0.0.0.0.
+        host="127.0.0.1",
         port=8000,
         # Off on Windows: under the proactor loop below, a reloaded worker can't accept on
         # the inherited socket (WinError 87), so the API went silent after any file change.

@@ -730,7 +730,7 @@
     var ports = r.ports || [];
     var blocked = ports.filter(function (p) { return !p.free && !p.ours; });
     var ours = ports.filter(function (p) { return !p.free && p.ours; });
-    addCheck(list, blocked.length ? 'warn' : 'ok', 'Ports 3000, 8000, 5432 and 6379',
+    addCheck(list, blocked.length ? 'warn' : 'ok', 'Ports 3000 and 8000',
       blocked.length ? '' : (ours.length ? 'In use by your running Crawler AI, which is fine.' : 'All free.'),
       fixes.ports);
 
