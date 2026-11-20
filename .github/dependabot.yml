@@ -8,6 +8,11 @@ updates:
     directory: "/Sentient-AI-/frontend"
     schedule:
       interval: weekly
+    ignore:
+      # typescript-eslint only accepts TypeScript < 6.1; newer breaks npm ci.
+      # Remove once typescript-eslint's peer range allows it.
+      - dependency-name: "typescript"
+        versions: [">=6.1"]
   - package-ecosystem: docker
     directory: "/Sentient-AI-/docker"
     schedule:
