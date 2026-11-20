@@ -1294,7 +1294,7 @@ async def root() -> dict[str, str]:
 
 
 @app.get("/api/health")
-async def health_check(db: AsyncSession = Depends(get_db)) -> JSONResponse:
+async def health_check(db: AsyncSession = Depends(get_db, scope="function")) -> JSONResponse:
     """Liveness + database reachability.
 
     The Docker healthcheck polls this endpoint; returning 503 when the

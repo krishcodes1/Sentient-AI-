@@ -85,7 +85,7 @@ async def list_memories(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> list[Memory]:
     """List the authenticated user's saved memories, newest first.
 
@@ -112,7 +112,7 @@ async def list_memories(
 async def create_memory(
     body: MemoryCreateRequest,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> Memory:
     """Save a new memory. Content is injection-screened before storage."""
     try:
@@ -139,7 +139,7 @@ async def update_memory(
     memory_id: uuid.UUID,
     body: MemoryUpdateRequest,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> Memory:
     """Edit a memory's content and/or category (owner-scoped)."""
     memory = await _get_owned_memory(memory_id, current_user, db)
@@ -161,7 +161,7 @@ async def update_memory(
 async def delete_memory(
     memory_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> Response:
     """Delete one of the authenticated user's memories."""
     memory = await _get_owned_memory(memory_id, current_user, db)

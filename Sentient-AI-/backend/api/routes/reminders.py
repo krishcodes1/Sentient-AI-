@@ -94,7 +94,7 @@ async def _get_owned_reminder(
 async def create_reminder(
     body: CreateReminderRequest,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> Reminder:
     reminder = Reminder(
         user_id=current_user.id,
@@ -114,7 +114,7 @@ async def list_reminders(
     include_delivered: bool = Query(default=False),
     limit: int = Query(default=100, ge=1, le=500),
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> list[Reminder]:
     query = select(Reminder).where(Reminder.user_id == current_user.id)
     if not include_delivered:
@@ -127,7 +127,7 @@ async def list_reminders(
 async def cancel_reminder(
     reminder_id: str,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> None:
     """Cancel a scheduled reminder. Delivered rows stay as a record."""
     reminder = await _get_owned_reminder(reminder_id, current_user, db)

@@ -120,7 +120,7 @@ def _lock_out(row: TutorLock, emails: dict[uuid.UUID, str]) -> TutorLockOut:
 async def list_tutor_locks(
     request: Request,
     owner: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> TutorLocksOut:
     """Every tutor lock on the install, oldest first, and whether tutor
     mode is on at all."""
@@ -136,7 +136,7 @@ async def list_tutor_locks(
 async def create_tutor_lock(
     body: TutorLockCreate,
     owner: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> TutorLockOut:
     """Create one lock (validated and audited); 422 with the reason when a
     rule refuses it."""
@@ -179,7 +179,7 @@ async def create_tutor_lock(
 async def delete_tutor_lock(
     lock_id: str,
     owner: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> Response:
     """Delete one lock (audited). Chats it held go back to each person's
     own switch. 404 when there is no such lock."""

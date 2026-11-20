@@ -164,7 +164,7 @@ async def outbound_settings(
 async def forget_known_recipients(
     request: Request,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict[str, Any]:
     """Forget the caller's own sent-to history: {"removed": <rows>}. Every
     address counts as new again."""
@@ -184,7 +184,7 @@ async def add_organisation_domain(
     body: DomainIn,
     request: Request,
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> OrganisationDomainOut:
     """The owner adds one of the organisation's own domains: 201 with the
     stored row, 409 when it is listed already, 422 with one plain sentence
@@ -213,7 +213,7 @@ async def remove_organisation_domain(
     domain_id: str,
     request: Request,
     admin: User = Depends(require_admin),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> Response:
     """The owner removes one listed domain: 204, or 404 when there is no
     such row."""

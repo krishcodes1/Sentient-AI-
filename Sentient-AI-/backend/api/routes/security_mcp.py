@@ -216,7 +216,7 @@ async def list_mcp_reviews(
     request: Request,
     connector_id: Optional[str] = Query(default=None, max_length=64),
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict[str, Any]:
     """The caller's MCP servers and their tools' review state. With
     ``connector_id``, that one server only, and 404 when it is not the
@@ -249,7 +249,7 @@ async def list_mcp_reviews(
 async def mcp_pin_detail(
     pin_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict[str, Any]:
     """One tool's definition, or its diff from the approved one, as text parts.
     ``definition_hash`` is the hash Approve must send back."""
@@ -270,7 +270,7 @@ async def approve_mcp_pin(
     pin_id: uuid.UUID,
     body: McpApproveBody,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict[str, Any]:
     """Approve exactly the definition hash the page showed: 409 when the tool
     changed again since; 200 and no change when it is already approved with that
@@ -306,7 +306,7 @@ async def approve_mcp_pin(
 async def keep_mcp_pin_off(
     pin_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict[str, Any]:
     """Keep a changed or new tool off (any status; idempotent). The safe
     direction, so the page asks for no confirmation."""
@@ -341,7 +341,7 @@ async def approve_mcp_server(
     connector_id: uuid.UUID,
     body: McpServerApproveBody,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> dict[str, Any]:
     """Approve every shown change of one server, by the exact hashes shown, in
     one transaction: every pin must be one of that server's waiting pins (404

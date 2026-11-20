@@ -44,7 +44,7 @@ from models.installation import INSTALLATION_ROW_ID, Installation
 from models.slack_link import SlackChannelLink
 from models.user import User
 from services.audit import append_auth_event
-from services.auth import get_current_user, login_lockout
+from services.auth import get_current_user, get_current_user_streaming, login_lockout
 from services.connectors import oauth as oauth_broker
 
 logger = structlog.get_logger(__name__)
@@ -235,7 +235,7 @@ async def create_account(
 async def register(
     body: RegisterRequest,
     request: Request,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> User:
     """Create a new user account.
 
@@ -346,7 +346,7 @@ async def _require_current_password(
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)) -> dict:
+async def login(body: LoginRequest, db: AsyncSession = Depends(get_db, scope="function")) -> dict:
     """Authenticate and return a JWT.
 
     Failures are counted per account (``services.auth.login_lockout``) as
@@ -504,7 +504,7 @@ async def refresh_token(
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 async def logout(
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> None:
     """End the session server-side and record that it ended.
 
@@ -542,7 +542,7 @@ async def get_me(current_user: User = Depends(get_current_user)) -> User:
 async def update_profile(
     body: ProfileUpdateRequest,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> User:
     """Update the current user's name and/or email.
 
@@ -592,7 +592,7 @@ async def update_profile(
 async def change_password(
     body: PasswordChangeRequest,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> None:
     """Change the current user's password after verifying the old one.
 
@@ -639,7 +639,7 @@ async def change_password(
 async def update_settings(
     body: SettingsUpdateRequest,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
 ) -> User:
     """Update the current user's account settings.
 
@@ -739,7 +739,9 @@ async def update_settings(
 
 @router.get("/export")
 async def export_account(
-    current_user: User = Depends(get_current_user),
+    # Request scope: _generate pages through the tables on this session
+    # while the response streams.
+    current_user: User = Depends(get_current_user_streaming),
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
     """Download everything this account holds, as one JSON document.
@@ -1196,7 +1198,7 @@ async def delete_account(
     request: Request,
     body: Optional[AccountDeleteRequest] = None,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     session_factory: Callable[[], AsyncSession] = Depends(session_factory_dependency),
 ) -> None:
     """Permanently delete the current user.

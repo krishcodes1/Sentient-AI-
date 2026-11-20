@@ -372,7 +372,7 @@ _owner_lock = asyncio.Lock()
 
 
 @router.post("/owner")
-async def create_owner(body: RegisterRequest, db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+async def create_owner(body: RegisterRequest, db: AsyncSession = Depends(get_db, scope="function")) -> dict[str, Any]:
     """Create the first account and sign it in. Refused (409) as soon as any
     account exists: after that, accounts come from /auth/register, which the
     owner controls."""

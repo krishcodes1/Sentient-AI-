@@ -77,7 +77,7 @@ async def list_permission_grants(
 async def revoke_permission_grant(
     grant_id: str,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     runtime: AgentRuntime = Depends(get_runtime),
 ) -> Response:
     """End one grant: that account's next low-risk change gets a card again.

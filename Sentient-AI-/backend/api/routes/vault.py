@@ -131,7 +131,7 @@ async def list_items(
 async def put_card(
     body: CardBody,
     request: Request,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     current_user: User = Depends(require_admin),
 ) -> dict[str, Any]:
     """Store (or replace) the owner's card. 409 when there is no key store
@@ -179,7 +179,7 @@ async def put_card(
 async def delete_item(
     item_id: str,
     request: Request,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db, scope="function"),
     current_user: User = Depends(require_admin),
 ) -> None:
     vault = vault_service(request)
