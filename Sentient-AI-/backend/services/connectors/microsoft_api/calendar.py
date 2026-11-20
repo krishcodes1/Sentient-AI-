@@ -171,8 +171,8 @@ CALENDAR_ACTIONS: tuple[ToolSpec, ...] = (
         ActionCategory.READ,
         _schema(
             attendees={**_ADDRESSES, "description": "Attendee email addresses (empty: only the user)"},
-            start={"type": "string", "description": "Earliest time, ISO 8601", "required": True},
-            end={"type": "string", "description": "Latest time, ISO 8601 (at most 62 days after start)", "required": True},
+            start={"type": "string", "description": "Earliest time, ISO 8601 (UTC if no offset; include the user's offset, e.g. -05:00)", "required": True},
+            end={"type": "string", "description": "Latest time, ISO 8601 (UTC if no offset; include the user's offset, e.g. -05:00; at most 62 days after start)", "required": True},
             duration_minutes={"type": "integer", "description": "Meeting length in minutes (default 30)"},
             limit={"type": "integer", "description": "How many suggestions (default 5, max 20)"},
         ),

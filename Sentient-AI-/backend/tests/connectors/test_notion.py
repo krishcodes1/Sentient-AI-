@@ -891,6 +891,24 @@ async def test_update_block_refuses_non_text_blocks_without_writing():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "item",
+    [
+        {"type": "mention", "plain_text": "@Ann", "mention": {"type": "user", "user": {"id": USER}}},
+        _text("Q3 plan", underline=True),
+        {**_text("Q3 plan"), "annotations": {"color": "red"}},
+    ],
+)
+async def test_update_block_refuses_text_markdown_cannot_keep(item):
+    block = _block(BLOCK, "paragraph")
+    block["paragraph"]["rich_text"] = [_text("Ask "), item]
+    connector, seen = _connector(lambda r: httpx.Response(200, json=block))
+    with pytest.raises(ConnectorError, match="Edit it in Notion"):
+        await connector.update_block(BLOCK, "Ask Ann", user_confirmed=True)
+    assert [r.method for r in seen] == ["GET"]
+
+
+@pytest.mark.asyncio
 async def test_add_comment_on_a_page_and_in_a_discussion():
     connector, seen = _connector(_write_handler)
     await connector.add_comment("Hi", page_id=PAGE, user_confirmed=True)

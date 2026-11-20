@@ -925,10 +925,10 @@ async def test_todo_write_requests():
     assert body_of(seen[0]) == {
         "title": "Call Bob",
         "body": {"content": "re: lease", "contentType": "text"},
-        "dueDateTime": {"dateTime": "2026-10-05T00:00:00", "timeZone": "UTC"},
+        "dueDateTime": {"dateTime": "2026-10-05T12:00:00", "timeZone": "UTC"},
         "importance": "high",
     }
-    assert body_of(seen[1]) == {"dueDateTime": {"dateTime": "2026-10-06T00:00:00", "timeZone": "UTC"}}
+    assert body_of(seen[1]) == {"dueDateTime": {"dateTime": "2026-10-06T12:00:00", "timeZone": "UTC"}}
     assert body_of(seen[2]) == {"status": "completed"}
 
 

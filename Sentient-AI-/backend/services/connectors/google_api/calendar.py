@@ -20,7 +20,7 @@ from services.agent import risk
 from services.agent.permissions import ActionCategory
 from services.connectors.base import ConnectorError, UserConfirmationRequired, path_segment
 from services.connectors.definition import Outbound, ToolSpec, _schema
-from services.connectors.shaping import cap_text, clamp_limit
+from services.connectors.shaping import cap_text, clamp_limit, collect_pages
 
 from .client import (
     CALENDAR_API,
@@ -36,8 +36,10 @@ from .client import (
     scalar_fields,
 )
 
-# Most events returned by get_events (the contract's hard list maximum).
+# Events per Calendar request (the contract's hard list maximum), and the
+# most requests one get_events call makes (so at most 200 events).
 MAX_EVENTS = 50
+EVENT_PAGES = 4
 EVENT_DESCRIPTION_CHARS = 1000
 _RESPONSES = ("accepted", "declined", "tentative")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -184,6 +186,14 @@ def _when(value: Any, field: str) -> Optional[dict[str, str]]:
     raise ConnectorError(f"'{field}' must be {_WHEN}.")
 
 
+def _instant(value: Any, field: str) -> Optional[str]:
+    """An RFC 3339 time for a read window; a bare date means its midnight UTC."""
+    when = _when(value, field)
+    if when is None:
+        return None
+    return when.get("dateTime") or f"{when['date']}T00:00:00Z"
+
+
 def _calendar(calendar_id: Any) -> str:
     return optional_line(calendar_id, "calendar_id", max_chars=512) or "primary"
 
@@ -226,12 +236,16 @@ class CalendarActions(GoogleBase):
     """Google Calendar action coroutines (mixed into GoogleWorkspaceConnector)."""
 
     @staticmethod
-    def _default_window(time_min: Optional[str], time_max: Optional[str]) -> tuple[str, str]:
-        now = datetime.now(timezone.utc)
-        return (
-            time_min or now.isoformat(),
-            time_max or (now + timedelta(days=7)).isoformat(),
-        )
+    def _default_window(time_min: Any, time_max: Any) -> tuple[str, str]:
+        """The validated window: start defaults to now, end to a week after start."""
+        start = _instant(time_min, "time_min") or datetime.now(timezone.utc).isoformat()
+        end = _instant(time_max, "time_max")
+        if end is None:
+            try:
+                end = (datetime.fromisoformat(start) + timedelta(days=7)).isoformat()
+            except ValueError:
+                raise ConnectorError(f"'time_min' must be {_WHEN}.") from None
+        return start, end
 
     def _event_url(self, calendar_id: str, event_id: Optional[str] = None) -> str:
         url = f"{CALENDAR_API}/calendars/{path_segment(calendar_id)}/events"
@@ -246,22 +260,27 @@ class CalendarActions(GoogleBase):
     ) -> list[dict[str, Any]]:
         """Fetch calendar events within a time window (RFC 3339 strings);
         defaults to the next 7 days."""
-        start, end = self._default_window(
-            optional_line(time_min, "time_min", max_chars=64),
-            optional_line(time_max, "time_max", max_chars=64),
-        )
-        data = await self._call_object(
-            "GET",
-            self._event_url("primary"),
-            params={
+        start, end = self._default_window(time_min, time_max)
+
+        async def fetch(cursor: Optional[str]) -> tuple[list[Any], Optional[str]]:
+            params: dict[str, Any] = {
                 "timeMin": start,
                 "timeMax": end,
                 "singleEvents": True,
                 "orderBy": "startTime",
                 "maxResults": MAX_EVENTS,
-            },
-        )
-        return [_shape_event(item) for item in as_list(data.get("items")) if isinstance(item, dict)]
+            }
+            if cursor:
+                params["pageToken"] = cursor
+            data = await self._call_object("GET", self._event_url("primary"), params=params)
+            token = data.get("nextPageToken")
+            return (
+                [item for item in as_list(data.get("items")) if isinstance(item, dict)],
+                token if isinstance(token, str) else None,
+            )
+
+        items = await collect_pages(fetch, limit=MAX_EVENTS * EVENT_PAGES, max_pages=EVENT_PAGES)
+        return [_shape_event(item) for item in items]
 
     async def check_availability(
         self,
@@ -269,16 +288,15 @@ class CalendarActions(GoogleBase):
         time_max: Optional[str] = None,
     ) -> dict[str, Any]:
         """Free/busy for the primary calendar (defaults to the next 7 days)."""
-        start, end = self._default_window(
-            optional_line(time_min, "time_min", max_chars=64),
-            optional_line(time_max, "time_max", max_chars=64),
-        )
+        start, end = self._default_window(time_min, time_max)
         data = await self._call_object(
             "POST",
             f"{CALENDAR_API}/freeBusy",
             json={"timeMin": start, "timeMax": end, "items": [{"id": "primary"}]},
         )
         primary = as_dict(as_dict(data.get("calendars")).get("primary"))
+        if primary.get("errors"):
+            raise ConnectorError("Google could not read your calendar's busy times; try again later.")
         busy_slots = [
             scalar_fields(slot, start="start", end="end")
             for slot in as_list(primary.get("busy"))[:100]

@@ -50,9 +50,14 @@ def path_segment(value: Any) -> str:
     add path segments, so ``/courses/{id}/assignments`` reaches any
     sibling endpoint on the allowlisted host — outside whatever scopes
     the user granted. ``safe=""`` keeps the separator itself encoded, so
-    the value can only ever be one segment.
+    the value can only ever be one segment. "." and ".." are refused: they
+    have nothing to encode, and the URL layer collapses them into the
+    parent path (``lists/L1/tasks/..`` would delete list L1).
     """
-    return quote(str(value), safe="")
+    text = str(value)
+    if text in (".", ".."):
+        raise ConnectorError(f"'{text}' is not a valid id.")
+    return quote(text, safe="")
 
 # ---------------------------------------------------------------------------
 # Prompt injection / content sanitization
@@ -780,7 +785,9 @@ class BaseConnector(ABC):
         if not self._authenticated:
             raise AuthenticationError(f"Connector '{self.name}' is not authenticated.")
 
-        self._rate_limiter.acquire()
+        # The executor re-runs an approved write with user_confirmed; that is the same call.
+        if not params.get("user_confirmed"):
+            self._rate_limiter.acquire()
         start = time.perf_counter()
 
         try:

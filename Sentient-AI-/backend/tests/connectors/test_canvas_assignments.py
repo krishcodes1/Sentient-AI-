@@ -170,9 +170,16 @@ class FakeCanvas:
     Records every request it is sent."""
 
     def __init__(
-        self, *, assignments: Any = None, submissions: Any = None, events: Any = None, status=200
+        self,
+        *,
+        assignments: Any = None,
+        submissions: Any = None,
+        events: Any = None,
+        courses: Any = None,
+        status=200,
     ) -> None:
         self.assignments = [] if assignments is None else assignments
+        self.courses = [] if courses is None else courses
         self.submissions = [] if submissions is None else submissions
         self.events = [] if events is None else events
         self.status = status
@@ -185,10 +192,14 @@ class FakeCanvas:
         parts = request.url.path.split("/")[3:]  # what follows /api/v1
         if parts == ["calendar_events"]:
             return httpx.Response(200, json=self.events)
+        if parts == ["courses"]:
+            return httpx.Response(200, json=self.courses)
+        if parts == ["users", "self"]:
+            return httpx.Response(200, json={"id": 42, "name": "Sam"})
         if parts[:1] == ["courses"] and parts[2:3] == ["assignments"]:
             if len(parts) == 3:
                 return httpx.Response(200, json=self.assignments)
-            if len(parts) == 5 and parts[4] == "submissions":
+            if parts[4:] == ["submissions", "self"]:
                 return httpx.Response(200, json=self.submissions)
             if len(parts) == 4:
                 for item in self.assignments:
@@ -567,17 +578,9 @@ def test_the_largest_results_fit_the_budget_they_are_sized_for():
 
 
 @pytest.mark.asyncio
-async def test_submissions_are_rows_without_text_or_download_links():
-    not_handed_in = submission(
-        user_id=43,
-        submitted_at=None,
-        workflow_state="unsubmitted",
-        score=None,
-        grade=None,
-        graded_at=None,
-        missing=True,
-    )
-    fake = FakeCanvas(submissions=[submission(), not_handed_in])
+async def test_the_users_own_submission_is_one_row_without_text_or_download_links():
+    # Canvas lists every submission only to graders, so a student reads their own.
+    fake = FakeCanvas(submissions=submission())
     connector = wired(fake)
     try:
         await connector.authenticate({"access_token": "tok-123"})
@@ -586,11 +589,10 @@ async def test_submissions_are_rows_without_text_or_download_links():
         await connector.close()
 
     (request,) = fake.requests
-    assert request.url.path == "/api/v1/courses/11/assignments/7/submissions"
-    assert request.url.params["per_page"] == "100"
+    assert request.url.path == "/api/v1/courses/11/assignments/7/submissions/self"
     assert result == {
-        "count": 2,
-        "total": 2,
+        "count": 1,
+        "total": 1,
         "truncated": False,
         "items": [
             {
@@ -605,18 +607,6 @@ async def test_submissions_are_rows_without_text_or_download_links():
                 "grade": "9.5",
                 "graded_at": "2026-10-01T10:00:00Z",
             },
-            {
-                "user_id": "43",
-                "attempt": 1,
-                "submitted_at": None,
-                "workflow_state": "unsubmitted",
-                "missing": True,
-                "late": False,
-                "excused": False,
-                "score": None,
-                "grade": None,
-                "graded_at": None,
-            },
         ],
     }
     for leaked in ("VERIFIER-SECRET", "preview", "My answer", "lab.pdf"):
@@ -624,8 +614,12 @@ async def test_submissions_are_rows_without_text_or_download_links():
 
 
 @pytest.mark.asyncio
-async def test_calendar_events_are_rows_and_lose_the_embedded_assignment():
+async def test_calendar_events_are_rows_and_lose_the_embedded_assignment(monkeypatch):
+    from services.connectors import canvas_upcoming
+
+    monkeypatch.setattr(canvas_upcoming, "_now", lambda: NOW)
     fake = FakeCanvas(
+        courses=[{"id": i, "name": f"Course {i}"} for i in range(1, 13)],
         events=[
             event(234),
             event(
@@ -642,13 +636,20 @@ async def test_calendar_events_are_rows_and_lose_the_embedded_assignment():
     connector = wired(fake)
     try:
         await connector.authenticate({"access_token": "tok-123"})
-        result = await connector.get_calendar_events()
+        result = await connector.get_calendar_events(days=3)
     finally:
         await connector.close()
 
-    (request,) = fake.requests
+    request = fake.requests[-1]
     assert request.url.path == "/api/v1/calendar_events"
     assert (request.url.params["type"], request.url.params["per_page"]) == ("event", "50")
+    # Without dates Canvas lists only today; without context codes only the
+    # personal calendar. It reads at most 10 codes.
+    assert request.url.params["start_date"] == "2026-09-30T12:00:00Z"
+    assert request.url.params["end_date"] == "2026-10-03T12:00:00Z"
+    assert request.url.params.get_list("context_codes[]") == ["user_42"] + [
+        f"course_{i}" for i in range(1, 10)
+    ]
     assert result == {
         "count": 2,
         "total": 2,

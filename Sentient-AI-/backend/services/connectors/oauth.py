@@ -1415,9 +1415,9 @@ def reconnect_message(label: str) -> str:
 
 
 # Set on a row's stored credentials when the provider refused its refresh
-# token, so the Connectors card can say "Needs reconnect". A reconnect or a
-# pasted token replaces the whole blob, and a later successful refresh drops
-# it, so it clears itself.
+# token or its pasted code, so the Connectors card can say "Needs reconnect".
+# A reconnect or a pasted token replaces the whole blob, and a later
+# successful refresh (or Test of a pasted code) drops it, so it clears itself.
 NEEDS_RECONNECT_KEY = "needs_reconnect"
 
 
@@ -1430,15 +1430,17 @@ def needs_reconnect(credentials: Mapping[str, Any]) -> bool:
     return credentials.get(NEEDS_RECONNECT_KEY) is True
 
 
-async def _mark_needs_reconnect(
-    session_factory: SessionFactory, config_id: uuid.UUID | str, refresh_token: Any
+async def mark_needs_reconnect(
+    session_factory: SessionFactory, config_id: uuid.UUID | str, refused: Mapping[str, Any]
 ) -> None:
-    """Flag the row, unless it changed since the refused refresh.
+    """Flag the row, unless it no longer holds *refused*, the credentials the
+    provider refused (a sign-in's refresh token, or a pasted code).
 
-    The update is a compare-and-swap on the stored blob, so a reconnect that
-    lands meanwhile (the callback does not take the refresh lock) is never
-    overwritten with the dead tokens. Best effort: the flag only drives the
-    UI, so a failure here is logged and the caller's error still surfaces.
+    The update is a compare-and-swap on the stored blob, so a reconnect or
+    new code that lands meanwhile (the callback does not take the refresh
+    lock) is never overwritten with the dead ones. Best effort: the flag only
+    drives the UI, so a failure here is logged and the caller's error still
+    surfaces.
     """
     row_id = config_id if isinstance(config_id, uuid.UUID) else uuid.UUID(str(config_id))
     try:
@@ -1451,7 +1453,7 @@ async def _mark_needs_reconnect(
             if blob is None:
                 return
             stored = _decrypt_row(blob)
-            if stored.get("refresh_token") != refresh_token or needs_reconnect(stored):
+            if stored != dict(refused) or needs_reconnect(stored):
                 return
             stored[NEEDS_RECONNECT_KEY] = True
             await session.execute(
@@ -1518,7 +1520,7 @@ async def ensure_fresh_credentials(
         try:
             refreshed = await _refresh(definition, spec, current)
         except ReconnectRequired:
-            await _mark_needs_reconnect(session_factory, config_id, current.get("refresh_token"))
+            await mark_needs_reconnect(session_factory, config_id, current)
             raise
         await persist_credentials(session_factory, config_id, refreshed)
         logger.info("oauth_token_refreshed", connector_type=connector_type, config_id=str(config_id))

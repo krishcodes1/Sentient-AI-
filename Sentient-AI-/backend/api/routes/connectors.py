@@ -26,7 +26,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field, StringConstraints, computed_field
 from sqlalchemy import delete as sa_delete
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.routes.agent import UserRateLimiter
@@ -45,7 +45,7 @@ from models.connector import (
 )
 from models.slack_link import SlackChannelLink
 from models.user import User
-from services.agent.tool_registry import connector_scopes, default_read_scopes
+from services.agent.tool_registry import connector_scopes, connector_slug, default_read_scopes
 from services.agent.permission_grants import on_connector_updated
 from services.audit import append_auth_event
 from services.auth import get_current_user
@@ -155,8 +155,9 @@ class ConnectorResponse(BaseModel):
     rate_limit_per_minute: int
     created_at: datetime
     updated_at: datetime
-    # True when the provider refused this sign-in's refresh token, so the
-    # card shows "Needs reconnect". Set by ``_connector_response``.
+    # True when the provider refused this sign-in's refresh token, or a
+    # pasted code, so the card shows "Needs reconnect". Set by
+    # ``_connector_response``.
     needs_reconnect: bool = False
 
     model_config = {"from_attributes": True}
@@ -171,16 +172,15 @@ class ConnectorResponse(BaseModel):
 
 
 def _connector_response(row: ConnectorConfig) -> ConnectorResponse:
-    """The API view of *row*. Only a signed-in (OAuth) row can carry the
-    broker's needs-reconnect flag, so only those are decrypted."""
+    """The API view of *row*, with the needs-reconnect flag its stored
+    credentials carry (a refused sign-in or a refused pasted code)."""
     response = ConnectorResponse.model_validate(row)
-    if row.auth_method == AuthMethod.oauth2:
-        try:
-            credentials = json.loads(decrypt_credentials(row.encrypted_credentials))
-        except Exception:  # noqa: BLE001 - an unreadable blob is not a reconnect hint
-            credentials = None
-        if isinstance(credentials, dict):
-            response.needs_reconnect = oauth_broker.needs_reconnect(credentials)
+    try:
+        credentials = json.loads(decrypt_credentials(row.encrypted_credentials))
+    except Exception:  # noqa: BLE001 - an unreadable blob is not a reconnect hint
+        credentials = None
+    if isinstance(credentials, dict):
+        response.needs_reconnect = oauth_broker.needs_reconnect(credentials)
     return response
 
 
@@ -413,8 +413,9 @@ async def get_connector_health(
     told every user their brand-new connector was already failing.
 
     First-party connectors derive their counts from the audit log: an
-    ``approved`` row is one action the platform carried out, a
-    ``blocked`` row one it refused. ``pending`` rows are the
+    ``approved`` row is one action the platform carried out (a failure
+    when it is marked ``outcome: failed``), a ``blocked`` row one it
+    refused, except a card the user denied or let expire. ``pending`` rows are the
     intent-before-side-effect half of an approved action and are skipped,
     so a single tool call counts once. MCP rows cannot use the audit log
     at all (the audit logger stores them under ``connector_name="mcp"``,
@@ -434,29 +435,41 @@ async def get_connector_health(
 
     # Audit rows usually record the connector segment of the tool name
     # ("canvas", "google_workspace", ...) rather than the display name, so
-    # match on both.
+    # match on both, and on "<type>__<slug>", the name one of two accounts
+    # of the same type is audited under.
     names = {c.display_name for c in connectors} | {
         connector_type_key(c.connector_type) for c in connectors
-    }
-    audit_result = await db.execute(
-        select(AuditLog)
-        .where(AuditLog.user_id == current_user.id)
-        .where(AuditLog.connector_name.in_(names))
-        .order_by(AuditLog.timestamp.desc())
+    } | {_slugged_name(c) for c in connectors}
+    mine = (AuditLog.user_id == current_user.id, AuditLog.connector_name.in_(names))
+    last_seen_by_name: Dict[str, datetime] = dict(
+        (
+            await db.execute(
+                select(AuditLog.connector_name, func.max(AuditLog.timestamp))
+                .where(*mine)
+                .group_by(AuditLog.connector_name)
+            )
+        ).all()
     )
-    audit_rows = list(audit_result.scalars().all())
+    recent = await db.execute(
+        select(AuditLog.connector_name, AuditLog.status, AuditLog.reasoning_chain)
+        .where(*mine)
+        .where(AuditLog.timestamp >= window_start)
+    )
 
-    last_seen_by_name: Dict[str, datetime] = {}
     observed_by_name: Dict[str, _Observations] = {}
-    for row in audit_rows:
-        if row.connector_name not in last_seen_by_name:
-            last_seen_by_name[row.connector_name] = row.timestamp
-        if _as_utc(row.timestamp) < window_start:
-            continue
-        counts = observed_by_name.setdefault(row.connector_name, _Observations())
-        if row.status == AuditStatus.approved:
-            counts.carried_out += 1
-        elif row.status == AuditStatus.blocked:
+    for name, row_status, chain in recent:
+        chain = chain if isinstance(chain, dict) else {}
+        counts = observed_by_name.setdefault(name, _Observations())
+        if row_status == AuditStatus.approved:
+            if chain.get("outcome") == "failed":
+                counts.refused += 1
+            else:
+                counts.carried_out += 1
+        # A card the user denied or let expire is their choice, not a fault.
+        elif row_status == AuditStatus.blocked and chain.get("event") not in (
+            "tool_denied",
+            "tool_expired",
+        ):
             counts.refused += 1
 
     from services.mcp.activity import mcp_activity
@@ -486,12 +499,18 @@ async def get_connector_health(
             # (e.g. "canvas" from "canvas.submit_assignment"), so fall back
             # to the connector type when no row matches the display name.
             type_key = connector_type_key(c.connector_type)
-            last_seen = last_seen_by_name.get(
-                c.display_name
-            ) or last_seen_by_name.get(type_key)
-            counts = observed_by_name.get(c.display_name) or observed_by_name.get(
-                type_key
-            ) or _Observations()
+            slugged = _slugged_name(c)
+            last_seen = (
+                last_seen_by_name.get(slugged)
+                or last_seen_by_name.get(c.display_name)
+                or last_seen_by_name.get(type_key)
+            )
+            counts = (
+                observed_by_name.get(slugged)
+                or observed_by_name.get(c.display_name)
+                or observed_by_name.get(type_key)
+                or _Observations()
+            )
             failed_recently = counts.refused > 0
             observed_recently = counts.total > 0
 
@@ -505,15 +524,15 @@ async def get_connector_health(
         elif failed_recently:
             status_value = "degraded"
             detail = (
-                f"{counts.refused} of {counts.total} action(s) refused in the "
-                "last 24h."
+                f"{counts.refused} of {counts.total} action(s) failed or were "
+                "refused in the last 24h."
                 if counts.total
                 else "The most recent call to this server failed."
             )
         elif observed_recently:
             status_value = "healthy"
             detail = (
-                f"{counts.total} action(s) in the last 24h, none refused."
+                f"{counts.total} action(s) in the last 24h, none failed."
                 if counts.total
                 else "Last call to this server succeeded."
             )
@@ -538,6 +557,11 @@ async def get_connector_health(
             )
         )
     return entries
+
+
+def _slugged_name(c: ConnectorConfig) -> str:
+    """The audit name of *c* when the user has two of its type (tool_registry.build_tools)."""
+    return f"{connector_type_key(c.connector_type)}__{connector_slug(str(c.id))}"
 
 
 def _as_utc(dt: datetime) -> datetime:
@@ -965,6 +989,10 @@ async def test_connector(
         await connector.authenticate(credentials)
         healthy = await connector.health_check()
         if healthy:
+            if oauth_broker.needs_reconnect(credentials) and not credentials.get("oauth_provider"):
+                # The pasted code works again: drop the flag a refused call left.
+                credentials.pop(oauth_broker.NEEDS_RECONNECT_KEY)
+                await oauth_broker.persist_credentials(session_factory, row.id, credentials)
             identity = connector.identity()
             return ConnectorTestResult(
                 ok=True,
@@ -993,6 +1021,8 @@ async def test_connector(
         # round-trip to the service, so reaching here means the stored
         # credentials did not pass the live health check: most often they are
         # invalid or expired. Do not claim the credentials "authenticated".
+        if not credentials.get("oauth_provider"):
+            await oauth_broker.mark_needs_reconnect(session_factory, row.id, credentials)
         return ConnectorTestResult(
             ok=False,
             detail=(
@@ -1001,6 +1031,9 @@ async def test_connector(
             ),
         )
     except AuthenticationError as exc:
+        # A connector that checks its key while signing in (Robinhood) refuses here.
+        if not credentials.get("oauth_provider"):
+            await oauth_broker.mark_needs_reconnect(session_factory, row.id, credentials)
         return ConnectorTestResult(ok=False, detail=f"Authentication failed: {exc}")
     except ConnectorError as exc:
         return ConnectorTestResult(ok=False, detail=str(exc))

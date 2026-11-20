@@ -59,6 +59,7 @@ from .properties import (
 _BLOCK_MARKDOWN_CHARS = 2_000
 _PROPERTY_CHARS = 200
 
+
 WRITE_ACTIONS: tuple[ToolSpec, ...] = (
     ToolSpec(
         "create_page",
@@ -183,6 +184,23 @@ def _property_names(properties: dict[str, Any]) -> str:
     names = sorted(str(name) for name in properties)
     shown = ", ".join(preview(name, 40) for name in names[:10])
     return shown + (f" and {len(names) - 10} more" if len(names) > 10 else "")
+
+
+def _has_unkeepable_text(items: Any) -> bool:
+    """True when rewriting this rich text from Markdown would drop a mention,
+    equation, underline or colour."""
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        notes = item.get("annotations")
+        notes = notes if isinstance(notes, dict) else {}
+        if (
+            item.get("type") != "text"
+            or notes.get("underline") is True
+            or notes.get("color", "default") != "default"
+        ):
+            return True
+    return False
 
 
 class WritesMixin(NotionApiBase):
@@ -396,6 +414,11 @@ class WritesMixin(NotionApiBase):
             )
         if checked is not None and btype != "to_do":
             raise ConnectorError("checked applies only to to-do blocks.")
+        current = block.get(btype)
+        if _has_unkeepable_text(current.get("rich_text") if isinstance(current, dict) else None):
+            raise ConnectorError(
+                "This block has mentions or formatting this tool cannot keep. Edit it in Notion."
+            )
         payload: dict[str, Any] = {
             "rich_text": rich_text_arg(text, "text", formatting=btype != "code")
         }

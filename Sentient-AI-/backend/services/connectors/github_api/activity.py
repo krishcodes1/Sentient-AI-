@@ -21,7 +21,7 @@ from typing import Any, Optional
 
 from services.agent import risk
 from services.agent.permissions import ActionCategory
-from services.connectors.base import ConnectorError, path_segment
+from services.connectors.base import AuthenticationError, ConnectorError, path_segment
 from services.connectors.definition import Outbound, ToolSpec, _schema
 from services.connectors.shaping import clamp_limit
 
@@ -187,7 +187,14 @@ class ActivityMixin(GitHubApiBase):
             else "false",
             "per_page": per_page,
         }
-        data = await self._get_json("/notifications", params=params)
+        try:
+            data = await self._get_json("/notifications", params=params)
+        except AuthenticationError:
+            # Fine-grained tokens can never read notifications; the token is fine otherwise.
+            raise ConnectorError(
+                "GitHub doesn't let fine-grained tokens read notifications. Connect GitHub with "
+                "the device sign-in or a classic token to see them."
+            ) from None
         return [
             {
                 **scalars(n, "id", "reason", "unread", "updated_at"),

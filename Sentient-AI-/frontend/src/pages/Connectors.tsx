@@ -1286,8 +1286,9 @@ function TierAndRate({
 }: {
   tier: PermissionTier;
   onTier: (t: PermissionTier) => void;
-  rate: number;
-  onRate: (n: number) => void;
+  /** What is typed; clamped on blur and when the form is sent. */
+  rate: string;
+  onRate: (value: string) => void;
   tierOptions?: { value: PermissionTier; label: string }[];
   lowRisk?: string[];
 }) {
@@ -1323,7 +1324,8 @@ function TierAndRate({
           min={MIN_RATE_LIMIT}
           max={MAX_RATE_LIMIT}
           value={rate}
-          onChange={(e) => onRate(clampRateLimit(Number(e.target.value)))}
+          onChange={(e) => onRate(e.target.value)}
+          onBlur={() => onRate(String(clampRateLimit(Number(rate))))}
           className={fieldCls}
           style={inputStyle}
         />
@@ -1919,7 +1921,7 @@ function ConnectModal({
   const [school, setSchool] = useState<CanvasSchool | null>(null);
   const [selectedScopes, setSelectedScopes] = useState<string[]>(defaultScopes(initial));
   const [permissionTier, setPermissionTier] = useState<PermissionTier>("user_confirm");
-  const [rateLimit, setRateLimit] = useState(DEFAULT_RATE_LIMIT);
+  const [rateLimit, setRateLimit] = useState(String(DEFAULT_RATE_LIMIT));
   const [chosenMethod, setChosenMethod] = useState<ConnectorAuthKind | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1997,7 +1999,7 @@ function ConnectModal({
         display_name: displayName.trim() || undefined,
         granted_scopes: granted,
         permission_tier: permissionTier,
-        rate_limit_per_minute: rateLimit,
+        rate_limit_per_minute: clampRateLimit(Number(rateLimit)),
       });
       // Closed while the start request was in flight: the consent page has
       // opened anyway, so the page watches the flow instead.
@@ -2018,7 +2020,7 @@ function ConnectModal({
       credentials,
       granted_scopes: granted,
       permission_tier: permissionTier,
-      rate_limit_per_minute: rateLimit,
+      rate_limit_per_minute: clampRateLimit(Number(rateLimit)),
     };
     let row: Connector;
     try {
@@ -2430,7 +2432,7 @@ function EditConnectorModal({
   const [selectedScopes, setSelectedScopes] = useState<string[]>(connector.granted_scopes);
   const [scopesText, setScopesText] = useState(connector.granted_scopes.join(", "));
   const [permissionTier, setPermissionTier] = useState<PermissionTier>(connector.permission_tier);
-  const [rateLimit, setRateLimit] = useState(connector.rate_limit_per_minute);
+  const [rateLimit, setRateLimit] = useState(String(connector.rate_limit_per_minute));
   const [fieldValues, setFieldValues] = useState<FieldValues>({});
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -2490,7 +2492,7 @@ function EditConnectorModal({
         is_active: isActive,
         granted_scopes: scopes,
         permission_tier: permissionTier,
-        rate_limit_per_minute: rateLimit,
+        rate_limit_per_minute: clampRateLimit(Number(rateLimit)),
       };
       if (anyCredentialEntered) {
         payload.credentials = buildCredentials(credentialFields, fieldValues);
@@ -2942,8 +2944,9 @@ function ConnectorCard({
   onDelete: () => Promise<void>;
   onEdit: () => void;
   onSignIn: (mode: "reconnect" | "grant") => void;
-  /** Called after a test of a signed-in row: the test may have refreshed
-   * the sign-in, or found it dead and flagged the row "needs reconnect". */
+  /** Called after every test: it may have refreshed a sign-in, or found a
+   * sign-in or a pasted code dead (or working again) and changed the
+   * row's "needs reconnect" flag. */
   onTested?: () => void;
 }) {
   const [deleting, setDeleting] = useState(false);
@@ -2973,7 +2976,7 @@ function ConnectorCard({
       setTestResult({ ok: false, detail: errorText(err, "The test failed.") });
     } finally {
       setTesting(false);
-      if (signedIn) onTested?.();
+      onTested?.();
     }
   };
 
@@ -3044,9 +3047,11 @@ function ConnectorCard({
 
         {needsReconnect && (
           <p role="status" className="text-xs mb-4 px-3 py-2 rounded-[8px]" style={warningNoticeStyle}>
-            {canSignIn
-              ? `${connector.display_name} stopped accepting this sign-in, so Crawler cannot use it. Press Reconnect to sign in again.`
-              : `${connector.display_name} stopped accepting this sign-in, so Crawler cannot use it. Sign-in needs a one-time setup by whoever runs this Crawler; ask them, or enter a new code in Edit if this connector takes one.`}
+            {kind === "token"
+              ? `${connector.display_name} stopped accepting its code, so Crawler cannot use it. Enter a new code with Edit.`
+              : canSignIn
+                ? `${connector.display_name} stopped accepting this sign-in, so Crawler cannot use it. Press Reconnect to sign in again.`
+                : `${connector.display_name} stopped accepting this sign-in, so Crawler cannot use it. Sign-in needs a one-time setup by whoever runs this Crawler; ask them, or enter a new code in Edit if this connector takes one.`}
           </p>
         )}
 

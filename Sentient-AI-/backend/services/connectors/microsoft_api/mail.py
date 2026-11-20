@@ -18,6 +18,7 @@ Talks to Microsoft Graph ``/v1.0/me/messages``, ``/me/mailFolders`` and
 
 from __future__ import annotations
 
+import html
 from typing import Any, Optional
 
 from services.agent import risk
@@ -512,7 +513,9 @@ class MailActions(GraphBase):
                 details=f"Send a reply from your Microsoft 365 account to {who} message {mid}.",
             )
         verb = "replyAll" if everyone else "reply"
-        await self._graph("POST", f"{_message_path(mid)}/{verb}", json={"comment": text})
+        await self._graph(
+            "POST", f"{_message_path(mid)}/{verb}", json={"comment": _comment_html(text)}
+        )
         return {"sent": True, "message_id": mid, "reply_all": everyone}
 
     async def forward(
@@ -536,7 +539,7 @@ class MailActions(GraphBase):
             )
         payload: dict[str, Any] = {"toRecipients": recipients(to_list)}
         if note:
-            payload["comment"] = note
+            payload["comment"] = _comment_html(note)
         await self._graph("POST", f"{_message_path(mid)}/forward", json=payload)
         return {"sent": True, "message_id": mid, "to": to_list}
 
@@ -635,6 +638,12 @@ def _long_text(value: Any, field: str, *, required: bool) -> str:
         require_text(value, field, max_chars=MAX_LONG_TEXT)
         return str(value)
     return optional_text(value, field, max_chars=MAX_LONG_TEXT) or ""
+
+
+def _comment_html(text: str) -> str:
+    """Graph puts a reply or forward ``comment`` into the HTML body, so a
+    plain-text note needs escaping and its line breaks as <br>."""
+    return "<br>".join(html.escape(text).splitlines())
 
 
 __all__ = ["MAIL_ACTIONS", "MailActions"]

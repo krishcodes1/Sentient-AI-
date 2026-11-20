@@ -307,3 +307,56 @@ async def test_mcp_dispatch_records_activity_seen_by_health(client, session_fact
         assert entry["status"] == "healthy"
     finally:
         mcp_activity.reset()
+
+
+@pytest.mark.asyncio
+async def test_health_counts_failed_runs_and_skips_the_users_own_denials(
+    client, session_factory
+):
+    """A call that ran and failed (a 401, a 500) is a failure, not a success;
+    a card the user denied or let expire is their choice, not a fault."""
+    from services.audit import RuntimeAuditLogger
+
+    user, token = await make_user(session_factory)
+    connector_id = await _make_canvas_connector(session_factory, user.id)
+    audit = RuntimeAuditLogger(session_factory)
+    for event, outcome in (
+        ("tool_executed", None),
+        ("tool_executed", "failed"),
+        ("tool_approved_and_executed", "failed"),
+        ("tool_denied", None),
+        ("tool_expired", None),
+    ):
+        await audit.log(
+            {"event": event, "user_id": str(user.id), "tool": "canvas.get_courses", "outcome": outcome}
+        )
+
+    entry = await _health_entry(client, token, connector_id)
+    assert (entry["checks_24h"], entry["failures_24h"]) == (3, 2)
+    assert entry["status"] == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_health_finds_the_activity_of_one_of_two_accounts_of_a_type(
+    client, session_factory
+):
+    """With two accounts of a type, tools (and their audit rows) are named
+    "<type>__<slug>", so each tile must look up its own slugged name."""
+    from services.agent.tool_registry import connector_slug
+    from services.audit import RuntimeAuditLogger
+
+    user, token = await make_user(session_factory)
+    first = await _make_canvas_connector(session_factory, user.id)
+    second = await _make_canvas_connector(session_factory, user.id)
+    await RuntimeAuditLogger(session_factory).log(
+        {
+            "event": "tool_executed",
+            "user_id": str(user.id),
+            "tool": f"canvas__{connector_slug(str(second))}.get_courses",
+        }
+    )
+
+    entry = await _health_entry(client, token, second)
+    assert entry["checks_24h"] == 1
+    assert entry["last_check"] != "Never"
+    assert (await _health_entry(client, token, first))["checks_24h"] == 0

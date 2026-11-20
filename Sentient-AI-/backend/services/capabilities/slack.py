@@ -22,8 +22,9 @@ def availability(ctx: ReportContext) -> Availability:
         return Availability(True)
     return Availability(
         False,
-        "Slack chat isn't set up yet. Open your Slack connector in Connectors and "
-        "follow the steps to turn on chat.",
+        "Chatting with Crawler in Slack DMs isn't set up yet. Open your Slack connector "
+        "in Connectors and follow the steps to turn on chat. This does not affect "
+        "reading or searching a connected Slack workspace.",
     )
 
 

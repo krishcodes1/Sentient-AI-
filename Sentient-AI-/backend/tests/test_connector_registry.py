@@ -824,7 +824,11 @@ OLD_CATALOG: dict[str, list[tuple[str, ActionCategory, str, Optional[str], dict,
             ["course_id"],
         ),
         ("get_grades", R, "grades.read", None, {"course_id": _COURSE}, ["course_id"]),
-        ("get_calendar_events", R, "calendar.read", None, {}, []),
+        (
+            "get_calendar_events", R, "calendar.read", None,
+            {"days": {"type": "integer", "description": "Days ahead to cover (default 7, at most 30)"}},
+            [],
+        ),
         (
             "get_submissions", R, "submissions.read", None,
             {"course_id": _COURSE, "assignment_id": _ASSIGNMENT},
@@ -923,7 +927,8 @@ def test_connector_catalog_entries_equal_the_old_catalog():
     for key, expected in OLD_CATALOG.items():
         by_name = {s.action: s for s in CONNECTOR_CATALOG[key]}
         # Every old action is still there, unchanged (Google may gain more;
-        # canvas.get_assignments gained the optional assignment_id).
+        # canvas.get_assignments gained the optional assignment_id and
+        # canvas.get_calendar_events the optional days).
         for old in expected:
             spec = by_name.get(old[0])
             assert spec is not None, (key, old[0])

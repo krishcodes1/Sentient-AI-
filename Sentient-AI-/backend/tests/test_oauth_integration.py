@@ -1049,13 +1049,87 @@ async def test_connection_test_with_a_refused_refresh_reports_reconnect_without_
     assert provider.to(MS_PROBE_PATH) == []
     assert await stored(session_factory, config_id) == {**creds, broker.NEEDS_RECONNECT_KEY: True}
 
-    # The card reads the flag from the list; a pasted-token row never has it.
+    # The card reads the flag from the list.
     listed = await wired.get("/api/connectors/", headers=auth_headers(token))
     assert [(c["id"], c["needs_reconnect"]) for c in listed.json()] == [(str(config_id), True)]
     single = await wired.get(f"/api/connectors/{config_id}", headers=auth_headers(token))
     assert single.json()["needs_reconnect"] is True
     for secret in ("ms-refresh-old-test", "ms-access-old-test"):
         assert secret not in listed.text
+
+
+CANVAS_COURSES_PATH = "/api/v1/courses"
+CANVAS_SELF_PATH = "/api/v1/users/self"
+CANVAS_DEAD_TOKEN = reply(401, {"errors": [{"message": "Invalid access token."}]})
+
+
+async def needs_reconnect(wired, token: str, config_id: uuid.UUID) -> bool:
+    return (await wired.get(f"/api/connectors/{config_id}", headers=auth_headers(token))).json()["needs_reconnect"]
+
+
+@pytest.mark.asyncio
+async def test_a_pasted_code_the_service_refuses_at_call_time_needs_reconnect_until_replaced(
+    wired, session_factory, provider
+):
+    user, token = await make_user(session_factory, "pasted-dead@example.com")
+    config_id = await add_connector(session_factory, user.id, "canvas", CANVAS_CREDS, ("courses.read",))
+    executor = ConnectorToolExecutor(session_factory=session_factory)
+
+    provider.on(CANVAS_COURSES_PATH, CANVAS_DEAD_TOKEN)
+    # A 401 the code's own health check does not confirm (Canvas answers a
+    # refused permission with 401 too) is not a dead code.
+    provider.on(CANVAS_SELF_PATH, reply(200, {"name": "Ann"}), CANVAS_DEAD_TOKEN)
+    assert (await executor.execute("canvas.get_courses", {}, str(user.id)))["ok"] is False
+    assert not await needs_reconnect(wired, token, config_id)
+
+    assert (await executor.execute("canvas.get_courses", {}, str(user.id)))["ok"] is False
+    assert await needs_reconnect(wired, token, config_id)
+
+    new_code = {**CANVAS_CREDS, "access_token": "canvas-token-new-test"}
+    response = await wired.patch(
+        f"/api/connectors/{config_id}", headers=auth_headers(token), json={"credentials": new_code}
+    )
+    assert response.json()["needs_reconnect"] is False
+    assert await stored(session_factory, config_id) == new_code
+
+
+@pytest.mark.asyncio
+async def test_a_failing_test_of_a_pasted_code_flags_it_and_a_passing_one_clears_it(
+    wired, session_factory, provider
+):
+    user, token = await make_user(session_factory, "pasted-test@example.com")
+    config_id = await add_connector(session_factory, user.id, "canvas", CANVAS_CREDS, ("courses.read",))
+    provider.on(CANVAS_SELF_PATH, CANVAS_DEAD_TOKEN, reply(200, {"name": "Ann"}))
+
+    tested = await wired.post(f"/api/connectors/{config_id}/test", headers=auth_headers(token))
+    assert tested.json()["ok"] is False
+    assert await needs_reconnect(wired, token, config_id)
+
+    tested = await wired.post(f"/api/connectors/{config_id}/test", headers=auth_headers(token))
+    assert tested.json()["ok"] is True
+    assert not await needs_reconnect(wired, token, config_id)
+    assert await stored(session_factory, config_id) == CANVAS_CREDS
+
+
+@pytest.mark.asyncio
+async def test_a_pasted_key_refused_while_signing_in_is_flagged(
+    wired, session_factory, provider, monkeypatch
+):
+    from services.connectors.base import AuthenticationError
+    from services.connectors.robinhood import RobinhoodConnector
+    from tests.test_connectors_behavior import RH_API_KEY, RH_PRIVATE_KEY
+
+    async def refused(self, credentials):
+        raise AuthenticationError("Robinhood rejected the API key or its signature.")
+
+    monkeypatch.setattr(RobinhoodConnector, "authenticate", refused)
+    user, token = await make_user(session_factory, "pasted-rh@example.com")
+    creds = {"api_key": RH_API_KEY, "api_secret": RH_PRIVATE_KEY}
+    config_id = await add_connector(session_factory, user.id, "robinhood", creds, ("crypto.read",))
+
+    tested = await wired.post(f"/api/connectors/{config_id}/test", headers=auth_headers(token))
+    assert tested.json()["ok"] is False
+    assert await needs_reconnect(wired, token, config_id), tested.json()
 
 
 
@@ -1089,4 +1163,5 @@ async def test_connection_test_never_loops_on_a_dead_token(wired, session_factor
     assert response.json()["ok"] is False
     assert len(provider.to(GOOGLE_TOKEN_PATH)) == 1
     assert len(provider.to("/gmail/v1/users/me/profile")) == 1
-    assert await stored(session_factory, config_id) == creds
+    # Nothing rotated; the dead pasted code is flagged for its card.
+    assert await stored(session_factory, config_id) == {**creds, broker.NEEDS_RECONNECT_KEY: True}

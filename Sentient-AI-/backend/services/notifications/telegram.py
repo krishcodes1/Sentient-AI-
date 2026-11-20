@@ -765,6 +765,9 @@ _NOT_LINKED_TEXT = "This chat isn't linked to a Crawler AI account."
 _SOMETHING_WENT_WRONG = (
     "Something went wrong on my side, so I couldn't finish that. Please try again."
 )
+# A turn that never comes back would hold the chat's lock until a restart.
+_TURN_TIMEOUT_S = 600.0
+_TOOK_TOO_LONG = "That took too long, so I stopped it. Please try again."
 # The reply to a turn that ended with no text and nothing else to report
 # (Slack's words).
 _NO_REPLY_TEXT = "I didn't come up with a reply that time. Please ask again."
@@ -2136,7 +2139,12 @@ class TelegramService:
             for name, value in (extra or {}).items():
                 if value is not None and takes_keyword(self.chat, name):
                     listen[name] = value
-            outcome = await self.chat(user_id, text, new_conversation=fresh, **listen)
+            outcome = await asyncio.wait_for(
+                self.chat(user_id, text, new_conversation=fresh, **listen), _TURN_TIMEOUT_S
+            )
+        except TimeoutError:
+            logger.error("telegram_chat_timed_out", chat_id=chat_id)
+            outcome = {"error": _TOOK_TOO_LONG}
         except Exception as exc:
             logger.error("telegram_chat_failed", chat_id=chat_id, error=str(exc))
             outcome = {"error": _SOMETHING_WENT_WRONG}
@@ -2422,7 +2430,12 @@ class TelegramService:
                 listen["files"] = files
             if images and takes_keyword(self.chat, "images"):
                 listen["images"] = images
-            outcome = await self.chat(user_id, caption, new_conversation=fresh, **listen)
+            outcome = await asyncio.wait_for(
+                self.chat(user_id, caption, new_conversation=fresh, **listen), _TURN_TIMEOUT_S
+            )
+        except TimeoutError:
+            logger.error("telegram_chat_timed_out", chat_id=chat_id)
+            outcome = {"error": _TOOK_TOO_LONG}
         except Exception as exc:
             logger.error("telegram_chat_failed", chat_id=chat_id, error_type=type(exc).__name__)
             outcome = {"error": _SOMETHING_WENT_WRONG}

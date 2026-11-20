@@ -183,10 +183,11 @@ class IssuesMixin(GitHubApiBase):
             raise ConnectorError(
                 "Pass both owner and repo, or neither to list issues assigned to you."
             )
-        per_page = clamp_limit(limit)
+        count = clamp_limit(limit)
         params: dict[str, Any] = {
             "state": choice(state, "state", _STATES, "open"),
-            "per_page": per_page,
+            # The endpoint returns pull requests too; a full page leaves issues after dropping them.
+            "per_page": 100,
         }
         if labels is not None:
             params["labels"] = text_arg(labels, "labels", max_chars=500)
@@ -197,7 +198,7 @@ class IssuesMixin(GitHubApiBase):
             {**issue_summary(i), "repository": _repository_of(i)}
             if owner is None
             else issue_summary(i)
-            for i in issues[:per_page]
+            for i in issues[:count]
         ]
 
     async def get_issue(self, owner: str, repo: str, number: Any) -> dict[str, Any]:

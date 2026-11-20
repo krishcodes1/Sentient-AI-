@@ -326,7 +326,8 @@ def due_date(value: Any, field: str = "due_date") -> Optional[dict[str, str]]:
         day = date.fromisoformat(value.strip()[:10])
     except ValueError:
         raise ConnectorError(f"'{field}' must be a date like 2026-10-01.") from None
-    return {"dateTime": f"{day.isoformat()}T00:00:00", "timeZone": "UTC"}
+    # shortcut: noon UTC keeps the day from UTC-12 to UTC+11; the user's zone is unknown here.
+    return {"dateTime": f"{day.isoformat()}T12:00:00", "timeZone": "UTC"}
 
 
 # ---------------------------------------------------------------------------

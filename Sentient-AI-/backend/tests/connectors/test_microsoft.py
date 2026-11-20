@@ -559,6 +559,16 @@ async def test_reply_all_forward_move_flag_delete_requests():
 
 
 @pytest.mark.asyncio
+async def test_reply_and_forward_comments_keep_line_breaks_and_angle_brackets():
+    connector, seen = make_connector(lambda r: httpx.Response(202))
+    note = "Hi Ann,\r\n\r\nThursday works for <name>.\n\nRafi"
+    await connector.reply("m1", note, user_confirmed=True)
+    await connector.forward("m1", "bob@contoso.com", comment=note, user_confirmed=True)
+    expected = "Hi Ann,<br><br>Thursday works for &lt;name&gt;.<br><br>Rafi"
+    assert [body_of(r)["comment"] for r in seen] == [expected, expected]
+
+
+@pytest.mark.asyncio
 async def test_create_draft_posts_to_messages_and_returns_the_draft_id():
     connector, seen = make_connector(ok({"id": "d1", "subject": "Hi", "webLink": "https://o/x"}, 201))
     result = await connector.create_draft("Hi", "Body", to=["bob@contoso.com"], user_confirmed=True)

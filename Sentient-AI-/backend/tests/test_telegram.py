@@ -713,6 +713,28 @@ async def test_typing_stops_when_the_turn_ends_whether_it_replied_or_failed(
 
 
 @pytest.mark.asyncio
+async def test_a_turn_that_never_returns_is_stopped_with_a_plain_reply(
+    session_factory, fake_api, monkeypatch
+):
+    import asyncio
+
+    from services.notifications import telegram as telegram_module
+
+    monkeypatch.setattr(telegram_module, "_TURN_TIMEOUT_S", 0.05)
+    await _link(session_factory, "tg-hang@example.com", 425)
+
+    async def chat(user_id, text, *, new_conversation=False):
+        await asyncio.Event().wait()  # a model call or page that never answers
+
+    service = _make_service(session_factory)
+    service.chat = chat
+    await service._handle_message(telegram_dm(425, "weather tomorrow?"))
+    await service.wait_for_chats()
+    assert "took too long" in fake_api.sent_messages()[-1]["text"]
+    await service._client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_chat_error_and_pending_are_surfaced(session_factory, fake_api):
     await _link(session_factory, "tg-err@example.com", 606)
 

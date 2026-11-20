@@ -60,9 +60,9 @@ TRAILER = "CRAWLER-END"
 # control Calendar (errAEEventNotPermitted, errAEEventWouldRequireUserConsent).
 _DENIED_MARKS = (b"-1743", b"-1744")
 # get_events returns at most this many events a call (google_api/calendar.py
-# MAX_EVENTS); a full page means there may be more.
-GOOGLE_PAGE = 50
-GOOGLE_MAX_PAGES = 20
+# MAX_EVENTS * EVENT_PAGES); a full page means there may be more.
+GOOGLE_PAGE = 200
+GOOGLE_MAX_PAGES = 5
 _NOTE_CHARS = 4000
 # An errand row keeps at most this much of a ref (models/errand.py).
 REF_CHARS = 255
@@ -406,7 +406,7 @@ async def read_google_calendar(
     reader: Any, user_id: str, accounts: Sequence[Any], start: datetime, end: datetime
 ) -> SourceRead:
     """Every connected Google account's primary calendar from *start* to
-    *end*, a page of 50 at a time, through the briefing's gated and audited
+    *end*, a page of 200 at a time, through the briefing's gated and audited
     read. "unavailable" when no Google account is connected."""
     from services.scheduler.briefing import _items, tool_name
 

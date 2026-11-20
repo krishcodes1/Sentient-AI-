@@ -39,6 +39,9 @@ _READ_MASK = "names,emailAddresses,phoneNumbers,organizations,biographies"
 _PERSON_ID_RE = re.compile(r"^(?:people/)?([A-Za-z0-9_-]{1,128})$")
 # Person fields update_contact may change, by argument name.
 _UPDATE_FIELDS = ("given_name", "family_name", "email", "phone", "organization", "notes")
+_COMPUTED_KEYS = frozenset(
+    {"metadata", "displayName", "displayNameLastFirst", "unstructuredName", "formattedType"}
+)
 
 _RESOURCE = {"type": "string", "description": "Contact resource name (people/c123...)", "required": True}
 _FIELDS: dict[str, dict[str, Any]] = {
@@ -136,6 +139,13 @@ def shape_person(raw: Any) -> dict[str, Any]:
         if cut:
             shaped["notes_truncated"] = True
     return shaped
+
+
+def _first_entry(entries: Any) -> dict[str, Any]:
+    """A copy of the first entry to edit and write back, without what People
+    computes itself (a stale unstructuredName would override the new name)."""
+    entry = as_dict(next(iter(as_list(entries)), {}))
+    return {k: v for k, v in entry.items() if k not in _COMPUTED_KEYS}
 
 
 def _primary_first(existing: Any, value: str) -> list[dict[str, Any]]:
@@ -285,10 +295,7 @@ class ContactsActions(GoogleBase):
             body["metadata"] = {"sources": sources}
         fields: list[str] = []
         if "given_name" in wanted or "family_name" in wanted:
-            name = {
-                k: v for k, v in as_dict(next(iter(as_list(current.get("names"))), {})).items()
-                if k in ("givenName", "familyName", "middleName")
-            }
+            name = _first_entry(current.get("names"))
             if "given_name" in wanted:
                 name["givenName"] = wanted["given_name"]
             if "family_name" in wanted:
@@ -302,7 +309,7 @@ class ContactsActions(GoogleBase):
             body["phoneNumbers"] = _primary_first(current.get("phoneNumbers"), wanted["phone"])
             fields.append("phoneNumbers")
         if "organization" in wanted:
-            body["organizations"] = [{"name": wanted["organization"]}]
+            body["organizations"] = [{**_first_entry(current.get("organizations")), "name": wanted["organization"]}]
             fields.append("organizations")
         if "notes" in wanted:
             body["biographies"] = [{"value": wanted["notes"], "contentType": "TEXT_PLAIN"}]
