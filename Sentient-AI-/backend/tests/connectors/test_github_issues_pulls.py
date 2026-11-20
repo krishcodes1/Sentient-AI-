@@ -43,7 +43,7 @@ async def test_list_issues_in_a_repo_excludes_pull_requests():
     pr = {"number": 8, "title": "PR", "pull_request": {"url": "x"}}
     connector, seen = make_connector(ok([ISSUE, pr]))
     result = await connector.list_issues("o", "r", state="closed", labels="bug,ui", limit=2)
-    assert seen[0].url.raw_path == b"/repos/o/r/issues?state=closed&per_page=2&labels=bug%2Cui"
+    assert seen[0].url.raw_path == b"/repos/o/r/issues?state=closed&per_page=100&labels=bug%2Cui"
     assert result == [
         {
             "number": 7,
@@ -63,8 +63,17 @@ async def test_list_issues_without_a_repo_lists_your_assigned_issues():
     item = {**ISSUE, "repository_url": "https://api.github.com/repos/acme/web"}
     connector, seen = make_connector(ok([item]))
     (result,) = await connector.list_issues()
-    assert seen[0].url.raw_path == b"/issues?state=open&per_page=10"
+    assert seen[0].url.raw_path == b"/issues?state=open&per_page=100"
     assert result["repository"] == "acme/web"
+
+
+@pytest.mark.asyncio
+async def test_list_issues_finds_issues_behind_newer_pull_requests_then_cuts_to_the_limit():
+    prs = [{"number": n, "title": "PR", "pull_request": {"url": "x"}} for n in range(20, 30)]
+    connector, seen = make_connector(ok([*prs, ISSUE, {**ISSUE, "number": 6}]))
+    result = await connector.list_issues("o", "r", limit=1)
+    assert seen[0].url.params["per_page"] == "100"
+    assert [i["number"] for i in result] == [7]
 
 
 @pytest.mark.asyncio

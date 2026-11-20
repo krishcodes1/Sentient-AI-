@@ -18,7 +18,7 @@ import base64
 import binascii
 import email.policy
 import re
-from email.message import EmailMessage
+from email.message import EmailMessage, Message
 from email.utils import getaddresses
 from typing import Any, Optional
 
@@ -73,14 +73,21 @@ def reply_to_elsewhere(headers: dict[str, str]) -> bool:
 
 
 def decode_part_data(part: dict[str, Any]) -> str:
-    """Decode a MIME part's base64url body, tolerating missing padding."""
+    """Decode a MIME part's base64url body in its Content-Type charset
+    (UTF-8 when unnamed or unknown), tolerating missing padding."""
     encoded = as_dict(part.get("body")).get("data")
     if not isinstance(encoded, str) or not encoded:
         return ""
     try:
-        return base64.urlsafe_b64decode(encoded + "==").decode("utf-8", errors="replace")
+        data = base64.urlsafe_b64decode(encoded + "==")
     except (binascii.Error, ValueError):
         return ""
+    content_type = Message()
+    content_type["Content-Type"] = header_map(part).get("content-type", "")
+    try:
+        return data.decode(content_type.get_content_charset() or "utf-8", errors="replace")
+    except (LookupError, UnicodeError):  # unknown, or a codec like idna that refuses "replace"
+        return data.decode("utf-8", errors="replace")
 
 
 def find_part(part: dict[str, Any], mime_type: str, depth: int = 0) -> Optional[dict[str, Any]]:

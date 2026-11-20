@@ -373,6 +373,18 @@ async def test_get_thread_request_and_longer_text_cap():
 
 
 @pytest.mark.asyncio
+async def test_get_thread_reads_past_the_first_page_with_oldest():
+    connector, seen = _connector(lambda r: ok(messages=[]))
+    await connector.get_thread("C0123ABCD", "1712345678.000200", limit=50, oldest="1712345999.000300")
+    assert seen[0].url.raw_path == (
+        b"/api/conversations.replies?channel=C0123ABCD&ts=1712345678.000200&limit=50"
+        b"&oldest=1712345999.000300"
+    )
+    with pytest.raises(ConnectorError, match="oldest"):
+        await connector.get_thread("C0123ABCD", "1712345678.000200", oldest="yesterday")
+
+
+@pytest.mark.asyncio
 async def test_search_messages_uses_the_user_token():
     match = {
         "iid": "x",

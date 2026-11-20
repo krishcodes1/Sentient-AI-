@@ -323,6 +323,27 @@ async def test_update_contact_sends_the_etag_and_keeps_other_emails():
 
 
 @pytest.mark.asyncio
+async def test_update_contact_keeps_the_rest_of_the_name_and_organization():
+    person = {
+        **PERSON,
+        "names": [{
+            "metadata": {"primary": True}, "displayName": "Dr. Jane Doe Jr.", "unstructuredName": "Dr. Jane Doe Jr.",
+            "honorificPrefix": "Dr.", "givenName": "Jane", "familyName": "Doe", "honorificSuffix": "Jr.",
+            "phoneticFamilyName": "Dou",
+        }],
+        "organizations": [{"metadata": {"primary": True}, "name": "Acme", "title": "CTO", "department": "R&D"}],
+    }
+    connector, seen = make(ok(person))
+    await connector.update_contact("c1", family_name="Smith", organization="Initech", user_confirmed=True)
+    sent = body(seen[1])
+    assert sent["names"] == [{
+        "honorificPrefix": "Dr.", "givenName": "Jane", "familyName": "Smith", "honorificSuffix": "Jr.",
+        "phoneticFamilyName": "Dou",
+    }]
+    assert sent["organizations"] == [{"name": "Initech", "title": "CTO", "department": "R&D"}]
+
+
+@pytest.mark.asyncio
 async def test_update_contact_retries_once_on_an_etag_conflict():
     patches = [
         httpx.Response(400, json={"error": {"code": 400, "status": "FAILED_PRECONDITION"}}),

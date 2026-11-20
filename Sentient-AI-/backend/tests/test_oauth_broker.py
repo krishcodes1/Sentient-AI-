@@ -1492,7 +1492,7 @@ async def test_needs_reconnect_flag_never_overwrites_a_reconnect_that_landed_mea
     reconnected = _broker_creds(access_token="reconnected-access-test", refresh_token="reconnected-refresh-test")
     config_id = await _add_connector(session_factory, user.id, credentials=reconnected)
     # The refresh that failed used the old token; the row now holds a new one.
-    await broker._mark_needs_reconnect(session_factory, config_id, REFRESH)
+    await broker.mark_needs_reconnect(session_factory, config_id, _broker_creds())
     assert await _stored(session_factory, config_id) == reconnected
 
 

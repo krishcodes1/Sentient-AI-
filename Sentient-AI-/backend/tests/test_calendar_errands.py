@@ -159,27 +159,27 @@ def _google(n: int, **extra: Any) -> dict[str, Any]:
 
 @pytest.mark.asyncio
 async def test_google_events_are_paged_and_only_the_owners_own_events_are_not_shared():
-    first = [_google(n) for n in range(50)]
+    first = [_google(n) for n in range(200)]
     second = [
-        _google(49),
-        _google(50, organizer="unknownorganizer@calendar.google.com"),
-        _google(51, attendees=[{"email": "sam@example.com"}]),
-        _google(52, status="cancelled"),
+        _google(199),
+        _google(200, organizer="unknownorganizer@calendar.google.com"),
+        _google(201, attendees=[{"email": "sam@example.com"}]),
+        _google(202, status="cancelled"),
         # Someone else's event on the owner's calendar: they did not make
         # it, even when the owner's calendar makes them its organizer (a
         # delegate writing on it).
-        _google(53, creator_self=False),
-        _google(54, creator_self=False, organizer_self=True, iCalUID="abc-uid"),
+        _google(203, creator_self=False),
+        _google(204, creator_self=False, organizer_self=True, iCalUID="abc-uid"),
     ]
     reader = FakeReader(first, second)
     accounts = [Account("google_workspace", "c1", "")]
     read = await read_google_calendar(reader, "u1", accounts, NOW, NOW + timedelta(days=180))
     assert read.status == "ok" and read.complete
-    assert len(read.events) == 54 and {e.source for e in read.events} == {"google"}
+    assert len(read.events) == 204 and {e.source for e in read.events} == {"google"}
     assert reader.calls[1][0] == "google_workspace.get_events"
     assert reader.calls[1][1]["time_min"] == first[-1]["start"]["dateTime"]
     shared = {e.ref for e in read.events if e.shared}
-    assert shared == {"g50@google.com", "g51@google.com", "g53@google.com", "abc-uid"}
+    assert shared == {"g200@google.com", "g201@google.com", "g203@google.com", "abc-uid"}
     # The iCalendar uid names the event when Google gives one.
     assert "abc-uid" in {e.ref for e in read.events}
     assert google_event({"id": "x", "start": {"date": "2026-12-20"}}).day == DAY
@@ -967,24 +967,24 @@ async def test_google_paging_after_an_all_day_event_keeps_that_mornings_events_e
                 "_s": start, "_e": start + timedelta(hours=1)}
 
     events = [timed(i, datetime(2026, 12, 1, 9, tzinfo=tz) + timedelta(hours=i))
-              for i in range(49)]
+              for i in range(199)]
     events.append({"id": "ad", "summary": "Holiday", "start": {"date": "2026-12-20"},
                    "_s": datetime(2026, 12, 20, tzinfo=tz), "_e": datetime(2026, 12, 21, tzinfo=tz)})
-    events.append(timed(99, datetime(2026, 12, 20, 1, 0, tzinfo=tz)))
+    events.append(timed(999, datetime(2026, 12, 20, 1, 0, tzinfo=tz)))
 
     class Google:
         async def read(self, user_id, name, arguments, run_id):
             lo = datetime.fromisoformat(arguments["time_min"].replace("Z", "+00:00"))
             hi = datetime.fromisoformat(arguments["time_max"])
             hits = sorted((e for e in events if e["_e"] > lo and e["_s"] < hi),
-                          key=lambda e: (e["_s"], "dateTime" in e["start"]))[:50]
+                          key=lambda e: (e["_s"], "dateTime" in e["start"]))[:200]
             return {"ok": True, "result": [
                 {k: v for k, v in e.items() if not k.startswith("_")} for e in hits]}, None
 
     start = datetime(2026, 11, 13, tzinfo=tz)
     read = await read_google_calendar(Google(), "u", [Account("google_workspace", "c", "")],
                                       start, start + timedelta(days=180))
-    assert "t99@google.com" in {e.ref for e in read.events}
+    assert "t999@google.com" in {e.ref for e in read.events}
 
 
 def test_a_ref_longer_than_the_errand_row_keeps_is_cut_to_fit():

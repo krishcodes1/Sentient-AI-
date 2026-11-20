@@ -4303,6 +4303,7 @@ class ConnectorToolExecutor:
         except HardBlockError as exc:
             return {"ok": False, "error": str(exc)}
         except AuthenticationError as exc:
+            await self._flag_refused_code(connector, config["id"], credentials, exc)
             return {"ok": False, "error": self._auth_refusal(exc, resolved, credentials)}
         except RateLimitExceededError as exc:
             return {"ok": False, "error": str(exc)}
@@ -4463,6 +4464,32 @@ class ConnectorToolExecutor:
         except Exception:
             return False
         return not rotated
+
+    async def _flag_refused_code(
+        self,
+        connector: Any,
+        config_id: uuid_module.UUID,
+        credentials: dict[str, Any],
+        exc: Exception,
+    ) -> None:
+        """Flag a pasted-code row "needs reconnect" when the service refused
+        the code itself, which its own health check failing too tells apart
+        from a refused permission (Canvas answers both with a 401). A
+        sign-in's dead refresh token is flagged by the broker instead."""
+        from services.connectors import oauth as oauth_broker
+
+        if (
+            credentials.get("oauth_provider")
+            or getattr(exc, "status_code", None) == 403
+            or self._session_factory is None
+        ):
+            return
+        try:
+            dead = not await connector.health_check() and connector.health_problem() is None
+        except Exception:  # noqa: BLE001 - a UI hint must not replace the refusal
+            return
+        if dead:
+            await oauth_broker.mark_needs_reconnect(self._session_factory, config_id, credentials)
 
     async def _persist_credentials(
         self, config_id: uuid_module.UUID, credentials: dict[str, Any]

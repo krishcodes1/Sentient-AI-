@@ -1303,7 +1303,8 @@ async def health_check(db: AsyncSession = Depends(get_db)) -> JSONResponse:
     API can actually serve requests.
     """
     try:
-        await db.execute(text("SELECT 1"))
+        # Bounded: a busy pool would otherwise hold the probe for pool_timeout (30s).
+        await asyncio.wait_for(db.execute(text("SELECT 1")), timeout=5)
     except Exception:
         logger.warning("health_check_database_unreachable")
         # Reset the session so get_db's trailing commit doesn't raise a
@@ -1371,7 +1372,9 @@ if __name__ == "__main__":
         "main:app",
         host="0.0.0.0",
         port=8000,
-        reload=settings.ENVIRONMENT == "development",
+        # Off on Windows: under the proactor loop below, a reloaded worker can't accept on
+        # the inherited socket (WinError 87), so the API went silent after any file change.
+        reload=settings.ENVIRONMENT == "development" and sys.platform != "win32",
         # With reload on, uvicorn picks the selector loop on Windows, which
         # cannot start subprocesses: Playwright's driver never launches and
         # every browser.* call answers "Could not start the browser". The

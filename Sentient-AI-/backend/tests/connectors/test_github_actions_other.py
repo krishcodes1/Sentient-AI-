@@ -325,6 +325,19 @@ async def test_cancel_run():
 
 
 @pytest.mark.asyncio
+async def test_list_notifications_refused_for_fine_grained_token_says_why():
+    refused = lambda request: httpx.Response(  # noqa: E731
+        403, json={"message": "Resource not accessible by personal access token"}
+    )
+    connector, _ = make_connector(refused)
+    with pytest.raises(ConnectorError) as caught:
+        await connector.list_notifications()
+    # Not an AuthenticationError: the token works for everything else, so no reconnect prompt.
+    assert not isinstance(caught.value, AuthenticationError)
+    assert "fine-grained tokens" in str(caught.value)
+
+
+@pytest.mark.asyncio
 async def test_list_notifications():
     item = {
         "id": "123",

@@ -44,6 +44,7 @@ from services.connectors.base import (
     RateLimiter,
     RateLimitExceededError,
     UserConfirmationRequired,
+    path_segment,
 )
 from services.connectors.canvas import CanvasConnector
 from services.connectors.google_workspace import GoogleWorkspaceConnector
@@ -331,6 +332,24 @@ async def test_execute_rate_limits_before_dispatch():
     assert len(connector.calls) == 1  # the rejected call never reached dispatch
 
 
+@pytest.mark.asyncio
+async def test_an_approved_write_takes_one_rate_limit_slot():
+    # The executor runs a write once, gets UserConfirmationRequired, then
+    # re-runs it with user_confirmed=True after approval.
+    class _Confirming(_StubConnector):
+        async def _execute_action(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+            if not params.get("user_confirmed"):
+                raise UserConfirmationRequired(action=action, details="send it?")
+            return await super()._execute_action(action, params)
+
+    connector = _Confirming(rate_limit=1)
+    await connector.authenticate({})
+    with pytest.raises(UserConfirmationRequired):
+        await connector.execute("send", {})
+    response = await connector.execute("send", {"user_confirmed": True})
+    assert response.success
+
+
 # ---------------------------------------------------------------------------
 # Canvas — request construction and parsing
 # ---------------------------------------------------------------------------
@@ -433,13 +452,15 @@ async def test_canvas_read_paths_and_query_parameters():
         await connector.get_submissions(42, "7")
         await connector.get_calendar_events()
 
-    assignments, grades, submissions, calendar = recorder.requests
+    # The calendar read first lists the courses and the user for its context codes.
+    assignments, grades, submissions, courses, me, calendar = recorder.requests
     assert assignments.url.path == "/api/v1/courses/42/assignments"
     assert assignments.url.params["order_by"] == "due_at"
     assert grades.url.path == "/api/v1/courses/42/enrollments"
     assert grades.url.params["user_id"] == "self"
     assert grades.url.params["type[]"] == "StudentEnrollment"
-    assert submissions.url.path == "/api/v1/courses/42/assignments/7/submissions"
+    assert submissions.url.path == "/api/v1/courses/42/assignments/7/submissions/self"
+    assert (courses.url.path, me.url.path) == ("/api/v1/courses", "/api/v1/users/self")
     assert calendar.url.path == "/api/v1/calendar_events"
     assert calendar.url.params["type"] == "event"
 
@@ -659,6 +680,49 @@ def test_canvas_auth_url_carries_a_valid_pkce_challenge():
 TRAVERSAL_ID = "1/../../users/self/enrollments?x=y"
 
 
+@pytest.mark.parametrize("dots", [".", ".."])
+def test_path_segment_refuses_a_bare_dot_segment(dots):
+    # httpx collapses these, so tasks/.. would reach (and delete) the parent list.
+    with pytest.raises(ConnectorError):
+        path_segment(dots)
+    assert path_segment("...") == "..."
+    assert path_segment("a.b") == "a.b"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "pasted",
+    [
+        "https://School.Instructure.com/courses/123",
+        "https://school.instructure.com/?login_success=1",
+    ],
+)
+async def test_canvas_keeps_only_the_scheme_and_host_of_a_pasted_address(pasted):
+    page_two = "https://school.instructure.com/api/v1/courses?page=2"
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("page") == "2":
+            return httpx.Response(200, json=[{"id": 2}])
+        return httpx.Response(200, json=[{"id": 1}], headers={"Link": f'<{page_two}>; rel="next"'})
+
+    recorder = _Recorder(responder)
+    connector = CanvasConnector(base_url=pasted, client_id="cid", client_secret="cs")
+    async with _wired(connector, recorder):
+        await connector.authenticate({"access_token": "tok"})
+        items = await connector._api_get("/courses")
+
+    # Both pages were read: the lowercased next link is on the same instance.
+    assert items == [{"id": 1}, {"id": 2}]
+    assert [str(r.url).split("?")[0] for r in recorder.requests] == [
+        "https://school.instructure.com/api/v1/courses"
+    ] * 2
+
+
+def test_canvas_refuses_an_address_httpx_cannot_parse():
+    with pytest.raises(ConnectorError):
+        CanvasConnector(base_url="https://school.instructure.com:abc", client_id="", client_secret="")
+
+
 @pytest.mark.asyncio
 async def test_canvas_course_id_cannot_add_path_segments():
     recorder = _Recorder(_json_ok([]))
@@ -697,7 +761,7 @@ async def test_canvas_grades_and_submission_ids_are_encoded():
     # Every request still lands on the same two collection endpoints.
     assert [p.split("?")[0].split("/")[-1] for p in raw_paths] == [
         "enrollments",
-        "submissions",
+        "self",
     ]
 
 

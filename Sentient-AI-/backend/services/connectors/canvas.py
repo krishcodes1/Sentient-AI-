@@ -191,14 +191,21 @@ ACTIONS: tuple[ToolSpec, ...] = (
     ),
     ToolSpec(
         "get_calendar_events",
-        "List upcoming Canvas calendar events.",
+        "List Canvas calendar events in the next N days from the user's own calendar "
+        "and current courses.",
         ActionCategory.READ,
+        _schema(
+            days={
+                "type": "integer",
+                "description": "Days ahead to cover (default 7, at most 30)",
+            },
+        ),
         required_scope="calendar.read",
         starter=True,
     ),
     ToolSpec(
         "get_submissions",
-        "List submissions for a Canvas assignment.",
+        "Get the user's own submission for a Canvas assignment (state, score, grade).",
         ActionCategory.READ,
         _schema(
             course_id={"type": "string", "description": "Numeric Canvas course id from canvas.get_courses (not the course code)", "required": True},
@@ -300,6 +307,14 @@ _CANVAS_PATHS: tuple[str, ...] = ("/api/v1/", "/login/oauth2/token", "/files/")
 _FILES_DEFAULT = 20
 _FILES_MAX = 50
 _FILE_ID_RE_CHARS = frozenset("0123456789")
+# Canvas reads at most 10 context codes per calendar_events request.
+_CALENDAR_CONTEXTS = 10
+
+
+def _not_allowed(response: httpx.Response) -> bool:
+    """Canvas answers a permission refusal with 401 too; only its body says
+    the token itself is fine."""
+    return response.status_code == 401 and json_object(response).get("status") == "unauthorized"
 
 
 class CanvasConnector(BaseConnector):
@@ -346,7 +361,12 @@ class CanvasConnector(BaseConnector):
         timeout_s: Optional[float] = None,
     ) -> None:
         super().__init__(timeout_s=timeout_s, rate_limit=self.CANVAS_RATE_LIMIT)
-        self._base_url = base_url.rstrip("/")
+        try:
+            url = httpx.URL(base_url)
+        except httpx.InvalidURL:
+            raise ConnectorError("The Canvas URL is not a valid address.") from None
+        # A pasted page address or capitals would break every path and same-instance check.
+        self._base_url = str(httpx.URL(scheme=url.scheme, host=url.host, port=url.port))
         self._client_id = client_id
         self._client_secret = client_secret
         self._redirect_uri = redirect_uri
@@ -585,7 +605,7 @@ class CanvasConnector(BaseConnector):
         resp = await client.get(url, headers=self._headers(), params=params)
 
         # Auto-refresh on 401
-        if resp.status_code == 401 and self._refresh_token:
+        if resp.status_code == 401 and self._refresh_token and not _not_allowed(resp):
             await self._refresh_access_token()
             resp = await client.get(url, headers=self._headers(), params=params)
 
@@ -639,7 +659,7 @@ class CanvasConnector(BaseConnector):
         url = f"{self._base_url}/api/v1{path}"
         resp = await client.post(url, headers=self._headers(), json=json_body)
 
-        if resp.status_code == 401 and self._refresh_token:
+        if resp.status_code == 401 and self._refresh_token and not _not_allowed(resp):
             await self._refresh_access_token()
             resp = await client.post(url, headers=self._headers(), json=json_body)
 
@@ -772,12 +792,32 @@ class CanvasConnector(BaseConnector):
         except canvas_grades.GradeInputError as exc:
             raise ConnectorError(str(exc)) from exc
 
-    async def get_calendar_events(self) -> dict[str, Any]:
-        """Calendar events as compact rows (``canvas_assignments``): the raw
-        objects carry HTML and, for an assignment's event, the whole
-        assignment with its secure_params."""
+    async def get_calendar_events(self, days: Any = None) -> dict[str, Any]:
+        """Events in the next *days* days on the user's own calendar and their
+        current courses (Canvas reads at most 10 calendars per request, so
+        the user's plus the first nine courses from get_courses), as compact
+        rows (``canvas_assignments``): the raw objects carry HTML and, for an
+        assignment's event, the whole assignment with its secure_params.
+        Without dates Canvas lists only today, and without context codes
+        only the personal calendar, which is named by the numeric user id."""
+        from . import canvas_activity as activity
+        from . import canvas_upcoming as upcoming
+
+        window = upcoming.window_for(days)
+        names = activity.course_names(await self.get_courses())
+        me = await self._api_get("/users/self")
+        user = activity._ident(me.get("id")) if isinstance(me, dict) else None
+        codes = [f"user_{user}"] if user else []
+        codes += [f"course_{course}" for course in names]
         raw = await self._api_get(
-            "/calendar_events", params={"type": "event", "per_page": 50}
+            "/calendar_events",
+            params={
+                "type": "event",
+                "start_date": upcoming.iso(window.now),
+                "end_date": upcoming.iso(window.until),
+                "context_codes[]": codes[:_CALENDAR_CONTEXTS],
+                "per_page": 50,
+            },
         )
         return canvas_assignments.calendar_events(raw, base_url=self._base_url)
 
@@ -838,7 +878,8 @@ class CanvasConnector(BaseConnector):
         their current courses (at most 12) or in *course_id*: one
         /students/submissions read per course with ``graded_since`` (a
         student sees only their own). A course the account may not open
-        (403, 404) is skipped rather than failing the rest."""
+        (403, 404, or Canvas's permission 401) is skipped rather than failing
+        the rest."""
         from . import canvas_activity as activity
 
         wanted = activity.parse_course_id(course_id)
@@ -857,7 +898,7 @@ class CanvasConnector(BaseConnector):
                     },
                 )
             except httpx.HTTPStatusError as exc:
-                if exc.response.status_code in (403, 404):
+                if exc.response.status_code in (403, 404) or _not_allowed(exc.response):
                     continue
                 raise
             rows.extend(activity.grade_rows(course, names.get(course, ""), raw, base_url=self._base_url))
@@ -866,15 +907,16 @@ class CanvasConnector(BaseConnector):
     async def get_submissions(
         self, course_id: int | str, assignment_id: int | str
     ) -> dict[str, Any]:
-        """An assignment's submissions as compact rows (``canvas_assignments``):
-        the raw objects carry the submitted text and file links with a
-        download token in them."""
+        """The user's own submission for an assignment as one compact row
+        (``canvas_assignments``): the raw object carries the submitted text
+        and file links with a download token in them. Canvas lists an
+        assignment's submissions only to graders, so a student reads their
+        own (``submissions/self``)."""
         raw = await self._api_get(
             f"/courses/{path_segment(course_id)}/assignments/"
-            f"{path_segment(assignment_id)}/submissions",
-            params={"per_page": 100},
+            f"{path_segment(assignment_id)}/submissions/self"
         )
-        return canvas_assignments.submissions(raw)
+        return canvas_assignments.submissions([raw] if isinstance(raw, dict) else raw)
 
     async def submit_assignment(
         self,
@@ -1043,7 +1085,15 @@ class CanvasConnector(BaseConnector):
         if not method_name:
             raise ConnectorError(f"Unknown Canvas action: {action}")
         method = getattr(self, method_name)
-        result = await method(**params)
+        try:
+            result = await method(**params)
+        except httpx.HTTPStatusError as exc:
+            if _not_allowed(exc.response):
+                raise ConnectorError(
+                    "Canvas refused this for this account. That usually means a wrong course or "
+                    "assignment id (look it up again from the course list), not a token problem."
+                ) from None
+            raise
         # Normalise to dict for ConnectorResponse
         if isinstance(result, list):
             return {"items": result, "count": len(result)}

@@ -611,14 +611,19 @@ describe("guided connect", () => {
     );
   });
 
-  it("clamps the rate limit to 1 to 600", async () => {
+  it("lets the rate limit be retyped and clamps it to 1 to 600 on blur", async () => {
     const { user } = setup([CANVAS]);
     const dialog = await openConnect(user, "Canvas LMS");
     await openMoreSettings(user, dialog);
     const rate = within(dialog).getByLabelText("Most actions per minute");
     expect(rate).toHaveValue(30);
+    // Clamping on each keystroke turned the cleared field into 1, so typing 60 gave 160.
+    await user.clear(rate);
+    await user.type(rate, "60");
+    expect(rate).toHaveValue(60);
     await user.clear(rate);
     await user.type(rate, "1000");
+    await user.tab();
     expect(rate).toHaveValue(600);
   });
 });
@@ -1154,13 +1159,23 @@ describe("existing rows", () => {
     expect(getConnectors).toHaveBeenCalledTimes(2);
   });
 
-  it("testing a pasted-token row does not reload the list", async () => {
-    const { user } = setup([CANVAS], [row({ id: "c-c", connector_type: "canvas", display_name: "School" })]);
+  it("testing a pasted-code row reloads the list, so a refused code says to enter a new one", async () => {
+    const pasted = row({ id: "c-c", connector_type: "canvas", display_name: "School" });
+    const { user } = setup([CANVAS], [pasted]);
     const card = await screen.findByRole("article", { name: "School" });
-    vi.mocked(testConnector).mockResolvedValue({ ok: true, detail: "Connection verified." });
+    vi.mocked(testConnector).mockResolvedValue({
+      ok: false,
+      detail: "Service health check failed. The stored credentials may be invalid or expired. Re-enter them to fix.",
+    });
+    vi.mocked(getConnectors).mockResolvedValue([{ ...pasted, needs_reconnect: true }]);
     await user.click(within(card).getByRole("button", { name: "Test School" }));
-    expect(await within(card).findByText("Connection verified.")).toBeInTheDocument();
-    expect(getConnectors).toHaveBeenCalledTimes(1);
+
+    expect(await within(card).findByText("needs reconnect")).toBeInTheDocument();
+    expect(getConnectors).toHaveBeenCalledTimes(2);
+    expect(within(card).getByText(/School stopped accepting its code/)).toHaveTextContent(
+      "Enter a new code with Edit.",
+    );
+    expect(within(card).queryByText(/sign-in/)).not.toBeInTheDocument();
   });
 
   it("Reconnect and Grant more access start the sign-in with connector_id", async () => {

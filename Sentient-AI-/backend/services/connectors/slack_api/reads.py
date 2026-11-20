@@ -89,6 +89,7 @@ READ_ACTIONS: tuple[ToolSpec, ...] = (
             channel=_CHANNEL,
             ts={"type": "string", "description": "ts of the parent message", "required": True},
             limit=_LIMIT,
+            oldest={"type": "string", "description": "Only messages after this ts"},
         ),
         required_scope="messages.read",
     ),
@@ -218,9 +219,14 @@ class SlackReadsMixin(SlackBase):
             limit=count,
         )
 
-    async def get_thread(self, channel: Any, ts: Any, limit: Any = None) -> list[dict[str, Any]]:
+    async def get_thread(
+        self, channel: Any, ts: Any, limit: Any = None, oldest: Any = None
+    ) -> list[dict[str, Any]]:
         count = clamp_limit(limit)
-        params = {"channel": channel_id(channel), "ts": message_ts(ts), "limit": count}
+        params: dict[str, Any] = {"channel": channel_id(channel), "ts": message_ts(ts), "limit": count}
+        after = optional_ts(oldest, "oldest")
+        if after:
+            params["oldest"] = after
         return await self._paged(
             "conversations.replies",
             "messages",

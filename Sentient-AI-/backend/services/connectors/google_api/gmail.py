@@ -75,7 +75,8 @@ from .mime import (
 
 # Body characters returned by get_message, and per message in a list or thread.
 MESSAGE_BODY_CHARS = 8000
-LIST_BODY_CHARS = 1500
+# Short so a whole list fits its RESULT_CHAR_BUDGETS entry (services/agent/runtime.py).
+LIST_BODY_CHARS = 300
 # Most recent messages of a thread returned by get_thread.
 THREAD_MESSAGES = 20
 # Characters of attachment text returned per call.

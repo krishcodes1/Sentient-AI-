@@ -405,6 +405,36 @@ async def test_auto_approve_tier_executes_write_without_parking(session_factory)
     assert any(e["event"] == "tool_executed" for e in audit.entries)
 
 
+@pytest.mark.parametrize("raises", [False, True])
+@pytest.mark.asyncio
+async def test_a_call_that_ran_and_failed_is_audited_as_failed(session_factory, raises):
+    """Connector health counts a tool_executed row as a success unless it
+    says otherwise: a 401 answer, or a call that raised, must say so."""
+    from services.agent.providers import ToolCall
+    from services.agent.tool_registry import ConnectorSpec, build_tools
+    from tests.conftest import make_user
+
+    class FailingExecutor(RecordingExecutor):
+        async def execute(self, tool_name, arguments, user_id, approved=False, *, task_id=None):
+            if raises:
+                raise RuntimeError("boom")
+            return {"ok": False, "error": "HTTP 401 from Gmail: the credentials were rejected."}
+
+    user, _ = await make_user(session_factory)
+    runtime, _, audit = _build_runtime(
+        session_factory, [ToolCall(id="tc1", name="google_workspace.get_messages", arguments={})]
+    )
+    runtime._executor = FailingExecutor()
+    await runtime.chat(
+        messages=[{"role": "user", "content": "check my mail"}],
+        tools=build_tools([ConnectorSpec("google_workspace")]),
+        user_id=str(user.id),
+    )
+
+    (executed,) = [e for e in audit.entries if e["event"] == "tool_executed"]
+    assert executed["outcome"] == "failed"
+
+
 @pytest.mark.asyncio
 async def test_auto_approve_tier_still_parks_always_confirm_send_email(session_factory):
     """send_email is always_confirm: even with an auto_approve connector and

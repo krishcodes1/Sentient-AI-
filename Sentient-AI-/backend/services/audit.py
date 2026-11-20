@@ -676,6 +676,7 @@ class RuntimeAuditLogger:
         # checks that escalated a call and the kinds of the notes its card
         # carries (never a note's text); "origin" is the job that parked a
         # card outside a turn (security wave, services/security/call_checks.py).
+        # "outcome" is "failed" on a call that ran and failed (connector health).
         for key in (
             "reason",
             "policy",
@@ -695,6 +696,7 @@ class RuntimeAuditLogger:
             "check",
             "note_kinds",
             "origin",
+            "outcome",
         ):
             if entry.get(key) is not None:
                 reasoning[key] = entry[key]

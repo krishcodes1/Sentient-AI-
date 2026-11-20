@@ -27,6 +27,7 @@ from services.connectors.base import (
     RateLimitExceededError,
     UserConfirmationRequired,
 )
+from services.connectors.google_api.gmail import LIST_BODY_CHARS
 from tests.connectors.test_google_workspace_support import (
     body,
     make,
@@ -96,7 +97,7 @@ async def test_get_messages_clamps_the_count_and_fetches_short_bodies():
         b"/gmail/v1/users/me/messages/a?format=full", b"/gmail/v1/users/me/messages/b?format=full",
     ]
     assert [m["id"] for m in messages] == ["a", "b"]
-    assert len(messages[0]["body"]) == 1500
+    assert len(messages[0]["body"]) == LIST_BODY_CHARS
     assert messages[0]["truncated"] is True and "get_message" in messages[0]["hint"]
 
 
@@ -571,3 +572,15 @@ def test_mime_helpers_are_bounded_and_header_safe():
     raw = mime.build_raw("a@example.com", "S", "B", cc="c@example.com", extra_headers={"In-Reply-To": "<x@y>"})
     parsed = email.message_from_bytes(base64.urlsafe_b64decode(raw), policy=email.policy.default)
     assert (parsed["To"], parsed["Cc"], parsed["In-Reply-To"]) == ("a@example.com", "c@example.com", "<x@y>")
+
+
+def test_part_text_is_decoded_in_its_own_charset():
+    from services.connectors.google_api import mime
+
+    latin = {"headers": [{"name": "Content-Type", "value": 'text/plain; charset="ISO-8859-1"'}],
+             "body": {"data": _b64("café".encode("latin-1"))}}
+    assert mime.decode_part_data(latin) == "café"
+    for charset in ("x-unknown", "idna"):
+        unknown = {"headers": [{"name": "Content-Type", "value": f"text/plain; charset={charset}"}],
+                   "body": {"data": _b64("café")}}
+        assert mime.decode_part_data(unknown) == "café"

@@ -59,6 +59,42 @@ async def test_get_events_shapes_and_caps_events():
 
 
 @pytest.mark.asyncio
+async def test_get_events_follows_the_page_token_up_to_four_pages():
+    pages = [{"items": [{"id": "a"}], "nextPageToken": "t1"}, {"items": [{"id": "b"}]}]
+    connector, seen = make(lambda r: httpx.Response(200, json=pages.pop(0)))
+    assert [e["id"] for e in await connector.get_events()] == ["a", "b"]
+    assert "pageToken" not in query(seen[0]) and query(seen[1])["pageToken"] == "t1"
+
+    tokens = iter(range(10))
+    connector, seen = make(lambda r: httpx.Response(200, json={"items": [{"id": "x"}], "nextPageToken": f"t{next(tokens)}"}))
+    assert len(await connector.get_events()) == 4 and len(seen) == 4
+
+
+@pytest.mark.asyncio
+async def test_the_read_window_ends_a_week_after_its_start_and_takes_dates():
+    connector, seen = make(ok({"items": []}))
+    await connector.get_events(time_min="2026-12-25T00:00:00Z")
+    assert query(seen[0])["timeMin"] == "2026-12-25T00:00:00Z"
+    assert query(seen[0])["timeMax"] == "2027-01-01T00:00:00+00:00"
+    await connector.get_events(time_min="2026-11-20", time_max="2026-11-21")
+    assert (query(seen[1])["timeMin"], query(seen[1])["timeMax"]) == ("2026-11-20T00:00:00Z", "2026-11-21T00:00:00Z")
+
+    connector, seen = make(ok({"calendars": {}}))
+    result = await connector.check_availability(time_min="2026-12-25")
+    assert (result["time_min"], result["time_max"]) == ("2026-12-25T00:00:00Z", "2027-01-01T00:00:00+00:00")
+    with pytest.raises(ConnectorError, match="time_max"):
+        await connector.check_availability(time_max="2026-11-20T10:00:00")
+    assert len(seen) == 1
+
+
+@pytest.mark.asyncio
+async def test_check_availability_refuses_to_call_you_free_when_google_could_not_read_it():
+    connector, _ = make(ok({"calendars": {"primary": {"errors": [{"domain": "global", "reason": "notFound"}]}}}))
+    with pytest.raises(ConnectorError, match="busy times"):
+        await connector.check_availability()
+
+
+@pytest.mark.asyncio
 async def test_list_calendars():
     items = [{"id": "primary@example.com", "summary": "Me", "accessRole": "owner", "primary": True}, {"id": "c2"}]
     connector, seen = make(ok({"items": items}))
