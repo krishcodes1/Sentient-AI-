@@ -1129,8 +1129,27 @@ async def test_fetch_page_says_what_to_do_when_a_site_refuses_automated_readers(
         "status_code": status,
         "url": "https://example.com/wall",
         "hint": (
-            "This site refuses automated readers. Use another source, or open the page in "
-            "the browser if you can."
+            "This site blocks automated reads. Don't retry this page. Answer from the search "
+            "results you already have and name the source, or say plainly what is still missing."
+        ),
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_page_read_that_times_out_says_so_and_points_at_the_search_results():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("slow", request=request)
+
+    tools = toolkit(handler, {"example.com": (PUBLIC_ADDRESS,)})
+    result = await tools.execute("fetch_page", {"url": "https://example.com/slow"})
+
+    assert result == {
+        "ok": False,
+        "error": "The site did not answer in time (ReadTimeout).",
+        # Slow is not blocked: the hint never says the site blocks readers.
+        "hint": (
+            "Don't retry this page. Answer from the search results you already have and "
+            "name the source, or say plainly what is still missing."
         ),
     }
 
@@ -1337,6 +1356,48 @@ async def test_screenshot_capture_failure_is_not_reported_as_a_missing_install()
 
     assert result["ok"] is False
     assert "playwright_available" not in result
+
+
+@pytest.mark.parametrize(
+    ("message", "reason"),
+    [
+        # What Playwright raises when a site closes the connection on the browser.
+        ("Page.goto: net::ERR_HTTP2_PROTOCOL_ERROR at https://example.com/?token=s3cret", "net::ERR_HTTP2_PROTOCOL_ERROR"),
+        # No net:: code: the class name is all that is safe to show.
+        ("Page.goto: Target closed at https://example.com/?token=s3cret", "Error"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_screenshot_failure_names_the_browsers_reason_and_never_the_address(
+    message: str, reason: str
+):
+    class Error(Exception):
+        """Same class name as playwright's own, which is why it used to read just "Error"."""
+
+    class FailingPlaywright:
+        def async_playwright(self) -> Any:
+            raise Error(message)
+
+    tools = WebToolkit(
+        resolver=resolver_for({"example.com": (PUBLIC_ADDRESS,)}),
+        playwright_loader=lambda: FailingPlaywright(),
+    )
+    result = await tools.execute("screenshot", {"url": "https://example.com/"})
+
+    assert result["ok"] is False
+    assert result["error"].startswith(f"Screenshot failed: {reason}. Don't retry this page.")
+    assert "s3cret" not in result["error"] and "example.com" not in result["error"]
+
+
+def test_the_prompt_tells_the_model_to_report_only_tried_steps_and_to_fall_back_to_search():
+    from services.agent.runtime import SECURITY_SYSTEM_PROMPT
+
+    rules = " ".join(SECURITY_SYSTEM_PROMPT.split("<tool_use>")[1].split("</tool_use>")[0].split())
+    assert "Only report what your own tool calls returned" in rules
+    assert "try it or say you haven't" in rules
+    assert "answer from the search results you already have and name the source" in rules
+    assert "read one likely page" in rules
+    assert "also give the page link, and its date when the page shows one" in rules
 
 
 @pytest.mark.asyncio

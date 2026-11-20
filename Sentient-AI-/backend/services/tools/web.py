@@ -248,10 +248,16 @@ _READABLE_CONTENT_TYPES = ("text/html", "application/xhtml", "text/plain", "text
 # a rate limit, or a bot check served as "unavailable". Asking again gets the
 # same answer, so the error carries what still works.
 _REFUSED_STATUSES = frozenset({401, 403, 429, 503})
-FETCH_REFUSED_HINT = (
-    "This site refuses automated readers. Use another source, or open the page in the "
-    "browser if you can."
+# What every failed page read tells the model to do next, so it answers from the
+# search rows it already has instead of retrying a site that will not open.
+_USE_SEARCH_INSTEAD = (
+    "Don't retry this page. Answer from the search results you already have and name "
+    "the source, or say plainly what is still missing."
 )
+FETCH_REFUSED_HINT = f"This site blocks automated reads. {_USE_SEARCH_INSTEAD}"
+# Playwright raises a bare ``Error`` for a page that closes the connection or
+# refuses the browser; its reason is this code (``net::ERR_HTTP2_PROTOCOL_ERROR``).
+_BROWSER_ERROR_CODE = re.compile(r"net::ERR_[A-Z0-9_]+")
 
 # web.research: one READ call that searches and reads the top results, so
 # a comparison costs one tool round instead of a search plus a fetch per
@@ -526,6 +532,12 @@ class WebToolkit:
             return _error(str(exc), blocked=True)
         except WebToolError as exc:
             return _error(str(exc))
+        except httpx.TimeoutException as exc:
+            # Slow is not blocked: only say what to do next (screenshots time out in Playwright, not here).
+            return _error(
+                f"The site did not answer in time ({type(exc).__name__}).",
+                **({"hint": _USE_SEARCH_INSTEAD} if action == "fetch_page" else {}),
+            )
         except httpx.HTTPError as exc:
             return _error(f"Request failed: {type(exc).__name__}")
         finally:
@@ -1242,7 +1254,11 @@ class WebToolkit:
                     f"browser is missing. {_MISSING_BROWSER_HINT}"
                 ) from exc
             logger.warning("web_screenshot_failed", url=url, error=message)
-            raise WebToolError(f"Screenshot failed: {type(exc).__name__}") from exc
+            # The browser's reason is its net:: code; the message around it
+            # carries the address, so only the code is kept.
+            code = _BROWSER_ERROR_CODE.search(message)
+            reason = code.group(0) if code else type(exc).__name__
+            raise WebToolError(f"Screenshot failed: {reason}. {_USE_SEARCH_INSTEAD}") from exc
 
         return image, final_url, width, height
 
