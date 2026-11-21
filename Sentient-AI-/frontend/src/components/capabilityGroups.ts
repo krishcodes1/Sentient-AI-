@@ -105,7 +105,7 @@ export const CATEGORIES: Category[] = [
     label: "Memory and learning",
     blurb: "What Crawler remembers about you, your documents, and study help.",
     icon: BookOpen,
-    keys: ["save_memories", "knowledge_base", "knowledge_semantic", "study", "tutor_mode"],
+    keys: ["save_memories", "skills", "knowledge_base", "knowledge_semantic", "study", "tutor_mode"],
   },
   { id: "other", label: "Other", blurb: "Everything else Crawler can do.", icon: Shapes, keys: [] },
 ];

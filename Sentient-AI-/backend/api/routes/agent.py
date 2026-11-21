@@ -48,6 +48,7 @@ from models.connector import ConnectorConfig
 from models.conversation import Conversation, Message, MessageRole
 from models.memory import Memory
 from models.pending_action import PendingAction
+from models.skill import Skill
 from models.user import User
 from models.vault_item import VaultItem
 from services import action_text
@@ -55,6 +56,7 @@ from services import capabilities as capability_registry
 from services.auth import get_current_user, get_current_user_streaming
 from services.capabilities.prompt import render_permissions_block
 from services.memory import render_memory_block
+from services.skills import render_skills_block
 from services.notifications import cards as approval_cards
 from services.notifications.progress import phrase_for as progress_phrase
 from services.agent import cancel as agent_cancel
@@ -728,6 +730,7 @@ class TurnContext(NamedTuple):
     default) changes no call site."""
 
     tools: list
+    # The user's saved memories and the list of their skills.
     memory_block: Optional[str]
     permissions_text: str
     # The conversation's tutor mode (services/tutor), when the turn runs in
@@ -840,6 +843,20 @@ async def _build_tools_and_memory(
             .order_by(Memory.created_at.desc())
         )
         memory_block = render_memory_block(list(mem_result.scalars().all()))
+
+    # The user's skills ride with their memories: both are their own context,
+    # and an unattended run gets neither (services/automation/turns.py).
+    skills_block: Optional[str] = None
+    if "skills" in enabled_capabilities:
+        skill_rows = await db.execute(
+            select(Skill).where(Skill.user_id == current_user.id, Skill.enabled.is_(True))
+        )
+        skills_block = render_skills_block(skill_rows.scalars().all())
+    if skills_block is None:
+        # Nothing to read: skills.read would only take a tool slot.
+        tools = [t for t in tools if t.name != "skills.read"]
+    else:
+        memory_block = "\n\n".join(b for b in (memory_block, skills_block) if b)
 
     tutor = await tutor_service.load_tutor_turn(
         db,

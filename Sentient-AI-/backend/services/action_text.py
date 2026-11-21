@@ -868,7 +868,8 @@ def _s_study_quiz(a: _Args) -> str:
     }.get(action, "Start or grade a practice quiz")
 
 
-_TRIGGER_EVENTS = {
+# Public: GET /api/triggers shows the same words on the Automations page.
+TRIGGER_EVENTS = {
     "email.new": "a new email arrives",
     "canvas.announcement": "a new Canvas announcement is posted",
     "canvas.assignment": "a new Canvas assignment is posted",
@@ -884,7 +885,7 @@ def _trigger_when(a: _Args) -> str:
     if source == "calendar.starting_soon":
         lead = _span(a.number("lead_minutes"))
         return f"{lead} before each event starts" if lead else "whenever an event is about to start"
-    event = _TRIGGER_EVENTS.get(source, "something new happens")
+    event = TRIGGER_EVENTS.get(source, "something new happens")
     if source == "email.new":
         senders = a.texts("senders")
         if senders:

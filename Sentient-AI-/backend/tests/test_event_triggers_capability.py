@@ -138,6 +138,7 @@ async def test_the_routes_list_pause_resume_and_delete_only_the_owners(client, s
     listed = await client.get("/api/triggers", headers=headers)
     assert listed.status_code == 200 and listed.json()["count"] == 1
     assert listed.json()["triggers"][0]["last_error"] == "The app did not answer in time."
+    assert listed.json()["triggers"][0]["when"] == "a new Canvas announcement is posted"
     assert (await client.get("/api/triggers", headers=strange)).json()["count"] == 0
 
     assert (await client.patch(f"/api/triggers/{trigger_id}", json={"paused": True}, headers=strange)).status_code == 404

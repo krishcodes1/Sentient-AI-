@@ -1166,6 +1166,25 @@ async def export_account(
             yield chunk
         yield ","
 
+        # The skills this account wrote on the Skills page.
+        from models.skill import Skill
+
+        async for chunk in _stream_table(
+            Skill,
+            Skill.created_at,
+            "skills",
+            lambda s: {
+                "name": s.name,
+                "description": s.description,
+                "instructions": s.instructions,
+                "enabled": s.enabled,
+                "created_at": s.created_at,
+                "updated_at": s.updated_at,
+            },
+        ):
+            yield chunk
+        yield ","
+
         async for chunk in _stream_table(
             AuditLog,
             AuditLog.timestamp,

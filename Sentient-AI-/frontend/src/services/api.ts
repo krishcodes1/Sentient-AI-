@@ -759,7 +759,7 @@ export async function getAuditStats(): Promise<AuditStats> {
 }
 
 /** The browser's IANA zone, or null where the runtime cannot say. */
-function browserTimeZone(): string | null {
+export function browserTimeZone(): string | null {
   try {
     return Intl.DateTimeFormat().resolvedOptions().timeZone || null;
   } catch {
@@ -1610,4 +1610,78 @@ export async function requestFileUpload(checkId: string, file?: File): Promise<F
 /** Forget one check (and any copy held for an upload). */
 export async function forgetFileCheck(checkId: string): Promise<void> {
   return request<void>(`/security/files/${encodeURIComponent(checkId)}`, { method: "DELETE" });
+}
+
+// Automations page: scheduled tasks, reminders and triggers. A refusal (the switch is off, a
+// rule, a taken label) arrives as an ApiError whose message says why.
+import type { Reminder, ScheduleCreate, ScheduleList, ScheduleTool, Skill, TriggerItem } from "@/types";
+
+export async function listSchedules(): Promise<ScheduleList> {
+  return request<ScheduleList>("/schedules");
+}
+
+/** The read tools a new task may use (the form's picker). */
+export async function listScheduleTools(): Promise<ScheduleTool[]> {
+  return (await request<{ tools: ScheduleTool[] }>("/schedules/tools")).tools;
+}
+
+export async function createSchedule(body: ScheduleCreate): Promise<void> {
+  await request("/schedules", { method: "POST", body: JSON.stringify(body) });
+}
+
+export async function setSchedulePaused(id: string, paused: boolean): Promise<void> {
+  await request(`/schedules/${id}`, { method: "PATCH", body: JSON.stringify({ paused }) });
+}
+
+export async function runScheduleNow(id: string): Promise<void> {
+  await request(`/schedules/${id}/run`, { method: "POST" });
+}
+
+export async function deleteSchedule(id: string): Promise<void> {
+  return request<void>(`/schedules/${id}`, { method: "DELETE" });
+}
+
+/** Reminders still to come, soonest first. */
+export async function listReminders(): Promise<Reminder[]> {
+  return request<Reminder[]>("/reminders/");
+}
+
+export async function createReminder(body: { title: string; note?: string; due_at: string }): Promise<Reminder> {
+  return request<Reminder>("/reminders/", { method: "POST", body: JSON.stringify(body) });
+}
+
+export async function cancelReminder(id: string): Promise<void> {
+  return request<void>(`/reminders/${id}`, { method: "DELETE" });
+}
+
+export async function listTriggers(): Promise<TriggerItem[]> {
+  return (await request<{ triggers: TriggerItem[] }>("/triggers")).triggers;
+}
+
+export async function setTriggerPaused(id: string, paused: boolean): Promise<void> {
+  await request(`/triggers/${id}`, { method: "PATCH", body: JSON.stringify({ paused }) });
+}
+
+export async function deleteTrigger(id: string): Promise<void> {
+  return request<void>(`/triggers/${id}`, { method: "DELETE" });
+}
+
+// Skills page.
+export async function listSkills(): Promise<Skill[]> {
+  return request<Skill[]>("/skills");
+}
+
+export async function createSkill(body: Pick<Skill, "name" | "description" | "instructions">): Promise<Skill> {
+  return request<Skill>("/skills", { method: "POST", body: JSON.stringify(body) });
+}
+
+export async function updateSkill(
+  id: string,
+  body: Partial<Pick<Skill, "description" | "instructions" | "enabled">>,
+): Promise<Skill> {
+  return request<Skill>(`/skills/${id}`, { method: "PATCH", body: JSON.stringify(body) });
+}
+
+export async function deleteSkill(id: string): Promise<void> {
+  return request<void>(`/skills/${id}`, { method: "DELETE" });
 }

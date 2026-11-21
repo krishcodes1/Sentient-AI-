@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.database import get_db
 from models.audit import AuditStatus
 from models.user import User
+from services.action_text import TRIGGER_EVENTS
 from services.audit import append_audit_log
 from services.auth import get_current_user
 
@@ -72,7 +73,12 @@ async def list_triggers(request: Request, current_user: User = Depends(get_curre
     result = await _toolkit(request).list_triggers(str(current_user.id))
     if not result.get("ok"):
         raise _refusal(result)
-    return {"count": result.get("count"), "triggers": result.get("triggers")}
+    # The page's words for each source, the same the approval card uses.
+    triggers = [
+        {**t, "when": TRIGGER_EVENTS.get(t["source"], "something new happens")}
+        for t in result.get("triggers") or []
+    ]
+    return {"count": result.get("count"), "triggers": triggers}
 
 
 @router.patch("/{trigger_id}")

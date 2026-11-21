@@ -1280,6 +1280,11 @@ app.include_router(security_site_rules_routes.router, prefix="/api")
 app.include_router(security_tool_rules_routes.router, prefix="/api")
 app.include_router(security_files_routes.router, prefix="/api")
 
+# User skills: the Skills page's routes.
+from api.routes import skills as skills_routes  # noqa: E402
+
+app.include_router(skills_routes.router, prefix="/api")
+
 
 @app.get("/")
 async def root() -> dict[str, str]:

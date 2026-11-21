@@ -211,3 +211,14 @@ async def test_the_browser_zone_is_stored_from_the_header(client, session_factor
     finally:
         app.state.agent_runtime = saved
     assert uuid.UUID(conversation_id)
+
+
+@pytest.mark.asyncio
+async def test_tools_lists_only_the_reads_a_task_may_use(client, session_factory):
+    _, headers = await account(session_factory, "schedules-tools@example.com")
+    response = await client.get("/api/schedules/tools", headers=headers)
+    assert response.status_code == 200
+    names = {tool["name"] for tool in response.json()["tools"]}
+    assert "web.search" in names
+    # A write, a family a run may never use, and a tool a run may never use.
+    assert not names & {"reminders.create", "schedule.list", "web.screenshot"}

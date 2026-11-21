@@ -81,6 +81,9 @@ from services.capabilities import file_reputation
 from services.capabilities import errand_runs
 from services.capabilities import calendar_errands
 
+# User skills: playbooks from the Skills page.
+from services.capabilities import skills
+
 # isort: on
 
 logger = structlog.get_logger(__name__)
@@ -149,6 +152,8 @@ REGISTRY: tuple[Capability, ...] = (
     errand_runs.CAPABILITY,
     # Errands planned from the owner's calendar notes (off; needs errand_runs).
     calendar_errands.CAPABILITY,
+    # User skills (on; skills.read and the prompt's list of skills).
+    skills.CAPABILITY,
 )
 
 # Owner-editable settings a capability carries, by key, with their defaults

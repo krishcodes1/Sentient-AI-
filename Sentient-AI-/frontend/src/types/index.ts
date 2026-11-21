@@ -1337,3 +1337,77 @@ export interface FileUploadRequest {
   state: "upload_pending";
   reason: string;
 }
+
+// Automations page: scheduled tasks (/schedules), reminders (/reminders/) and triggers
+// (/triggers). Times are already in the task's own zone ("Tue 2026-11-24 08:00").
+export interface ScheduledTask {
+  id: string;
+  kind: "prompt" | "briefing" | "nudge";
+  label: string;
+  schedule: string;
+  timezone: string | null;
+  status: "active" | "paused" | "error";
+  next_run_local: string | null;
+  last_run_local: string | null;
+  last_status: string | null;
+  prompt?: string;
+  last_error?: string;
+}
+
+export interface ScheduleList {
+  timezone: string | null;
+  count: number;
+  tasks: ScheduledTask[];
+}
+
+export type ScheduleFreq = "once" | "daily" | "weekdays" | "weekly" | "monthly";
+
+export interface ScheduleCreate {
+  label: string;
+  prompt: string;
+  freq: ScheduleFreq;
+  time: string;
+  days?: string[];
+  day_of_month?: number;
+  date?: string;
+  tools: string[];
+  timezone?: string;
+}
+
+/** A read tool a scheduled task may use (GET /schedules/tools). */
+export interface ScheduleTool {
+  name: string;
+  description: string;
+}
+
+export interface Reminder {
+  id: string;
+  title: string;
+  note: string | null;
+  due_at: string;
+  status: "scheduled" | "delivered" | "cancelled";
+}
+
+export interface TriggerItem {
+  id: string;
+  label: string;
+  source: string;
+  /** What sets it off, in words ("a new grade is posted on Canvas"). */
+  when: string;
+  account: string | null;
+  mode: "notify" | "run_task";
+  status: "active" | "paused" | "error";
+  last_fired_at: string | null;
+  last_error?: string;
+}
+
+// Skills page (/skills): playbooks the user writes for Crawler.
+export interface Skill {
+  id: string;
+  name: string;
+  description: string;
+  instructions: string;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}

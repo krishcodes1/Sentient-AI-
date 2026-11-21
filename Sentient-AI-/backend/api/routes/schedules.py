@@ -136,6 +136,25 @@ async def get_timezone(current_user: User = Depends(get_current_user)) -> dict[s
     return {"timezone": current_user.timezone}
 
 
+@router.get("/tools")
+async def schedule_tools(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db, scope="function"),
+) -> dict[str, Any]:
+    """The read tools a task of this user may list (the Automations page's
+    picker): what their chat turns are offered, cut to the reads a scheduled
+    run may use, as create checks them (services/automation/fence.py)."""
+    from api.routes.agent import _build_tools_and_memory
+    from services.automation.fence import canonical_name, classify_tool
+
+    turn = await _build_tools_and_memory(
+        None, current_user, db, getattr(request.app.state, "installation", None)
+    )
+    reads = {canonical_name(t.name): t.description for t in turn.tools if classify_tool(t.name) == "read"}
+    return {"tools": [{"name": name, "description": text} for name, text in sorted(reads.items())]}
+
+
 @router.put("/timezone")
 async def put_timezone(
     body: TimezoneBody,

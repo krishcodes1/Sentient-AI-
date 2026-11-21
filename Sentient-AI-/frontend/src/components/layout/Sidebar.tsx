@@ -12,6 +12,8 @@ import {
   LayoutDashboard,
   MessageSquare,
   Brain,
+  CalendarClock,
+  Sparkles,
   Plug,
   Shield,
   ShieldAlert,
@@ -30,6 +32,8 @@ const navItems = [
   { to: "/", icon: LayoutDashboard, label: "Gateway", end: true },
   { to: "/chat", icon: MessageSquare, label: "Chat" },
   { to: "/memory", icon: Brain, label: "Memory" },
+  { to: "/skills", icon: Sparkles, label: "Skills" },
+  { to: "/automations", icon: CalendarClock, label: "Automations" },
   { to: "/connectors", icon: Plug, label: "Connectors" },
   // Security wave (security10): the Security page.
   { to: "/security", icon: ShieldAlert, label: "Security" },
