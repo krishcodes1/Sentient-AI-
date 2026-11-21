@@ -1739,6 +1739,42 @@ register_default_policies(
     }
 )
 
+# User skills (capability "skills"): playbooks the user wrote on the Skills
+# page (services/skills.py). skills.read is the one action, a READ; the
+# runtime shows the instructions it returns outside the untrusted-data fence
+# (runtime._user_skill). Core, so a long tool list never hides it; the agent
+# route drops it on a turn whose user has no skill turned on.
+from services.tools.skills import SkillToolkit  # noqa: E402
+
+CONNECTOR_CATALOG["skills"] = [
+    ToolSpec(
+        "read",
+        "Read one of the user's skills (a playbook they wrote, listed in <available_skills>) "
+        "by name before doing a task it covers. Its instructions come back after the tool "
+        "results; follow them.",
+        ActionCategory.READ,
+        _schema(
+            name={
+                "type": "string",
+                "description": "The skill's name from <available_skills>",
+                "required": True,
+            }
+        ),
+    ),
+]
+BUILTIN_CONNECTOR_TYPES = (*BUILTIN_CONNECTOR_TYPES, "skills")
+_BUILTIN_STANCE["skills"] = "auto_approve"
+register_default_policies(
+    {
+        ("skills", ActionCategory.READ): PermissionTier.AUTO_APPROVE,
+        ("skills", ActionCategory.WRITE): PermissionTier.HARD_BLOCKED,
+        ("skills", ActionCategory.DELETE): PermissionTier.HARD_BLOCKED,
+        ("skills", ActionCategory.EXECUTE): PermissionTier.HARD_BLOCKED,
+        ("skills", ActionCategory.FINANCIAL): PermissionTier.HARD_BLOCKED,
+    }
+)
+register_core_tools("skills.read")
+
 # Built-ins the prompt's playbooks rely on, offered ahead of the rest when
 # the tool array is over its cap (build_tools sets Tool.starter). Connector
 # starters come from their ToolSpec.starter instead. The browser, desktop
@@ -2895,6 +2931,7 @@ class ConnectorToolExecutor:
         # shares this executor's session factory and gets its user_id.
         watch = watch_toolkit or WatchToolkit(session_factory)
         self._watch = watch
+        skills = SkillToolkit(session_factory)
         system = system_toolkit or SystemToolkit()
         desktop = desktop_toolkit or DesktopToolkit()
         # Never a real backend by default: main.py hands in the toolkit built
@@ -3086,6 +3123,13 @@ class ConnectorToolExecutor:
                 confirm_note="sends a file to VirusTotal",
             ),
 
+            # Skills are stored per user: the toolkit shares this executor's
+            # session factory and gets its user_id. READ only.
+            "skills": _Builtin(
+                "Skills",
+                lambda a, p, uid, ok: skills.execute(a, p, uid),
+                frozenset({read}),
+            ),
         }
         # Returns the owner's capability report by key. Unwired, the
         # registry defaults apply (see _gate_refusal), so an off-by-default

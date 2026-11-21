@@ -25,6 +25,8 @@ const Security = lazy(() => import("./pages/Security"));
 const AuditLogs = lazy(() => import("./pages/AuditLogs"));
 const Settings = lazy(() => import("./pages/Settings"));
 const MemoryPage = lazy(() => import("./pages/Memory"));
+const AutomationsPage = lazy(() => import("./pages/Automations"));
+const SkillsPage = lazy(() => import("./pages/Skills"));
 // Seen once per install, so it never belongs in the main bundle.
 const Setup = lazy(() => import("./pages/Setup"));
 
@@ -109,6 +111,8 @@ export default function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/chat" element={<Chat />} />
             <Route path="/memory" element={<MemoryPage />} />
+            <Route path="/skills" element={<SkillsPage />} />
+            <Route path="/automations" element={<AutomationsPage />} />
             <Route path="/connectors" element={<Connectors />} />
             <Route path="/security" element={<Security />} />
             <Route path="/audit" element={<AuditLogs />} />

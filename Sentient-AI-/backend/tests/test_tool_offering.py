@@ -264,15 +264,20 @@ def test_starters_and_the_rest_prefer_active_connectors():
 
 
 def test_the_core_set_is_extensible(monkeypatch):
-    tools = _big_set(rest=30) + [_tool("skills.read")]
-    assert "skills.read" not in _names(select_offered_tools(tools, ["acme"]))
-    assert "skills.read" in _names(
-        select_offered_tools(tools, ["acme"], core=[*CORE, "skills.read"])
+    tools = _big_set(rest=30) + [_tool("notes.read")]
+    assert "notes.read" not in _names(select_offered_tools(tools, ["acme"]))
+    assert "notes.read" in _names(
+        select_offered_tools(tools, ["acme"], core=[*CORE, "notes.read"])
     )
     monkeypatch.setattr(context_manager, "_core_tool_names", set(context_manager.CORE_TOOL_NAMES))
-    context_manager.register_core_tools("skills.read")
+    context_manager.register_core_tools("notes.read")
+    assert "notes.read" in context_manager.core_tool_names()
+    assert "notes.read" in _names(select_offered_tools(tools, ["acme"]))
+
+
+def test_skills_read_is_core():
+    # The skills feature registers it, so a long tool list never hides it.
     assert "skills.read" in context_manager.core_tool_names()
-    assert "skills.read" in _names(select_offered_tools(tools, ["acme"]))
 
 
 def test_prepare_context_offers_loaded_tools():

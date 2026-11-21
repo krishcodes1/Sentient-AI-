@@ -62,6 +62,9 @@ from models.file_reputation import FileReputationCall, FileReputationCheck, File
 # Errand runs (migration 0033): background errands that end in one purchase card.
 from models.errand import Errand
 
+# User skills (migration 0036): playbooks the model reads with skills.read.
+from models.skill import Skill
+
 # isort: on
 
 __all__ = [
@@ -147,4 +150,6 @@ __all__ = [
     "FileReputationVerdict",
     # Errand runs (migration 0033).
     "Errand",
+    # User skills (migration 0036).
+    "Skill",
 ]
