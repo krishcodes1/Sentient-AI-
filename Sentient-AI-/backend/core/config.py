@@ -219,6 +219,10 @@ class Settings(BaseSettings):
     # that URL with the provider. It must be an http(s) origin with no path
     # (the frontend on port 3000 proxies /api/ to this backend).
     OAUTH_REDIRECT_BASE: str = "http://127.0.0.1:3000"
+    # The built frontend (`vite build` output). Set by the native Mac app, which runs no
+    # nginx and no Node: the backend then serves the page and /api on one origin.
+    # Empty = API only (Docker, dev).
+    FRONTEND_DIST: str = ""
     # Client ids (and Google's Desktop-app secret, which Google treats as
     # non-confidential) of the OAuth apps registered for this install.
     # Empty = that provider's "Sign in" button is unavailable; pasting a

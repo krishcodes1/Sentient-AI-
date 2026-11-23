@@ -1,0 +1,14 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "build": {
+    "beforeBuildCommand": "npm run build:ui && npm run stage-stack && bash scripts/prep-mac.sh"
+  },
+  "bundle": {
+    "longDescription": "Installs, starts and opens Crawler AI on this Mac. Runs natively, so screen and computer control work.",
+    "externalBin": ["binaries/uv"],
+    "resources": {
+      "../stack/": "stack/",
+      "../postgres/": "postgres/"
+    }
+  }
+}

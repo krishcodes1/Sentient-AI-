@@ -45,8 +45,13 @@ export function classifyPhase(event: PhaseEvent | null | undefined): PhaseKind {
   return "working";
 }
 
+/** The native Mac install builds no images: it downloads Python, packages and a browser. */
+const NATIVE_LABELS: Record<string, string> = {
+  building: "Installing Python, Crawler AI’s packages and its browser…",
+};
+
 /** Sentence for the progress line of step 3. */
-export function phaseLabel(event: PhaseEvent | null | undefined): string {
+export function phaseLabel(event: PhaseEvent | null | undefined, native = false): string {
   switch (classifyPhase(event)) {
     case "healthy":
       return "Crawler AI is running ✓";
@@ -57,6 +62,6 @@ export function phaseLabel(event: PhaseEvent | null | undefined): string {
     case "idle":
       return "Getting ready…";
     default:
-      return LABELS[normalise(event?.phase)] ?? "Working…";
+      return (native ? NATIVE_LABELS[normalise(event?.phase)] : undefined) ?? LABELS[normalise(event?.phase)] ?? "Working…";
   }
 }

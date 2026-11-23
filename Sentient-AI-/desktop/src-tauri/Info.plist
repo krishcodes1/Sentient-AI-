@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Merged into the app's Info.plist by Tauri. On macOS the app runs Crawler AI's backend as its
+  own child process, so macOS asks for permissions in the app's name; Automation (Apple
+  Events, which the backend sends through osascript) needs this usage string or macOS denies
+  it without asking.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Crawler AI controls other apps on this Mac when you ask it to.</string>
+</dict>
+</plist>

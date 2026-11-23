@@ -2,7 +2,8 @@
 //!
 //! Launching opens Crawler AI when it is installed and answering, otherwise the setup/status
 //! window (see windows.rs for the two windows and their trust levels). Closing a window hides
-//! it (the tray icon stays); Quit exits the app and leaves the stack running. A second launch
+//! it (the tray icon stays); Quit exits the app and leaves the Docker stack running, or stops
+//! the native one (a Mac release build, where Crawler AI runs as the app's own processes). A second launch
 //! focuses the running app instead of starting another one.
 //!
 //! Why it exists: the library holds everything testable; this binary adds the parts that only
@@ -30,8 +31,20 @@ fn main() {
 
     commands::register(builder)
         .setup(|app| {
-            tray::create(app.handle())?;
-            windows::show_main_window(app.handle());
+            let handle = app.handle();
+            tray::create(handle)?;
+            if commands::is_native(handle)
+                && commands::is_installed(handle)
+                && !windows::crawler_is_up()
+            {
+                // Mac: opening the app starts Crawler AI; it opens once it answers.
+                if let Err(err) = windows::show_setup_window(handle) {
+                    eprintln!("crawler-ai: could not open a window: {err}");
+                }
+                commands::start_then_open(handle);
+            } else {
+                windows::show_main_window(handle);
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -43,15 +56,15 @@ fn main() {
         })
         .build(tauri::generate_context!())
         .expect("Crawler AI failed to start")
-        .run(|_app, _event| {
+        .run(|app, event| match event {
             // Clicking the Dock icon while every window is hidden brings the app back.
             #[cfg(target_os = "macos")]
-            if let tauri::RunEvent::Reopen {
+            tauri::RunEvent::Reopen {
                 has_visible_windows: false,
                 ..
-            } = _event
-            {
-                windows::show_main_window(_app);
-            }
+            } => windows::show_main_window(app),
+            // The native (Mac) stack is the app's own processes: Quit stops it.
+            tauri::RunEvent::Exit => commands::stop_native_on_exit(app),
+            _ => {}
         });
 }

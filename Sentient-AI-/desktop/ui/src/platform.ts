@@ -23,6 +23,10 @@ export interface PlatformWords {
   openDockerYourself: string;
   /** OS name for the version line. */
   osName: string;
+  /** As in "Runs … on this Mac". */
+  runsIn: string;
+  /** What closing the window (and quitting the app) does to Crawler AI. */
+  closeNote: string;
 }
 
 export const WORDS: Record<Platform, PlatformWords> = {
@@ -34,6 +38,8 @@ export const WORDS: Record<Platform, PlatformWords> = {
     tray: "menu-bar icon",
     openDockerYourself: "Open it from Applications",
     osName: "macOS",
+    runsIn: "in Docker Desktop for Mac",
+    closeNote: "Closing this window keeps Crawler AI running in Docker Desktop.",
   },
   windows: {
     computer: "PC",
@@ -43,8 +49,22 @@ export const WORDS: Record<Platform, PlatformWords> = {
     tray: "system-tray icon",
     openDockerYourself: "Open it from the Start menu",
     osName: "Windows",
+    runsIn: "in Docker Desktop for Windows",
+    closeNote: "Closing this window keeps Crawler AI running in Docker Desktop.",
   },
 };
+
+/** A Mac release build: Crawler AI runs as the app's own processes, no Docker. */
+export const NATIVE_MAC: PlatformWords = {
+  ...WORDS.mac,
+  headline: "Setting up Crawler AI on this Mac",
+  runsIn: "natively",
+  closeNote: "Closing this window keeps Crawler AI running; quitting the app stops it.",
+};
+
+export function wordsFor(platform: Platform, native: boolean | undefined): PlatformWords {
+  return native && platform === "mac" ? NATIVE_MAC : WORDS[platform];
+}
 
 export const DOCKER_DESKTOP_URL = "https://www.docker.com/products/docker-desktop/";
 export const WSL_URL = "https://learn.microsoft.com/windows/wsl/install";

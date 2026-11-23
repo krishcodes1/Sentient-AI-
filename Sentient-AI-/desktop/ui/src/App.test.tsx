@@ -106,6 +106,28 @@ describe("App", () => {
     expect(screen.getByText(/Docker Desktop needs WSL 2/)).toBeInTheDocument();
   });
 
+  it("native Mac: installs and opens Crawler AI with no clicks and no Docker or keys step", async () => {
+    mocked.appInfo.mockResolvedValue({ version: "0.1.0", platform: "mac", installed: false, native: true });
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Setting up Crawler AI on this Mac" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Check this computer" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Security keys" })).not.toBeInTheDocument();
+    expect(step("Install & start")).toHaveAttribute("data-state", "active");
+
+    await waitFor(() => expect(mocked.startInstall).toHaveBeenCalledTimes(1));
+    expect(mocked.preflight).not.toHaveBeenCalled();
+    expect(mocked.saveKeys).not.toHaveBeenCalled();
+    expect(screen.getByText(/downloads about 1/)).toBeInTheDocument();
+
+    bridge.emitPhase({ phase: "building", elapsed_s: 5 });
+    expect(await screen.findByText("Installing Python, Crawler AI’s packages and its browser…")).toBeInTheDocument();
+
+    bridge.emitPhase({ phase: "healthy", elapsed_s: 90 });
+    await waitFor(() => expect(mocked.openCrawler).toHaveBeenCalledTimes(1));
+    expect(await screen.findByRole("heading", { name: "Crawler AI is installed" })).toBeInTheDocument();
+    expect(screen.getByText(/Runs natively on this Mac/)).toBeInTheDocument();
+  });
+
   it("falls back to setup when app_info fails", async () => {
     mocked.appInfo.mockRejectedValue("no app");
     render(<App />);

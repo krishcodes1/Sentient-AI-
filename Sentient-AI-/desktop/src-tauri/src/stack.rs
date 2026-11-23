@@ -21,6 +21,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 
 use crate::keys::env_key_status;
+use crate::native::{self, NativeLayout};
 use crate::platform::{self, OwnerOnly, PathError};
 use crate::preflight::{CmdError, CommandRunner};
 
@@ -36,8 +37,9 @@ const DIAGNOSE_TAIL: usize = 200;
 const FAILURE_LOG_LINES: usize = 60;
 pub const LOG_TAIL_LINES: usize = 200;
 
-/// Top-level folders of the bundle that make up the stack.
-const BUNDLE_DIRS: &[&str] = &["backend", "frontend", "docker"];
+/// Top-level folders of the bundle that make up the stack. `frontend-dist` (the built web app)
+/// and `mac` (crawler-native.sh) only exist in Mac builds; missing folders are skipped.
+const BUNDLE_DIRS: &[&str] = &["backend", "frontend", "docker", "frontend-dist", "mac"];
 /// Never copied, at any depth: host caches, build output, VCS and agent state.
 const SKIP_DIRS: &[&str] = &[
     "node_modules",
@@ -468,6 +470,9 @@ pub struct Stack {
     clock: Arc<dyn Clock>,
     perms: OwnerOnly,
     cancel: AtomicBool,
+    /// Set on macOS: Crawler AI runs natively (native.rs, mac/crawler-native.sh) instead of
+    /// in Docker. Every public method below branches on it.
+    pub native: Option<NativeLayout>,
 }
 
 impl Stack {
@@ -490,7 +495,17 @@ impl Stack {
             clock,
             perms,
             cancel: AtomicBool::new(false),
+            native: None,
         }
+    }
+
+    /// Run Crawler AI natively (macOS). The backend serves everything on port 3000, and a
+    /// native start that hasn't answered in 3 minutes has crashed: there is no image to build.
+    pub fn enable_native(&mut self, native: NativeLayout) {
+        self.health_url = native::HEALTH_URL.into();
+        self.frontend_url = native::FRONTEND_URL.into();
+        self.timings.health_timeout = Duration::from_secs(3 * 60);
+        self.native = Some(native);
     }
 
     /// Ask a running install/start to stop at the next opportunity (kills compose).
@@ -522,7 +537,14 @@ impl Stack {
 
     /// The stack for this version has been copied and has its keys.
     pub fn is_installed(&self) -> bool {
-        self.layout.compose_file().is_file() && env_key_status(&self.layout.env_file()).all_set()
+        let keys = env_key_status(&self.layout.env_file()).all_set();
+        match &self.native {
+            Some(native) => {
+                keys && self.layout.dir.join(native::SCRIPT).is_file()
+                    && native.is_installed(&self.layout.version)
+            }
+            None => self.layout.compose_file().is_file() && keys,
+        }
     }
 
     pub fn backend_healthy(&self) -> bool {
@@ -583,6 +605,9 @@ impl Stack {
             clock: self.clock.as_ref(),
             started: self.clock.now(),
         };
+        if let Some(native) = &self.native {
+            return self.install_native(native, &mut job);
+        }
 
         job.phase(Phase::Copying);
         let Some(bundle) = self.bundle.as_deref().filter(|b| looks_like_bundle(b)) else {
@@ -671,7 +696,7 @@ impl Stack {
         if !saw_containers {
             job.phase(Phase::Starting);
         }
-        self.wait_healthy(&mut job, &docker)
+        self.wait_healthy(&mut job, &|n| self.logs_with(&docker, n))
     }
 
     /// `docker compose start` for an installed stack, then wait for health:
@@ -684,6 +709,9 @@ impl Stack {
             started: self.clock.now(),
         };
         job.phase(Phase::Starting);
+        if let Some(native) = &self.native {
+            return self.start_native(native, &mut job);
+        }
         if !self.layout.compose_file().is_file() {
             return job.fail("Crawler AI isn't installed yet. Run Install & start first.");
         }
@@ -713,10 +741,16 @@ impl Stack {
                 out.describe_failure()
             ));
         }
-        self.wait_healthy(&mut job, &docker)
+        self.wait_healthy(&mut job, &|n| self.logs_with(&docker, n))
     }
 
-    fn wait_healthy(&self, job: &mut Job<'_>, docker: &Path) -> Result<(), String> {
+    /// Poll the backend until it answers, then give the web app a moment. `backend_log`
+    /// returns the backend's last n log lines, shown when it never answers.
+    fn wait_healthy(
+        &self,
+        job: &mut Job<'_>,
+        backend_log: &dyn Fn(usize) -> Vec<String>,
+    ) -> Result<(), String> {
         job.phase(Phase::Waiting);
         job.log(format!(
             "Waiting for the backend at {} ...",
@@ -729,12 +763,12 @@ impl Stack {
             }
             if self.clock.now() >= deadline {
                 job.log("----- last backend log lines -----");
-                let lines = self.logs_with(docker, FAILURE_LOG_LINES);
+                let lines = backend_log(FAILURE_LOG_LINES);
                 for line in lines {
                     job.log(line);
                 }
                 return job.fail(format!(
-                    "The containers started, but the backend didn't answer within {} minutes. \
+                    "Crawler AI started, but the backend didn't answer within {} minutes. \
                      The backend's last log lines are above.",
                     self.timings.health_timeout.as_secs() / 60
                 ));
@@ -761,6 +795,9 @@ impl Stack {
 
     /// `docker compose stop` (containers and data are kept).
     pub fn stop(&self) -> Result<(), String> {
+        if let Some(native) = &self.native {
+            return self.stop_native(native);
+        }
         let docker = self.docker()?;
         let cwd = self.layout.docker_dir();
         let cwd = cwd.is_dir().then_some(cwd);
@@ -785,6 +822,9 @@ impl Stack {
 
     /// The backend's last `LOG_TAIL_LINES` log lines.
     pub fn logs(&self) -> Result<Vec<String>, String> {
+        if let Some(native) = &self.native {
+            return Ok(native::tail(&native.backend_log(), LOG_TAIL_LINES));
+        }
         let docker = self.docker()?;
         Ok(self.logs_with(&docker, LOG_TAIL_LINES))
     }
@@ -808,11 +848,137 @@ impl Stack {
         }
         all
     }
+
+    // ── Native (macOS) ───────────────────────────────────────────────────────
+
+    /// copying -> building -> starting -> waiting -> healthy | failed, like Docker's install,
+    /// with mac/crawler-native.sh doing the building and starting.
+    fn install_native(&self, native: &NativeLayout, job: &mut Job<'_>) -> Result<(), String> {
+        job.phase(Phase::Copying);
+        let Some(bundle) = self
+            .bundle
+            .as_deref()
+            .filter(|b| looks_like_bundle(b) && b.join(native::SCRIPT).is_file())
+        else {
+            return job.fail(
+                "This app's copy of Crawler AI is missing or damaged. Download Crawler AI again, \
+                 then click Retry.",
+            );
+        };
+        job.log(format!(
+            "Copying Crawler AI {} to {}",
+            self.layout.version,
+            self.layout.dir.display()
+        ));
+        match copy_bundle(bundle, &self.layout.dir) {
+            Ok(count) => job.log(format!("Copied {count} files.")),
+            Err(err) => return job.fail(format!("Couldn't copy Crawler AI's files ({err}).")),
+        }
+        if !env_key_status(&self.layout.env_file()).all_set() {
+            return job.fail("The security keys couldn't be created. Click Retry.");
+        }
+        self.run_script(native, "install", self.timings.build_timeout, job)?;
+        self.wait_healthy(job, &|n| native::tail(&native.backend_log(), n))?;
+        if let Err(err) = native.mark_installed(&self.layout.version) {
+            job.log(format!(
+                "Couldn't record the install ({err}); the next open checks again."
+            ));
+        }
+        Ok(())
+    }
+
+    fn start_native(&self, native: &NativeLayout, job: &mut Job<'_>) -> Result<(), String> {
+        if !self.is_installed() {
+            return job.fail("Crawler AI isn't installed yet. Run Install & start first.");
+        }
+        self.run_script(native, "start", self.timings.command_timeout, job)?;
+        self.wait_healthy(job, &|n| native::tail(&native.backend_log(), n))
+    }
+
+    fn stop_native(&self, native: &NativeLayout) -> Result<(), String> {
+        let out = self.runner.run(
+            &native.argv(&self.layout.dir, "stop"),
+            None,
+            self.timings.command_timeout,
+        );
+        if out.ok() {
+            return Ok(());
+        }
+        let said = out.stdout.lines().chain(out.stderr.lines()).find_map(|l| {
+            match native::parse_line(l) {
+                native::Line::Error(message) => Some(message),
+                _ => None,
+            }
+        });
+        Err(said
+            .unwrap_or_else(|| format!("Couldn't stop Crawler AI ({}).", out.describe_failure())))
+    }
+
+    /// Stream the script; its `==> ` lines move the phase, its `error: ` line is the failure.
+    fn run_script(
+        &self,
+        native: &NativeLayout,
+        command: &str,
+        timeout: Duration,
+        job: &mut Job<'_>,
+    ) -> Result<(), String> {
+        let mut said: Option<String> = None;
+        let out = self.runner.stream(
+            &native.argv(&self.layout.dir, command),
+            Some(&self.layout.dir),
+            timeout,
+            &self.cancel,
+            &mut |raw| match native::parse_line(&clean_line(raw)) {
+                native::Line::Building => job.phase(Phase::Building),
+                native::Line::Starting => job.phase(Phase::Starting),
+                native::Line::Error(message) => {
+                    job.log(format!("Error: {message}"));
+                    said = Some(message);
+                }
+                native::Line::Log(line) => job.log(line),
+            },
+        );
+        match out.error {
+            Some(CmdError::Cancelled) => {
+                return job.fail(if command == "install" {
+                    "Stopped before the install finished."
+                } else {
+                    "Stopped before Crawler AI started."
+                })
+            }
+            Some(CmdError::Timeout) => {
+                return job.fail(format!(
+                    "Setting up took longer than {} minutes and was stopped. Check your internet \
+                     connection, then click Retry.",
+                    timeout.as_secs() / 60
+                ))
+            }
+            Some(CmdError::NotFound) | Some(CmdError::Io(_)) => {
+                return job.fail(format!(
+                    "Couldn't run Crawler AI's setup ({}). Download Crawler AI again.",
+                    out.describe_failure()
+                ))
+            }
+            None => {}
+        }
+        if out.code == Some(0) {
+            return Ok(());
+        }
+        match said {
+            Some(message) => job.fail(message),
+            None => job.fail(format!(
+                "Setup stopped with {}. The log above says why.",
+                out.code
+                    .map_or_else(|| "a signal".to_string(), |c| format!("exit code {c}"))
+            )),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::native::{self, NativeLayout};
     use crate::test_support::{
         owner_only, runner_with_account, FakeClock, FakeRunner, ScriptedProbe,
     };
@@ -838,6 +1004,8 @@ mod tests {
             ("frontend/package.json", "{}\n"),
             ("frontend/node_modules/left-pad/index.js", "\n"),
             ("frontend/src/App.tsx", "\n"),
+            ("frontend-dist/index.html", "<!doctype html>\n"),
+            ("mac/crawler-native.sh", "#!/bin/bash\n"),
             ("installer/bootstrap.py", "\n"),
         ] {
             let full = bundle.join(path);
@@ -1257,5 +1425,165 @@ mod tests {
             format!("http://{}/", l.local_addr().unwrap())
         };
         assert!(!probe.ok(&closed));
+    }
+
+    // ── Native (macOS) mode ──────────────────────────────────────────────────
+
+    fn native_rig(with_keys: bool) -> (Rig, NativeLayout) {
+        let mut rig = rig(with_keys);
+        let tmp = rig._dir.path().to_path_buf();
+        let native = NativeLayout::new(&rig.stack.layout.root, &tmp, &tmp, &tmp);
+        rig.stack.enable_native(native.clone());
+        (rig, native)
+    }
+
+    fn run_start(stack: &Stack) -> (Result<(), String>, Vec<Phase>, Vec<String>) {
+        let mut phases = Vec::new();
+        let mut logs = Vec::new();
+        let result = stack.start(&mut |event| match event {
+            StackEvent::Phase(update) => phases.push(update.phase),
+            StackEvent::Log(line) => logs.push(line),
+        });
+        (result, phases, logs)
+    }
+
+    #[test]
+    fn native_install_walks_every_phase_and_marks_installed() {
+        let (rig, native) = native_rig(true);
+        rig.runner.stream_lines(
+            "crawler-native.sh install",
+            0,
+            &[
+                "==> building",
+                "    Python 3.12.13",
+                "==> starting",
+                "    Backend starting on http://127.0.0.1:3000",
+            ],
+        );
+        rig.probe.set(native::HEALTH_URL, 2);
+        rig.probe.set(native::FRONTEND_URL, 0);
+        assert!(!rig.stack.is_installed());
+        let (result, phases, logs) = run_install(&rig.stack);
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            phases,
+            vec![
+                Phase::Copying,
+                Phase::Building,
+                Phase::Starting,
+                Phase::Waiting,
+                Phase::Healthy
+            ]
+        );
+        assert!(logs.contains(&"    Python 3.12.13".to_string()));
+        assert!(
+            !logs.iter().any(|l| l.starts_with("==> ")),
+            "markers are not log"
+        );
+
+        let (argv, _) = &rig.runner.streamed()[0];
+        let dir = &rig.stack.layout.dir;
+        assert_eq!(argv[0], "/usr/bin/env");
+        assert_eq!(
+            &argv[argv.len() - 2..],
+            &[
+                dir.join("mac/crawler-native.sh").display().to_string(),
+                "install".to_string()
+            ]
+        );
+        assert!(dir.join("mac/crawler-native.sh").is_file());
+        assert!(dir.join("frontend-dist/index.html").is_file());
+        assert!(native.is_installed("1.0.0"));
+        assert!(rig.stack.is_installed());
+    }
+
+    #[test]
+    fn native_install_shows_the_scripts_error_line() {
+        let (rig, native) = native_rig(true);
+        rig.runner.stream_lines(
+            "crawler-native.sh install",
+            1,
+            &[
+                "==> building",
+                "error: Port 3000 is in use by node (pid 7).",
+            ],
+        );
+        let (result, phases, _) = run_install(&rig.stack);
+        assert_eq!(result.unwrap_err(), "Port 3000 is in use by node (pid 7).");
+        assert_eq!(phases.last(), Some(&Phase::Failed));
+        assert!(!native.is_installed("1.0.0"));
+    }
+
+    #[test]
+    fn native_install_failures_without_an_error_line() {
+        let (rig, _) = native_rig(true);
+        rig.runner
+            .stream_lines("crawler-native.sh install", 1, &["==> building"]);
+        assert!(run_install(&rig.stack)
+            .0
+            .unwrap_err()
+            .contains("exit code 1"));
+
+        let (rig, _) = native_rig(true);
+        rig.runner
+            .stream_error("crawler-native.sh install", CmdError::Cancelled);
+        assert_eq!(
+            run_install(&rig.stack).0.unwrap_err(),
+            "Stopped before the install finished."
+        );
+    }
+
+    #[test]
+    fn native_install_needs_keys_and_never_touches_docker() {
+        let (rig, _) = native_rig(false);
+        rig.runner.missing("docker");
+        let (result, phases, _) = run_install(&rig.stack);
+        assert!(result.unwrap_err().contains("security keys"));
+        assert_eq!(phases, vec![Phase::Copying, Phase::Failed]);
+        assert!(rig.runner.streamed().is_empty());
+    }
+
+    #[test]
+    fn native_health_timeout_shows_the_backend_log() {
+        let (rig, native) = native_rig(true);
+        fs::create_dir_all(native.backend_log().parent().unwrap()).unwrap();
+        fs::write(native.backend_log(), "Traceback\nValueError: boom\n").unwrap();
+        let (result, phases, logs) = run_install(&rig.stack);
+        assert!(result
+            .unwrap_err()
+            .contains("didn't answer within 3 minutes"));
+        assert_eq!(phases.last(), Some(&Phase::Failed));
+        assert!(logs.contains(&"ValueError: boom".to_string()));
+        assert!(!native.is_installed("1.0.0"));
+    }
+
+    #[test]
+    fn native_start_stop_and_logs() {
+        let (rig, native) = native_rig(true);
+        let (result, phases, _) = run_start(&rig.stack);
+        assert!(result.unwrap_err().contains("isn't installed yet"));
+        assert_eq!(phases, vec![Phase::Starting, Phase::Failed]);
+
+        rig.runner
+            .stream_lines("crawler-native.sh install", 0, &["==> building"]);
+        rig.probe.set(native::HEALTH_URL, 0);
+        rig.probe.set(native::FRONTEND_URL, 0);
+        assert_eq!(run_install(&rig.stack).0, Ok(()));
+
+        let (result, phases, _) = run_start(&rig.stack);
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            phases,
+            vec![Phase::Starting, Phase::Waiting, Phase::Healthy]
+        );
+        let last = rig.runner.streamed().last().unwrap().0.clone();
+        assert_eq!(last.last().unwrap(), "start");
+
+        assert_eq!(rig.stack.stop(), Ok(()));
+        assert_eq!(rig.runner.calls().last().unwrap().last().unwrap(), "stop");
+
+        fs::create_dir_all(native.backend_log().parent().unwrap()).unwrap();
+        fs::write(native.backend_log(), "one\ntwo\n").unwrap();
+        assert_eq!(rig.stack.logs().unwrap(), vec!["one", "two"]);
     }
 }

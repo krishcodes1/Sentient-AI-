@@ -29,7 +29,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.staticfiles import StaticFiles
 
 from core.config import settings
 from core.database import async_session, engine, get_db, init_db
@@ -1286,16 +1288,37 @@ from api.routes import skills as skills_routes  # noqa: E402
 app.include_router(skills_routes.router, prefix="/api")
 
 
-@app.get("/")
-async def root() -> dict[str, str]:
-    info = {
-        "name": "Crawler AI",
-        "version": "0.1.0",
-        "health": "/api/health",
-    }
-    if not _is_production:
-        info["docs"] = "/docs"
-    return info
+class _SpaFiles(StaticFiles):
+    """The built frontend: real files as they are, any other page path is the SPA's
+    index.html. /api is never answered with the page, so an unknown API path stays 404."""
+
+    async def get_response(self, path: str, scope: Any) -> Any:
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            if exc.status_code != 404 or path == "api" or path.startswith("api/"):
+                raise
+            return await super().get_response("index.html", scope)
+
+
+def mount_frontend(target: FastAPI, dist: str) -> None:
+    """Serve the built frontend at / (the native Mac app: no nginx, no Node). Mounted
+    after every route, so it only answers what no route does."""
+    target.mount("/", _SpaFiles(directory=dist, html=True), name="frontend")
+
+
+if not settings.FRONTEND_DIST:
+
+    @app.get("/")
+    async def root() -> dict[str, str]:
+        info = {
+            "name": "Crawler AI",
+            "version": "0.1.0",
+            "health": "/api/health",
+        }
+        if not _is_production:
+            info["docs"] = "/docs"
+        return info
 
 
 @app.get("/api/health")
@@ -1370,6 +1393,11 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
         status_code=500,
         content={"detail": "Internal server error", "request_id": request_id},
     )
+
+
+# Last, so every route above wins over the page.
+if settings.FRONTEND_DIST:
+    mount_frontend(app, settings.FRONTEND_DIST)
 
 
 if __name__ == "__main__":

@@ -99,7 +99,7 @@ fn reveal<R: Runtime>(window: &WebviewWindow<R>) -> tauri::Result<()> {
 
 /// Is the stack's frontend accepting connections? A quick local TCP probe, so launching the
 /// app never shows Crawler AI's window over a connection error.
-fn crawler_is_up() -> bool {
+pub fn crawler_is_up() -> bool {
     let addr = SocketAddr::from(([127, 0, 0, 1], CRAWLER_PORT));
     TcpStream::connect_timeout(&addr, Duration::from_millis(400)).is_ok()
 }

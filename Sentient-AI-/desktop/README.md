@@ -26,6 +26,27 @@ desktop/
   stack/                generated at build time; not committed
 ```
 
+## On a Mac: native, no Docker
+
+The Mac release build (`npm run build:mac`) runs Crawler AI **natively**, as the app's own
+processes, so screen and computer control work and macOS asks for Screen Recording,
+Accessibility and Automation in the name **Crawler AI**. Design:
+`docs/superpowers/specs/2026-11-20-mac-native-app-design.md`.
+
+- The app carries uv (`Contents/MacOS/uv`, a sidecar) and PostgreSQL 16
+  (`Contents/Resources/postgres`, zonky's relocatable build, signed by EnterpriseDB), the
+  backend source and the built web app.
+- First open: one screen, no clicks. `mac/crawler-native.sh install` downloads Python 3.12, the
+  backend packages (from `requirements.lock`, every one checked against its SHA-256) and
+  Chromium, creates the database and the keys, starts everything, then Crawler AI opens.
+- The backend serves the web app and `/api` on `http://127.0.0.1:3000` (`FRONTEND_DIST`).
+  Postgres has **no TCP port**: a Unix socket in an owner-only folder.
+- Opening the app starts Crawler AI; closing the window keeps it running; **Quit stops it**.
+- Files: `~/Library/Application Support/Crawler AI/native` (Python, venv, Chromium, database,
+  logs) and `stack/<version>` (source, `.env`); `~/Library/Caches/Crawler AI/uv` (downloads).
+- Builds without the bundled uv/Postgres (`tauri dev`, `cargo test`, plain `tauri build`) keep
+  the Docker stack below, so development is unchanged. Windows always uses Docker.
+
 ## How it behaves
 
 - **First launch** opens the setup window (bundled UI). When setup finishes, the window
@@ -88,7 +109,17 @@ cargo test --manifest-path src-tauri/Cargo.toml  # Rust: preflight, keys, stack,
 The version lives in **`desktop/package.json` only** (`tauri.conf.json` reads it; `stack/VERSION`
 is written from it). `beforeBuildCommand` builds `ui/` and runs `scripts/stage-stack.mjs`.
 
-**Mac** (on a Mac):
+**Mac** (on a Mac), the native app:
+
+```bash
+npm run build:mac   # universal, native; adds tauri.mac-native.conf.json, which runs scripts/prep-mac.sh
+```
+
+`prep-mac.sh` fetches pinned uv and PostgreSQL (SHA-256 checked), builds `../frontend` into
+`stack/frontend-dist` and writes `stack/backend/requirements.lock`. To bump uv or Postgres,
+change the version and its SHA-256 at the top of the script.
+
+**Mac**, the Docker-based app (as before):
 
 ```bash
 npm run tauri -- build --bundles app,dmg                                  # this Mac's architecture
