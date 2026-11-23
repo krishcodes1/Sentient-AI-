@@ -162,6 +162,8 @@ mod tests {
         );
     }
 
+    // Compares paths as text with `/`; Windows joins with `\`, and argv only runs on a Mac.
+    #[cfg(unix)]
     #[test]
     fn argv_passes_paths_through_env_not_a_shell() {
         let stack = Path::new("/Users/a/Library/Application Support/Crawler AI/stack/1.0.0");
