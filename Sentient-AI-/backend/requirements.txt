@@ -41,7 +41,7 @@ playwright>=1.65.2,<1.66
 mss>=10.2.0,<11
 # 12.3.0 fixes decoder memory bugs (PSD, GD, McIdas, fonts) that are reachable
 # through services/files/worker/parsers/image.py, which opens uploaded files.
-Pillow>=12.3.0,<13
+Pillow>=13.0.0,<14
 # macOS backend of computer_control (services/tools/computer/backend_mac.py):
 # the accessibility tree and the Accessibility trust check
 # (ApplicationServices), synthetic mouse/keyboard/scroll events and the
